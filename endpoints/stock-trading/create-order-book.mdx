@@ -8,6 +8,8 @@ Creates a new on-chain order book that pairs a stock token with a quote token. T
 
 Both `tokenAddress` and `quoteTokenAddress` must reference deployed, registered tokens within the instance. The custody contract handles escrow during the settlement lifecycle.
 
+Order books support three matching modes (continuous, periodic auction, and hybrid) and an optional price reference layer that bounds execution prices against an external or manual reference. Both are configured at creation and can be adjusted later with [Update Order Book](/endpoints/stock-trading/update-order-book).
+
 ## Authentication
 
 Requires an instance API key with the `trading` service enabled. Pass the key as `x-api-key` header in the format `trusset_{instanceRef}_{secret}`.
@@ -62,8 +64,80 @@ Requires an instance API key with the `trading` service enabled. Pass the key as
   Reference ID for stock tokens. Required when `tokenType` is `STOCK_TOKEN`. Max 100 characters.
 </ParamField>
 
+<ParamField body="underlyingIdentifier" type="string">
+  Identifier of the underlying instrument (for example an ISIN). Exactly 12 alphanumeric characters, matching `[A-Za-z0-9]{12}`.
+</ParamField>
+
 <ParamField body="allowImport" type="boolean">
   Whether other instances can import this order book for cross-instance trading. Defaults to `false`.
+</ParamField>
+
+### Trading Mode (Hybrid Order Books)
+
+These fields control the matching engine. Continuous books match orders on arrival; periodic auction books batch orders and clear at fixed intervals; hybrid books switch between the two based on live spread.
+
+<ParamField body="tradingMode" type="string">
+  Matching engine mode. One of `CONTINUOUS` (default), `PERIODIC_AUCTION`, or `HYBRID`.
+</ParamField>
+
+<ParamField body="auctionIntervalSeconds" type="integer">
+  Auction clearing interval in seconds. Applies to `PERIODIC_AUCTION` and `HYBRID`. 30-3600. Nullable.
+</ParamField>
+
+<ParamField body="hybridSwitchSpreadBps" type="integer">
+  Spread threshold in basis points that switches a `HYBRID` book between continuous matching and auction batching. 1-10000. Nullable.
+</ParamField>
+
+<ParamField body="auctionRollUnmatched" type="boolean">
+  Whether orders left unmatched at the end of an auction roll forward into the next auction.
+</ParamField>
+
+<ParamField body="mmMakerRebateBps" type="integer">
+  Maker rebate paid to registered market makers, in basis points. -1000 to 1000 (negative values charge makers). Nullable.
+</ParamField>
+
+### Price Reference
+
+When enabled, the price reference layer bounds order and trade prices to a band around a reference price. Stale or out-of-band conditions can halt the book or reject orders.
+
+<ParamField body="priceRefEnabled" type="boolean">
+  Enable price reference enforcement for this order book.
+</ParamField>
+
+<ParamField body="priceRefMode" type="string">
+  Source of the reference price. One of `MANUAL`, `STOCK_FEED`, or `EXTERNAL_FEED`.
+</ParamField>
+
+<ParamField body="priceRefFeedUrl" type="string">
+  Feed endpoint to poll when `priceRefMode` is `EXTERNAL_FEED`. Max 2048 characters. Nullable.
+</ParamField>
+
+<ParamField body="priceRefFeedHeaders" type="string">
+  Headers to send with the feed request, as a serialized string (for example a JSON object of header pairs). Max 4096 characters. Nullable.
+</ParamField>
+
+<ParamField body="priceRefFeedPath" type="string">
+  Path used to extract the price from the feed response (for example a JSON path). Max 256 characters. Nullable.
+</ParamField>
+
+<ParamField body="priceRefEnforcement" type="string">
+  How often the reference is refreshed and enforced. One of `EVERY_TRADE`, `1MIN`, `5MIN`, `10MIN`, `30MIN`, `1HOUR`, `6HOUR`, `12HOUR`, `1DAY`.
+</ParamField>
+
+<ParamField body="priceRefSpreadBps" type="integer">
+  Allowed band around the reference price, in basis points. Orders priced outside the band are rejected. 1-10000. Nullable.
+</ParamField>
+
+<ParamField body="priceRefHaltOnStale" type="boolean">
+  Halt the order book when the reference price is older than `priceRefStaleTolerance`.
+</ParamField>
+
+<ParamField body="priceRefStaleTolerance" type="integer">
+  Maximum age of the reference price before it is considered stale, in seconds. 60-604800. Nullable.
+</ParamField>
+
+<ParamField body="priceRefCircuitBreakerBps" type="integer">
+  Circuit breaker threshold in basis points. A reference move beyond this bound trips the breaker. 10-10000. Nullable.
 </ParamField>
 
 <RequestExample>
@@ -80,7 +154,21 @@ Requires an instance API key with the `trading` service enabled. Pass the key as
   "takerFeeBps": 25,
   "tokenType": "STOCK_TOKEN",
   "stockTokenId": "acme-corp-001",
-  "allowImport": true
+  "underlyingIdentifier": "US0000ACME01",
+  "allowImport": true,
+  "tradingMode": "HYBRID",
+  "auctionIntervalSeconds": 300,
+  "hybridSwitchSpreadBps": 50,
+  "auctionRollUnmatched": true,
+  "mmMakerRebateBps": 5,
+  "priceRefEnabled": true,
+  "priceRefMode": "EXTERNAL_FEED",
+  "priceRefFeedUrl": "https://feed.example.com/acme",
+  "priceRefFeedPath": "data.last",
+  "priceRefEnforcement": "1MIN",
+  "priceRefSpreadBps": 200,
+  "priceRefHaltOnStale": true,
+  "priceRefStaleTolerance": 300
 }
 ```
 </RequestExample>
@@ -105,7 +193,19 @@ Requires an instance API key with the `trading` service enabled. Pass the key as
     "takerFeeBps": 25,
     "tokenType": "STOCK_TOKEN",
     "stockTokenId": "acme-corp-001",
-    "allowImport": true
+    "underlyingIdentifier": "US0000ACME01",
+    "allowImport": true,
+    "tradingMode": "HYBRID",
+    "auctionIntervalSeconds": 300,
+    "hybridSwitchSpreadBps": 50,
+    "auctionRollUnmatched": true,
+    "mmMakerRebateBps": 5,
+    "priceRefEnabled": true,
+    "priceRefMode": "EXTERNAL_FEED",
+    "priceRefEnforcement": "1MIN",
+    "priceRefSpreadBps": 200,
+    "priceRefHaltOnStale": true,
+    "priceRefStaleTolerance": 300
   },
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
@@ -124,4 +224,11 @@ Requires an instance API key with the `trading` service enabled. Pass the key as
 | `INVALID_CONFIG` | 400 | Invalid order book configuration |
 | `INVALID_PAIR` | 400 | Invalid token pair (e.g. same token for both sides) |
 | `TOKEN_NOT_REGISTERED` | 400 | One or both tokens are not registered in this instance |
+| `BASE_TOKEN_NOT_SUPPORTED` | 503 | The base token is not supported by the settlement layer |
+| `QUOTE_TOKEN_NOT_SUPPORTED` | 503 | The quote token is not supported by the settlement layer |
+| `BASE_TOKEN_REGISTRATION_FAILED` | 503 | On-chain registration of the base token failed |
+| `QUOTE_TOKEN_REGISTRATION_FAILED` | 503 | On-chain registration of the quote token failed |
+| `CUSTODY_NOT_AUTHORIZED` | 503 | The custody contract has not authorized this order book |
+| `CUSTODY_SETUP_FAILED` | 503 | Custody contract setup failed |
+| `NETWORK_MISMATCH` | 400 | Token and custody contract are on different networks |
 | `VALIDATION_ERROR` | 400 | Request body failed schema validation |

@@ -4,15 +4,19 @@ description: 'Place a new buy or sell order on an on-chain order book'
 api: 'POST /orderbooks/stocks/api/orders'
 ---
 
-Submits a new order to an on-chain order book. Supports limit and market order types with configurable time-in-force policies.
+Submits a new order to an on-chain order book. Supports limit and market order types with configurable time-in-force, post-only, and self-trade prevention policies.
 
 For `LIMIT` orders, the `price` field is required and specifies the maximum (buy) or minimum (sell) acceptable price. `MARKET` orders execute immediately at the best available price.
 
-The `userAddress` must be a verified on-chain identity with sufficient custody balance for sell orders, or sufficient quote token balance for buy orders.
+The `userAddress` must be a verified on-chain identity with sufficient custody balance for sell orders, or sufficient quote token balance for buy orders. When the order book has a price reference enabled, orders priced outside the configured band are rejected.
 
 ## Authentication
 
 Requires an instance API key with the `trading` service enabled.
+
+## Idempotency
+
+This endpoint accepts an optional `Idempotency-Key` header. When supplied, repeating a request with the same key and body returns the original result instead of placing a duplicate order. Reusing a key with a different body returns `IDEMPOTENCY_MISMATCH`.
 
 ## Request Body
 
@@ -47,6 +51,26 @@ Requires an instance API key with the `trading` service enabled.
   - `FOK` - Fill or Kill. Must fill entirely or is rejected.
 </ParamField>
 
+<ParamField body="postOnly" type="boolean">
+  When `true`, the order is rejected if it would match immediately as a taker. Use this to guarantee maker status. Defaults to `false`.
+</ParamField>
+
+<ParamField body="selfTradePreventionMode" type="string">
+  Controls what happens when an order would match against another order from the same `userAddress`. One of:
+  - `NONE` - Self-trades are allowed (default).
+  - `CANCEL_TAKER` - Cancel the incoming (taker) order.
+  - `CANCEL_MAKER` - Cancel the resting (maker) order.
+  - `CANCEL_BOTH` - Cancel both orders.
+</ParamField>
+
+<ParamField body="signature" type="string">
+  Optional signature over the order message, for instances that enforce signed orders. Max 256 characters.
+</ParamField>
+
+<ParamField body="message" type="string">
+  Optional signed message payload associated with `signature`. Max 512 characters.
+</ParamField>
+
 <RequestExample>
 ```json
 {
@@ -56,7 +80,9 @@ Requires an instance API key with the `trading` service enabled.
   "orderType": "LIMIT",
   "price": "100000000000000000000",
   "quantity": "5000000000000000000",
-  "timeInForce": "GTC"
+  "timeInForce": "GTC",
+  "postOnly": true,
+  "selfTradePreventionMode": "CANCEL_TAKER"
 }
 ```
 </RequestExample>
@@ -76,6 +102,8 @@ Requires an instance API key with the `trading` service enabled.
     "filledQuantity": "0",
     "status": "OPEN",
     "timeInForce": "GTC",
+    "postOnly": true,
+    "selfTradePreventionMode": "CANCEL_TAKER",
     "createdAt": "2025-01-15T10:30:00.000Z"
   },
   "metadata": {
@@ -100,5 +128,13 @@ Requires an instance API key with the `trading` service enabled.
 | `PRICE_REQUIRED` | 400 | Price is required for limit orders |
 | `INVALID_QUANTITY` | 400 | Invalid quantity value |
 | `INVALID_PRICE` | 400 | Price does not align with tick size |
+| `PRICE_OUTSIDE_BAND` | 400 | Price is outside the allowed price reference band |
+| `PRICE_REF_STALE` | 503 | The price reference is stale and the book halts on stale references |
+| `PRICE_REF_UNAVAILABLE` | 503 | The price reference could not be retrieved |
 | `TRANSFER_RESTRICTED` | 400 | User is not eligible to trade this token |
 | `NO_CUSTODY_CONTRACT` | 400 | Order book has no custody contract configured |
+| `NO_LIQUIDITY` | 400 | No matching liquidity for a market or fill-or-kill order |
+| `SHARED_LIQUIDITY_DISABLED` | 400 | Shared liquidity routing is disabled for this order book |
+| `INVALID_SIGNATURE` | 401 | The provided order signature is invalid |
+| `IDEMPOTENCY_MISMATCH` | 409 | Idempotency key reused with a different request body |
+| `BACKEND_RELAYER_FORBIDDEN` | 500 | Backend relayer is not permitted to submit this order |
