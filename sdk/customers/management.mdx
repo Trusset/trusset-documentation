@@ -28,6 +28,17 @@ const pending = await trusset.customers.manage.create({
   externalId: 'crm-9920',
 })
 // pending.referenceKey -> "ref_a1b2c3d4..."
+
+// Company customer with linked individuals
+const company = await trusset.customers.manage.create({
+  name: 'Acme Capital GmbH',
+  customerType: 'COMPANY',
+  companyUrl: 'acme.example.com',   // normalized to https://
+})
+await trusset.customers.manage.create({
+  name: 'Jane Doe',
+  companyId: company.id,            // link individual to the company
+})
 ```
 
 If the wallet address is already registered on-chain in the IdentityRegistry, the customer status is automatically set to `verified`.
@@ -37,13 +48,25 @@ If the wallet address is already registered on-chain in the IdentityRegistry, th
     Ethereum address. Validated client-side before sending.
   </ParamField>
   <ParamField body="name" type="string">
-    Display name for the customer.
+    Display name for the customer. Required for company customers.
   </ParamField>
   <ParamField body="country" type="string">
     ISO 3166-1 alpha-2 or alpha-3 country code. Stored uppercase.
   </ParamField>
   <ParamField body="investorType" type="string">
-    MiFID II classification: `RETAIL`, `PROFESSIONAL`, or `ELIGIBLE_COUNTERPARTY`.
+    `RETAIL`, `PROFESSIONAL`, `ELIGIBLE_COUNTERPARTY`, or a custom [verification profile](/sdk/customers/verification-profiles) key.
+  </ParamField>
+  <ParamField body="customerType" type="string" default="INDIVIDUAL">
+    `INDIVIDUAL` or `COMPANY`. Immutable after creation.
+  </ParamField>
+  <ParamField body="companyUrl" type="string">
+    Company customers only. Normalized to an absolute https URL.
+  </ParamField>
+  <ParamField body="companyId" type="string">
+    Individual customers only: id of a `COMPANY` customer in the same instance to link to.
+  </ParamField>
+  <ParamField body="contactChannels" type="string[]">
+    Up to 20 contact strings (emails, phone numbers), 200 characters each.
   </ParamField>
   <ParamField body="externalId" type="string">
     Your system's unique identifier. Used for deduplication and as a lookup key.
@@ -61,7 +84,7 @@ The SDK provides typed search methods that map to different lookup strategies. E
 // By wallet address
 const c1 = await trusset.customers.manage.searchByWallet('0x1234...abcd')
 
-// By your internal ID
+// By your internal ID (resolves reliably regardless of ID format or length)
 const c2 = await trusset.customers.manage.searchByExternalId('crm-4821')
 
 // By reference key (for pre-wallet customers)
@@ -79,9 +102,10 @@ const results = await trusset.customers.manage.searchByName('Acme', {
 
 ```typescript
 const page = await trusset.customers.manage.list({
-  limit: 100,          // 1-200, default 100
+  limit: 100,               // 1-200, default 100
   offset: 0,
-  search: 'bank',      // Searches name, wallet, externalId, referenceKey
+  search: 'bank',           // Searches name, wallet, externalId, referenceKey, companyUrl
+  customerType: 'COMPANY',  // Optional: INDIVIDUAL or COMPANY
   includeArchived: false,
 })
 // page.customers: Customer[]
@@ -120,6 +144,28 @@ Archiving soft-deletes a customer. Archived customers are excluded from list que
 ```typescript
 await trusset.customers.manage.archive('customer-id')
 ```
+
+## Linked wallets
+
+A customer has one primary wallet and any number of linked wallets. Linked wallets resolve to the same customer in lookups and country checks. A wallet can only belong to one customer per instance.
+
+```typescript
+// List all wallets (primary + linked)
+const wallets = await trusset.customers.manage.listWallets('customer-id')
+// wallets.primary, wallets.total, wallets.wallets: [{ address, label, isPrimary, addedAt }]
+
+// Link an additional wallet
+await trusset.customers.manage.addWallet('customer-id', '0x9999...aaaa', 'Trading desk')
+
+// Make a linked wallet the primary. The previous primary stays linked,
+// labeled "Previously primary".
+await trusset.customers.manage.promoteWallet('customer-id', '0x9999...aaaa')
+
+// Remove a linked (non-primary) wallet
+await trusset.customers.manage.removeWallet('customer-id', '0x9999...aaaa')
+```
+
+Conflicts return `409` with a specific code: `ALREADY_PRIMARY`, `WALLET_ALREADY_LINKED` (same customer), or `WALLET_IN_USE` (another customer).
 
 ## Batch country lookup
 

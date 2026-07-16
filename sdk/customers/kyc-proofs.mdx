@@ -1,0 +1,148 @@
+---
+title: "KYC Proofs"
+description: "Generate zk-STARK KYC proofs locally and verify customers with the root hash"
+icon: "fingerprint"
+---
+
+Trusset never sees or hashes your customers' KYC data. You run the [trusset-kyc-zk-proofs](https://github.com/Trusset/trusset-kyc-zk-proofs) tool on your own infrastructure, and only two artifacts from its output ever reach Trusset:
+
+1. The **root hash** (`kycHash`) - a Rescue-Prime Merkle root over per-field commitments, stored on-chain by `identity.verify`.
+2. The **bundle manifest** (`manifest.json`) - hashes and public inputs only, used by `identity.addClaimsFromProof` to derive on-chain claims.
+
+Names, birth dates, and document data stay on your machine. The proofs themselves (`proofs/*.bin`) and the encrypted witness material (`secrets.enc`) are never uploaded.
+
+## Run the proof tool
+
+The tool is a separate repository you clone and run locally. It reads subject rows from `/input` (JSON or CSV) and writes one proof bundle per subject:
+
+```bash
+git clone https://github.com/Trusset/trusset-kyc-zk-proofs
+cd trusset-kyc-zk-proofs
+npm install
+cp config.example.json config.json
+export TRUSSET_KYC_MASTER_KEY=$(openssl rand -hex 32)
+export TRUSSET_KYC_SIGNING_KEY=$(openssl rand -hex 32)
+
+# place your customer rows in /input, then:
+npm start
+```
+
+```
+output/
+├── 0xAbCd.../                       # one bundle per subject wallet
+│   ├── kycHash.hex                  # the root hash (0x + 64 hex chars)
+│   ├── manifest.json                # signed manifest: root hash + proof leaves
+│   ├── manifest.sig                 # ed25519 signature
+│   ├── proofs/<field>.bin           # zk-STARK proofs - keep local
+│   └── secrets.enc                  # encrypted witnesses - keep local, never upload
+└── kyc_hashes_<timestamp>.csv       # batch index: one row per subject
+```
+
+The root hash appears in three places - they are the same value: `kycHash.hex`, the `kycHash` field of `manifest.json`, and the `kycHash` column of the batch CSV.
+
+<Warning>
+  `secrets.enc` and `proofs/*.bin` must never leave your infrastructure. Trusset endpoints only accept the manifest (hashes and public inputs) and the root hash.
+</Warning>
+
+### Stub vs production manifests
+
+Each manifest carries a `mode`. `production` manifests are accepted everywhere. `stub` manifests (CI smoke mode, `--skip-proofs`) are accepted by development instances only - a production instance rejects them with `STUB_NOT_ALLOWED`.
+
+## From bundle to verified customer
+
+<Steps>
+  <Step title="Verify on-chain with the root hash">
+    Load the bundle's `manifest.json` and call `verifyFromManifest`. The wallet address, root hash, country, investor type, and expiry days are read straight from the manifest; pass overrides for anything you want to change.
+
+    ```typescript
+    import { readFileSync } from 'node:fs'
+    import type { KycProofManifest } from '@trusset/sdk'
+
+    const manifest: KycProofManifest = JSON.parse(
+      readFileSync('output/0xAbCd.../manifest.json', 'utf8'),
+    )
+
+    const result = await trusset.customers.identity.verifyFromManifest(manifest)
+    // result.kycHash === manifest.kycHash - the root hash is now on-chain
+    // result.operation: 'verify' (new identity) or 'update' (existing)
+    ```
+
+    If you only stored the root hash (for example from the batch CSV), call `verify` directly with `kycHash`:
+
+    ```typescript
+    await trusset.customers.identity.verify({
+      walletAddress: '0xAbCd...',
+      country: 'DEU',
+      investorType: 'PROFESSIONAL',
+      kycHash: '0x591aa0f6...',
+      softExpiryDays: 365,
+      hardExpiryDays: 730,
+    })
+    ```
+  </Step>
+  <Step title="Add proof-backed claims">
+    With the root hash on-chain, the manifest can back on-chain claims. The backend re-checks that the manifest's `kycHash` matches the on-chain identity before adding anything.
+
+    ```typescript
+    const claims = await trusset.customers.identity.addClaimsFromProof({
+      walletAddress: manifest.walletAddress,
+      manifest,
+    })
+    // claims.added: 4, claims.claims: [{ claimType: 'KYC', status: 'confirmed', txHash }, ...]
+    ```
+
+    One transaction is sent per claim. Use `selected: ['KYC']` to add a subset.
+  </Step>
+  <Step title="Check the result">
+    ```typescript
+    const status = await trusset.customers.identity.getStatus(manifest.walletAddress)
+    // status.onChain.isVerified === true
+    // status.onChain.kycHash === manifest.kycHash
+
+    const { claims } = await trusset.customers.identity.getClaims(manifest.walletAddress)
+    // active claims with their data hashes and expiries
+    ```
+  </Step>
+</Steps>
+
+## Which claims a proof can back
+
+The `KYC` claim always derives from the root hash. Field-level claims derive from the manifest's proof leaves:
+
+| Claim type | Derived from | Circuit |
+|---|---|---|
+| `KYC` | the root hash itself | `merkle_root` |
+| `RESIDENCY` | `country` leaf | `set_membership` |
+| `CITIZENSHIP` | `nationality` leaf | `set_membership` |
+| `ACCREDITATION` | `investorType` leaf | `tier_threshold` |
+
+`AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK`, and `PEP_CHECK` are not proof-backed - add them with [`addClaim`](/sdk/customers/identity#manual-claims).
+
+## Batch onboarding
+
+The tool's batch CSV maps row-for-row onto `batchVerify` entries - up to 500 subjects in one on-chain transaction:
+
+```typescript
+await trusset.customers.identity.batchVerify(rows.map(row => ({
+  walletAddress: row.walletAddress,
+  country: row.country,
+  investorType: row.investorType,
+  kycHash: row.kycHash,
+  softExpiryDays: Number(row.softExpiryDays) || undefined,
+  hardExpiryDays: Number(row.hardExpiryDays) || undefined,
+})))
+```
+
+Addresses that are already actively verified are skipped on-chain (their existing root hash is kept); revoked identities are re-verified.
+
+## Troubleshooting
+
+| Error code | Meaning | Fix |
+|---|---|---|
+| `NOT_VERIFIED` | The wallet has no on-chain identity yet | Run `verify` / `verifyFromManifest` first |
+| `HASH_MISMATCH` | Manifest root hash differs from the on-chain hash | Re-verify with this manifest's `kycHash`, or use the bundle that matches the chain |
+| `WALLET_MISMATCH` | Manifest belongs to a different wallet | Use the bundle generated for this wallet |
+| `STUB_NOT_ALLOWED` | Stub-mode manifest on a production instance | Re-run the tool without `--skip-proofs` |
+| `INVALID_MANIFEST` | Malformed or incomplete manifest | Pass the unmodified `manifest.json` object |
+| `INVALID_HASH` | `kycHash` is not a 32-byte hex string | Use the exact value from `kycHash.hex` |
+| `NO_SELECTED_CLAIMS` | `selected` names claim types this proof cannot back | See the claim derivation table above |

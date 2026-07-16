@@ -74,21 +74,24 @@ Every `TrussetError` instance exposes:
 | `RELAYER_LIMIT_EXCEEDED` | 429 | Daily transaction limit reached |
 | `VALIDATION_ERROR` | 400 | Client-side input validation failure |
 
+KYC proof flow codes (`NOT_VERIFIED`, `HASH_MISMATCH`, `WALLET_MISMATCH`, `STUB_NOT_ALLOWED`, `INVALID_MANIFEST`, `INVALID_HASH`, `PROOF_REQUIRED`, `INVALID_CLAIM_TYPE`, `NO_SELECTED_CLAIMS`) are documented with fixes in the [KYC proofs troubleshooting table](/sdk/customers/kyc-proofs#troubleshooting).
+
 ## Retry behavior
 
-The HTTP layer automatically retries requests that fail with transient errors:
+Read requests (GET) are retried on transient failures. Write requests are not - identity writes execute on-chain transactions through the relayer, and blindly repeating an ambiguous failure (5xx, timeout) could submit the same transaction twice. Writes retry only on `429`, where the server rejected the request before doing any work.
 
-| Status | Retried |
-|---|---|
-| 408 Request Timeout | Yes |
-| 429 Too Many Requests | Yes |
-| 500 Internal Server Error | Yes |
-| 502 Bad Gateway | Yes |
-| 503 Service Unavailable | Yes |
-| 504 Gateway Timeout | Yes |
-| Network errors (DNS, connection) | Yes |
-| Timeouts (AbortError) | Yes |
-| 400, 401, 403, 404, 409 | No |
+| Status | GET | POST / PUT / DELETE |
+|---|---|---|
+| 408 Request Timeout | Retried | No |
+| 429 Too Many Requests | Retried | Retried |
+| 500 / 502 / 503 / 504 | Retried | No |
+| Network errors (DNS, connection) | Retried | No |
+| Timeouts (AbortError) | Retried | No |
+| 400, 401, 403, 404, 409 | No | No |
+
+<Tip>
+  If an on-chain write fails ambiguously (timeout, 5xx), check `identity.getStatus` or `identity.getClaims` before repeating it - the transaction may have landed anyway. Verification and claim writes are safe to repeat: re-verifying updates the identity, re-adding a claim overwrites it.
+</Tip>
 
 Retries use exponential backoff: 1s, 2s, 4s, capped at 10s. Configure via `maxRetries` in the client constructor. Set to `0` to disable.
 
@@ -99,6 +102,8 @@ const trusset = new TrussetClient({
   timeoutMs: 60_000, // 60s timeout per attempt
 })
 ```
+
+On-chain write methods enforce higher per-request timeout floors regardless of `timeoutMs` (180s; `addClaimsFromProof` 420s), because the backend waits for block confirmations inside the request.
 
 ## Logging
 
