@@ -1,0 +1,134 @@
+---
+title: 'Get Configuration Status'
+api: 'GET /lending-external-securities/api/markets/{marketId}/configuration-status'
+description: 'Check whether a market is ready to accept loans'
+---
+
+Returns a single readiness verdict plus the individual checks behind it. Poll this after deployment and after each authorization step until `fullyConfigured` is `true`.
+
+Readiness spans two layers. Contract wiring is set up by the factory at deployment and rarely needs attention. Token-side authorization is the layer that blocks new markets, because it depends on parties outside Trusset: the collateral token's agent administrator and its identity registry operator.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="fullyConfigured" type="boolean">
+      True only when contract wiring is complete, the adapter is authorized on the collateral token, the router is an eligible collateral recipient, the relayer can sign oracle prices, and the relayer holds `LIQUIDATOR_ROLE`. This is the single flag to gate a market on.
+    </ResponseField>
+    <ResponseField name="liquidationContract" type="string">Liquidation router the market is wired to.</ResponseField>
+    <ResponseField name="insuranceFund" type="string">Insurance fund contract.</ResponseField>
+    <ResponseField name="adapter" type="string">Collateral adapter contract.</ResponseField>
+    <ResponseField name="liquidationConfigured" type="boolean">Router address is set on the market.</ResponseField>
+    <ResponseField name="insuranceFundConfigured" type="boolean">Insurance fund address is set on the market.</ResponseField>
+    <ResponseField name="adapterConfigured" type="boolean">Adapter address is set on the market.</ResponseField>
+    <ResponseField name="routerAuthorized" type="boolean">The router accepts liquidations originating from this market.</ResponseField>
+    <ResponseField name="routerHolderAuthorized" type="boolean">The router is an eligible recipient of the collateral token under its compliance rules. Without this, a liquidation cannot transfer seized collateral.</ResponseField>
+    <ResponseField name="collateralAuthStatus" type="object">
+      Adapter authorization detail. `null` when the market has no collateral token recorded.
+      <Expandable>
+        <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`.</ResponseField>
+        <ResponseField name="adapterAuthorized" type="boolean">Whether the adapter can act on the collateral token.</ResponseField>
+        <ResponseField name="requirement" type="string">What is needed. See the table below.</ResponseField>
+        <ResponseField name="interfaceSupported" type="boolean">`FREEZE` only. False means the token cannot support freeze mode at all.</ResponseField>
+        <ResponseField name="authorizedVia" type="string">`CUSTODY` only. `token_authorized_contract` or `identity_registry`, or null.</ResponseField>
+        <ResponseField name="identityRegistry" type="string">`CUSTODY` only. Registry consulted, when one was resolvable.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="oracleSignerAuthorized" type="boolean">The instance relayer can push and sign prices for this market's oracle. The oracle owner is treated as authorized implicitly.</ResponseField>
+    <ResponseField name="liquidatorRoleGranted" type="boolean">The instance relayer holds `LIQUIDATOR_ROLE` on the market, which liquidation and expired-auction settlement require.</ResponseField>
+    <ResponseField name="relayerAddress" type="string">Instance relayer address, or null when none is configured. Every role check above is evaluated against this address.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Requirement Values
+
+| `requirement` | Meaning | Resolved by |
+|---|---|---|
+| `adapter_must_hold_agent_role` | `FREEZE` mode. The adapter needs the agent role on the collateral token | The token's agent administrator |
+| `adapter_must_be_verified_holder` | `CUSTODY` mode. The adapter must be a verified holder or an allowlisted contract | The token's identity registry operator |
+| `token_not_freeze_compatible` | The token does not implement the freeze interface. `FREEZE` mode is impossible. Redeploy in `CUSTODY` mode | Not resolvable |
+| `identity_registry_unknown` | No identity registry was supplied at deployment, so compliance cannot be verified | Redeploy with `identityRegistry`, or verify manually off-platform |
+| `adapter_not_deployed` | No adapter address is recorded on the market | Contact Trusset |
+| `unknown` | The check could not complete, usually an RPC failure | Retry |
+
+<Note>
+  `identity_registry_unknown` is treated as satisfied when computing `fullyConfigured`, because the backend cannot prove or disprove compliance without a registry. It is not a pass. Verify authorization out of band before letting borrowers in.
+</Note>
+
+<Tip>
+  This endpoint tells you what is unfinished. [Get Setup Steps](/endpoints/external-securities-lending/get-setup-steps) returns the same state as an ordered checklist with ready-to-sign calldata for each outstanding item.
+</Tip>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/configuration-status" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/configuration-status`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+if (!data.fullyConfigured) {
+  // hold the market back from borrowers and surface the failing checks
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - Ready
+{
+  "success": true,
+  "data": {
+    "liquidationContract": "0x067a3FeEA46649AdAd8e31c33B3a4D8774b8d8cF",
+    "insuranceFund": "0x8f1a...9c22",
+    "adapter": "0x4d2b...77ae",
+    "liquidationConfigured": true,
+    "insuranceFundConfigured": true,
+    "adapterConfigured": true,
+    "routerAuthorized": true,
+    "collateralAuthStatus": {
+      "mode": "FREEZE",
+      "adapterAuthorized": true,
+      "interfaceSupported": true,
+      "requirement": "adapter_must_hold_agent_role"
+    },
+    "routerHolderAuthorized": true,
+    "oracleSignerAuthorized": true,
+    "liquidatorRoleGranted": true,
+    "relayerAddress": "0x123...456",
+    "fullyConfigured": true
+  }
+}
+```
+```json Response - Awaiting Token Agent
+{
+  "success": true,
+  "data": {
+    "liquidationContract": "0x067a3FeEA46649AdAd8e31c33B3a4D8774b8d8cF",
+    "insuranceFund": "0x8f1a...9c22",
+    "adapter": "0x4d2b...77ae",
+    "liquidationConfigured": true,
+    "insuranceFundConfigured": true,
+    "adapterConfigured": true,
+    "routerAuthorized": true,
+    "collateralAuthStatus": {
+      "mode": "FREEZE",
+      "adapterAuthorized": false,
+      "interfaceSupported": true,
+      "requirement": "adapter_must_hold_agent_role"
+    },
+    "routerHolderAuthorized": false,
+    "oracleSignerAuthorized": true,
+    "liquidatorRoleGranted": false,
+    "relayerAddress": "0x123...456",
+    "fullyConfigured": false
+  }
+}
+```
+</ResponseExample>

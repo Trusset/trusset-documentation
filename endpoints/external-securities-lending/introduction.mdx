@@ -1,0 +1,175 @@
+---
+title: 'External Securities Lending'
+description: 'Overcollateralized lending against imported ERC-3643 security tokens'
+icon: 'building-columns'
+---
+
+External securities lending markets let you lend against ERC-3643 (T-REX) security tokens that were issued outside Trusset and imported into your instance. A borrower pledges security tokens, receives a settlement asset such as USDC, and repays with interest. Liquidity providers fund the pool and earn the supply rate.
+
+This differs from [Stock Lending](/endpoints/stock-lending/list-markets), which operates on stock tokens Trusset issued. Here the collateral is a third-party token you do not control, so the API exposes the compliance plumbing that makes such a token usable as collateral: adapter authorization, identity registry checks, and a named collateral agent recorded on every lock.
+
+## Base Path
+
+```
+https://api.trusset.org/lending-external-securities/api
+```
+
+Four resource groups sit under that path:
+
+| Group | Path | Covers |
+|---|---|---|
+| Markets | `/markets` | Deployment, configuration, oracle pricing, readiness |
+| Positions | `/positions` | Liquidity provision, borrowing, position queries |
+| Liquidations | `/liquidations` | Liquidation execution, settlement, Dutch auctions |
+| Hooks | `/hooks` | Risk monitors and automated liquidation reactions |
+
+Every request authenticates with an instance API key in the `X-API-Key` header. See [Authentication](/endpoints/authentication). The instance bound to your key determines both the network and the data you can reach. Markets belonging to another instance return `MARKET_NOT_FOUND`.
+
+## Response Envelope
+
+```json
+{
+  "success": true,
+  "data": { },
+  "error": null,
+  "metadata": {
+    "timestamp": "2025-06-15T12:00:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+
+On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. Schema failures use `VALIDATION_ERROR` with `error.details` listing each offending field. Always branch on `success` rather than on the HTTP status alone.
+
+## Execution Modes
+
+Every write endpoint accepts `useRelayer` and supports two modes.
+
+**Calldata mode** is the default. The API returns unsigned transaction data for a wallet you control to sign and broadcast. Nothing is submitted on your behalf.
+
+```json
+{
+  "action": "SIGN_TRANSACTION",
+  "transaction": { "to": "0x70A0...", "data": "0x..." },
+  "functionName": "openLoan"
+}
+```
+
+Some operations need more than one transaction. Those return `SIGN_TRANSACTIONS` with an ordered `steps` array that must be broadcast in sequence.
+
+```json
+{
+  "action": "SIGN_TRANSACTIONS",
+  "steps": [
+    { "action": "SIGN_TRANSACTION", "transaction": { "to": "0xUSDC...", "data": "0x..." }, "functionName": "approve", "description": "Approve the market to pull USDC" },
+    { "action": "SIGN_TRANSACTION", "transaction": { "to": "0x70A0...", "data": "0x..." }, "functionName": "addLiquidity" }
+  ]
+}
+```
+
+**Relayer mode** (`useRelayer: true`) submits the transaction through your instance relayer and returns the mined result including `txHash`. The relayer handles ERC-20 approvals automatically. It must be configured, unfrozen, and within its daily transaction limit. See [Relayer Errors](/endpoints/introduction#relayer-errors).
+
+<Warning>
+  [Liquidate Loan](/endpoints/external-securities-lending/liquidate) inverts this default. It executes through the relayer unless you explicitly send `useRelayer: false`.
+</Warning>
+
+## Collateral Modes
+
+Every market is deployed in one of two modes, fixed at deployment. A single collateral token can back one market of each mode.
+
+**`FREEZE`** is the default. The adapter freezes the borrower's tokens where they sit. The borrower keeps custody and no ERC-20 approval is needed to open a loan. This requires the market's adapter to hold the agent role on the collateral token, granted by whoever controls that token's agent administration. The token must implement the ERC-3643 freeze interface (`isAgent` and `getFrozenTokens`), which is checked at deployment and rejected with `FREEZE_MODE_UNSUPPORTED_TOKEN` if absent.
+
+**`CUSTODY`** escrows the tokens in the adapter. Borrowers must call `approve` on the collateral token before posting collateral, and the API returns that approval as an explicit step. This requires the adapter to be a verified holder on the token's identity registry. If a return transfer is ever blocked by compliance, the borrower reclaims through [Claim Escrowed Collateral](/endpoints/external-securities-lending/claim-escrowed-collateral).
+
+Both modes require the market's liquidation router to be an eligible recipient of the collateral token, because a liquidation transfers seized tokens to it.
+
+## Pricing
+
+There is no automatic price feed. Prices come from the issuer, as a net asset value the issuer publishes.
+
+[Sync Oracle Price](/endpoints/external-securities-lending/sync-oracle) pushes a NAV on-chain. [Sign Price](/endpoints/external-securities-lending/sign-price) returns an EIP-712 signed price that a borrower submits alongside their own transaction, updating the price atomically without a separate oracle write. Both require an explicit positive `price`, and both require the instance relayer to be an authorized signer on the market's oracle.
+
+`priceSource` records how the market's price is meant to be interpreted. `NAV` is the default. `MARKET` signals an observable market price and the contract responds by disallowing Dutch auctions and raising the auction floor premium. The backend applies no branching of its own on this field.
+
+## Units
+
+Three separate decimal domains apply. Send and receive plain decimal strings in every case. Do not send base units.
+
+| Domain | Precision | Applies to |
+|---|---|---|
+| Borrow asset | The settlement token's decimals, on `borrowAssetDecimals` | Borrow, repay, liquidity, prices, minimums, proceeds |
+| Collateral | The collateral token's decimals, on `collateralDecimals` | Collateral amounts, caps, seized amounts, auction sizes |
+| LP shares | Always 18 | The `shares` argument to [Remove Liquidity](/endpoints/external-securities-lending/remove-liquidity), and `totalShares` |
+
+Both decimal values are on the market record from [Get Market](/endpoints/external-securities-lending/get-market). Sending more decimal places than the target token supports returns `VALIDATION_ERROR` with the message `Amount must be a number with at most N decimal places`.
+
+Risk parameters are integers in basis points. `7500` is 75 percent. Health factor is a decimal string where `1.0` is the liquidation boundary: at or above is healthy, below is liquidatable.
+
+<Note>
+  The borrow asset is fixed at deployment. Any ERC-20 with 6 to 18 decimals is accepted, validated on-chain at deploy time. Omitting it selects USDC. See [List Borrow Assets](/endpoints/external-securities-lending/list-borrow-assets).
+</Note>
+
+## Market Lifecycle
+
+<Steps>
+  <Step title="Deploy">
+    [Deploy Market](/endpoints/external-securities-lending/deploy-market) deploys the market, oracle, interest model, insurance fund, collateral adapter, and a liquidation router dedicated to this market, in one factory transaction.
+  </Step>
+  <Step title="Authorize">
+    A new market cannot take loans until token-side authorizations are complete. [Get Setup Steps](/endpoints/external-securities-lending/get-setup-steps) returns the outstanding items with ready-to-sign calldata. These are executed by the token's agent or identity registry operator, not by Trusset.
+  </Step>
+  <Step title="Configure">
+    [Update Market Config](/endpoints/external-securities-lending/update-config) sets collateral factor, liquidation threshold, penalties, fees, caps, and auction behaviour. Defaults are seeded at deployment.
+  </Step>
+  <Step title="Price">
+    Push an initial NAV with [Sync Oracle Price](/endpoints/external-securities-lending/sync-oracle). Loans revert against a stale price.
+  </Step>
+  <Step title="Fund">
+    Liquidity providers deposit the borrow asset with [Add Liquidity](/endpoints/external-securities-lending/add-liquidity). The first deposit into an empty pool has a minimum.
+  </Step>
+  <Step title="Lend">
+    Borrowers open positions with [Open Loan](/endpoints/external-securities-lending/open-loan).
+  </Step>
+</Steps>
+
+Confirm readiness with [Get Configuration Status](/endpoints/external-securities-lending/get-configuration-status) before directing borrowers at a market.
+
+## Liquidations
+
+A loan becomes liquidatable when its health factor falls below `1.0`. What happens next depends on the market's `useDutchAuction` setting.
+
+With Dutch auctions enabled, liquidation opens an auction whose price decays linearly from `auctionStartPremium` to `auctionMinPremium` over `auctionDuration`. Bidders buy collateral through [Bid on Auction](/endpoints/external-securities-lending/bid-on-auction). Collateral unsold when the auction expires routes to the liquidation router through [Settle Expired Auction](/endpoints/external-securities-lending/settle-expired-auction).
+
+With Dutch auctions disabled, seized collateral transfers straight to the liquidation router and a pending liquidation is recorded.
+
+Once collateral reaches the router it does not sell itself. There is no auto-sell for external securities, because these instruments have no on-platform venue. The operator drives settlement explicitly:
+
+<Steps>
+  <Step title="Withdraw for sale">
+    [Withdraw Collateral for Sale](/endpoints/external-securities-lending/withdraw-collateral-for-sale) moves collateral to a sale venue or custodian. The recipient must pass the token's compliance checks.
+  </Step>
+  <Step title="Sell off-platform">
+    Execute the sale through your own channel. Trusset is not involved.
+  </Step>
+  <Step title="Report proceeds">
+    [Report Partial Sale](/endpoints/external-securities-lending/report-partial-sale) deposits interim proceeds into the router. Repeatable.
+  </Step>
+  <Step title="Settle">
+    [Settle Liquidation](/endpoints/external-securities-lending/settle-liquidation) routes the cumulative proceeds to the market and closes the liquidation.
+  </Step>
+</Steps>
+
+Proceeds above the debt plus liquidation penalty are returned to the borrower by the contract. If the settlement token blocks that transfer on compliance grounds, the surplus is escrowed on the market for the borrower to claim, rather than reverting the settlement.
+
+A liquidation left unsettled for 7 days can be written off with [Handle Liquidation Timeout](/endpoints/external-securities-lending/handle-timeout), which draws on the insurance fund to cover the bad debt. Write-off does not recover collateral from the router, so dispose of or return the collateral first.
+
+## Per-Market Liquidation Router
+
+Each market gets its own `SecurityLiquidationRouter`, deployed by the factory in the same transaction. The market admin holds `DEFAULT_ADMIN_ROLE` on it and the `liquidationOperator` you nominate at deployment holds `OPERATOR_ROLE`. Trusset holds no role. Nominating the instance relayer as `liquidationOperator` is what allows settlement to be driven through this API.
+
+Every market payload carries `liquidationRouterAddress`. Endpoints that act on a liquidation resolve the correct router automatically. Markets deployed before per-market routers existed continue to use the shared legacy router, transparently.
+
+## Rate Limits
+
+Read endpoints allow 100 requests per minute per API key. Write endpoints allow 10 per minute. Exceeding either returns `429` with code `RATE_LIMIT_EXCEEDED`. See [Rate Limits](/endpoints/rate-limits).

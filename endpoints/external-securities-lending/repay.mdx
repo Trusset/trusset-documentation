@@ -1,0 +1,128 @@
+---
+title: 'Repay Loan'
+api: 'POST /lending-external-securities/api/positions/{marketId}/repay'
+description: 'Repay loan debt, interest first then principal'
+---
+
+Repays part or all of a loan's outstanding debt. Accrued interest is settled before principal. Anyone can repay any loan, so a third party can rescue a position approaching liquidation.
+
+Two transactions are required: an approval on the borrow asset, then the repayment. In relayer mode the approval is handled automatically.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="loanId" type="integer" required>
+  On-chain loan ID. Must be a positive integer sent as a JSON number.
+</ParamField>
+
+<ParamField body="amount" type="string" required>
+  Amount to repay as a decimal string in borrow asset units. The contract caps repayment at the total debt, so overpaying does not transfer more than owed.
+</ParamField>
+
+<ParamField body="useRelayer" type="boolean" default="false">
+  Execute through the instance relayer, or return unsigned calldata.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">Transaction hash. Relayer mode only.</ResponseField>
+    <ResponseField name="loanId" type="integer">Loan ID, echoed back. Relayer mode only.</ResponseField>
+    <ResponseField name="repaidAmount" type="string">Amount submitted, echoed back. Relayer mode only.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` in calldata mode.</ResponseField>
+    <ResponseField name="steps" type="array">Ordered `approve` then `repay` transactions. Calldata mode only.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  Repaying the full debt does not release collateral on its own. Follow with [Close Loan](/endpoints/external-securities-lending/close-loan) to unlock the pledged tokens and mark the position repaid.
+</Note>
+
+<Tip>
+  Read `principal` and `accruedInterest` from [Get Loan](/endpoints/external-securities-lending/get-loan) immediately before repaying. Interest accrues per block, so a payoff quote computed even a minute earlier will leave dust behind and block the subsequent close.
+</Tip>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/repay" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"loanId": 5, "amount": "10000", "useRelayer": true}'
+```
+```typescript TypeScript
+const loanRes = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/loan/5`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data: loan } = await loanRes.json();
+const payoff = (Number(loan.principal) + Number(loan.accruedInterest)) * 1.0001;
+
+await fetch(
+  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/repay`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ loanId: 5, amount: payoff.toFixed(6), useRelayer: true })
+  }
+);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Relayer Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0xabc...def",
+    "loanId": 5,
+    "repaidAmount": "10000"
+  }
+}
+```
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": { "to": "0x98aD0ca091552e23C564B41C74282e5343D03E8a", "data": "0x..." },
+        "functionName": "approve",
+        "description": "Approve the market to pull USDC"
+      },
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": { "to": "0x70A0...", "data": "0x..." },
+        "functionName": "repay"
+      }
+    ]
+  }
+}
+```
+```json Error - Preflight Failed
+{
+  "success": false,
+  "error": {
+    "code": "PREFLIGHT_FAILED",
+    "message": "execution reverted: LoanNotActive"
+  }
+}
+```
+</ResponseExample>
+
+## Errors
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `PREFLIGHT_FAILED` | `400` | The repayment reverted during simulation. `message` carries the reason |
+| `REPAY_FAILED` | `400` | The transaction failed on-chain |
+| `VALIDATION_ERROR` | `400` | `amount` carries more decimal places than the borrow asset supports |

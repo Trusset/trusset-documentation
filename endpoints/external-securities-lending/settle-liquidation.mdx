@@ -1,0 +1,117 @@
+---
+title: 'Settle Liquidation'
+api: 'POST /lending-external-securities/api/liquidations/settle/{liquidationId}'
+description: 'Route sale proceeds back to the market and close the liquidation'
+---
+
+Closes a liquidation by forwarding the cumulative proceeds from the router to the lending market. This repays the pool, pays any surplus to the borrower, and marks the record `SETTLED`.
+
+This is the final step of the manual settlement workflow. Until it is called, the liquidated debt remains outstanding on the market and counts against `pendingLiquidationDebt`.
+
+## Path Parameters
+
+<ParamField path="liquidationId" type="string" required>
+  Global router liquidation ID.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="usdcProceeds" type="string" required>
+  Final proceeds to deposit before settling, in the market's borrow asset. Must be zero or greater.
+
+  Send the full sale proceeds when settling in one step. Send `"0"` when the proceeds were already deposited through [Report Partial Sale](/endpoints/external-securities-lending/report-partial-sale), and the router forwards what it already holds.
+</ParamField>
+
+<Note>
+  This endpoint always executes through the instance relayer, which must hold `OPERATOR_ROLE` on the router. There is no calldata mode. When `usdcProceeds` is greater than zero the relayer must be holding that amount, since settlement pulls it from the relayer wallet.
+</Note>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="liquidationId" type="string">Liquidation ID, echoed back.</ResponseField>
+    <ResponseField name="usdcProceeds" type="string">Amount submitted on this call, echoed back. This is not the cumulative total forwarded to the market.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Proceeds Distribution
+
+The market keeps at most the liquidated debt plus the market's `liquidationPenalty`. Anything above that is surplus and belongs to the borrower.
+
+Surplus is pushed directly to the borrower's wallet. If the settlement token rejects that transfer on compliance grounds, the amount is escrowed on the market contract against the borrower's address instead of reverting the settlement, and the borrower claims it later. Settlement therefore always completes, whether or not the borrower can currently receive funds.
+
+When proceeds fall short of the debt, the shortfall is recorded as slippage on the settlement event. The pool absorbs the loss. It is not automatically covered by the insurance fund, which only steps in on a timeout write-off.
+
+<Warning>
+  Settling with zero proceeds is rejected with `NO_PROCEEDS_COLLECTED` unless the router already holds proceeds from a reported partial sale. This prevents accidentally closing a liquidation that recovered nothing, which would silently write off the debt against the pool.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidations/settle/14" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"usdcProceeds": "21400.00"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/liquidations/settle/${liquidationId}`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ usdcProceeds: '21400.00' })
+  }
+);
+const { success, data, error } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "liquidationId": "14",
+    "usdcProceeds": "21400.00",
+    "txHash": "0xabc...def"
+  }
+}
+```
+```json Error - Nothing Collected
+{
+  "success": false,
+  "error": {
+    "code": "NO_PROCEEDS_COLLECTED",
+    "message": "No proceeds have been collected for this liquidation"
+  }
+}
+```
+```json Error - Already Settled
+{
+  "success": false,
+  "error": {
+    "code": "ALREADY_SETTLED",
+    "message": "Already settled or written off"
+  }
+}
+```
+</ResponseExample>
+
+## Errors
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_ID` | `400` | No liquidation ID in the path |
+| `INVALID_AMOUNT` | `400` | `usdcProceeds` is absent, non-numeric, or negative |
+| `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
+| `ALREADY_SETTLED` | `400` | The liquidation is already settled or written off |
+| `NO_PROCEEDS_COLLECTED` | `400` | Zero was submitted and the router holds no proceeds |
+| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | The relayer lacks `OPERATOR_ROLE`. The error carries grant `calldata` |
+| `ROUTER_NOT_CONFIGURED` | `400` | No liquidation router resolved for this market |
+| `SETTLE_PREFLIGHT_FAILED` | `400` | Simulation reverted, commonly an insufficient relayer balance |
+| `SETTLE_TX_REVERTED` | `400` | The transaction reverted after broadcast. `error.txHash` carries the hash |

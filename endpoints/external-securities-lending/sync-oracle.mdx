@@ -1,0 +1,125 @@
+---
+title: 'Sync Oracle Price'
+api: 'POST /lending-external-securities/api/markets/{marketId}/sync-oracle'
+description: 'Push a NAV price on-chain'
+---
+
+Writes a new price to the market's oracle through the instance relayer. This is how external securities markets are priced: the issuer publishes a net asset value and pushes it here.
+
+There is no automatic price feed for these markets. `price` is required on every call. If you omit it or send a non-positive value the request is rejected.
+
+<Warning>
+  This submits a blockchain transaction. The instance relayer must be an authorized signer on the oracle, which the oracle owner grants. Check `signerAuthorized` on [Get Oracle Status](/endpoints/external-securities-lending/get-oracle-status) first.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="price" type="number" required>
+  Net asset value per collateral token, denominated in the market's borrow asset. Must be greater than zero.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="previousPrice" type="string">The on-chain price before this write.</ResponseField>
+    <ResponseField name="newPrice" type="string">The price written.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Circuit Breaker
+
+The oracle rejects a price that deviates from the current price by more than `maxDeviationBps`, defaulting to 5000 basis points, which is 50 percent. This guards against a fat-fingered NAV wiping out healthy loans in one transaction.
+
+The check is skipped when the oracle has never been priced, so the first push after deployment can be any positive value. When the breaker trips, the error carries `currentPrice`, `newPrice`, and `maxDeviationPercent` so you can present the comparison.
+
+A genuine repricing beyond the limit requires the oracle owner to widen `maxDeviationBps`, or a sequence of smaller steps.
+
+<Note>
+  Successful pushes are recorded on the market as an `ORACLE_SYNC` transaction, visible through [List Transactions](/endpoints/external-securities-lending/list-transactions), and update `lastOracleUpdate` on the market record.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/sync-oracle" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"price": 105.40}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/sync-oracle`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ price: 105.40 })
+  }
+);
+const { success, data, error } = await res.json();
+if (!success && error.code === 'PRICE_DEVIATION_TOO_LARGE') {
+  // surface the deviation to an operator rather than retrying
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "previousPrice": "104.820000",
+    "newPrice": "105.4",
+    "txHash": "0xabc...def"
+  }
+}
+```
+```json Error - Signer Not Authorized
+{
+  "success": false,
+  "error": {
+    "code": "SIGNER_NOT_AUTHORIZED",
+    "message": "Relayer signer not authorized on oracle"
+  }
+}
+```
+```json Error - Circuit Breaker
+{
+  "success": false,
+  "error": {
+    "code": "PRICE_DEVIATION_TOO_LARGE",
+    "message": "Price deviation exceeds circuit breaker. On-chain: $104.820000, new: $250. Max allowed: 50%"
+  }
+}
+```
+```json Error - Missing Price
+{
+  "success": false,
+  "error": {
+    "code": "MISSING_PRICE",
+    "message": "A positive NAV price is required"
+  }
+}
+```
+</ResponseExample>
+
+## Errors
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_PRICE` | `400` | `price` absent, non-numeric, or not greater than zero |
+| `NO_ORACLE` | `400` | The market has no oracle recorded |
+| `SIGNER_NOT_AUTHORIZED` | `403` | The instance relayer is not authorized on the oracle |
+| `PRICE_DEVIATION_TOO_LARGE` | `400` | The change exceeds the oracle circuit breaker |
+| `PREFLIGHT_FAILED` | `400` | The contract call reverted during simulation |
+| `RELAYER_NOT_CONFIGURED` | `400` | No relayer is configured for this instance |
+| `RELAYER_FROZEN` | `400` | The relayer is frozen |
+| `RELAYER_LIMIT_EXCEEDED` | `400` | The relayer's daily transaction limit is exhausted. Resets at the next UTC day boundary |
+| `SYNC_FAILED` | `400` | The transaction failed on-chain. `message` carries the reason |

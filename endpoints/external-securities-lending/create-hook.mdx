@@ -1,0 +1,170 @@
+---
+title: 'Create Hook'
+api: 'POST /lending-external-securities/api/hooks/{marketId}'
+description: 'Create a risk monitor, pre-liquidation check, or post-liquidation action'
+---
+
+Creates a hook on an external securities lending market. Hooks let you attach off-platform risk data and automated reactions to a market without running your own poller.
+
+Three hook types are available:
+
+| `hookType` | Runs when | Purpose |
+|---|---|---|
+| `monitorRisk` | On the `checkFrequency` schedule | Polls `riskUri` and evaluates `riskFields` against the response |
+| `beforeLiquidation` | Immediately before a liquidation is attempted | Evaluates `parameterChecks` against live loan state |
+| `afterLiquidation` | Immediately after a liquidation completes | Runs the `actionType`, either `buy` or `inform` |
+
+<Info>
+  `riskUri` and `webhookUrl` must be publicly resolvable `http` or `https` URLs. Loopback addresses, private ranges, link-local addresses, and `.local` or `.internal` hostnames are rejected at validation time and on every outbound call.
+</Info>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="hookType" type="string" required>
+  One of `monitorRisk`, `beforeLiquidation`, or `afterLiquidation`.
+</ParamField>
+
+<ParamField body="name" type="string">
+  Display name, 1 to 128 characters. Defaults to `Risk Monitor`, `Pre-Liquidation Check`, or `Post-Liquidation Action` based on the hook type.
+</ParamField>
+
+<ParamField body="riskUri" type="string">
+  URL polled on each run. Required for `monitorRisk`. Max 2048 characters.
+</ParamField>
+
+<ParamField body="riskFields" type="array">
+  Field checks applied to the `riskUri` JSON response. Max 20 entries. Required for `monitorRisk` on create.
+  <Expandable>
+    <ParamField body="path" type="string" required>Dot-notation path into the response body, 1 to 256 characters.</ParamField>
+    <ParamField body="operator" type="string">One of `>`, `>=`, `<`, `<=`, `==`, `!=`.</ParamField>
+    <ParamField body="threshold" type="number">Value compared against the resolved field.</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="riskThreshold" type="number">
+  Optional global threshold stored alongside the hook.
+</ParamField>
+
+<ParamField body="checkFrequency" type="string">
+  Polling interval for `monitorRisk`. One of `1m`, `5m`, `15m`, `30m`, `1h`, `6h`, `12h`, `24h`. A hook without a `checkFrequency` is never scheduled and only runs when triggered manually.
+</ParamField>
+
+<ParamField body="parameterChecks" type="array">
+  On-chain loan checks for `beforeLiquidation`. Max 10 entries.
+  <Expandable>
+    <ParamField body="parameter" type="string" required>One of `healthFactor`, `collateralValue`, `debtValue`, `collateralRatio`, `interestAccrued`.</ParamField>
+    <ParamField body="operator" type="string" required>One of `>`, `>=`, `<`, `<=`, `==`, `!=`.</ParamField>
+    <ParamField body="threshold" type="string" required>Comparison value, max 64 characters.</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="actionType" type="string">
+  Required for `afterLiquidation`. `buy` places a bid on the resulting Dutch auction through the issuer relayer. `inform` posts to `webhookUrl`.
+</ParamField>
+
+<ParamField body="maxBuyPrice" type="string">
+  Price ceiling per collateral unit for `buy` actions, in the market's borrow asset. The hook skips the bid when the live auction price is above this value.
+</ParamField>
+
+<ParamField body="webhookUrl" type="string">
+  Destination for `inform` actions. Required when `actionType` is `inform`. Max 2048 characters.
+</ParamField>
+
+<ParamField body="webhookPayload" type="object">
+  Additional fields merged into the outbound webhook body.
+</ParamField>
+
+<ParamField body="triggerHookIds" type="array">
+  Hook IDs whose failure chains into this hook. Max 10. Every ID must belong to the same market.
+</ParamField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/hooks/{marketId}" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "hookType": "monitorRisk",
+    "name": "NAV Publication Monitor",
+    "riskUri": "https://nav.example.com/funds/NYF1",
+    "riskFields": [{ "path": "ageHours", "operator": "<", "threshold": 36 }],
+    "checkFrequency": "6h"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/hooks/${marketId}`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      hookType: 'afterLiquidation',
+      name: 'Desk notification',
+      actionType: 'inform',
+      webhookUrl: 'https://ops.example.com/hooks/liquidation'
+    })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "id": "hook_003",
+    "marketId": "clx_secmarket_001",
+    "hookType": "monitorRisk",
+    "name": "NAV Publication Monitor",
+    "riskUri": "https://nav.example.com/funds/NYF1",
+    "riskFields": [{ "path": "ageHours", "operator": "<", "threshold": 36 }],
+    "checkFrequency": "6h",
+    "parameterChecks": [],
+    "triggerHookIds": [],
+    "actionType": null,
+    "signerAddress": "0x123...456",
+    "active": true,
+    "executionCount": 0,
+    "createdAt": "2025-06-15T12:00:00.000Z"
+  }
+}
+```
+```json Error - Missing Risk Fields
+{
+  "success": false,
+  "error": {
+    "code": "MISSING_RISK_FIELDS",
+    "message": "At least one risk field is required for monitor hooks"
+  }
+}
+```
+```json Error - Invalid Trigger Hooks
+{
+  "success": false,
+  "error": {
+    "code": "INVALID_TRIGGER_HOOKS",
+    "message": "One or more trigger hook IDs are invalid"
+  }
+}
+```
+</ResponseExample>
+
+## Validation Errors
+
+| Code | Cause |
+|---|---|
+| `MISSING_RISK_URI` | `hookType` is `monitorRisk` and `riskUri` is absent |
+| `MISSING_RISK_FIELDS` | `hookType` is `monitorRisk` and `riskFields` is empty |
+| `MISSING_ACTION_TYPE` | `hookType` is `afterLiquidation` and `actionType` is absent |
+| `MISSING_WEBHOOK_URL` | `actionType` is `inform` and `webhookUrl` is absent |
+| `INVALID_TRIGGER_HOOKS` | One or more `triggerHookIds` do not exist on this market |
+| `VALIDATION_ERROR` | Schema violation. `error.details` lists the offending fields |

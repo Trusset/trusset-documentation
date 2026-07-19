@@ -1,0 +1,144 @@
+---
+title: 'Sign Price'
+api: 'POST /lending-external-securities/api/markets/{marketId}/sign-price'
+description: 'Produce an EIP-712 signed price for atomic use in a transaction'
+---
+
+Returns a NAV signed with the instance relayer's key under EIP-712. The borrower passes it as `signedPrice` on [Open Loan](/endpoints/external-securities-lending/open-loan), [Borrow More](/endpoints/external-securities-lending/borrow-more), [Withdraw Collateral](/endpoints/external-securities-lending/withdraw-collateral), or [Liquidate Loan](/endpoints/external-securities-lending/liquidate), and the contract applies the price and the action in one transaction.
+
+This is the alternative to [Sync Oracle Price](/endpoints/external-securities-lending/sync-oracle). Signing costs no gas and writes nothing on-chain, so it suits per-transaction pricing where a borrower needs a fresh valuation without waiting for an oracle write. Pushing suits a scheduled NAV publication that every loan in the market should see.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="price" type="number" required>
+  Net asset value per collateral token, denominated in the market's borrow asset. Must be greater than zero.
+</ParamField>
+
+<ParamField body="validitySeconds" type="integer" default="300">
+  Signature lifetime in seconds. Values below 60 are raised to 60 and values above 3600 are lowered to 3600.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="price" type="string">Price in base units at the borrow asset's decimals. Pass this value, not `priceUsd`, in the `signedPrice` object.</ResponseField>
+    <ResponseField name="priceUsd" type="string">The same price as a human-readable decimal string. Informational.</ResponseField>
+    <ResponseField name="timestamp" type="integer">Unix seconds the price was signed at. Never ahead of chain time.</ResponseField>
+    <ResponseField name="validUntil" type="integer">Unix seconds after which the signature is rejected.</ResponseField>
+    <ResponseField name="signature" type="string">65-byte EIP-712 signature.</ResponseField>
+    <ResponseField name="signer" type="string">Address that signed. Informational.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  The contract reads only `price`, `timestamp`, `validUntil`, and `signature`. Pass those four through unchanged. `priceUsd` and `signer` are for display and reconciliation.
+</Note>
+
+## Signature Structure
+
+```
+domain = {
+  name: "SecurityPriceOracle",
+  version: "1",
+  chainId: <chain the market is deployed on>,
+  verifyingContract: <market oracle address>
+}
+
+PriceUpdate = {
+  price:      uint256
+  timestamp:  uint256
+  validUntil: uint256
+}
+```
+
+The signature is bound to one oracle through `verifyingContract` and expires at `validUntil`. It carries no nonce, so a signature can be replayed by anyone who holds it until it expires. Keep `validitySeconds` tight, and treat a signed price as a bearer credential over its lifetime.
+
+Verify a signature without spending gas using [Verify Signed Price](/endpoints/external-securities-lending/verify-price).
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/sign-price" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"price": 105.40, "validitySeconds": 300}'
+```
+```typescript TypeScript
+const signRes = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/sign-price`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ price: 105.40, validitySeconds: 300 })
+  }
+);
+const { data: signed } = await signRes.json();
+
+const loanRes = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/open-loan`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      collateralAmount: '1000',
+      borrowAmount: '50000',
+      signedPrice: {
+        price: signed.price,
+        timestamp: signed.timestamp,
+        validUntil: signed.validUntil,
+        signature: signed.signature
+      },
+      useRelayer: true
+    })
+  }
+);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "price": "105400000",
+    "priceUsd": "105.4",
+    "timestamp": 1718445600,
+    "validUntil": 1718445900,
+    "signature": "0xabc...def",
+    "signer": "0x123...456"
+  }
+}
+```
+```json Error - Signing Failed
+{
+  "success": false,
+  "error": {
+    "code": "SIGNING_FAILED",
+    "message": "Relayer 0x123...456 not authorized on oracle. Authorize the relayer via setAuthorizedSigner first."
+  }
+}
+```
+```json Error - Missing Price
+{
+  "success": false,
+  "error": {
+    "code": "MISSING_PRICE",
+    "message": "A positive NAV price is required"
+  }
+}
+```
+</ResponseExample>
+
+<Note>
+  Every signing failure returns code `SIGNING_FAILED`. The specific cause, whether an unconfigured relayer, a frozen relayer, or a missing oracle authorization, is in `message`. Unlike [Sync Oracle Price](/endpoints/external-securities-lending/sync-oracle), this endpoint has no daily transaction limit, because nothing is broadcast.
+</Note>

@@ -1,0 +1,118 @@
+---
+title: 'Execute Hook'
+api: 'POST /lending-external-securities/api/hooks/{marketId}/{hookId}/execute'
+description: 'Run a hook immediately, outside its schedule'
+---
+
+Triggers one run of a hook and returns the result synchronously. Useful for validating a new hook before enabling it. The run is recorded in the execution log exactly like a scheduled run.
+
+What the request body must carry depends on the hook type:
+
+| `hookType` | Required body | Behaviour |
+|---|---|---|
+| `monitorRisk` | None | Fetches `riskUri` and evaluates every entry in `riskFields` |
+| `beforeLiquidation` | `loanData` | Evaluates `parameterChecks` against the supplied loan state |
+| `afterLiquidation` | `liquidationData` | Runs the configured `buy` or `inform` action |
+
+<Warning>
+  A hook with `actionType` set to `buy` submits a real bid through the issuer relayer when the conditions pass. Test with `inform` first, or set `maxBuyPrice` to a value the live auction cannot reach.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="hookId" type="string" required>Hook ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="loanData" type="object">
+  Required for `beforeLiquidation` hooks. Supply the parameters your `parameterChecks` reference, for example `healthFactor`, `collateralValue`, `debtValue`, `collateralRatio`, `interestAccrued`.
+</ParamField>
+
+<ParamField body="liquidationData" type="object">
+  Required for `afterLiquidation` hooks.
+  <Expandable>
+    <ParamField body="loanId" type="string">On-chain loan ID.</ParamField>
+    <ParamField body="auctionId" type="string">Auction ID, when the liquidation produced a Dutch auction.</ParamField>
+    <ParamField body="collateralAmount" type="string">Collateral seized.</ParamField>
+    <ParamField body="debtOwed" type="string">Debt outstanding at liquidation.</ParamField>
+    <ParamField body="borrower" type="string">Borrower address.</ParamField>
+  </Expandable>
+</ParamField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/hooks/{marketId}/{hookId}/execute" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+```bash cURL (beforeLiquidation)
+curl -X POST "https://api.trusset.org/lending-external-securities/api/hooks/{marketId}/{hookId}/execute" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"loanData": {"healthFactor": "0.92", "debtValue": "4272.50"}}'
+```
+</RequestExample>
+
+<ResponseExample>
+```json monitorRisk
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "result": true,
+    "fields": [
+      { "path": "ageHours", "value": 12, "operator": "<", "threshold": 36, "pass": true }
+    ]
+  }
+}
+```
+```json beforeLiquidation
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "result": false,
+    "checkResults": [
+      { "parameter": "healthFactor", "value": "0.92", "operator": "<", "threshold": "0.95", "pass": true }
+    ]
+  }
+}
+```
+```json afterLiquidation (inform)
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "result": true,
+    "status": 200
+  }
+}
+```
+```json afterLiquidation (buy)
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "result": true,
+    "txHash": "0xabc...def"
+  }
+}
+```
+```json Error - Missing Loan Data
+{
+  "success": false,
+  "error": {
+    "code": "MISSING_LOAN_DATA",
+    "message": "Loan data required"
+  }
+}
+```
+</ResponseExample>
+
+## Result Semantics
+
+`data.success` reports whether the hook ran without error. `data.result` reports the outcome of the evaluation. A hook that runs cleanly and evaluates to false returns `success: true` with `result: false`, which is not an API error.
+
+Skipped `buy` actions return `result: false` with a `reason` field, for example `Price exceeds max buy price` or `Auction not active`. An insufficient relayer balance returns `success: false` with an `error` describing the shortfall in the market's borrow asset.

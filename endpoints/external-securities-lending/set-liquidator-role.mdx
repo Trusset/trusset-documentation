@@ -1,0 +1,121 @@
+---
+title: 'Set Liquidator Role'
+api: 'POST /lending-external-securities/api/markets/{marketId}/liquidator-role'
+description: 'Grant or revoke LIQUIDATOR_ROLE on a market'
+---
+
+Grants or revokes `LIQUIDATOR_ROLE` for any address on the market contract. Holding this role is a prerequisite for [Liquidate Loan](/endpoints/external-securities-lending/liquidate) and [Settle Expired Auction](/endpoints/external-securities-lending/settle-expired-auction).
+
+The call executes through the instance relayer, which must hold `DEFAULT_ADMIN_ROLE` on the market. If it does not, the response still succeeds but returns `requiresUserAction` with calldata for the market admin's wallet to execute instead.
+
+<Note>
+  This endpoint has no `useRelayer` parameter. It always attempts relayer execution and falls back to returning calldata.
+</Note>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="address" type="string" required>
+  Address to grant or revoke. Must be a 0x-prefixed 40-character hex address.
+</ParamField>
+
+<ParamField body="action" type="string" required>
+  `grant` or `revoke`.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">The action performed, echoed back.</ResponseField>
+    <ResponseField name="address" type="string">The address affected, echoed back.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. `null` when the address was already in the requested state.</ResponseField>
+    <ResponseField name="unchanged" type="boolean">`true` when no transaction was needed because the role already matched the requested state.</ResponseField>
+    <ResponseField name="requiresUserAction" type="boolean">Present and `true` when the relayer could not execute. Pair with `configurationCalldata`.</ResponseField>
+    <ResponseField name="configurationCalldata" type="object">Present only alongside `requiresUserAction`. Contains `liquidatorRole` as `{ to, data, description }` for the market admin to sign.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  Revoking the role from the instance relayer disables liquidation through this API for that market. Loans will still become liquidatable, but nothing will act on them until the role is restored or another liquidator is authorized.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/liquidator-role" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"address": "0x123...456", "action": "grant"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/liquidator-role`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ address: relayerAddress, action: 'grant' })
+  }
+);
+const { data } = await res.json();
+if (data.requiresUserAction) {
+  // route data.configurationCalldata.liquidatorRole to the market admin wallet
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - Granted
+{
+  "success": true,
+  "data": {
+    "action": "grant",
+    "address": "0x123...456",
+    "txHash": "0xabc...def",
+    "unchanged": false
+  }
+}
+```
+```json Response - Already Granted
+{
+  "success": true,
+  "data": {
+    "action": "grant",
+    "address": "0x123...456",
+    "txHash": null,
+    "unchanged": true
+  }
+}
+```
+```json Response - Admin Signature Needed
+{
+  "success": true,
+  "data": {
+    "requiresUserAction": true,
+    "action": "grant",
+    "address": "0x123...456",
+    "configurationCalldata": {
+      "liquidatorRole": {
+        "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "data": "0x...",
+        "description": "Grant LIQUIDATOR_ROLE to 0x123...456"
+      }
+    }
+  }
+}
+```
+```json Error - Invalid Address
+{
+  "success": false,
+  "error": {
+    "code": "LIQUIDATOR_ROLE_UPDATE_FAILED",
+    "message": "A valid non-zero address is required"
+  }
+}
+```
+</ResponseExample>

@@ -1,0 +1,110 @@
+---
+title: 'Settle Expired Auction'
+api: 'POST /lending-external-securities/api/liquidations/{marketId}/settle-expired-auction'
+description: 'Route unsold collateral from an expired auction to the liquidation router'
+---
+
+Closes a Dutch auction that reached its end time without selling out, and transfers the unsold collateral to the market's liquidation router. This creates a pending liquidation and hands the position over to the manual settlement workflow.
+
+Until this is called, an expired auction leaves the collateral in limbo: no longer purchasable, and not yet available for an off-platform sale.
+
+<Warning>
+  Requires the instance relayer to hold `LIQUIDATOR_ROLE` on the market, the same role [Liquidate Loan](/endpoints/external-securities-lending/liquidate) needs.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="auctionId" type="integer" required>
+  Auction ID. Must be a positive integer sent as a JSON number.
+</ParamField>
+
+<ParamField body="useRelayer" type="boolean" default="false">
+  Execute through the instance relayer, or return unsigned calldata.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">Transaction hash. Relayer mode only.</ResponseField>
+    <ResponseField name="auctionId" type="integer">Auction ID, echoed back. Relayer mode only.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION` in calldata mode.</ResponseField>
+    <ResponseField name="transaction" type="object">`{ to, data }` for the `settleExpiredAuction` call. Calldata mode only.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## What Happens Next
+
+After settlement the unsold collateral sits at the liquidation router as a `PENDING` liquidation, visible through [Get Pending Liquidations](/endpoints/external-securities-lending/get-pending-liquidations). From there the standard manual workflow applies: withdraw for sale, report proceeds, settle. The 7 day write-off clock starts at this point, not at the original liquidation.
+
+<Note>
+  If the market has no liquidation router configured, the contract releases the collateral back to the borrower and charges the outstanding debt to the insurance fund instead. Confirm router configuration through [Get Liquidation Config](/endpoints/external-securities-lending/get-liquidation-config) before letting auctions expire.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidations/{marketId}/settle-expired-auction" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"auctionId": 3, "useRelayer": true}'
+```
+</RequestExample>
+
+<ResponseExample>
+```json Relayer Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0xabc...def",
+    "auctionId": 3
+  }
+}
+```
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": { "to": "0x70A0...", "data": "0x..." },
+    "functionName": "settleExpiredAuction"
+  }
+}
+```
+```json Error - Missing Role
+{
+  "success": false,
+  "error": {
+    "code": "LIQUIDATOR_ROLE_MISSING",
+    "message": "Issuer relayer does not hold LIQUIDATOR_ROLE on this market",
+    "calldata": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x...",
+      "description": "Grant LIQUIDATOR_ROLE to the instance relayer"
+    }
+  }
+}
+```
+```json Error - Not Expired
+{
+  "success": false,
+  "error": {
+    "code": "SETTLE_PREFLIGHT_FAILED",
+    "message": "Transaction reverted on-chain"
+  }
+}
+```
+</ResponseExample>
+
+## Errors
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `LIQUIDATOR_ROLE_MISSING` | `400` | The relayer lacks `LIQUIDATOR_ROLE`. The error carries grant `calldata` |
+| `RELAYER_NOT_CONFIGURED` | `400` | No relayer is configured for this instance |
+| `SETTLE_PREFLIGHT_FAILED` | `400` | Simulation reverted. The auction has not expired, or was already settled |
+| `SETTLE_FAILED` | `400` | The transaction failed on-chain |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |

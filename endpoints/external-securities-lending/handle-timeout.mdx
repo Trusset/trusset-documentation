@@ -1,0 +1,116 @@
+---
+title: 'Handle Liquidation Timeout'
+api: 'POST /lending-external-securities/api/liquidations/handle-timeout/{liquidationId}'
+description: 'Write off a liquidation that could not be settled within 7 days'
+---
+
+Writes off a liquidation the operator was unable to settle. The market clears the outstanding debt, draws on the insurance fund to cover it, and reconciles the pool's liquidity. The record moves to `WRITTEN_OFF`.
+
+This is a loss-recognition step, not a recovery step. Use it when collateral proved unsellable within the window, or when a sale realised nothing.
+
+<Warning>
+  Write-off does not touch the liquidation router. Whatever collateral the router still holds stays there, and the backend will refuse further action on the record because `WRITTEN_OFF` is terminal. Dispose of or return the collateral before calling this, otherwise it is stranded.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="liquidationId" type="string" required>
+  Global router liquidation ID. The market-local ID needed on-chain is resolved automatically.
+</ParamField>
+
+## Body Parameters
+
+None.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="liquidationId" type="string">Global router liquidation ID, echoed back.</ResponseField>
+    <ResponseField name="marketLiquidationId" type="string">Market-local ID the contract call used.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## The 7 Day Window
+
+The clock starts when the router receives the collateral, which is `onChainData.timestamp` on [Get Pending Liquidations](/endpoints/external-securities-lending/get-pending-liquidations). Calling before 7 days have elapsed reverts with `Not timed out` under `TIMEOUT_PREFLIGHT_FAILED`.
+
+## What the Write-Off Does
+
+<Steps>
+  <Step title="Close the pending liquidation">
+    The market marks its pending liquidation settled so the debt stops counting against `pendingLiquidationDebt`.
+  </Step>
+  <Step title="Draw on the insurance fund">
+    The outstanding debt is presented to the market's insurance fund, which covers as much as its balance allows.
+  </Step>
+  <Step title="Reconcile the pool">
+    Any shortfall between the covered amount and the principal is deducted from pool liquidity. Liquidity providers absorb what the insurance fund could not.
+  </Step>
+</Steps>
+
+<Warning>
+  This call requires the instance relayer to hold `DEFAULT_ADMIN_ROLE` on the market contract, which is a higher privilege than the `LIQUIDATOR_ROLE` and router `OPERATOR_ROLE` the other liquidation endpoints need. Unlike those endpoints, a missing role is not detected in advance. It surfaces as a generic `TIMEOUT_PREFLIGHT_FAILED` with no remediation calldata. Confirm the relayer holds market admin before relying on this path.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidations/handle-timeout/14" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/liquidations/handle-timeout/${liquidationId}`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    }
+  }
+);
+const { success, data, error } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "liquidationId": "14",
+    "marketLiquidationId": "2",
+    "txHash": "0xabc...def"
+  }
+}
+```
+```json Error - Too Early
+{
+  "success": false,
+  "error": {
+    "code": "TIMEOUT_PREFLIGHT_FAILED",
+    "message": "Not timed out"
+  }
+}
+```
+```json Error - Already Resolved
+{
+  "success": false,
+  "error": {
+    "code": "ALREADY_SETTLED",
+    "message": "Already settled or written off"
+  }
+}
+```
+</ResponseExample>
+
+## Errors
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
+| `ALREADY_SETTLED` | `400` | The liquidation is already settled or written off |
+| `TIMEOUT_PREFLIGHT_FAILED` | `400` | Simulation reverted. The 7 days have not elapsed, or the relayer lacks market `DEFAULT_ADMIN_ROLE` |
+| `TIMEOUT_TX_REVERTED` | `400` | The transaction reverted after broadcast |

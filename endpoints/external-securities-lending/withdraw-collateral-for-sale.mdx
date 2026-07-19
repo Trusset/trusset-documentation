@@ -1,0 +1,109 @@
+---
+title: 'Withdraw Collateral for Sale'
+api: 'POST /lending-external-securities/api/liquidations/withdraw-collateral/{liquidationId}'
+description: 'Move seized collateral out of the router to a sale venue'
+---
+
+Transfers seized collateral from the liquidation router to a recipient you nominate, so it can be sold off-platform. This is step one of the manual settlement workflow.
+
+External securities have no on-platform venue, so nothing sells automatically. The operator withdraws the collateral, arranges the sale through their own channel, and reports the proceeds back.
+
+<Warning>
+  The recipient must satisfy the collateral token's compliance rules. ERC-3643 transfers to an unverified or non-allowlisted address revert, surfacing as `WITHDRAW_PREFLIGHT_FAILED`. Verify the recipient on the token's identity registry before calling.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="liquidationId" type="string" required>
+  Global router liquidation ID from [Get Pending Liquidations](/endpoints/external-securities-lending/get-pending-liquidations) or from the [Liquidate Loan](/endpoints/external-securities-lending/liquidate) response.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="recipientAddress" type="string" required>
+  Wallet or custodian address receiving the collateral. Must be a 0x-prefixed 40-character hex address.
+</ParamField>
+
+<ParamField body="amount" type="string" required>
+  Collateral to withdraw, as a decimal string in collateral token units. Must be greater than zero and no more than `collateralRemaining`.
+</ParamField>
+
+<Note>
+  This endpoint always executes through the instance relayer, which must hold `OPERATOR_ROLE` on the market's liquidation router. There is no calldata mode.
+</Note>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="liquidationId" type="string">Liquidation ID, echoed back.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  Withdrawal is repeatable. Take the collateral out in tranches as sales are arranged. Each call reduces `collateralRemaining` on the router. The liquidation's `status` stays `PENDING` throughout, so track progress through `collateralRemaining` rather than status.
+</Note>
+
+<Tip>
+  If the liquidation ID exists on-chain but has no Trusset record, the endpoint adopts it automatically by scanning your instance's routers. Liquidations triggered outside this API are therefore still settleable through it.
+</Tip>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidations/withdraw-collateral/14" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "recipientAddress": "0x999...aaa",
+    "amount": "100"
+  }'
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "liquidationId": "14",
+    "txHash": "0xabc...def"
+  }
+}
+```
+```json Error - Missing Operator Role
+{
+  "success": false,
+  "error": {
+    "code": "ROUTER_OPERATOR_ROLE_MISSING",
+    "message": "Issuer relayer does not hold OPERATOR_ROLE on the liquidation router",
+    "calldata": {
+      "to": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+      "data": "0x...",
+      "description": "Grant OPERATOR_ROLE to the instance relayer"
+    }
+  }
+}
+```
+```json Error - Recipient Not Compliant
+{
+  "success": false,
+  "error": {
+    "code": "WITHDRAW_PREFLIGHT_FAILED",
+    "message": "Transaction reverted on-chain"
+  }
+}
+```
+</ResponseExample>
+
+## Errors
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
+| `ALREADY_SETTLED` | `400` | The liquidation is already settled |
+| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | The relayer lacks `OPERATOR_ROLE`. The error carries grant `calldata` for the router admin |
+| `ROUTER_NOT_CONFIGURED` | `400` | No liquidation router resolved for this market |
+| `RELAYER_NOT_CONFIGURED` | `400` | No relayer is configured for this instance |
+| `WITHDRAW_PREFLIGHT_FAILED` | `400` | Simulation reverted. Recipient compliance, an amount above `collateralRemaining`, or the router's per-token rate limit |
+| `WITHDRAW_TX_REVERTED` | `400` | The transaction reverted after broadcast |

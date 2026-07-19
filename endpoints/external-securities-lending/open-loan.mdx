@@ -1,0 +1,193 @@
+---
+title: 'Open Loan'
+api: 'POST /lending-external-securities/api/positions/{marketId}/open-loan'
+description: 'Pledge security tokens as collateral and borrow the settlement asset'
+---
+
+Opens an overcollateralized loan. The borrower pledges ERC-3643 security tokens and receives the market's borrow asset. How the collateral is secured depends on the market's mode: `FREEZE` locks the tokens in the borrower's own wallet, `CUSTODY` escrows them in the adapter.
+
+The maximum borrow is the collateral value multiplied by the market's collateral factor. Quote it first with [Get Max Borrow](/endpoints/external-securities-lending/get-max-borrow).
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="collateralAmount" type="string" required>
+  Security tokens to pledge, as a decimal string. Parsed at the collateral token's decimals.
+</ParamField>
+
+<ParamField body="borrowAmount" type="string" required>
+  Amount to borrow, as a decimal string. Parsed at the borrow asset's decimals. Must be at least the market's `minBorrowAmount`.
+</ParamField>
+
+<ParamField body="signedPrice" type="object">
+  EIP-712 signed price from [Sign Price](/endpoints/external-securities-lending/sign-price), applied atomically with the loan. Omit to price against the stored oracle value, which must not be stale.
+  <Expandable>
+    <ParamField body="price" type="string">Price in base units.</ParamField>
+    <ParamField body="timestamp" type="integer">Signing timestamp.</ParamField>
+    <ParamField body="validUntil" type="integer">Signature expiry.</ParamField>
+    <ParamField body="signature" type="string">EIP-712 signature.</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="useRelayer" type="boolean" default="false">
+  Execute through the instance relayer, or return unsigned calldata.
+</ParamField>
+
+## Transaction Shape by Mode
+
+In calldata mode the response is always `SIGN_TRANSACTIONS` with a `mode` field, and the step count depends on the market.
+
+**`CUSTODY`** returns two steps: `approve` on the collateral token for the adapter, then `openLoan`. Broadcast in order.
+
+**`FREEZE`** returns one step: `openLoan`. No approval exists because the tokens never leave the borrower's wallet.
+
+In relayer mode the approval is handled automatically for custody markets.
+
+## Response Fields
+
+Relayer mode returns `201`.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
+    <ResponseField name="loanId" type="string">On-chain loan ID, parsed from the `LoanOpened` event. Use this on every subsequent loan operation.</ResponseField>
+    <ResponseField name="positionId" type="string">Trusset position record ID, or null if the record could not be written.</ResponseField>
+    <ResponseField name="collateralAmount" type="string">Collateral pledged, echoed back.</ResponseField>
+    <ResponseField name="borrowAmount" type="string">Amount borrowed, echoed back.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  Loans cannot be opened until the market's collateral adapter is authorized on the token. The endpoint checks this before doing anything else and rejects with `COLLATERAL_ADAPTER_NOT_AUTHORIZED` or `FREEZE_MODE_UNSUPPORTED_TOKEN`. See [Get Setup Steps](/endpoints/external-securities-lending/get-setup-steps).
+</Warning>
+
+<Note>
+  Minimum and maximum borrow are pre-checked in calldata mode only. In relayer mode an out-of-range amount reverts on-chain rather than returning `BELOW_MIN_BORROW` or `EXCEEDS_MAX_BORROW`. The maximum borrow check is also skipped whenever a `signedPrice` is supplied, since the contract will price against the signature rather than the stored value.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/open-loan" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "collateralAmount": "1000",
+    "borrowAmount": "50000",
+    "useRelayer": true
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/open-loan`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      collateralAmount: '1000',
+      borrowAmount: '50000',
+      signedPrice: {
+        price: signed.price,
+        timestamp: signed.timestamp,
+        validUntil: signed.validUntil,
+        signature: signed.signature
+      }
+    })
+  }
+);
+const { data } = await res.json();
+
+// CUSTODY returns approve then openLoan; FREEZE returns openLoan alone
+for (const step of data.steps) {
+  const tx = await wallet.sendTransaction(step.transaction);
+  await tx.wait();
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Relayer Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0xabc...def",
+    "loanId": "5",
+    "positionId": "secpos_014",
+    "collateralAmount": "1000",
+    "borrowAmount": "50000"
+  }
+}
+```
+```json Calldata Response (CUSTODY)
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "mode": "CUSTODY",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": { "to": "0xabc...def", "data": "0x..." },
+        "functionName": "approve",
+        "description": "Approve the custody adapter to pull collateral"
+      },
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": { "to": "0x70A0...", "data": "0x..." },
+        "functionName": "openLoan"
+      }
+    ]
+  }
+}
+```
+```json Calldata Response (FREEZE)
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "mode": "FREEZE",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": { "to": "0x70A0...", "data": "0x..." },
+        "functionName": "openLoan"
+      }
+    ]
+  }
+}
+```
+```json Error - Adapter Not Authorized
+{
+  "success": false,
+  "error": {
+    "code": "COLLATERAL_ADAPTER_NOT_AUTHORIZED",
+    "message": "The freeze adapter is not authorized on the collateral token yet. Complete market configuration (grant the adapter the agent role) before opening loans."
+  }
+}
+```
+```json Error - Exceeds Max Borrow
+{
+  "success": false,
+  "error": {
+    "code": "EXCEEDS_MAX_BORROW",
+    "message": "Borrow amount exceeds the maximum for this collateral"
+  }
+}
+```
+</ResponseExample>
+
+## Errors
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `COLLATERAL_ADAPTER_NOT_AUTHORIZED` | `400` | The adapter lacks the agent role (`FREEZE`) or verified holder status (`CUSTODY`) on the collateral token |
+| `FREEZE_MODE_UNSUPPORTED_TOKEN` | `400` | The token does not implement the ERC-3643 freeze interface. Use a `CUSTODY` market |
+| `BELOW_MIN_BORROW` | `400` | `borrowAmount` is under the market's `minBorrowAmount`. Calldata mode only |
+| `EXCEEDS_MAX_BORROW` | `400` | `borrowAmount` exceeds what the collateral supports. Calldata mode only |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `TX_REVERTED` | `400` | The transaction reverted. Common causes are a stale oracle price, an exhausted supply cap, or insufficient pool liquidity |

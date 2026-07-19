@@ -1,0 +1,161 @@
+---
+title: 'Liquidate Loan'
+api: 'POST /lending-external-securities/api/liquidations/{marketId}/liquidate/{loanId}'
+description: 'Seize collateral from an undercollateralized loan'
+---
+
+Liquidates a loan whose health factor is below `1.0`. What the transaction produces depends on the market's `useDutchAuction` setting.
+
+With Dutch auctions **disabled**, collateral is seized and transferred to the market's liquidation router, and a pending liquidation is created. The response carries `liquidationId` and `collateralSeized`, and settlement becomes a manual operator workflow.
+
+With Dutch auctions **enabled**, an auction is opened instead. The response carries `auctionId` and `borrower`, while `liquidationId`, `collateralSeized`, and `debtRepaid` are all `null`. No pending liquidation exists yet. One is created only if the auction expires unsold and is settled with [Settle Expired Auction](/endpoints/external-securities-lending/settle-expired-auction).
+
+<Warning>
+  This endpoint inverts the usual default. It executes through the instance relayer unless you explicitly send `useRelayer: false`. The relayer must hold `LIQUIDATOR_ROLE` on the market.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="loanId" type="integer" required>On-chain loan ID. Must be a positive integer.</ParamField>
+
+## Body Parameters
+
+<ParamField body="signedPrice" type="object">
+  EIP-712 signed price from [Sign Price](/endpoints/external-securities-lending/sign-price), applied atomically with the liquidation. Omit to price against the stored oracle value. If the stored price is stale, the backend signs a fresh one automatically before executing.
+  <Expandable>
+    <ParamField body="price" type="string">Price in base units.</ParamField>
+    <ParamField body="timestamp" type="integer">Signing timestamp.</ParamField>
+    <ParamField body="validUntil" type="integer">Signature expiry.</ParamField>
+    <ParamField body="signature" type="string">EIP-712 signature.</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="useRelayer" type="boolean" default="true">
+  Send `false` to receive unsigned calldata instead of executing.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="loanId" type="integer">Loan ID, echoed back.</ResponseField>
+    <ResponseField name="liquidationId" type="string">Global liquidation ID on the router. Use this on every settlement endpoint. `null` in Dutch auction mode.</ResponseField>
+    <ResponseField name="auctionId" type="string">Dutch auction ID. `null` in instant liquidation mode.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
+    <ResponseField name="collateralSeized" type="string">Collateral moved to the router, in collateral token units. `null` in Dutch auction mode.</ResponseField>
+    <ResponseField name="debtRepaid" type="string">Debt covered by the seizure, in borrow asset units. `null` in Dutch auction mode.</ResponseField>
+    <ResponseField name="borrower" type="string">Borrower address, or null when it could not be resolved.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Seizure Bounds
+
+A liquidation does not close the whole loan. The amount seized is bounded by `closeFactor`, capping how much of the debt one call can repay, and marked up by `liquidationPenalty`. A deeply underwater loan therefore needs several liquidations to clear, or resolves through the auction path.
+
+There is no auto-sell for external securities. Once collateral reaches the router it stays there until an operator sells it and settles the proceeds. See [Settle Liquidation](/endpoints/external-securities-lending/settle-liquidation).
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidations/{marketId}/liquidate/7" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/liquidations/${marketId}/liquidate/7`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      signedPrice: {
+        price: signed.price,
+        timestamp: signed.timestamp,
+        validUntil: signed.validUntil,
+        signature: signed.signature
+      }
+    })
+  }
+);
+const { data } = await res.json();
+
+if (data.auctionId) {
+  // Dutch auction opened, monitor bids
+} else {
+  // collateral sits at the router, begin the settlement workflow
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - Instant Liquidation
+{
+  "success": true,
+  "data": {
+    "loanId": 7,
+    "liquidationId": "14",
+    "auctionId": null,
+    "txHash": "0xabc...def",
+    "collateralSeized": "220.000000000000000000",
+    "debtRepaid": "21159.200000",
+    "borrower": "0xabc...def"
+  }
+}
+```
+```json Response - Dutch Auction
+{
+  "success": true,
+  "data": {
+    "loanId": 7,
+    "liquidationId": null,
+    "auctionId": "3",
+    "txHash": "0xabc...def",
+    "collateralSeized": null,
+    "debtRepaid": null,
+    "borrower": "0xabc...def"
+  }
+}
+```
+```json Error - Missing Role
+{
+  "success": false,
+  "error": {
+    "code": "LIQUIDATOR_ROLE_MISSING",
+    "message": "Issuer relayer does not hold LIQUIDATOR_ROLE on this market",
+    "calldata": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x...",
+      "description": "Grant LIQUIDATOR_ROLE to the instance relayer"
+    }
+  }
+}
+```
+```json Error - Loan Healthy
+{
+  "success": false,
+  "error": {
+    "code": "LIQUIDATION_PREFLIGHT_FAILED",
+    "message": "execution reverted: LoanStillHealthy"
+  }
+}
+```
+</ResponseExample>
+
+## Errors
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MARKET_NOT_CONFIGURED` | `400` | The market has no address or no oracle recorded |
+| `INVALID_LOAN_ID` | `400` | `loanId` is not a positive integer |
+| `LIQUIDATOR_ROLE_MISSING` | `400` | The relayer lacks `LIQUIDATOR_ROLE`. The error carries grant `calldata` for the market admin |
+| `RELAYER_NOT_CONFIGURED` | `400` | No relayer is configured for this instance |
+| `LIQUIDATION_PREFLIGHT_FAILED` | `400` | Gas estimation reverted. Most often the loan is still healthy, or the router cannot receive the collateral token |
+| `LIQUIDATION_FAILED` | `400` | The transaction failed on-chain |
+
+<Tip>
+  `LIQUIDATOR_ROLE_MISSING` returns ready-to-sign calldata under `error.calldata`. You can also resolve it through [Set Liquidator Role](/endpoints/external-securities-lending/set-liquidator-role) when the relayer holds the market admin role.
+</Tip>

@@ -1,0 +1,132 @@
+---
+title: 'Report Partial Sale'
+api: 'POST /lending-external-securities/api/liquidations/report-partial-sale/{liquidationId}'
+description: 'Deposit interim sale proceeds into the router'
+---
+
+Records proceeds from a partial sale of seized collateral and transfers them from the instance relayer into the liquidation router. Use it when a position is being sold down in tranches and you want proceeds banked as they arrive, rather than held off-platform until the final settlement.
+
+The endpoint is repeatable. Each call increases the router's `proceedsCollected`.
+
+<Warning>
+  The relayer must be holding the proceeds. This call pulls the borrow asset from the relayer wallet into the router, so fund the relayer before calling. An insufficient balance surfaces as `PARTIAL_SALE_PREFLIGHT_FAILED`.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="liquidationId" type="string" required>
+  Global router liquidation ID.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="collateralSold" type="string" required>
+  Collateral disposed of in this tranche, as a decimal string in collateral token units. Must be greater than zero.
+</ParamField>
+
+<ParamField body="usdcProceeds" type="string" required>
+  Proceeds realised, as a decimal string in the market's borrow asset. Must be greater than zero.
+</ParamField>
+
+<Note>
+  This endpoint always executes through the instance relayer, which must hold `OPERATOR_ROLE` on the router. There is no calldata mode.
+</Note>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="liquidationId" type="string">Liquidation ID, echoed back.</ResponseField>
+    <ResponseField name="collateralSold" type="string">Collateral reported, echoed back.</ResponseField>
+    <ResponseField name="usdcProceeds" type="string">Proceeds deposited.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  `collateralSold` is recorded in the on-chain event as an audit trail. It does not reduce `collateralRemaining` on the router, because the collateral left the router when you called [Withdraw Collateral for Sale](/endpoints/external-securities-lending/withdraw-collateral-for-sale). Only that endpoint moves the balance.
+</Note>
+
+Proceeds deposited here stay in the router until [Settle Liquidation](/endpoints/external-securities-lending/settle-liquidation) forwards the cumulative total to the market. Reporting partial sales alone never closes a liquidation, and the record stays `PENDING`.
+
+## Settling After Partial Sales
+
+Once every tranche has been reported, call [Settle Liquidation](/endpoints/external-securities-lending/settle-liquidation) with `usdcProceeds` of `"0"`. Settlement forwards the full `proceedsCollected` balance already sitting at the router, so a zero final payment is valid and expected in this flow.
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidations/report-partial-sale/14" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "collateralSold": "100",
+    "usdcProceeds": "9800.00"
+  }'
+```
+```typescript TypeScript
+// Report each tranche as it clears
+for (const tranche of tranches) {
+  await fetch(
+    `https://api.trusset.org/lending-external-securities/api/liquidations/report-partial-sale/${liquidationId}`,
+    {
+      method: 'POST',
+      headers: {
+        'X-API-Key': 'trusset_your_key_here',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        collateralSold: tranche.units,
+        usdcProceeds: tranche.proceeds
+      })
+    }
+  );
+}
+
+// Then close it out, forwarding what the router already holds
+await fetch(
+  `https://api.trusset.org/lending-external-securities/api/liquidations/settle/${liquidationId}`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ usdcProceeds: "0" })
+  }
+);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "liquidationId": "14",
+    "collateralSold": "100",
+    "usdcProceeds": "9800.00",
+    "txHash": "0xabc...def"
+  }
+}
+```
+```json Error - Already Settled
+{
+  "success": false,
+  "error": {
+    "code": "ALREADY_SETTLED",
+    "message": "Already settled"
+  }
+}
+```
+</ResponseExample>
+
+## Errors
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
+| `ALREADY_SETTLED` | `400` | The liquidation is settled or written off |
+| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | The relayer lacks `OPERATOR_ROLE`. The error carries grant `calldata` |
+| `ROUTER_NOT_CONFIGURED` | `400` | No liquidation router resolved for this market |
+| `PARTIAL_SALE_PREFLIGHT_FAILED` | `400` | Simulation reverted, commonly an insufficient relayer balance |
+| `PARTIAL_SALE_TX_REVERTED` | `400` | The transaction reverted after broadcast |

@@ -1,0 +1,84 @@
+---
+title: 'Claim Escrowed Collateral'
+api: 'POST /lending-external-securities/api/positions/{marketId}/claim-escrowed-collateral'
+description: 'Reclaim collateral held in escrow after a blocked return transfer'
+---
+
+Withdraws collateral that the custody adapter could not return automatically. This applies to `CUSTODY` markets only.
+
+When a loan closes or collateral is withdrawn, the adapter attempts to transfer the tokens back to the holder. ERC-3643 tokens enforce compliance at transfer time, so that return can fail: an expired KYC record, a suspended identity, or a jurisdiction restriction will all block it. Rather than reverting the whole operation, the adapter records the amount as escrowed. Once the holder's compliance status is restored, this endpoint releases it.
+
+<Note>
+  The transaction targets the custody adapter, not the market contract. The claim is scoped to the caller, so the signing wallet must be the holder whose collateral is escrowed. In relayer mode the instance relayer signs, which claims only collateral escrowed for the relayer's own address.
+</Note>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID. Must be a `CUSTODY` market.</ParamField>
+
+## Body Parameters
+
+<ParamField body="useRelayer" type="boolean" default="false">
+  Execute through the instance relayer, or return unsigned calldata. Anything other than `true` returns calldata.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">Transaction hash. Relayer mode only.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION` in calldata mode.</ResponseField>
+    <ResponseField name="transaction" type="object">`{ to, data }` targeting the adapter address. Calldata mode only.</ResponseField>
+    <ResponseField name="functionName" type="string">`claimEscrowedCollateral`. Calldata mode only.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  Claiming fails while the underlying compliance block is still in force, because the transfer out of the adapter is subject to the same rules that blocked the original return. Resolve the holder's identity status first, then claim.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/claim-escrowed-collateral" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"useRelayer": false}'
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": { "to": "0x4d2b...77ae", "data": "0x..." },
+    "functionName": "claimEscrowedCollateral"
+  }
+}
+```
+```json Relayer Response
+{
+  "success": true,
+  "data": { "txHash": "0xabc...def" }
+}
+```
+```json Error - Not Custody Mode
+{
+  "success": false,
+  "error": {
+    "code": "NOT_CUSTODY_MODE",
+    "message": "Escrow claims only apply to custody-mode markets"
+  }
+}
+```
+```json Error - No Adapter
+{
+  "success": false,
+  "error": {
+    "code": "NO_ADAPTER",
+    "message": "No custody adapter configured"
+  }
+}
+```
+</ResponseExample>

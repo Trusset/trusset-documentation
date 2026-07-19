@@ -1,0 +1,116 @@
+---
+title: 'Add Liquidity'
+api: 'POST /lending-external-securities/api/positions/{marketId}/add-liquidity'
+description: 'Deposit the borrow asset into the pool and receive LP shares'
+---
+
+Deposits the market's borrow asset into the lending pool. The depositor receives LP shares proportional to their contribution, and those shares accrue value as borrowers pay interest.
+
+Two transactions are required: an ERC-20 approval, then the deposit. In calldata mode both are returned as ordered steps. In relayer mode the approval is handled automatically when the existing allowance is insufficient.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="amount" type="string" required>
+  Amount to deposit as a decimal string, for example `"250000"`. Denominated in the market's borrow asset and parsed at its decimals.
+</ParamField>
+
+<ParamField body="useRelayer" type="boolean" default="false">
+  Execute through the instance relayer, or return unsigned calldata.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">Deposit transaction hash. Relayer mode only.</ResponseField>
+    <ResponseField name="amount" type="string">Amount deposited, echoed back. Relayer mode only.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` in calldata mode.</ResponseField>
+    <ResponseField name="steps" type="array">Ordered transactions to broadcast. Calldata mode only. The first approves the market to pull the borrow asset, the second calls `addLiquidity`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Info>
+  The first deposit into an empty pool must be at least 1,000,000,000 base units of the borrow asset. That is 1,000 USDC or USDT for a 6-decimal asset. The floor exists to prevent share price manipulation against an empty pool. Subsequent deposits have no minimum beyond the token's own precision.
+</Info>
+
+<Warning>
+  The minimum deposit is checked before returning calldata. In relayer mode it is not pre-checked, so an undersized first deposit reverts on-chain instead of returning `BELOW_MIN_DEPOSIT`. Check the pool's `totalShares` through [Get Market Metrics](/endpoints/external-securities-lending/get-metrics) if you need to detect an empty pool ahead of time.
+</Warning>
+
+<Note>
+  Depositors receive shares at the current share price, which already includes accrued interest. Depositing does not dilute existing providers.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/add-liquidity" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": "250000", "useRelayer": true}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/add-liquidity`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ amount: '250000' })
+  }
+);
+const { data } = await res.json();
+
+for (const step of data.steps) {
+  const tx = await wallet.sendTransaction(step.transaction);
+  await tx.wait();
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Relayer Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0xabc...def",
+    "amount": "250000"
+  }
+}
+```
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": { "to": "0x98aD0ca091552e23C564B41C74282e5343D03E8a", "data": "0x..." },
+        "functionName": "approve",
+        "description": "Approve the market to pull USDC"
+      },
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": { "to": "0x70A0...", "data": "0x..." },
+        "functionName": "addLiquidity"
+      }
+    ]
+  }
+}
+```
+```json Error - Below Minimum
+{
+  "success": false,
+  "error": {
+    "code": "BELOW_MIN_DEPOSIT",
+    "message": "The first deposit into a market must be at least 1000.0 USDC"
+  }
+}
+```
+</ResponseExample>
