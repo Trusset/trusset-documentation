@@ -4,7 +4,9 @@ api: 'POST /customers/api/identity/batch-verify'
 description: 'Verify multiple customer identities on-chain in a single transaction'
 ---
 
-Submits a batch of identity verifications to the on-chain registry. Invalid entries (malformed addresses, missing country) are silently filtered out. The remaining valid entries are verified in a single transaction and their off-chain records are created or updated.
+Builds a single registry call that verifies many identities at once. Invalid entries (malformed addresses, missing country) are filtered out and reported back in `rejected` rather than failing the request.
+
+Call it once without `txHash` to get the calldata, and again with the same `entries` plus `txHash` once you have broadcast it. The off-chain records are created or updated on the second call.
 
 ## Request Body
 
@@ -29,16 +31,32 @@ Submits a batch of identity verifications to the on-chain registry. Invalid entr
   </Expandable>
 </ParamField>
 
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast. Send it, along with the same `entries`, to confirm the batch and write the records. Omit it to receive the calldata.
+</ParamField>
+
 ## Response Fields
 
-<ResponseField name="success" type="boolean">Request status</ResponseField>
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="totalEntries" type="integer">Number of valid entries processed</ResponseField>
-    <ResponseField name="txHash" type="string">On-chain transaction hash</ResponseField>
-    <ResponseField name="gasUsed" type="string">Gas consumed by the batch transaction</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">`to` (the identity registry) and `data`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">Always `batchVerifyIdentities`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="entries" type="array">The accepted entries with their computed `kycHash`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="confirmWith" type="object">Where to send the hash once broadcast, as `endpoint` and `field`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="submitted" type="integer">Number of entries you sent.</ResponseField>
+    <ResponseField name="accepted" type="integer">Number that passed validation and went into the call.</ResponseField>
+    <ResponseField name="totalEntries" type="integer">Same as `accepted`.</ResponseField>
+    <ResponseField name="rejectedCount" type="integer">Number filtered out.</ResponseField>
+    <ResponseField name="rejected" type="array">The filtered entries with the reason each was dropped.</ResponseField>
+    <ResponseField name="txHash" type="string">The confirmed transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="gasUsed" type="string">Gas consumed. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
+
+<Warning>
+  Send the identical `entries` array on both calls. Confirmation compares the addresses decoded from the receipt against the entries you submitted and rejects the call with `TX_ENTRIES_MISMATCH` if the sets differ, so no records are written from a transaction that verified a different batch.
+</Warning>
 
 <RequestExample>
 ```bash cURL
@@ -70,16 +88,62 @@ const response = await fetch(
   }
 );
 const { data } = await response.json();
-console.log(`Verified ${data.totalEntries} identities: ${data.txHash}`);
+
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch('https://api.trusset.org/customers/api/identity/batch-verify', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-API-Key': 'trusset_abc123xy_secret...'
+  },
+  body: JSON.stringify({ entries, txHash: tx.hash })
+});
 ```
 </RequestExample>
 
 <ResponseExample>
-```json Response
+```json Calldata Response
 {
   "success": true,
   "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x5B3c9D1e7F2a4B6c8D0e2F4a6B8c0D2e4F6a8B0c",
+      "data": "0x2c9d7f18..."
+    },
+    "functionName": "batchVerifyIdentities",
+    "description": "Batch verify 2 identities",
+    "submitted": 2,
+    "accepted": 2,
     "totalEntries": 2,
+    "rejectedCount": 0,
+    "rejected": [],
+    "entries": [
+      { "walletAddress": "0xabc123...", "country": "DE", "kycHash": "0xdead...beef" },
+      { "walletAddress": "0xdef456...", "country": "FR", "kycHash": "0xfeed...face" }
+    ],
+    "confirmWith": {
+      "endpoint": "POST /customers/api/identity/batch-verify",
+      "field": "txHash"
+    }
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2025-06-15T12:00:00.000Z"
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "submitted": 2,
+    "accepted": 2,
+    "totalEntries": 2,
+    "rejectedCount": 0,
+    "rejected": [],
     "txHash": "0xabc123def456789012345678901234567890abc123def456789012345678901234",
     "gasUsed": "168042"
   },

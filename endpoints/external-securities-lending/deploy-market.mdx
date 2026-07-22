@@ -35,7 +35,7 @@ A collateral token can back one `FREEZE` market and one `CUSTODY` market at the 
 </ParamField>
 
 <ParamField body="liquidationOperator" type="string" required>
-  Wallet receiving `OPERATOR_ROLE` on the market's liquidation router. This is the address permitted to withdraw seized collateral for sale and settle proceeds. Use your instance relayer address to drive settlement through this API. Must not be the zero address.
+  Wallet receiving `OPERATOR_ROLE` on the market's liquidation router. This is the address permitted to withdraw seized collateral for sale and settle proceeds. Use your registered wallet address to drive settlement through this API. Must not be the zero address.
 </ParamField>
 
 <ParamField body="mode" type="string" default="FREEZE">
@@ -58,24 +58,24 @@ A collateral token can back one `FREEZE` market and one `CUSTODY` market at the 
   Decimals to assume if the collateral token's `decimals()` cannot be read on-chain. Integer between 0 and 36.
 </ParamField>
 
-<ParamField body="useRelayer" type="boolean" default="false">
-  Execute through the instance relayer, or return unsigned calldata.
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
 </ParamField>
 
 ## Response Fields
 
-In relayer mode the endpoint returns `201` with the recorded market and its readiness state.
+Confirming with `txHash` returns `201` with the recorded market and its readiness state.
 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="market" type="object">The persisted market record, including `id`, all contract addresses, `collateralMode`, `priceSource`, `collateralDecimals`, the borrow asset triple, and seeded default risk parameters.</ResponseField>
     <ResponseField name="txHash" type="string">Deployment transaction hash.</ResponseField>
-    <ResponseField name="relayerAddress" type="string">Instance relayer address, or null when none is configured.</ResponseField>
+    <ResponseField name="relayerAddress" type="string">The instance's registered wallet address, or null when no wallet is registered.</ResponseField>
     <ResponseField name="liquidationRouterAddress" type="string">Router deployed for this market.</ResponseField>
     <ResponseField name="configurationStatus" type="object">Contract wiring state.</ResponseField>
     <ResponseField name="collateralAuthStatus" type="object">Whether the adapter is authorized on the collateral token, and what is required. See [Get Configuration Status](/endpoints/external-securities-lending/get-configuration-status).</ResponseField>
-    <ResponseField name="oracleSignerAuthorized" type="boolean">Whether the relayer can sign prices for this market's oracle.</ResponseField>
-    <ResponseField name="liquidatorRoleGranted" type="boolean">Whether the relayer holds `LIQUIDATOR_ROLE` on the market.</ResponseField>
+    <ResponseField name="oracleSignerAuthorized" type="boolean">Whether the registered wallet can sign prices for this market's oracle.</ResponseField>
+    <ResponseField name="liquidatorRoleGranted" type="boolean">Whether the registered wallet holds `LIQUIDATOR_ROLE` on the market.</ResponseField>
     <ResponseField name="configurationSteps" type="array">Outstanding steps, each with `step`, `description`, `requiredRole`, `requiredBy`.</ResponseField>
     <ResponseField name="configurationCalldata" type="object">Ready-to-sign calldata keyed by step name, each `{ to, data, description }`.</ResponseField>
   </Expandable>
@@ -99,8 +99,7 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/de
     "liquidationOperator": "0x777...888",
     "mode": "FREEZE",
     "priceSource": "NAV",
-    "identityRegistry": "0x9e3c...1145",
-    "useRelayer": true
+    "identityRegistry": "0x9e3c...1145"
   }'
 ```
 ```typescript TypeScript
@@ -118,11 +117,10 @@ const res = await fetch(
       adminAddress: '0x333...444',
       initialPrice: '104.82',
       collateralAgent: '0x555...666',
-      liquidationOperator: relayerAddress,
+      liquidationOperator: issuerWalletAddress,
       mode: 'CUSTODY',
       identityRegistry: token.metadata.identityRegistry,
-      borrowAssetAddress: '0x6B175474E89094C44Da98b954EedeAC495271d0F',
-      useRelayer: true
+      borrowAssetAddress: '0x6B175474E89094C44Da98b954EedeAC495271d0F'
     })
   }
 );
@@ -131,7 +129,22 @@ const { data } = await res.json();
 </RequestExample>
 
 <ResponseExample>
-```json Relayer Response
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x37712db30A7B4fFD9C445793089118b60e56d752",
+      "data": "0x..."
+    },
+    "collateralTokenAddress": "0xabc...def",
+    "mode": "FREEZE",
+    "priceSource": "NAV"
+  }
+}
+```
+```json Confirmed Response
 {
   "success": true,
   "data": {
@@ -184,21 +197,6 @@ const { data } = await res.json();
   }
 }
 ```
-```json Calldata Response
-{
-  "success": true,
-  "data": {
-    "action": "SIGN_TRANSACTION",
-    "transaction": {
-      "to": "0x37712db30A7B4fFD9C445793089118b60e56d752",
-      "data": "0x..."
-    },
-    "collateralTokenAddress": "0xabc...def",
-    "mode": "FREEZE",
-    "priceSource": "NAV"
-  }
-}
-```
 ```json Error - Market Exists
 {
   "success": false,
@@ -232,10 +230,10 @@ const { data } = await res.json();
 | `BORROW_ASSET_NOT_CONTRACT` | `400` | No deployed bytecode at `borrowAssetAddress` |
 | `BORROW_ASSET_NOT_ERC20` | `400` | `decimals()` or `balanceOf()` could not be read |
 | `BORROW_ASSET_DECIMALS_UNSUPPORTED` | `400` | Borrow asset decimals outside 6 to 18 |
-| `DEPLOYER_NOT_AUTHORIZED` | `403` | The instance relayer is not on the factory's authorized deployer allowlist |
-| `DEPLOYER_AUTHORIZATION_FAILED` | `502` | Adding the relayer to the allowlist failed on-chain |
+| `DEPLOYER_NOT_AUTHORIZED` | `403` | The registered wallet is not on the factory's authorized deployer allowlist |
+| `DEPLOYER_AUTHORIZATION_FAILED` | `502` | Adding the registered wallet to the allowlist failed on-chain |
 | `DEPLOY_FAILED` | `500` | The factory call reverted during preflight. `message` carries the reason |
 | `FACTORY_UPGRADE_REQUIRED` | `503` | The factory predates per-market routers and cannot deploy this market |
 | `SECURITY_LENDING_NOT_CONFIGURED` | `503` | External securities lending contracts are not deployed on the network your instance resolves to |
 
-Relayer mode can additionally return any [relayer error](/endpoints/introduction#relayer-errors).
+Confirming can additionally return any [transaction verification error](/endpoints/introduction#confirming-a-transaction).

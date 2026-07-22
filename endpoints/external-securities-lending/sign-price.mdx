@@ -4,7 +4,7 @@ api: 'POST /lending-external-securities/api/markets/{marketId}/sign-price'
 description: 'Produce an EIP-712 signed price for atomic use in a transaction'
 ---
 
-Returns a NAV signed with the instance relayer's key under EIP-712. The borrower passes it as `signedPrice` on [Open Loan](/endpoints/external-securities-lending/open-loan), [Borrow More](/endpoints/external-securities-lending/borrow-more), [Withdraw Collateral](/endpoints/external-securities-lending/withdraw-collateral), or [Liquidate Loan](/endpoints/external-securities-lending/liquidate), and the contract applies the price and the action in one transaction.
+Returns an EIP-712 payload for a NAV, ready to sign. You sign it with the wallet authorized on the market's oracle, then pass the price and your signature as `signedPrice` on [Open Loan](/endpoints/external-securities-lending/open-loan), [Borrow More](/endpoints/external-securities-lending/borrow-more), [Withdraw Collateral](/endpoints/external-securities-lending/withdraw-collateral), or [Liquidate Loan](/endpoints/external-securities-lending/liquidate). The contract applies the price and the action in one transaction.
 
 This is the alternative to [Sync Oracle Price](/endpoints/external-securities-lending/sync-oracle). Signing costs no gas and writes nothing on-chain, so it suits per-transaction pricing where a borrower needs a fresh valuation without waiting for an oracle write. Pushing suits a scheduled NAV publication that every loan in the market should see.
 
@@ -26,17 +26,23 @@ This is the alternative to [Sync Oracle Price](/endpoints/external-securities-le
 
 <ResponseField name="data" type="object">
   <Expandable>
+    <ResponseField name="action" type="string">Always `SIGN_TYPED_DATA`.</ResponseField>
+    <ResponseField name="typedData" type="object">
+      The EIP-712 payload to sign, carrying `domain`, `types`, `primaryType`, and `message`. Pass it straight to `signTypedData`.
+    </ResponseField>
+    <ResponseField name="display" type="object">
+      The same values in readable form, also flattened onto `data` itself.
+    </ResponseField>
     <ResponseField name="price" type="string">Price in base units at the borrow asset's decimals. Pass this value, not `priceUsd`, in the `signedPrice` object.</ResponseField>
     <ResponseField name="priceUsd" type="string">The same price as a human-readable decimal string. Informational.</ResponseField>
-    <ResponseField name="timestamp" type="integer">Unix seconds the price was signed at. Never ahead of chain time.</ResponseField>
+    <ResponseField name="timestamp" type="integer">Unix seconds the price is stamped at. Never ahead of chain time.</ResponseField>
     <ResponseField name="validUntil" type="integer">Unix seconds after which the signature is rejected.</ResponseField>
-    <ResponseField name="signature" type="string">65-byte EIP-712 signature.</ResponseField>
-    <ResponseField name="signer" type="string">Address that signed. Informational.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet expected to sign. Signing with any other wallet produces a signature the oracle rejects.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  The contract reads only `price`, `timestamp`, `validUntil`, and `signature`. Pass those four through unchanged. `priceUsd` and `signer` are for display and reconciliation.
+  No signature is returned. You produce it by signing `typedData`. The contract then reads `price`, `timestamp`, `validUntil`, and your `signature`. Pass the first three through unchanged.
 </Note>
 
 ## Signature Structure
@@ -81,6 +87,9 @@ const signRes = await fetch(
 );
 const { data: signed } = await signRes.json();
 
+const { domain, types, message } = signed.typedData;
+const signature = await wallet._signTypedData(domain, types, message);
+
 const loanRes = await fetch(
   `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/open-loan`,
   {
@@ -96,9 +105,8 @@ const loanRes = await fetch(
         price: signed.price,
         timestamp: signed.timestamp,
         validUntil: signed.validUntil,
-        signature: signed.signature
-      },
-      useRelayer: true
+        signature
+      }
     })
   }
 );
@@ -110,11 +118,39 @@ const loanRes = await fetch(
 {
   "success": true,
   "data": {
+    "action": "SIGN_TYPED_DATA",
+    "typedData": {
+      "domain": {
+        "name": "SecurityPriceOracle",
+        "version": "1",
+        "chainId": 11155111,
+        "verifyingContract": "0x8B2e...4a7c"
+      },
+      "types": {
+        "PriceUpdate": [
+          { "name": "price", "type": "uint256" },
+          { "name": "timestamp", "type": "uint256" },
+          { "name": "validUntil", "type": "uint256" }
+        ]
+      },
+      "primaryType": "PriceUpdate",
+      "message": {
+        "price": "105400000",
+        "timestamp": 1718445600,
+        "validUntil": 1718445900
+      }
+    },
+    "display": {
+      "price": "105400000",
+      "priceUsd": "105.4",
+      "timestamp": 1718445600,
+      "validUntil": 1718445900,
+      "signer": "0x123...456"
+    },
     "price": "105400000",
     "priceUsd": "105.4",
     "timestamp": 1718445600,
     "validUntil": 1718445900,
-    "signature": "0xabc...def",
     "signer": "0x123...456"
   }
 }
@@ -124,7 +160,7 @@ const loanRes = await fetch(
   "success": false,
   "error": {
     "code": "SIGNING_FAILED",
-    "message": "Relayer 0x123...456 not authorized on oracle. Authorize the relayer via setAuthorizedSigner first."
+    "message": "Issuer wallet 0x123...456 not authorized on oracle. Authorize it via setAuthorizedSigner first."
   }
 }
 ```
@@ -140,5 +176,5 @@ const loanRes = await fetch(
 </ResponseExample>
 
 <Note>
-  Every signing failure returns code `SIGNING_FAILED`. The specific cause, whether an unconfigured relayer, a frozen relayer, or a missing oracle authorization, is in `message`. Unlike [Sync Oracle Price](/endpoints/external-securities-lending/sync-oracle), this endpoint has no daily transaction limit, because nothing is broadcast.
+  Every failure returns code `SIGNING_FAILED`. The specific cause, whether no registered wallet or a missing oracle authorization, is in `message`.
 </Note>

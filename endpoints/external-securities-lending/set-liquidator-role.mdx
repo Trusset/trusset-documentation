@@ -6,10 +6,10 @@ description: 'Grant or revoke LIQUIDATOR_ROLE on a market'
 
 Grants or revokes `LIQUIDATOR_ROLE` for any address on the market contract. Holding this role is a prerequisite for [Liquidate Loan](/endpoints/external-securities-lending/liquidate) and [Settle Expired Auction](/endpoints/external-securities-lending/settle-expired-auction).
 
-The call executes through the instance relayer, which must hold `DEFAULT_ADMIN_ROLE` on the market. If it does not, the response still succeeds but returns `requiresUserAction` with calldata for the market admin's wallet to execute instead.
+The role change has to be executed from the wallet holding `DEFAULT_ADMIN_ROLE` on the market. The endpoint returns `requiresUserAction` with the calldata for that wallet to sign.
 
 <Note>
-  This endpoint has no `useRelayer` parameter. It always attempts relayer execution and falls back to returning calldata.
+  When the address already holds the role you asked for, the response returns `unchanged: true` and no calldata. Nothing needs to be signed.
 </Note>
 
 ## Path Parameters
@@ -26,6 +26,10 @@ The call executes through the instance relayer, which must hold `DEFAULT_ADMIN_R
   `grant` or `revoke`.
 </ParamField>
 
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+</ParamField>
+
 ## Response Fields
 
 <ResponseField name="data" type="object">
@@ -34,13 +38,13 @@ The call executes through the instance relayer, which must hold `DEFAULT_ADMIN_R
     <ResponseField name="address" type="string">The address affected, echoed back.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. `null` when the address was already in the requested state.</ResponseField>
     <ResponseField name="unchanged" type="boolean">`true` when no transaction was needed because the role already matched the requested state.</ResponseField>
-    <ResponseField name="requiresUserAction" type="boolean">Present and `true` when the relayer could not execute. Pair with `configurationCalldata`.</ResponseField>
+    <ResponseField name="requiresUserAction" type="boolean">Present and `true` whenever the role actually needs changing. Pair with `configurationCalldata`.</ResponseField>
     <ResponseField name="configurationCalldata" type="object">Present only alongside `requiresUserAction`. Contains `liquidatorRole` as `{ to, data, description }` for the market admin to sign.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Warning>
-  Revoking the role from the instance relayer disables liquidation through this API for that market. Loans will still become liquidatable, but nothing will act on them until the role is restored or another liquidator is authorized.
+  Revoking the role from every address you control leaves the market with no liquidator. Loans will still become liquidatable, but nothing will act on them until the role is restored or another liquidator is authorized.
 </Warning>
 
 <RequestExample>
@@ -59,7 +63,7 @@ const res = await fetch(
       'X-API-Key': 'trusset_your_key_here',
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ address: relayerAddress, action: 'grant' })
+    body: JSON.stringify({ address: issuerWalletAddress, action: 'grant' })
   }
 );
 const { data } = await res.json();
@@ -103,7 +107,7 @@ if (data.requiresUserAction) {
       "liquidatorRole": {
         "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
         "data": "0x...",
-        "description": "Grant LIQUIDATOR_ROLE to 0x123...456"
+        "description": "Grant LIQUIDATOR_ROLE to 0x123...456 (requires market DEFAULT_ADMIN_ROLE)"
       }
     }
   }
@@ -113,7 +117,7 @@ if (data.requiresUserAction) {
 {
   "success": false,
   "error": {
-    "code": "LIQUIDATOR_ROLE_UPDATE_FAILED",
+    "code": "INVALID_ADDRESS",
     "message": "A valid non-zero address is required"
   }
 }

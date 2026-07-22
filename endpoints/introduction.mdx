@@ -62,24 +62,63 @@ The API uses standard HTTP status codes:
 | `403` | Service not enabled or resource access denied |
 | `404` | Resource not found |
 | `409` | Resource already exists |
-| `429` | Rate limit or transaction limit exceeded |
+| `429` | Rate limit exceeded |
 | `500` | Internal server error |
-| `502` | Upstream service error (e.g. vault provider unreachable) |
+| `502` | Upstream service error |
 | `503` | Service temporarily unavailable |
 
-## Relayer Errors
-Endpoints that submit blockchain transactions (identity verification, token issuance, redemptions, freezes, force transfers, oracle syncs, liquidations, and similar write operations) require a configured relayer. The relayer is a per-instance wallet whose private key is fetched from your vault provider (Doppler or HashiCorp Vault) at transaction time. If the relayer is not set up or is unavailable, the API returns one of the following errors:
+## Write Operations
+Endpoints that touch a contract (identity verification, token issuance, redemptions, freezes, force transfers, oracle syncs, market deployments, loans, liquidations) do not execute anything. They return an unsigned payload built against the target contract. You sign it with your registered wallet and broadcast it yourself.
+
+Trusset holds no private key and has no signer. Nothing moves on-chain without a signature you produced.
+
+A write response carries one of four shapes, depending on what the operation needs:
+
+| Shape | Returned when | Payload |
+|-------|---------------|---------|
+| `SIGN_TRANSACTION` | One transaction is enough | `transaction` (`to`, `data`) and `functionName` |
+| `SIGN_TRANSACTIONS` | Several transactions must run in order | `steps`, each holding its own `transaction`, `functionName`, and a `description` where the reason is not obvious |
+| `SIGN_TYPED_DATA` | The contract wants a signature, not a transaction | `typedData` (EIP-712 `domain`, `types`, `primaryType`, `message`) and `display` |
+| `txData` | Stock tokenization writes | `txData` (`to`, `data`, `value`) |
+
+Multi-step responses are ordered and must be broadcast in sequence. Where a contract pulls tokens from you, the ERC-20 approval is the first step.
+
+<Info>
+  Read-only endpoints (balance queries, holder lookups, transfer compliance checks, status lookups, market metrics) return data directly and need no signature.
+</Info>
+
+## Confirming a Transaction
+Some endpoints record state once the transaction is mined. To record it, call the same endpoint a second time with the transaction hash in the body:
+
+```json
+{ "txHash": "0x9f2c...a41b" }
+```
+
+Trusset then reads the receipt from the chain and checks that the transaction was mined, succeeded, targeted the expected contract, and called the expected function with the arguments you claimed. Only then does it write to the database and return the mined result, including values that exist only after execution such as `loanId`, `liquidationId`, `auctionId`, and `positionId`.
+
+State is derived from the receipt, never from the request body. A confirm call that fails verification changes nothing.
+
 | Code | HTTP | Meaning |
 |------|------|---------|
-| `RELAYER_NOT_CONFIGURED` | `400` | No relayer has been configured for this instance. Set one up in the dashboard under Wallets > Configure Relayer. |
-| `RELAYER_FROZEN` | `403` | The relayer has been manually frozen. Unfreeze it in the dashboard to resume transactions. |
-| `RELAYER_LIMIT_EXCEEDED` | `429` | The daily transaction limit has been reached. The limit resets at midnight UTC. You can increase it in the dashboard. |
-| `RELAYER_CONFIG_ERROR` | `500` | The stored vault configuration could not be decrypted. Reconfigure the relayer in the dashboard. |
-| `RELAYER_VAULT_ERROR` | `502` | The private key could not be fetched from your vault provider. Verify your vault credentials and connectivity. |
-| `RELAYER_KEY_MISMATCH` | `500` | The key returned by your vault does not match the wallet address on file. Reconfigure the relayer. |
-<Info>
-  Read-only endpoints (balance queries, holder lookups, transfer compliance checks, status lookups, market metrics) do not require a relayer and will work without one configured.
-</Info>
+| `INVALID_TX` | `400` | `txHash` is not a well-formed 32-byte hash |
+| `TX_REVERTED` | `400` | The transaction was mined but reverted |
+| `TX_WRONG_TARGET` | `400` | The transaction was sent to a different contract than the endpoint expects |
+| `TX_WRONG_FUNCTION` | `400` | The calldata does not decode against the expected ABI, or calls a different function |
+| `TX_NOT_VERIFIED` | `400` | The transaction decoded correctly but acts on a different loan, auction, or liquidation |
+| `TX_NOT_FOUND` | `404` | No receipt yet. The transaction is unmined, dropped, or on another network |
+
 <Tip>
-  When `useRelayer` is set to `false` or omitted on write endpoints, the API returns unsigned transaction data (`txData`) that you can sign and submit client-side. This path does not require a relayer.
+  `TX_NOT_FOUND` is the expected response when you confirm too early. Wait for one confirmation and retry, rather than treating it as a failure.
 </Tip>
+
+## Authorisation Errors
+Writes are authorised against the wallets registered on the instance, and against the roles those wallets hold on your contracts.
+
+| Code | HTTP | Meaning |
+|------|------|---------|
+| `RELAYER_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance |
+| `SIGNER_NOT_AUTHORIZED` | `403` | The wallet is not an authorised signer on the market oracle. The oracle owner must call `setAuthorizedSigner`. |
+| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | The wallet does not hold `OPERATOR_ROLE` on the liquidation router. The error carries `calldata` that grants it. |
+| `ROUTER_ADMIN_ROLE_MISSING` | `400` | The wallet does not hold `DEFAULT_ADMIN_ROLE` on the liquidation router. |
+| `MISSING_ROLE` | `403` | The wallet does not hold the contract role this operation requires. The error names it in `requiredRole`. |
+| `ONCHAIN_SETTLEMENT_UNAVAILABLE` | `409` | The operation settles on-chain but has no wallet in the loop to sign. Order books configured for `OFF_CHAIN` settlement are unaffected. |

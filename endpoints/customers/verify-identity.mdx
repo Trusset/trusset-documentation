@@ -4,7 +4,11 @@ api: 'POST /customers/api/identity/verify'
 description: 'Register and verify a customer identity on-chain'
 ---
 
-Writes a customer's KYC verification to the on-chain identity registry. The address is checksummed, a KYC hash is computed, and the verification transaction is submitted to the instance's configured network. The corresponding off-chain customer record is created or updated automatically.
+Registers a customer's KYC verification on the on-chain identity registry. The address is checksummed and a KYC hash is computed, then the encoded registry call is returned for you to sign.
+
+Call it once without `txHash` to get the calldata, and again with `txHash` once you have broadcast it. The second call verifies the receipt and creates or updates the off-chain customer record.
+
+The endpoint picks `verifyIdentity` or `updateIdentity` for you depending on whether the address is already on the registry, and reports which in `operation`.
 
 ## Request Body
 
@@ -32,18 +36,33 @@ Writes a customer's KYC verification to the on-chain identity registry. The addr
   Optional custom data to include in the KYC hash computation. When omitted, the hash is derived from the wallet address, country, and current timestamp.
 </ParamField>
 
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast. Send it to confirm the verification and write the customer record. Omit it to receive the calldata.
+</ParamField>
+
 ## Response Fields
 
-<ResponseField name="success" type="boolean">Request status</ResponseField>
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="walletAddress" type="string">Checksummed address</ResponseField>
-    <ResponseField name="status" type="string">Always `verified` on success</ResponseField>
-    <ResponseField name="txHash" type="string">On-chain transaction hash</ResponseField>
-    <ResponseField name="gasUsed" type="string">Gas consumed by the transaction</ResponseField>
-    <ResponseField name="kycHash" type="string">Computed KYC hash stored on-chain</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">`to` (the identity registry) and `data`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`verifyIdentity` or `updateIdentity`, whichever applies to this address. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="confirmWith" type="object">Where to send the hash once broadcast, as `endpoint` and `field`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="walletAddress" type="string">Checksummed address.</ResponseField>
+    <ResponseField name="kycHash" type="string">Computed KYC hash written on-chain. Pass the same value if you re-request calldata, or the hash will differ.</ResponseField>
+    <ResponseField name="investorType" type="integer">Investor classification as the registry's numeric enum. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="softExpiry" type="integer">Soft expiry as a Unix timestamp, or `0` when unset. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="hardExpiry" type="integer">Hard expiry as a Unix timestamp, or `0` when unset. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="operation" type="string">`verify` or `update`.</ResponseField>
+    <ResponseField name="status" type="string">Always `verified`. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="txHash" type="string">The confirmed transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="gasUsed" type="string">Gas consumed. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
+
+<Warning>
+  `kycHash` is derived from the current timestamp when you do not supply `kycData`. Requesting calldata twice produces two different hashes. Carry the `kycHash` from the calldata response through to your records, and confirm the transaction you actually broadcast.
+</Warning>
 
 <RequestExample>
 ```bash cURL
@@ -77,7 +96,22 @@ const response = await fetch(
   }
 );
 const { data } = await response.json();
-console.log(`Verified: ${data.txHash}`);
+
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch('https://api.trusset.org/customers/api/identity/verify', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-API-Key': 'trusset_abc123xy_secret...'
+  },
+  body: JSON.stringify({
+    walletAddress: '0xAbC123dEf456789012345678901234567890AbCd',
+    country: 'DE',
+    txHash: tx.hash
+  })
+});
 ```
 ```python Python
 import requests
@@ -101,12 +135,41 @@ data = response.json()['data']
 </RequestExample>
 
 <ResponseExample>
-```json Response
+```json Calldata Response
 {
   "success": true,
   "data": {
-    "walletAddress": "0xAbC123dEf456789012345678901234567890AbCd",
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x5B3c9D1e7F2a4B6c8D0e2F4a6B8c0D2e4F6a8B0c",
+      "data": "0x3f8a1b2c..."
+    },
+    "functionName": "verifyIdentity",
+    "description": "Verify 0xabc123def456789012345678901234567890abcd on the identity registry",
+    "walletAddress": "0xabc123def456789012345678901234567890abcd",
+    "kycHash": "0xdeadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678",
+    "investorType": 1,
+    "softExpiry": 1750000000,
+    "hardExpiry": 1781536000,
+    "operation": "verify",
+    "confirmWith": {
+      "endpoint": "POST /customers/api/identity/verify",
+      "field": "txHash"
+    }
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2025-06-15T12:00:00.000Z"
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "walletAddress": "0xabc123def456789012345678901234567890abcd",
     "status": "verified",
+    "operation": "verify",
     "txHash": "0xabc123def456789012345678901234567890abc123def456789012345678901234",
     "gasUsed": "84521",
     "kycHash": "0xdeadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"

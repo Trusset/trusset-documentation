@@ -42,11 +42,9 @@ Every request authenticates with an instance API key in the `X-API-Key` header. 
 
 On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. Schema failures use `VALIDATION_ERROR` with `error.details` listing each offending field. Always branch on `success` rather than on the HTTP status alone.
 
-## Execution Modes
+## Writes
 
-Every write endpoint accepts `useRelayer` and supports two modes.
-
-**Calldata mode** is the default. The API returns unsigned transaction data for a wallet you control to sign and broadcast. Nothing is submitted on your behalf.
+Every write endpoint returns unsigned transaction data for a wallet you control to sign and broadcast. Nothing is submitted on your behalf.
 
 ```json
 {
@@ -68,10 +66,16 @@ Some operations need more than one transaction. Those return `SIGN_TRANSACTIONS`
 }
 ```
 
-**Relayer mode** (`useRelayer: true`) submits the transaction through your instance relayer and returns the mined result including `txHash`. The relayer handles ERC-20 approvals automatically. It must be configured, unfrozen, and within its daily transaction limit. See [Relayer Errors](/endpoints/introduction#relayer-errors).
+Once you have broadcast a transaction, call the same endpoint again with its hash in the body:
+
+```json
+{ "txHash": "0x9f2c...a41b" }
+```
+
+The API verifies the mined receipt, records the result against the market, and returns the values that only exist after execution, such as `loanId`, `positionId`, `liquidationId`, and `auctionId`. Verification checks that the transaction succeeded, targeted the market this endpoint operates on, and called the expected function on the entity you named. See [Confirming a Transaction](/endpoints/introduction#confirming-a-transaction).
 
 <Warning>
-  [Liquidate Loan](/endpoints/external-securities-lending/liquidate) inverts this default. It executes through the relayer unless you explicitly send `useRelayer: false`.
+  Positions, liquidity providers, and the transaction ledger are written on the confirm call. Broadcast without confirming and the loan is still live on-chain, but Trusset will not see it until the next reconciliation pass.
 </Warning>
 
 ## Collateral Modes
@@ -88,7 +92,7 @@ Both modes require the market's liquidation router to be an eligible recipient o
 
 There is no automatic price feed. Prices come from the issuer, as a net asset value the issuer publishes.
 
-[Sync Oracle Price](/endpoints/external-securities-lending/sync-oracle) pushes a NAV on-chain. [Sign Price](/endpoints/external-securities-lending/sign-price) returns an EIP-712 signed price that a borrower submits alongside their own transaction, updating the price atomically without a separate oracle write. Both require an explicit positive `price`, and both require the instance relayer to be an authorized signer on the market's oracle.
+[Sync Oracle Price](/endpoints/external-securities-lending/sync-oracle) pushes a NAV on-chain. [Sign Price](/endpoints/external-securities-lending/sign-price) returns an EIP-712 signed price that a borrower submits alongside their own transaction, updating the price atomically without a separate oracle write. Both require an explicit positive `price`, and both require the registered wallet to be an authorized signer on the market's oracle.
 
 `priceSource` records how the market's price is meant to be interpreted. `NAV` is the default. `MARKET` signals an observable market price and the contract responds by disallowing Dutch auctions and raising the auction floor premium. The backend applies no branching of its own on this field.
 
@@ -166,7 +170,7 @@ A liquidation left unsettled for 7 days can be written off with [Handle Liquidat
 
 ## Per-Market Liquidation Router
 
-Each market gets its own `SecurityLiquidationRouter`, deployed by the factory in the same transaction. The market admin holds `DEFAULT_ADMIN_ROLE` on it and the `liquidationOperator` you nominate at deployment holds `OPERATOR_ROLE`. Trusset holds no role. Nominating the instance relayer as `liquidationOperator` is what allows settlement to be driven through this API.
+Each market gets its own `SecurityLiquidationRouter`, deployed by the factory in the same transaction. The market admin holds `DEFAULT_ADMIN_ROLE` on it and the `liquidationOperator` you nominate at deployment holds `OPERATOR_ROLE`. Trusset holds no role. Nominating the registered wallet as `liquidationOperator` is what allows settlement to be driven through this API.
 
 Every market payload carries `liquidationRouterAddress`. Endpoints that act on a liquidation resolve the correct router automatically. Markets deployed before per-market routers existed continue to use the shared legacy router, transparently.
 
