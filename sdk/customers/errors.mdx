@@ -4,49 +4,60 @@ description: "Error types, codes, and retry behavior in the Trusset SDK"
 icon: "triangle-exclamation"
 ---
 
+This page is for the engineer writing the catch blocks. After reading it you will know which errors are worth retrying, which are not, and why an ambiguous write failure needs a status check rather than a retry.
+
 All SDK errors extend `TrussetError` and carry a machine-readable `code`, HTTP `statusCode`, and the server's `requestId` when available. Catch specific subclasses to handle different failure modes.
 
 ## Error hierarchy
 
 ```typescript
 import {
-  TrussetError,      // Base class - all errors extend this
-  AuthError,         // 401 - invalid or expired API key
-  ValidationError,   // 400 - bad input caught client-side
-  NetworkError,      // 0   - timeout, DNS failure, connection refused
+  TrussetError,
+  AuthError,
+  ValidationError,
+  NetworkError,
 } from '@trusset/sdk'
 ```
 
-## Catching errors
+`ValidationError` is the one that never reaches the network. The SDK raises it from client-side checks, so it costs no request and its message names the offending field.
+
+| Class | Status | Fires when | Do |
+|---|---|---|---|
+| `ValidationError` | 400 | Input rejected before hitting the API | Fix the input. Retrying is pointless. |
+| `AuthError` | 401 | API key is invalid, expired, or the instance is archived | Check the key and the instance state. |
+| `NetworkError` | 0 | Timeout, DNS failure, connection refused | Retry a read. For a write, check status first. |
+| `TrussetError` | 4xx / 5xx | Server returned a non-success response | Branch on `code`. |
+
+Order the branches from most specific to least. `TrussetError` is the base class, so a leading `instanceof TrussetError` swallows every other case.
+
+## Catch errors
 
 ```typescript
 try {
   await trusset.customers.manage.get('0xinvalid')
 } catch (err) {
   if (err instanceof ValidationError) {
-    // Input rejected before hitting the API
-    console.error(err.message) // "walletAddress must be a valid Ethereum address"
+    console.error(err.message)
     return
   }
 
   if (err instanceof AuthError) {
-    // API key is invalid, expired, or the instance is archived
     console.error(err.message, err.requestId)
     return
   }
 
   if (err instanceof NetworkError) {
-    // Request timed out or network is unreachable
     console.error(err.message)
     return
   }
 
   if (err instanceof TrussetError) {
-    // Server returned a non-success response (4xx/5xx)
     console.error(err.code, err.statusCode, err.message, err.requestId)
   }
 }
 ```
+
+The `ValidationError` from that call reports `walletAddress must be a valid Ethereum address`.
 
 ## Error properties
 
@@ -98,14 +109,14 @@ Retries use exponential backoff: 1s, 2s, 4s, capped at 10s. Configure via `maxRe
 ```typescript
 const trusset = new TrussetClient({
   apiKey: '...',
-  maxRetries: 5,   // up to 5 retries
-  timeoutMs: 60_000, // 60s timeout per attempt
+  maxRetries: 5,
+  timeoutMs: 60_000,
 })
 ```
 
 On-chain write methods enforce higher per-request timeout floors regardless of `timeoutMs` (180s; `addClaimsFromProof` 420s), because the backend waits for block confirmations inside the request.
 
-## Logging
+## Enable logging
 
 Pass a logger to surface retry attempts and request metadata during development:
 
