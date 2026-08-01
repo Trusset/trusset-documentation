@@ -187,6 +187,8 @@ Tables are for role-by-role and category-by-category comparison. Reasoning goes 
 
 Never build a table whose second column is the only one carrying content. That is a list.
 
+One exception: a navigation index. A quick-links table is a single column of links, and the links are the content rather than a padded-out label for it. `protocol/intro.mdx` closes with one. The rule above is about data tables inflated to look substantial, which is a different thing.
+
 *Vale enforces:* nothing.
 
 ---
