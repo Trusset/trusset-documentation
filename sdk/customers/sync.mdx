@@ -4,22 +4,26 @@ description: "Bulk-import and export customer records between your systems and T
 icon: "rotate"
 ---
 
+This page is for the engineer migrating an existing customer database into Trusset. After reading it you will know how records are matched, what happens to the ones that fail, and why a failed on-chain verification does not undo the import.
+
 The `sync` sub-module handles bulk migration of customer data between your existing systems and Trusset. It is designed for institutions with established customer databases that need to onboard thousands of records without manual entry.
 
 Records are mapped by `externalId` - your system's unique customer identifier. This key is used for deduplication and conflict resolution across syncs.
 
 ## Import records
 
+`externalId` is the only required field on a record. `kycHash` takes the root hash from the KYC proof tool, which is what lets proof-backed claims attach later.
+
 ```typescript
 import { SyncRecord } from '@trusset/sdk'
 
 const records: SyncRecord[] = existingCustomers.map(row => ({
-  externalId: row.customerId,       // required - your unique ID
+  externalId: row.customerId,
   name: row.fullName,
-  walletAddress: row.ethAddress,    // optional
+  walletAddress: row.ethAddress,
   country: row.countryCode,
   investorType: 'RETAIL',
-  kycHash: row.kycRootHash,         // root hash from the KYC proof tool
+  kycHash: row.kycRootHash,
   metadata: { source: 'core-banking', migrationBatch: '2025-Q1' },
 }))
 
@@ -30,13 +34,17 @@ const result = await trusset.customers.sync.importRecords(records, {
     console.log(`${done}/${total} processed`)
   },
 })
-
-result.total    // total records submitted
-result.created  // new customers created
-result.updated  // existing customers updated
-result.skipped  // skipped due to onConflict: 'skip'
-result.errors   // array of { externalId, code, message }
 ```
+
+The result counts each outcome separately:
+
+| Field | Holds |
+|---|---|
+| `result.total` | Total records submitted |
+| `result.created` | New customers created |
+| `result.updated` | Existing customers updated |
+| `result.skipped` | Skipped due to `onConflict: 'skip'` |
+| `result.errors` | Array of `{ externalId, code, message }` |
 
 The SDK processes records in configurable batches to avoid overloading the API. Each record is matched against existing customers by `externalId`. If a match is found, the `onConflict` strategy determines the outcome.
 
@@ -47,7 +55,7 @@ The SDK processes records in configurable batches to avoid overloading the API. 
 | `update` | Overwrites name, country, investorType, walletAddress, and metadata on the existing record. Default. |
 | `skip` | Leaves the existing record untouched. Counted in `result.skipped`. |
 
-### With on-chain verification
+### Verify on-chain during import
 
 Set `verifyOnChain: true` to automatically batch-verify imported records that have both a `walletAddress` and a `country`. This runs after the database import completes and requires a verified [registered wallet](/protocol/infrastructure/custody) on the instance. Each record's `kycHash` (the root hash from the [KYC proof tool](/sdk/customers/kyc-proofs)) is passed through to the on-chain verification, so proof-backed claims can be added later.
 
@@ -90,9 +98,6 @@ Pull all customer data back out as flat `SyncRecord` objects. Useful for syncing
 const records = await trusset.customers.sync.exportRecords({
   includeArchived: false,
 })
-
-// records: SyncRecord[]
-// Each record: { externalId, walletAddress?, name?, country?, investorType?, metadata? }
 ```
 
 The method paginates internally - it fetches all records regardless of total count. For very large datasets (50k+ customers), consider using the [list endpoint](/endpoints/customers/list) directly with pagination for more control.
@@ -103,17 +108,26 @@ Every record requires `externalId`. All other fields are optional.
 
 ```typescript
 interface SyncRecord {
-  externalId: string          // your system's unique customer ID
-  walletAddress?: string      // Ethereum address
-  name?: string               // display name
-  country?: string            // ISO country code
-  investorType?: string       // preset or custom verification profile key
-  kycHash?: string            // root hash from the KYC proof tool
+  externalId: string
+  walletAddress?: string
+  name?: string
+  country?: string
+  investorType?: string
+  kycHash?: string
   metadata?: Record<string, unknown>
 }
 ```
 
-## Error handling
+| Field | Holds |
+|---|---|
+| `externalId` | Your system's unique customer ID |
+| `walletAddress` | Ethereum address |
+| `name` | Display name |
+| `country` | ISO country code |
+| `investorType` | Preset or custom verification profile key |
+| `kycHash` | Root hash from the KYC proof tool |
+
+## Handle per-record errors
 
 Import errors are collected per-record rather than failing the entire batch. The `errors` array in the result contains one entry per failed record:
 
