@@ -6,35 +6,40 @@ Ordered by how much damage the wrong answer does.
 
 ---
 
-## 1. The ISO certification claim contradicts itself
+## 1. The ISO certification claim contradicted itself. RESOLVED
 
-**File:** `security/overview.mdx`, lines 8 and 31.
+**File:** `security/overview.mdx`.
 
-Line 31 states that Trusset renews "our ISO certification with TÜV" once a year. Line 8 states that documents "are currently being reviewed by TÜV as part of the final certification process".
+Line 31 stated that Trusset renews "our ISO certification with TÜV" once a year, asserting a certification that already exists. Line 8 described one still in process. Both could not be true.
 
-Line 8 describes a certification in progress. Line 31 asserts one that already exists and recurs annually. Both cannot be true.
+**Answered:** certification is in process and near completion, not granted.
 
-The task brief states the correct position is "in progress with TÜV SÜD, not completed", which contradicts line 31 directly.
+**Fixed.** The audit-renewal cycle and the certification status are now two separate statements:
 
-**Why this is first:** this page is read by compliance officers at prospective bank customers. An overstated certification claim on a security page is the kind of thing that gets checked, and the checker is the counterparty deciding whether to sign.
+> Once a year, Trusset renews all security audits with a chosen third-party auditor based in the EU.
+>
+> ISO certification with TÜV is in progress and not yet complete. Once it is granted, it enters the same annual renewal cycle.
 
-**Needed:** the actual certification status. Is ISO 27001 certified, in progress, or scheduled? If in progress, line 31 needs to describe the intended annual cycle without asserting the certification exists today.
+Two deliberate omissions in that wording:
+
+- **No completion date.** "Soon" and any target date age into a false statement on a page a counterparty may read months later. The page says in progress. It does not forecast.
+- **No specific TÜV entity and no ISO standard number.** The page says "TÜV" and "ISO certification" because that is what it said before. The brief mentions TÜV SÜD and ISO 27001. Neither was confirmed here, so neither was written in. Say the word and both get specified.
 
 ---
 
-## 2. Two pages state different API key limits
+## 2. Two pages stated different API key limits. RESOLVED
 
-**Files:** `endpoints/authentication.mdx` line 21, `protocol/infrastructure/instances.mdx` lines 76 and 83.
+**Files:** `endpoints/authentication.mdx`, `protocol/infrastructure/instances.mdx`.
 
-| Page | Claim |
-|---|---|
-| `endpoints/authentication.mdx` | "Each instance supports up to 10 active keys." |
-| `protocol/infrastructure/instances.mdx` (table) | "API Keys per Instance: 3 maximum" |
-| `protocol/infrastructure/instances.mdx` (prose) | "Each instance supports up to three API keys" |
+`authentication.mdx` said 10 active keys. `instances.mdx` said 3, in both a table cell and prose.
 
-One of these is wrong. An integrator who builds key rotation against a limit of 3 and hits 10, or plans for 10 and is capped at 3, has a production problem.
+**Answered:** `authentication.mdx` is correct. The limit is 10 active keys.
 
-**Needed:** the real cap. Then one number, stated once, cross-linked from the other page.
+**Fixed.** `instances.mdx` now reads "10 active" in the limits table and "up to 10 active API keys" in prose, and carries the rotation window that `authentication.mdx` documents.
+
+One thing deliberately not written: whether a key in `PENDING_ROTATION` counts against the 10 active limit. `authentication.mdx` does not say, so neither does this page. An integrator rotating all 10 keys at once needs that answer.
+
+**Still needed:** does a `PENDING_ROTATION` key occupy one of the 10 slots?
 
 ---
 

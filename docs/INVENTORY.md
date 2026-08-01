@@ -190,13 +190,13 @@ The 26 JavaScript blocks were listed here as the second largest job before they 
 
 One transliteration inconsistency is already live: `licenses/stocks/introduction.mdx` writes "Gesetz uber elektronische Wertpapiere", dropping the umlaut without transliterating. `security/overview.mdx` writes `TÜV` with the umlaut intact. Both cannot be right. The style guide picks one.
 
-### An unhedged certification claim
+### An unhedged certification claim, since corrected
 
-`security/overview.mdx` line 31 states that Trusset renews "our ISO certification with TÜV" once a year. Line 8 states documents "are currently being reviewed by TÜV as part of the final certification process".
+`security/overview.mdx` line 31 stated that Trusset renews "our ISO certification with TÜV" once a year, while line 8 described a certification still in process. Both could not be true, and the overstated version is the one a counterparty checks.
 
-Line 8 describes a certification in progress. Line 31 asserts one that exists and recurs. The brief states the correct position is "in progress with TUEV Sued, not completed", which contradicts line 31.
+It was left untouched during the pass and logged, because correcting a compliance claim on a guess is the exact failure this task exists to prevent. The status was then confirmed as in process and near completion, and the page now says so without forecasting a completion date. See `docs/OPEN-QUESTIONS.md` item 1.
 
-I am not rewording it. Correcting it requires knowing the actual certification status, and guessing at a compliance claim is the exact failure this task exists to prevent. Logged in `docs/OPEN-QUESTIONS.md` as the highest-priority item.
+This is why the log exists. The finding was worth more than a rewrite would have been.
 
 ---
 
