@@ -149,13 +149,15 @@ One deliberate exclusion: `endpoints/authentication.mdx` states that a rotated A
 
 Structure and accuracy problems, not voice problems. Recorded here because the tier classification is the moment to notice them.
 
-### `stock-lending/` and `external-securities-lending/` are parallel sections at different quality levels
+### `stock-lending/` and `external-securities-lending/` are two products, documented to different depths
 
-51 files and 57 files, covering overlapping surface. `external-securities-lending/` is the newer of the two and is materially better: it documents the unsigned-calldata write path, has a real section introduction, and names failure behaviour next to each capability.
+51 files and 57 files. They are separate products with separate purposes, both live, and neither supersedes the other. `external-securities-lending` is the more important of the two and is verified working.
 
-`stock-lending/` mostly predates that work. Only 16 of its 51 files mention the `txHash` confirm pattern; 35 do not. `endpoints/stock-lending/open-loan.mdx` documents a single returned call with no confirm step, while its `external-securities-lending` counterpart documents the two-shape `SIGN_TRANSACTIONS` response and the confirm call.
+They are not documented to the same depth. Counting write endpoints only, `external-securities-lending` documents the `txHash` confirm call on 20 of 27, and `stock-lending` on 7 of 23. The omissions in the first section are coherent: hooks write backend configuration, and the price endpoints produce a signature without submitting anything, so there is nothing to confirm. `stock-lending` omits those same six and then ten more that do touch the chain.
 
-Whether these are two products or one product documented twice is a question I cannot answer from the repo. Logged in `docs/OPEN-QUESTIONS.md`.
+Whether those ten accept a confirm call is a question about the API, not about the prose, so it is logged rather than answered. See `docs/OPEN-QUESTIONS.md` item 3 for the list.
+
+The first pass reported this as "35 of 51 pages missing the confirm pattern". That number counted GET endpoints, which never need it, and counted a `txHash` appearing in a response example as documentation. The real figure is ten write endpoints.
 
 ### The relayer removal is mostly done, and the leftovers are naming, not behaviour
 

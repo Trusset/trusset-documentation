@@ -43,17 +43,37 @@ One thing deliberately not written: whether a key in `PENDING_ROTATION` counts a
 
 ---
 
-## 3. `stock-lending/` and `external-securities-lending/` document overlapping surface at different quality levels
+## 3. Ten `stock-lending/` write endpoints do not document the confirm call
 
-**Files:** all 51 pages under `endpoints/stock-lending/`, all 57 under `endpoints/external-securities-lending/`.
+**Answered, in part:** `stock-lending` and `external-securities-lending` are two separate products with separate purposes, both live. Neither supersedes the other. Do not merge them and do not delete either. `external-securities-lending` is the more important of the two and is verified working.
 
-Both sections document overcollateralized lending against tokenized securities. `external-securities-lending/` is newer and materially better: it has a real section introduction, documents the unsigned-calldata write path, and names failure behaviour beside each capability. Only 16 of the 51 `stock-lending/` pages mention the `txHash` confirm pattern; 35 do not.
+That settles the product question. It does not settle the documentation question, which is narrower than the first pass suggested.
 
-`endpoints/stock-lending/open-loan.mdx` documents a single returned call with no confirm step. Its `external-securities-lending` counterpart documents the two-shape `SIGN_TRANSACTIONS` response and the confirm call. If both are live, one of them is wrong about how writes work.
+**The measurement.** Counting only write endpoints, and counting only a `txHash` request parameter as documenting the confirm call:
 
-**Needed:** are these two products or one product documented twice? If `stock-lending/` is superseded, it should be deleted rather than restyled. If both are live, the 35 pages missing the confirm pattern need it, and that is a correctness fix, not a style fix.
+| Section | Write endpoints documenting the confirm call |
+|---|---|
+| `external-securities-lending` | 20 of 27 |
+| `stock-lending` | 7 of 23 |
 
-**Blocked work:** a full style pass on 51 pages is not worth spending until this is answered. Those pages received the mechanical pass (heading unification, en dash removal) and nothing more.
+The 7 that `external-securities-lending` omits are coherent. They are the five hook endpoints, which write backend configuration rather than chain state, plus `sign-price` and `verify-price`, which produce or check an EIP-712 signature without submitting anything. Nothing on-chain happens, so there is nothing to confirm.
+
+`stock-lending` omits those same six, correctly, and then omits ten more that do touch the chain:
+
+`add-collateral`, `add-liquidity`, `borrow-more`, `claim-escrowed-collateral`, `close-loan`, `deploy-market`, `open-loan`, `remove-liquidity`, `repay`, `withdraw-collateral`
+
+Every one of those ten has a direct counterpart in `external-securities-lending` that does document a `txHash` request parameter.
+
+**Why "different products" does not explain it.** These ten are the same class of operation in both sections: deposit, borrow, repay, withdraw collateral. `endpoints/introduction.mdx` states the pattern platform-wide, naming "loans, liquidations" among the operations that return an unsigned payload and then record state on a second call. `endpoints/stock-lending/open-loan.mdx` already says "Only the `openLoan` call is returned", so it does hand back a transaction for the client to broadcast. What it never says is how the resulting position gets recorded.
+
+**Needed:** one answer covering all ten. Do the `stock-lending` write endpoints accept a `txHash` confirm call, the way their `external-securities-lending` counterparts do?
+
+- **If yes**, the ten pages are missing a request parameter, a response shape, and the confirm paragraph. That is a correctness gap, not a style gap, and it is the kind that costs an integrator a day.
+- **If no**, and `stock-lending` records positions by indexing events instead, then `endpoints/introduction.mdx` overstates its scope and should say which product the confirm pattern applies to.
+
+Not written either way, because the request and response contract cannot be inferred from the docs, and guessing at it would be inventing an API.
+
+**Style status:** `stock-lending` is clean on every mechanically checkable rule. It has had the heading unification, the en dash removal, and the Vale pass. What it has not had is the per-page structural rewrite that `sdk/` received.
 
 ---
 
