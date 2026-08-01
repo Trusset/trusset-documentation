@@ -4,14 +4,17 @@ description: "Create, search, update, and archive customer records"
 icon: "address-book"
 ---
 
+This page is for the engineer managing customer records from your backend. After reading it you will know how to create a customer before you have their wallet, how to find one again, and which conflicts return `409`.
+
 The `manage` sub-module handles customer CRUD operations, search, and wallet linking. All operations are scoped to the [instance](/protocol/infrastructure/instances) bound to your API key.
 
 ## Create a customer
 
 Customers can be created with or without a wallet address. When no wallet is provided, the system generates a `referenceKey` that you can use to link a wallet later.
 
+With a wallet:
+
 ```typescript
-// With wallet
 const customer = await trusset.customers.manage.create({
   walletAddress: '0x1234...abcd',
   name: 'Acme Capital GmbH',
@@ -20,24 +23,30 @@ const customer = await trusset.customers.manage.create({
   externalId: 'your-crm-id-4821',
   metadata: { department: 'treasury' },
 })
+```
 
-// Without wallet - gets a referenceKey
+Without one. The returned `pending.referenceKey` looks like `ref_a1b2c3d4...` and is what you pass to `linkWallet` once the customer has an address:
+
+```typescript
 const pending = await trusset.customers.manage.create({
   name: 'Pending Investor AG',
   country: 'AT',
   externalId: 'crm-9920',
 })
-// pending.referenceKey -> "ref_a1b2c3d4..."
+```
 
-// Company customer with linked individuals
+Company customers link to individuals through `companyId`. A `companyUrl` is normalized to an absolute https URL on the way in:
+
+```typescript
 const company = await trusset.customers.manage.create({
   name: 'Acme Capital GmbH',
   customerType: 'COMPANY',
-  companyUrl: 'acme.example.com',   // normalized to https://
+  companyUrl: 'acme.example.com',
 })
+
 await trusset.customers.manage.create({
   name: 'Jane Doe',
-  companyId: company.id,            // link individual to the company
+  companyId: company.id,
 })
 ```
 
@@ -76,43 +85,47 @@ If the wallet address is already registered on-chain in the IdentityRegistry, th
   </ParamField>
 </Expandable>
 
-## Search
+## Search for a customer
 
 The SDK provides typed search methods that map to different lookup strategies. Each returns a single `Customer` object or throws a `TrussetError` with code `NOT_FOUND`.
 
+`searchByExternalId` resolves reliably regardless of ID format or length. `searchByName` is the exception to the single-result rule: it does a substring match and returns a paginated list on `results.customers` and `results.total`.
+
 ```typescript
-// By wallet address
 const c1 = await trusset.customers.manage.searchByWallet('0x1234...abcd')
 
-// By your internal ID (resolves reliably regardless of ID format or length)
 const c2 = await trusset.customers.manage.searchByExternalId('crm-4821')
 
-// By reference key (for pre-wallet customers)
 const c3 = await trusset.customers.manage.searchByReference('ref_a1b2c3d4...')
 
-// By name (substring match, returns paginated list)
 const results = await trusset.customers.manage.searchByName('Acme', {
   limit: 20,
   offset: 0,
 })
-// results.customers, results.total
 ```
 
 ## List customers
 
+`list` returns `customers` and `total`. The `search` option matches against name, wallet, externalId, referenceKey, and companyUrl in one pass.
+
 ```typescript
 const page = await trusset.customers.manage.list({
-  limit: 100,               // 1-200, default 100
+  limit: 100,
   offset: 0,
-  search: 'bank',           // Searches name, wallet, externalId, referenceKey, companyUrl
-  customerType: 'COMPANY',  // Optional: INDIVIDUAL or COMPANY
+  search: 'bank',
+  customerType: 'COMPANY',
   includeArchived: false,
 })
-// page.customers: Customer[]
-// page.total: number
 ```
 
-## Update
+<ParamField body="limit" type="number" default={100}>
+  Records per page. Range: 1-200.
+</ParamField>
+<ParamField body="customerType" type="string">
+  Optional filter. `INDIVIDUAL` or `COMPANY`.
+</ParamField>
+
+## Update a customer
 
 ```typescript
 await trusset.customers.manage.update('customer-id', {
@@ -137,7 +150,7 @@ await trusset.customers.manage.linkWallet({
 
 The wallet address must not already be assigned to another customer in the same instance. If the address is already verified on-chain, the customer status updates to `verified` automatically.
 
-## Archive
+## Archive a customer
 
 Archiving soft-deletes a customer. Archived customers are excluded from list queries by default.
 
@@ -145,29 +158,27 @@ Archiving soft-deletes a customer. Archived customers are excluded from list que
 await trusset.customers.manage.archive('customer-id')
 ```
 
-## Linked wallets
+## Manage linked wallets
 
 A customer has one primary wallet and any number of linked wallets. Linked wallets resolve to the same customer in lookups and country checks. A wallet can only belong to one customer per instance.
 
-```typescript
-// List all wallets (primary + linked)
-const wallets = await trusset.customers.manage.listWallets('customer-id')
-// wallets.primary, wallets.total, wallets.wallets: [{ address, label, isPrimary, addedAt }]
+Promoting a linked wallet does not unlink the old one. The previous primary stays linked, labeled "Previously primary". `removeWallet` works on linked wallets only, not on the primary.
 
-// Link an additional wallet
+```typescript
+const wallets = await trusset.customers.manage.listWallets('customer-id')
+
 await trusset.customers.manage.addWallet('customer-id', '0x9999...aaaa', 'Trading desk')
 
-// Make a linked wallet the primary. The previous primary stays linked,
-// labeled "Previously primary".
 await trusset.customers.manage.promoteWallet('customer-id', '0x9999...aaaa')
 
-// Remove a linked (non-primary) wallet
 await trusset.customers.manage.removeWallet('customer-id', '0x9999...aaaa')
 ```
 
+`listWallets` returns `primary`, `total`, and `wallets`, where each entry carries `address`, `label`, `isPrimary`, and `addedAt`.
+
 Conflicts return `409` with a specific code: `ALREADY_PRIMARY`, `WALLET_ALREADY_LINKED` (same customer), or `WALLET_IN_USE` (another customer).
 
-## Batch country lookup
+## Look up countries in bulk
 
 Retrieve country codes for a list of wallet addresses in a single call. Useful for compliance checks across large holder sets.
 
@@ -175,7 +186,6 @@ Retrieve country codes for a list of wallet addresses in a single call. Useful f
 const countries = await trusset.customers.manage.batchGetCountries([
   '0xaaa...', '0xbbb...', '0xccc...',
 ])
-// { "0xaaa...": "DE", "0xbbb...": "FR" }
 ```
 
-Addresses without a matching customer record are omitted from the result.
+The result maps address to country code, as in `{ "0xaaa...": "DE", "0xbbb...": "FR" }`. Addresses without a matching customer record are omitted from the result.
