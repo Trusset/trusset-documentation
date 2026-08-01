@@ -182,9 +182,11 @@ The prior docs are in better shape than the brief assumes. Measured across all 2
 | Banned vocabulary | 5 hits | "Additionally" x3, "seamlessly" x1, "industry-leading" x1 |
 | Umlauts | 5 | `TÜV` x3, `Musterstraße` x2 |
 | Inline comments in code blocks | 133 | Across `endpoints/` and `sdk/` |
-| JavaScript code blocks where TypeScript is the standard | 26 | Mixed with 134 TypeScript blocks |
+| JavaScript code blocks | 26 | 25 are Hardhat config and deployment scripts in the two orderbook integration pages. 1 is a CommonJS interop example in `sdk/installation.mdx`. |
 
-The two largest jobs are the 133 inline comments, which the style guide moves into surrounding prose, and the 26 JavaScript blocks.
+The single largest job is the 133 inline comments, which the style guide moves into surrounding prose.
+
+The 26 JavaScript blocks were listed here as the second largest job before they were read. They are not a job. Hardhat config is `hardhat.config.js` and Hardhat scripts use `require`; the CommonJS example exists to demonstrate `require`. All 26 are correctly JavaScript, and the style guide carries an explicit exception for both cases rather than a rule that would break working samples.
 
 One transliteration inconsistency is already live: `licenses/stocks/introduction.mdx` writes "Gesetz uber elektronische Wertpapiere", dropping the umlaut without transliterating. `security/overview.mdx` writes `TÜV` with the umlaut intact. Both cannot be right. The style guide picks one.
 

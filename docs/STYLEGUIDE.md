@@ -195,11 +195,20 @@ Never build a table whose second column is the only one carrying content. That i
 
 ### Write TypeScript, real and runnable
 
-Every code sample is TypeScript unless the sample is a shell command or a JSON payload. Three pages currently ship JavaScript blocks and need converting: `sdk/installation.mdx`, `licenses/stock-orderbook/integration.mdx`, `licenses/commodity-orderbook/integration.mdx`.
+Every code sample is TypeScript, with four exceptions where another language is the correct answer:
 
-Samples must run. A sample that omits an await, or calls a method that does not exist, costs more than no sample.
+| Exception | Why |
+|---|---|
+| Shell commands | Tag them `bash`. |
+| JSON payloads | Tag them `json`. |
+| Hardhat config and deployment scripts | Hardhat config is `hardhat.config.js` and its scripts conventionally use `require`. Rewriting them in TypeScript would ship a sample that does not match the tool. |
+| CommonJS interop examples | The point of the sample is `require`. A TypeScript version would not demonstrate the thing. |
 
-*Vale enforces:* warning on ` ```js ` and ` ```javascript ` fences.
+Samples must run. A sample that omits an await, or calls a method that does not exist, costs more than no sample. That is why the exceptions exist: a correct JavaScript sample beats a TypeScript sample that nobody can paste.
+
+The 26 JavaScript blocks in this repository were all checked against this rule and all four fall under an exception. None need converting.
+
+*Vale enforces:* warning on ` ```js ` and ` ```javascript ` fences, which a reviewer clears against the table above.
 
 ### Put explanation above the block, not inside it
 
