@@ -224,9 +224,16 @@ if (!success && error.code === 'PRICE_DEVIATION_TOO_LARGE') {
 
 Right: move that sentence into the paragraph above the block, where it can be a full sentence and can explain why rather than what.
 
-133 inline comments exist across `endpoints/` and `sdk/` today. They move into prose during the Tier 3 pass.
+One exception: a trailing label on a positional argument. In a constructor call, the label is the only thing telling a reader which address goes in which slot, and prose cannot carry that mapping without the reader counting positions.
 
-*Vale enforces:* warning on `//` at the start of a line inside a fence.
+```
+"0xADMIN_ADDRESS",        // admin (multi-sig recommended)
+"0xOPERATOR_ADDRESS",     // settlement operator (or 0x0 to default to admin)
+```
+
+That is a label, not an explanation. A comment on its own line dividing a block into steps is an explanation, and it moves to prose or the block splits.
+
+*Vale enforces:* warning on `//` at the start of a line inside a fence, which is exactly the explanatory case. Trailing labels do not trip it.
 
 ### Keep code next to the prose that describes it
 
