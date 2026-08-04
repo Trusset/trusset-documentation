@@ -20,6 +20,10 @@ Redeems LP shares for the borrow asset at the current share price, which include
   LP shares to redeem as a decimal string with up to 18 decimal places, for example `"250000"`. Must be greater than zero.
 </ParamField>
 
+<ParamField body="provider" type="string">
+  Wallet holding the shares. When supplied, the redemption is checked against that provider's share balance and against the pool's uncommitted liquidity. A redemption that fails either check is refused with `INSUFFICIENT_SHARES` or `INSUFFICIENT_LIQUIDITY`, instead of handing back calldata that reverts. Omit it and only the market's total share count is checked.
+</ParamField>
+
 <ParamField body="txHash" type="string">
   Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
 </ParamField>
@@ -28,15 +32,17 @@ Redeems LP shares for the borrow asset at the current share price, which include
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="sharesRedeemed" type="string">Shares burned, echoed back. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION` when `txHash` is omitted.</ResponseField>
-    <ResponseField name="transaction" type="object">`{ to, data }` for the `removeLiquidity` call. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, for the `removeLiquidity` call. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`removeLiquidity`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="sharesRedeemed" type="string">Shares actually burned, read from the `LiquidityRemoved` event, at 18 decimals. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="amount" type="string">Settlement amount that actually left the pool, in borrow asset units. Null when the event could not be read from the receipt. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  Withdrawal is bounded by available liquidity, not by share balance. A provider holding shares worth more than the pool's idle balance cannot exit fully while borrowers hold the difference. The transaction reverts rather than partially filling. Check `availableLiquidity` on [Get Market Metrics](/endpoints/external-securities-lending/get-metrics) before redeeming a large position.
+  Withdrawal is bounded by available liquidity, not by share balance. A provider holding shares worth more than the pool's idle balance cannot exit fully while borrowers hold the difference, and the contract reverts rather than partially filling. Supply `provider` to have that refused before you sign, or check `availableLiquidity` on [Get Market Metrics](/endpoints/external-securities-lending/get-metrics) before redeeming a large position.
 </Note>
 
 <RequestExample>
@@ -54,7 +60,12 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTION",
-    "transaction": { "to": "0x70A0...", "data": "0x..." },
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
     "functionName": "removeLiquidity"
   }
 }
@@ -63,9 +74,30 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
 {
   "success": true,
   "data": {
-    "txHash": "0xabc...def",
-    "sharesRedeemed": "50000"
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "sharesRedeemed": "50000.000000000000000000",
+    "amount": "50082.576000"
+  }
+}
+```
+```json Error - Insufficient Liquidity
+{
+  "success": false,
+  "error": {
+    "code": "INSUFFICIENT_LIQUIDITY",
+    "message": "The market has 12500.000000 USDC of uncommitted liquidity, which is less than this redemption is worth. Wait for borrowers to repay, or redeem fewer shares."
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `VALIDATION_ERROR` | `400` | `shares` is not a positive decimal string, or carries more than 18 decimal places |
+| `INSUFFICIENT_SHARES` | `400` | `shares` exceeds the market's outstanding shares, or the balance held by `provider` |
+| `INSUFFICIENT_LIQUIDITY` | `400` | The redemption is worth more than the pool's uncommitted liquidity. Only checked when `provider` is supplied |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to check shares or liquidity. Retry shortly |

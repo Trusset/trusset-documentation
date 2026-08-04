@@ -54,6 +54,8 @@ Every write endpoint returns unsigned transaction data for a wallet you control 
 }
 ```
 
+Every `transaction` object carries the `chainId` your instance resolves to and `value: "0"`, so a payload can never be broadcast against the wrong network by accident.
+
 Some operations need more than one transaction. Those return `SIGN_TRANSACTIONS` with an ordered `steps` array that must be broadcast in sequence.
 
 ```json
@@ -66,10 +68,12 @@ Some operations need more than one transaction. Those return `SIGN_TRANSACTIONS`
 }
 ```
 
+A multi-step payload also names the step that carries the confirmable action, as `confirmStepIndex` and `confirmWith`. Confirm with that step's hash, which is not always the last one.
+
 Once you have broadcast a transaction, call the same endpoint again with its hash in the body:
 
 ```json
-{ "txHash": "0x9f2c...a41b" }
+{ "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b" }
 ```
 
 The API verifies the mined receipt, records the result against the market, and returns the values that only exist after execution, such as `loanId`, `positionId`, `liquidationId`, and `auctionId`. Verification checks that the transaction succeeded, targeted the market this endpoint operates on, and called the expected function on the entity you named. See [Confirming a Transaction](/endpoints/introduction#confirm-a-transaction).
@@ -78,9 +82,11 @@ The API verifies the mined receipt, records the result against the market, and r
   Positions, liquidity providers, and the transaction ledger are written on the confirm call. Broadcast without confirming and the loan is still live on-chain, but Trusset will not see it until the next reconciliation pass.
 </Warning>
 
+Trusset never holds, fetches or uses a private key, and no endpoint signs on your behalf. This is enforced rather than assumed. A write whose body carries a field named for key material, or for signing on behalf of someone else, is rejected with `400 KEY_MATERIAL_REJECTED` at any nesting depth. The refused names include `privateKey`, `mnemonic`, `seedPhrase`, `keystore`, `signerKey`, `secretKey`, `useRelayer`, `signOnBehalf`, `onBehalfOf` and `autoSubmit`.
+
 ## Collateral modes
 
-Every market is deployed in one of two modes, fixed at deployment. A single collateral token can back one market of each mode.
+Every market is deployed in one of two modes, fixed at deployment. A single collateral token can back several markets, as long as they differ in collateral mode or in settlement asset.
 
 **`FREEZE`** is the default. The adapter freezes the borrower's tokens where they sit. The borrower keeps custody and no ERC-20 approval is needed to open a loan. This requires the market's adapter to hold the agent role on the collateral token, granted by whoever controls that token's agent administration. The token must implement the ERC-3643 freeze interface (`isAgent` and `getFrozenTokens`), which is checked at deployment and rejected with `FREEZE_MODE_UNSUPPORTED_TOKEN` if absent.
 
@@ -92,7 +98,7 @@ Both modes require the market's liquidation router to be an eligible recipient o
 
 There is no automatic price feed. Prices come from the issuer, as a net asset value the issuer publishes.
 
-[Sync Oracle Price](/endpoints/external-securities-lending/sync-oracle) pushes a NAV on-chain. [Sign Price](/endpoints/external-securities-lending/sign-price) returns an EIP-712 signed price that a borrower submits alongside their own transaction, updating the price atomically without a separate oracle write. Both require an explicit positive `price`, and both require the registered wallet to be an authorized signer on the market's oracle.
+[Sync Oracle Price](/endpoints/external-securities-lending/sync-oracle) pushes a NAV on-chain. [Sign Price](/endpoints/external-securities-lending/sign-price) returns the EIP-712 payload for a price update, which you sign in your own environment. A borrower then submits that signature alongside their own transaction, updating the price atomically without a separate oracle write. Both endpoints require an explicit positive `price`. Both also require the signing wallet to be an authorized signer on the market's oracle.
 
 `priceSource` records how the market's price is meant to be interpreted. `NAV` is the default. `MARKET` signals an observable market price and the contract responds by disallowing Dutch auctions and raising the auction floor premium. The backend applies no branching of its own on this field.
 
@@ -114,11 +120,26 @@ Risk parameters are integers in basis points. `7500` is 75 percent. Health facto
   The borrow asset is fixed at deployment. Any ERC-20 with 6 to 18 decimals is accepted, validated on-chain at deploy time. Omitting it selects USDC. See [List Borrow Assets](/endpoints/external-securities-lending/list-borrow-assets).
 </Note>
 
+## Lender of record
+
+A market is deployed without parties. It names no admin, no issuer and no collateral agent. Instead it carries the `candidates` you nominated at [Deploy Market](/endpoints/external-securities-lending/deploy-market). Until one of them takes the role, the market is **seeking a lender of record**. `DEFAULT_ADMIN_ROLE`, `ISSUER_ROLE` and the oracle owner are all unheld, so every administrative transaction on it would revert. `openLoan` and `addLiquidity` revert too.
+
+The API refuses those calls before a wallet signs rather than letting them be paid for in gas. Opening a loan, borrowing more, providing liquidity, changing risk parameters and changing who may liquidate all return `409 MARKET_PENDING_CURATOR` while the market is in this state. [Get Configuration Status](/endpoints/external-securities-lending/get-configuration-status) reports it as `pendingCurator`, and never reports a market fully configured while it holds.
+
+Taking the role is what names the parties. The adopting institution declares its own `admin`, `issuer`, `collateralAgent`, `saleRecipient`, `liquidationOperator`, `oracleOwner` and `priceSigner`, a `realizationMode` of `EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION`, and a `liquidityCommitment`. Because that binds an institution to another party's market, the right to take the role is granted by Trusset and is not derived from a nomination alone.
+
+<Note>
+  Adoption is not performed with an instance API key. A nominated institution takes the role from its own Trusset issuer account. This surface exposes two reads. [Get Nominations](/endpoints/external-securities-lending/get-nominations) shows who has been nominated on a market. [List Pending Markets](/endpoints/external-securities-lending/list-pending-markets) shows the markets currently seeking a lender of record.
+</Note>
+
 ## Market lifecycle
 
 <Steps>
   <Step title="Deploy">
-    [Deploy Market](/endpoints/external-securities-lending/deploy-market) deploys the market, oracle, interest model, insurance fund, collateral adapter, and a liquidation router dedicated to this market, in one factory transaction.
+    [Deploy Market](/endpoints/external-securities-lending/deploy-market) deploys the market, oracle, interest model, insurance fund, collateral adapter, and a dedicated liquidation router, in one factory transaction. It also nominates the candidates who may become the lender of record.
+  </Step>
+  <Step title="Adopt">
+    A nominated candidate takes the lender-of-record role, which names the market's parties and declares how seized collateral is realized. Track it with [Get Nominations](/endpoints/external-securities-lending/get-nominations).
   </Step>
   <Step title="Authorize">
     A new market cannot take loans until token-side authorizations are complete. [Get Setup Steps](/endpoints/external-securities-lending/get-setup-steps) returns the outstanding items with ready-to-sign calldata. These are executed by the token's agent or identity registry operator, not by Trusset.
@@ -151,7 +172,7 @@ Once collateral reaches the router it does not sell itself. There is no auto-sel
 
 <Steps>
   <Step title="Withdraw for sale">
-    [Withdraw Collateral for Sale](/endpoints/external-securities-lending/withdraw-collateral-for-sale) moves collateral to a sale venue or custodian. The recipient must pass the token's compliance checks.
+    [Withdraw Collateral for Sale](/endpoints/external-securities-lending/withdraw-collateral-for-sale) moves collateral to the sale recipient the lender of record fixed when it took the role. That destination cannot be rotated, and it must pass the token's compliance checks.
   </Step>
   <Step title="Sell off-platform">
     Execute the sale through your own channel. Trusset is not involved.
@@ -170,10 +191,24 @@ A liquidation left unsettled for 7 days can be written off with [Handle Liquidat
 
 ## Per-market liquidation router
 
-Each market gets its own `SecurityLiquidationRouter`, deployed by the factory in the same transaction. The market admin holds `DEFAULT_ADMIN_ROLE` on it and the `liquidationOperator` you nominate at deployment holds `OPERATOR_ROLE`. Trusset holds no role. Nominating the registered wallet as `liquidationOperator` is what allows settlement to be driven through this API.
+Each market gets its own `SecurityLiquidationRouter`, deployed by the factory in the same transaction. The market admin holds `DEFAULT_ADMIN_ROLE` on it and the `liquidationOperator` holds `OPERATOR_ROLE`. Both are named by the lender of record when it takes the role, not at deployment. Trusset holds no role. Naming your registered wallet as `liquidationOperator` is what allows settlement to be driven through this API.
 
 Every market payload carries `liquidationRouterAddress`. Endpoints that act on a liquidation resolve the correct router automatically. Markets deployed before per-market routers existed continue to use the shared legacy router, transparently.
 
 ## Rate limits
 
-Read endpoints allow 100 requests per minute per API key. Write endpoints allow 10 per minute. Exceeding either returns `429` with code `RATE_LIMIT_EXCEEDED`. See [Rate Limits](/endpoints/rate-limits).
+Every request made with an instance API key counts against a ceiling of 200 requests per minute for that key. Some endpoints carry a second, tighter limit on top of it:
+
+| Limit | Applies to |
+|---|---|
+| 200 per minute | Every request on this surface, keyed by API key |
+| 10 per minute | Every write, plus [Get Lifecycle Statement](/endpoints/external-securities-lending/get-lifecycle-statement) |
+| 100 per minute | [List Markets](/endpoints/external-securities-lending/list-markets), [List Borrow Assets](/endpoints/external-securities-lending/list-borrow-assets), [Get Market History](/endpoints/external-securities-lending/get-history), [Get Index Status](/endpoints/external-securities-lending/get-index-status), [Get Terms](/endpoints/external-securities-lending/get-terms), [List Terms Versions](/endpoints/external-securities-lending/list-terms-versions), [Get Nominations](/endpoints/external-securities-lending/get-nominations), [List Pending Markets](/endpoints/external-securities-lending/list-pending-markets) |
+
+Reads not named above are bounded only by the 200 per minute ceiling. [Verify Signed Price](/endpoints/external-securities-lending/verify-price) is a write that carries no tighter limit, because it reads a signature rather than moving anything.
+
+Exceeding a limit returns `429` with code `RATE_LIMIT_EXCEEDED`, a `Retry-After` header in seconds, and `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`. See [Rate Limits](/endpoints/rate-limits).
+
+## Credits
+
+Requests on this surface also draw on your instance's monthly API credit allowance, billed against the lending service. Every response carries `X-Credits-Limit`, `X-Credits-Remaining` and `X-Credits-Reset`, plus an `X-Request-Id` you can quote in support requests. When the allowance is exhausted the request is refused with `402` and code `CREDIT_LIMIT_EXCEEDED`, and `metadata` carries `creditsLimit`, `creditsRemaining` and `resetsAt`. Credits consumed by a request that fails with a `5xx` are refunded automatically.

@@ -11,10 +11,14 @@ This is the final step of the manual settlement workflow. Until it is called, th
 ## Path Parameters
 
 <ParamField path="liquidationId" type="string" required>
-  Global router liquidation ID.
+  Liquidation ID on the market's router.
 </ParamField>
 
 ## Body Parameters
+
+<ParamField body="marketId" type="string">
+  Names the market whose liquidation you mean. Every market runs its own liquidation router and IDs restart at `1` on each of them, so the same `liquidationId` can exist on several markets in one instance. Supply this when it does, otherwise the call is refused with `AMBIGUOUS_LIQUIDATION_ID` and the response lists the candidates. Also accepted as a query parameter.
+</ParamField>
 
 <ParamField body="usdcProceeds" type="string" required>
   Final proceeds to deposit before settling, in the market's borrow asset. Must be zero or greater.
@@ -35,12 +39,11 @@ This is the final step of the manual settlement workflow. Until it is called, th
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="liquidationId" type="string">Liquidation ID, echoed back.</ResponseField>
-    <ResponseField name="usdcProceeds" type="string">Amount submitted on this call, echoed back. This is not the cumulative total forwarded to the market.</ResponseField>
-    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
     <ResponseField name="success" type="boolean">Nested inside `data` on the calldata response.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="steps" type="array">Ordered `approve` on the borrow asset, then `settleLiquidation`. Returned when `txHash` is omitted. The approve step is omitted when `usdcProceeds` is zero.</ResponseField>
-    <ResponseField name="signedBy" type="string">Address that signed, read from the receipt. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="steps" type="array">Ordered `approve` on the borrow asset, then `settleLiquidation`. Returned when `txHash` is omitted. The approve step is omitted when `usdcProceeds` is zero, leaving `settleLiquidation` as the only step.</ResponseField>
+    <ResponseField name="usdcProceeds" type="string">Proceeds the router actually forwarded to the market, read from the settlement event rather than from the request. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -80,13 +83,36 @@ const { success, data, error } = await res.json();
 </RequestExample>
 
 <ResponseExample>
-```json Response
+```json Confirmed Response
 {
   "success": true,
   "data": {
     "liquidationId": "14",
-    "usdcProceeds": "21400.00",
-    "txHash": "0xabc...def"
+    "usdcProceeds": "21400.000000",
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b"
+  }
+}
+```
+```json Error - Ambiguous ID
+{
+  "success": false,
+  "error": {
+    "code": "AMBIGUOUS_LIQUIDATION_ID",
+    "message": "Liquidation 14 exists on 2 markets in this instance because every market runs its own liquidation router. Pass marketId to name the one you mean.",
+    "candidates": [
+      {
+        "marketId": "clx_secmarket_001",
+        "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "status": "PENDING",
+        "collateralAmount": "220.000000000000000000"
+      },
+      {
+        "marketId": "clx_secmarket_004",
+        "marketAddress": "0x1c74f9a2b0e63d581a47c02f9b8de3517a604c2b",
+        "status": "WITHDRAWN_TO_CUSTODY",
+        "collateralAmount": "85.000000000000000000"
+      }
+    ]
   }
 }
 ```
@@ -116,10 +142,13 @@ const { success, data, error } = await res.json();
 |---|---|---|
 | `MISSING_ID` | `400` | No liquidation ID in the path |
 | `INVALID_AMOUNT` | `400` | `usdcProceeds` is absent, non-numeric, or negative |
-| `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
+| `AMBIGUOUS_LIQUIDATION_ID` | `400` | This ID exists on more than one market in your instance. The error carries `candidates`; resend with `marketId` |
 | `ALREADY_SETTLED` | `400` | The liquidation is already settled or written off |
 | `NO_PROCEEDS_COLLECTED` | `400` | Zero was submitted and the router holds no proceeds |
-| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | The registered wallet lacks `OPERATOR_ROLE`. The error carries grant `calldata` |
+| `WALLET_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance to resolve the signer against |
+| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | The resolved wallet lacks `OPERATOR_ROLE`. The error carries grant `calldata` |
 | `ROUTER_NOT_CONFIGURED` | `400` | No liquidation router resolved for this market |
-| `SETTLE_PREFLIGHT_FAILED` | `400` | Simulation reverted, commonly an insufficient balance on the signing wallet |
-| `SETTLE_TX_REVERTED` | `400` | The transaction reverted after broadcast. `error.txHash` carries the hash |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction settles a different liquidation |
+| `SETTLE_TX_REVERTED` | `400` | The settlement reverted. `error.txHash` carries the hash when one exists |
+| `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
+| `MARKET_NOT_FOUND` | `404` | `marketId` was supplied but names no market on your instance |

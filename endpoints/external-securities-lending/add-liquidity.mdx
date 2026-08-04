@@ -18,6 +18,10 @@ Two transactions are required: an ERC-20 approval, then the deposit. Both come b
   Amount to deposit as a decimal string, for example `"250000"`. Denominated in the market's borrow asset and parsed at its decimals.
 </ParamField>
 
+<ParamField body="provider" type="string">
+  Wallet that will sign the deposit. When supplied, the API checks it against the market's identity registry before offering a transaction and refuses with `IDENTITY_NOT_VERIFIED` if it would be rejected on-chain. Omit it to skip that check.
+</ParamField>
+
 <ParamField body="txHash" type="string">
   Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
 </ParamField>
@@ -26,10 +30,12 @@ Two transactions are required: an ERC-20 approval, then the deposit. Both come b
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="txHash" type="string">Deposit transaction hash. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="amount" type="string">Amount deposited, echoed back. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` when `txHash` is omitted.</ResponseField>
     <ResponseField name="steps" type="array">Ordered transactions to broadcast. Returned when `txHash` is omitted. The first approves the market to pull the borrow asset, the second calls `addLiquidity`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm with. Always `1`.</ResponseField>
+    <ResponseField name="confirmWith" type="string">`addLiquidity`.</ResponseField>
+    <ResponseField name="txHash" type="string">Deposit transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="amount" type="string">Amount actually deposited, read from the `LiquidityAdded` event rather than from the request. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -82,16 +88,28 @@ for (const step of data.steps) {
     "steps": [
       {
         "action": "SIGN_TRANSACTION",
-        "transaction": { "to": "0x98aD0ca091552e23C564B41C74282e5343D03E8a", "data": "0x..." },
+        "transaction": {
+          "to": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
         "functionName": "approve",
         "description": "Approve the market to pull USDC"
       },
       {
         "action": "SIGN_TRANSACTION",
-        "transaction": { "to": "0x70A0...", "data": "0x..." },
+        "transaction": {
+          "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
         "functionName": "addLiquidity"
       }
-    ]
+    ],
+    "confirmStepIndex": 1,
+    "confirmWith": "addLiquidity"
   }
 }
 ```
@@ -99,8 +117,8 @@ for (const step of data.steps) {
 {
   "success": true,
   "data": {
-    "txHash": "0xabc...def",
-    "amount": "250000"
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "amount": "250000.000000"
   }
 }
 ```
@@ -109,8 +127,21 @@ for (const step of data.steps) {
   "success": false,
   "error": {
     "code": "BELOW_MIN_DEPOSIT",
-    "message": "The first deposit into a market must be at least 1000.0 USDC"
+    "message": "The first deposit into a market must be at least 1000000000 of the smallest USDC unit (1000.0 USDC at 6 decimals)."
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `VALIDATION_ERROR` | `400` | `amount` is not a positive decimal string, or carries more decimal places than the borrow asset supports |
+| `BELOW_MIN_DEPOSIT` | `400` | This is the first deposit into an empty pool and it is under the floor |
+| `MARKET_PAUSED` | `400` | The market is paused. Its admin must unpause it |
+| `IDENTITY_NOT_VERIFIED` | `400` | `provider` is not verified on the market's identity registry |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet. See [Lender of record](/endpoints/external-securities-lending/introduction#lender-of-record) |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to check the first-deposit minimum. Retry shortly |

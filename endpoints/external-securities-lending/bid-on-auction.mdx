@@ -34,21 +34,28 @@ Bids can be partial. Buy any quantity up to `collateralRemaining`, and the aucti
 
 <ResponseField name="data" type="object">
   <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` when `txHash` is omitted.</ResponseField>
+    <ResponseField name="auctionId" type="integer">Auction the payload bids on.</ResponseField>
+    <ResponseField name="steps" type="array">Ordered transactions. The first approves the market to pull the borrow asset for the priced cost of this bid, the second calls `bidOnAuction`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm with. Always `1`.</ResponseField>
+    <ResponseField name="confirmWith" type="string">`bidOnAuction`.</ResponseField>
+    <ResponseField name="collateralAmount" type="string">Collateral the bid will actually buy, clamped to what the auction has left.</ResponseField>
+    <ResponseField name="pricePerUnit" type="string">The auction's live price per collateral unit, in borrow asset units.</ResponseField>
+    <ResponseField name="estimatedCost" type="string">`collateralAmount` priced at `pricePerUnit`. The approval step is sized to this.</ResponseField>
+    <ResponseField name="borrowAssetSymbol" type="string">Symbol of the asset the bid is paid in.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="auctionId" type="integer">Auction ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="collateralPurchased" type="string">Collateral bought, echoed back. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="usdcPaid" type="string">Amount paid, in borrow asset units, computed at the price at execution time. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="action" type="string">`SIGN_TRANSACTION` when `txHash` is omitted.</ResponseField>
-    <ResponseField name="transaction" type="object">`{ to, data }` for the `bidOnAuction` call. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="collateralPurchased" type="string">Collateral actually bought, read from the receipt. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="amountPaid" type="string">Amount actually paid, in borrow asset units, at the price at execution time. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="bidder" type="string">Address that signed the bid. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
 
-<Warning>
-  The bid transaction is returned alone, with no approval step. The bidder must already have approved the market contract to spend the borrow asset, otherwise the bid reverts.
-</Warning>
+<Note>
+  A bid larger than the collateral left is clamped by the contract to what remains, and the API prices the clamped amount. `collateralAmount` and `estimatedCost` in the response are therefore what the bid will actually cost, which can be less than what you asked for.
+</Note>
 
 <Note>
-  The price is read at execution, not at quote time, and it falls continuously. The amount actually paid is therefore at or below what you computed from `currentPrice` a moment earlier, never above. Size the approval against the quoted price to leave headroom.
+  The price is read at execution, not at quote time, and it falls continuously. The amount actually paid is therefore at or below `estimatedCost`, never above.
 </Note>
 
 <RequestExample>
@@ -89,9 +96,37 @@ if (Number(auction.currentPrice) <= reservePrice) {
 {
   "success": true,
   "data": {
-    "action": "SIGN_TRANSACTION",
-    "transaction": { "to": "0x70A0...", "data": "0x..." },
-    "functionName": "bidOnAuction"
+    "auctionId": 3,
+    "action": "SIGN_TRANSACTIONS",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "approve",
+        "description": "Approve the market to pull USDC"
+      },
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "bidOnAuction"
+      }
+    ],
+    "confirmStepIndex": 1,
+    "confirmWith": "bidOnAuction",
+    "collateralAmount": "100.000000000000000000",
+    "pricePerUnit": "112.180000",
+    "estimatedCost": "11218.000000",
+    "borrowAssetSymbol": "USDC"
   }
 }
 ```
@@ -99,11 +134,32 @@ if (Number(auction.currentPrice) <= reservePrice) {
 {
   "success": true,
   "data": {
-    "txHash": "0xabc...def",
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
     "auctionId": 3,
-    "collateralPurchased": "100",
-    "usdcPaid": "11218.000000"
+    "collateralPurchased": "100.000000000000000000",
+    "amountPaid": "11204.500000",
+    "bidder": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"
+  }
+}
+```
+```json Error - Auction Not Active
+{
+  "success": false,
+  "error": {
+    "code": "AUCTION_NOT_ACTIVE",
+    "message": "Auction 3 is not active — it was fully bought, settled after expiry, or never existed. Bidding on it reverts, so no transaction is offered."
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `VALIDATION_ERROR` | `400` | `auctionId` is not a positive integer, or `collateralAmount` is not a positive decimal string |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction bids on a different auction |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `AUCTION_NOT_ACTIVE` | `409` | The auction was fully bought, settled after expiry, has no collateral left, or never existed |
+| `AUCTION_STATE_UNAVAILABLE` | `503` | The auction could not be read on-chain, so the bid could not be priced. Retry shortly |

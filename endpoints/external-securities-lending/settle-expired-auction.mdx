@@ -9,7 +9,7 @@ Closes a Dutch auction that reached its end time without selling out, and transf
 Until this is called, an expired auction leaves the collateral in limbo: no longer purchasable, and not yet available for an off-platform sale.
 
 <Warning>
-  Requires the registered wallet to hold `LIQUIDATOR_ROLE` on the market, the same role [Liquidate Loan](/endpoints/external-securities-lending/liquidate) needs.
+  The signing wallet must hold `LIQUIDATOR_ROLE` on the market, the same role [Liquidate Loan](/endpoints/external-securities-lending/liquidate) needs. The check only runs when you pass `signerAddress`; without it the calldata is returned regardless and a wallet without the role has its transaction reverted on-chain.
 </Warning>
 
 ## Path Parameters
@@ -22,6 +22,10 @@ Until this is called, an expired auction leaves the collateral in limbo: no long
   Auction ID. Must be a positive integer sent as a JSON number.
 </ParamField>
 
+<ParamField body="signerAddress" type="string">
+  Wallet you intend to settle with. Supplying it turns on a `LIQUIDATOR_ROLE` check against that address, so the call is refused with `LIQUIDATOR_ROLE_MISSING` rather than handing back calldata that reverts. Omit it and no role check runs, because you sign in your own environment and the wallet this API knows about is not necessarily the one that will call.
+</ParamField>
+
 <ParamField body="txHash" type="string">
   Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
 </ParamField>
@@ -30,10 +34,12 @@ Until this is called, an expired auction leaves the collateral in limbo: no long
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="auctionId" type="integer">Auction ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="auctionId" type="integer">Auction ID, echoed back.</ResponseField>
+    <ResponseField name="success" type="boolean">Nested inside `data` on the calldata response.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION` when `txHash` is omitted.</ResponseField>
-    <ResponseField name="transaction" type="object">`{ to, data }` for the `settleExpiredAuction` call. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, for the `settleExpiredAuction` call. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`settleExpiredAuction`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -79,11 +85,11 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidatio
   "success": false,
   "error": {
     "code": "LIQUIDATOR_ROLE_MISSING",
-    "message": "Issuer wallet 0x123...456 does not hold LIQUIDATOR_ROLE on market 0x70A0...9c2d. Grant it via the market configuration flow.",
+    "message": "Wallet 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 does not hold LIQUIDATOR_ROLE on market 0x70a0e25c7b768b87e658348b3b577678a173e038. Grant it via the roles flow.",
     "calldata": {
       "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
       "data": "0x...",
-      "description": "Grant LIQUIDATOR_ROLE to the issuer wallet (requires market DEFAULT_ADMIN_ROLE)"
+      "description": "Grant LIQUIDATOR_ROLE to 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 (requires market DEFAULT_ADMIN_ROLE)"
     }
   }
 }
@@ -92,8 +98,9 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidatio
 {
   "success": false,
   "error": {
-    "code": "SETTLE_PREFLIGHT_FAILED",
-    "message": "Transaction reverted on-chain"
+    "code": "AUCTION_NOT_EXPIRED",
+    "message": "An auction can only be settled after it expires. Auction 3 runs until 2025-06-15T14:00:00.000Z, in 42 minutes. Bid on it to clear it sooner, or retry after that time.",
+    "eligibleAt": "2025-06-15T14:00:00.000Z"
   }
 }
 ```
@@ -103,8 +110,13 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidatio
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `LIQUIDATOR_ROLE_MISSING` | `400` | The registered wallet lacks `LIQUIDATOR_ROLE`. The error carries grant `calldata` |
-| `RELAYER_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance |
-| `SETTLE_PREFLIGHT_FAILED` | `400` | Simulation reverted. The auction has not expired, or was already settled |
-| `SETTLE_FAILED` | `400` | The transaction failed on-chain |
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `VALIDATION_ERROR` | `400` | `auctionId` is not a positive integer, or `signerAddress` is not a valid address |
+| `AUCTION_NOT_ACTIVE` | `400` | The auction was already fully bought or settled, so settling it again reverts |
+| `AUCTION_NOT_EXPIRED` | `400` | The auction is still running. The error carries `eligibleAt` |
+| `LIQUIDATOR_ROLE_MISSING` | `400` | `signerAddress` was supplied and lacks `LIQUIDATOR_ROLE`. The error carries grant `calldata` |
+| `WALLET_NOT_CONFIGURED` | `400` | No signer wallet could be resolved for the role check |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction settles a different auction |
+| `AUCTION_STATE_UNAVAILABLE` | `400` | The auction could not be read on-chain, so whether it has expired is unknown. Retry shortly |
+| `SETTLE_FAILED` | `400` | The settlement could not be prepared or confirmed and no more specific code applied |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

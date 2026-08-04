@@ -17,7 +17,7 @@ Readiness spans two layers. Contract wiring is set up by the factory at deployme
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="fullyConfigured" type="boolean">
-      True only when contract wiring is complete, the adapter is authorized on the collateral token, the router is an eligible collateral recipient, the registered wallet can sign oracle prices, and the registered wallet holds `LIQUIDATOR_ROLE`. This is the single flag to gate a market on.
+      The single flag to gate a market on. True only when all of the following hold: the market has a lender of record, contract wiring is complete, the adapter is authorized on the collateral token, the router is an eligible collateral recipient, the registered wallet can sign oracle prices, and it holds `LIQUIDATOR_ROLE`.
     </ResponseField>
     <ResponseField name="liquidationContract" type="string">Liquidation router the market is wired to.</ResponseField>
     <ResponseField name="insuranceFund" type="string">Insurance fund contract.</ResponseField>
@@ -41,6 +41,8 @@ Readiness spans two layers. Contract wiring is set up by the factory at deployme
     <ResponseField name="oracleSignerAuthorized" type="boolean">The registered wallet can push and sign prices for this market's oracle. The oracle owner is treated as authorized implicitly.</ResponseField>
     <ResponseField name="liquidatorRoleGranted" type="boolean">The registered wallet holds `LIQUIDATOR_ROLE` on the market, which liquidation and expired-auction settlement require.</ResponseField>
     <ResponseField name="relayerAddress" type="string">Registered wallet address, or null when none is configured. Every role check above is evaluated against this address.</ResponseField>
+    <ResponseField name="pendingCurator" type="boolean">The market has no lender of record yet, so every configuration transaction would assign a role nobody holds. `fullyConfigured` can never be true while this is set. See [Lender of record](/endpoints/external-securities-lending/introduction#lender-of-record).</ResponseField>
+    <ResponseField name="pendingCuratorMessage" type="string">Explanation accompanying `pendingCurator`, or null when the role has been taken.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -49,14 +51,15 @@ Readiness spans two layers. Contract wiring is set up by the factory at deployme
 | `requirement` | Meaning | Resolved by |
 |---|---|---|
 | `adapter_must_hold_agent_role` | `FREEZE` mode. The adapter needs the agent role on the collateral token | The token's agent administrator |
-| `adapter_must_be_verified_holder` | `CUSTODY` mode. The adapter must be a verified holder or an allowlisted contract | The token's identity registry operator |
+| `adapter_must_be_verified_holder` | `CUSTODY` mode. The adapter must be a verified holder on the token's identity registry | The token's identity registry operator |
+| `adapter_must_be_authorized_contract` | `CUSTODY` mode. The adapter must be allow-listed on the collateral token itself | The token's compliance administrator |
 | `token_not_freeze_compatible` | The token does not implement the freeze interface. `FREEZE` mode is impossible. Redeploy in `CUSTODY` mode | Not resolvable |
-| `identity_registry_unknown` | No identity registry was supplied at deployment, so compliance cannot be verified | Redeploy with `identityRegistry`, or verify manually off-platform |
+| `collateral_authorization_unresolvable` | The token exposes neither an identity registry nor a contract allow-list, so the adapter can never be authorized to hold collateral | Not resolvable |
 | `adapter_not_deployed` | No adapter address is recorded on the market | Contact Trusset |
 | `unknown` | The check could not complete, usually an RPC failure | Retry |
 
 <Note>
-  `identity_registry_unknown` is treated as satisfied when computing `fullyConfigured`, because the backend cannot prove or disprove compliance without a registry. It is not a pass. Verify authorization out of band before letting borrowers in.
+  `routerHolderAuthorized` is reported as `true` when the collateral token exposes no identity registry and no contract allow-list, because eligibility cannot be evaluated without one. That is an unknown, not a pass. Verify the router's authorization out of band before letting borrowers in.
 </Note>
 
 <Tip>
@@ -99,6 +102,8 @@ const { data } = await res.json();
     "oracleSignerAuthorized": true,
     "liquidatorRoleGranted": true,
     "relayerAddress": "0x123...456",
+    "pendingCurator": false,
+    "pendingCuratorMessage": null,
     "fullyConfigured": true
   }
 }

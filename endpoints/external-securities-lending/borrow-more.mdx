@@ -15,7 +15,7 @@ Single transaction in both modes. No approval is involved because funds move out
 ## Body Parameters
 
 <ParamField body="loanId" type="integer" required>
-  On-chain loan ID. Must be a positive integer sent as a JSON number, not a string.
+  On-chain loan ID. A positive integer. Accepted as a JSON number or as a numeric string, so the value [Get Loan](/endpoints/external-securities-lending/get-loan) returns passes straight back.
 </ParamField>
 
 <ParamField body="amount" type="string" required>
@@ -44,7 +44,8 @@ Single transaction in both modes. No approval is involved because funds move out
     <ResponseField name="loanId" type="integer">Loan ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="additionalBorrow" type="string">Amount borrowed, echoed back. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION` when `txHash` is omitted.</ResponseField>
-    <ResponseField name="transaction" type="object">`{ to, data }` for the `borrowMore` call. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, for the `borrowMore` call. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`borrowMore`. Returned when `txHash` is omitted.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -53,7 +54,7 @@ Single transaction in both modes. No approval is involved because funds move out
 </Warning>
 
 <Note>
-  This endpoint performs no preflight check in either mode. An amount beyond capacity reverts on-chain. Compute headroom from [Get Max Borrow](/endpoints/external-securities-lending/get-max-borrow) against the loan's current collateral, less the outstanding principal and accrued interest.
+  Capacity is checked before any transaction is offered. An amount past what the collateral supports is refused with `EXCEEDS_MAX_BORROW`, and one the pool cannot fund with `INSUFFICIENT_LIQUIDITY`. That check is skipped when a `signedPrice` is supplied, because the contract then prices against the signature rather than the stored value. In that case the amount reverts on-chain instead. Compute headroom from [Get Max Borrow](/endpoints/external-securities-lending/get-max-borrow) against the loan's collateral, less outstanding principal and accrued interest.
 </Note>
 
 <RequestExample>
@@ -87,3 +88,20 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `VALIDATION_ERROR` | `400` | `loanId` is not a positive integer, or `amount` carries more decimal places than the borrow asset supports |
+| `LOAN_NOT_ACTIVE` | `400` | The loan is closed and can no longer be modified |
+| `MARKET_PAUSED` | `400` | The market is paused. Its admin must unpause it |
+| `PRICE_STALE` | `400` | The oracle price is outside the market's `maxPriceAge`. Push a NAV with [Sync Oracle Price](/endpoints/external-securities-lending/sync-oracle), or supply a `signedPrice` |
+| `EXCEEDS_MAX_BORROW` | `400` | The request would take the loan past what its collateral supports. Skipped when a `signedPrice` is supplied |
+| `INSUFFICIENT_LIQUIDITY` | `400` | The pool holds less available liquidity than the request needs |
+| `LOAN_NOT_FOUND` | `404` | No loan with that ID exists on this market |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet. See [Lender of record](/endpoints/external-securities-lending/introduction#lender-of-record) |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to run a check. Retry shortly |
+| `LOAN_STATE_UNAVAILABLE` | `503` | The loan could not be read from the network. Retry shortly |

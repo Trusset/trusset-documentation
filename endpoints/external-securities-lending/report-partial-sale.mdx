@@ -4,21 +4,25 @@ api: 'POST /lending-external-securities/api/liquidations/report-partial-sale/{li
 description: 'Deposit interim sale proceeds into the router'
 ---
 
-Records proceeds from a partial sale of seized collateral and transfers them from the registered wallet into the liquidation router. Use it when a position is being sold down in tranches and you want proceeds banked as they arrive, rather than held off-platform until the final settlement.
+Records proceeds from a partial sale of seized collateral and transfers them from the signing wallet into the liquidation router. Use it when a position is being sold down in tranches and you want proceeds banked as they arrive, rather than held off-platform until the final settlement.
 
 The endpoint is repeatable. Each call increases the router's `proceedsCollected`.
 
 <Warning>
-  The registered wallet must be holding the proceeds. This call pulls the borrow asset from the registered wallet wallet into the router, so fund the registered wallet before calling. An insufficient balance surfaces as `PARTIAL_SALE_PREFLIGHT_FAILED`.
+  The signing wallet must be holding the proceeds. This call pulls the borrow asset from that wallet into the router, so fund it before broadcasting. An insufficient balance reverts on-chain.
 </Warning>
 
 ## Path Parameters
 
 <ParamField path="liquidationId" type="string" required>
-  Global router liquidation ID.
+  Liquidation ID on the market's router.
 </ParamField>
 
 ## Body Parameters
+
+<ParamField body="marketId" type="string">
+  Names the market whose liquidation you mean. Every market runs its own liquidation router and IDs restart at `1` on each of them, so the same `liquidationId` can exist on several markets in one instance. Supply this when it does, otherwise the call is refused with `AMBIGUOUS_LIQUIDATION_ID` and the response lists the candidates.
+</ParamField>
 
 <ParamField body="collateralSold" type="string" required>
   Collateral disposed of in this tranche, as a decimal string in collateral token units. Must be greater than zero.
@@ -47,7 +51,6 @@ The endpoint is repeatable. Each call increases the router's `proceedsCollected`
     <ResponseField name="success" type="boolean">Nested inside `data` on the calldata response.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="steps" type="array">Ordered `approve` on the borrow asset, then `reportPartialSale`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="signedBy" type="string">Address that signed, read from the receipt. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -130,9 +133,14 @@ await fetch(
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
+| `VALIDATION_ERROR` | `400` | `collateralSold` or `usdcProceeds` is not a positive decimal string |
+| `AMBIGUOUS_LIQUIDATION_ID` | `400` | This ID exists on more than one market in your instance. The error carries `candidates`; resend with `marketId` |
 | `ALREADY_SETTLED` | `400` | The liquidation is settled or written off |
-| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | The registered wallet lacks `OPERATOR_ROLE`. The error carries grant `calldata` |
+| `WALLET_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance to resolve the signer against |
+| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | The resolved wallet lacks `OPERATOR_ROLE`. The error carries grant `calldata` |
 | `ROUTER_NOT_CONFIGURED` | `400` | No liquidation router resolved for this market |
-| `PARTIAL_SALE_PREFLIGHT_FAILED` | `400` | Simulation reverted, commonly an insufficient balance on the signing wallet |
-| `PARTIAL_SALE_TX_REVERTED` | `400` | The transaction reverted after broadcast |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction targets a different liquidation |
+| `PARTIAL_SALE_TX_REVERTED` | `400` | The report reverted. `error.txHash` carries the hash when one exists |
+| `PARTIAL_SALE_FAILED` | `400` | The report could not be prepared and no more specific code applied |
+| `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
+| `MARKET_NOT_FOUND` | `404` | `marketId` was supplied but names no market on your instance |

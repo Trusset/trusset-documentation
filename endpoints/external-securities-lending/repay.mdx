@@ -6,7 +6,7 @@ description: 'Repay loan debt, interest first then principal'
 
 Repays part or all of a loan's outstanding debt. Accrued interest is settled before principal. Anyone can repay any loan, so a third party can rescue a position approaching liquidation.
 
-Two transactions are required: an approval on the borrow asset, then the repayment. Both come back as ordered steps.
+At least two transactions are required: an approval on the borrow asset, then the repayment. They come back as ordered steps.
 
 ## Path Parameters
 
@@ -15,36 +15,54 @@ Two transactions are required: an approval on the borrow asset, then the repayme
 ## Body Parameters
 
 <ParamField body="loanId" type="integer" required>
-  On-chain loan ID. Must be a positive integer sent as a JSON number.
+  On-chain loan ID. A positive integer. Accepted as a JSON number or as a numeric string, so the value [Get Loan](/endpoints/external-securities-lending/get-loan) returns passes straight back.
 </ParamField>
 
-<ParamField body="amount" type="string" required>
-  Amount to repay as a decimal string in borrow asset units. The contract caps repayment at the total debt, so overpaying does not transfer more than owed.
+<ParamField body="amount" type="string">
+  Amount to repay as a decimal string in borrow asset units. The contract caps repayment at the total debt, so overpaying does not transfer more than owed. Required unless `all` is `true` or you are confirming with `txHash`.
+</ParamField>
+
+<ParamField body="all" type="boolean">
+  Repay the loan in full. The API reads the current debt and sizes the approval with a small overshoot, so interest accruing between the quote and the mine cannot leave dust behind. Use this instead of computing a payoff yourself.
 </ParamField>
 
 <ParamField body="txHash" type="string">
   Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
 </ParamField>
 
+## Transaction Shape
+
+A partial repayment returns two steps: `approve` on the borrow asset, then `repay`.
+
+A full repayment (`all: true`) returns three. The third resets the allowance to zero. `repay` caps the pull at the true debt, so without it the unused approval would stay live against the payer's funds after the loan closed.
+
+<Warning>
+  On a full repayment the confirmable step is no longer the last one. Confirm with the hash of the step named by `confirmStepIndex`, which is always `1` here and always the step whose `functionName` is `repay`. Confirming with the allowance-reset hash returns `TX_WRONG_TARGET`.
+</Warning>
+
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="loanId" type="integer">Loan ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="repaidAmount" type="string">Amount submitted, echoed back. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` when `txHash` is omitted.</ResponseField>
-    <ResponseField name="steps" type="array">Ordered `approve` then `repay` transactions. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="steps" type="array">Ordered transactions to broadcast. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="fullRepayment" type="boolean">Whether the payload settles the loan in full.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm with. Always `1`.</ResponseField>
+    <ResponseField name="confirmWith" type="string">`repay`.</ResponseField>
+    <ResponseField name="outstandingDebt" type="string">Principal plus accrued interest at the time the payload was built.</ResponseField>
+    <ResponseField name="repayAmount" type="string">Amount the `repay` step is sized for, including the overshoot on a full repayment.</ResponseField>
+    <ResponseField name="collateralRelease" type="object">Present on a full repayment when releasing the collateral is restricted. Describes what the collateral token would do.</ResponseField>
+    <ResponseField name="warning" type="string">Human-readable form of `collateralRelease`, present alongside it.</ResponseField>
+    <ResponseField name="success" type="boolean">Nested inside `data` on the calldata response.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming.</ResponseField>
+    <ResponseField name="loanId" type="integer">Loan ID, echoed back. Returned when confirming.</ResponseField>
+    <ResponseField name="repaidAmount" type="string">Amount that actually moved, read from the `LoanRepaid` event rather than from the calldata. On a full repayment this is lower than `repayAmount`, because the contract pulls only the true debt. Returned when confirming.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
   Repaying the full debt does not release collateral on its own. Follow with [Close Loan](/endpoints/external-securities-lending/close-loan) to unlock the pledged tokens and mark the position repaid.
 </Note>
-
-<Tip>
-  Read `principal` and `accruedInterest` from [Get Loan](/endpoints/external-securities-lending/get-loan) immediately before repaying. Interest accrues per block, so a payoff quote computed even a minute earlier will leave dust behind and block the subsequent close.
-</Tip>
 
 <RequestExample>
 ```bash cURL
@@ -54,12 +72,25 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
   -d '{"loanId": 5, "amount": "10000"}'
 ```
 ```typescript TypeScript
-const loanRes = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/loan/5`,
-  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/repay`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ loanId: 5, all: true })
+  }
 );
-const { data: loan } = await loanRes.json();
-const payoff = (Number(loan.principal) + Number(loan.accruedInterest)) * 1.0001;
+const { data } = await res.json();
+
+const hashes = [];
+for (const step of data.steps) {
+  const tx = await wallet.sendTransaction(step.transaction);
+  await tx.wait();
+  hashes.push(tx.hash);
+}
 
 await fetch(
   `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/repay`,
@@ -69,14 +100,14 @@ await fetch(
       'X-API-Key': 'trusset_your_key_here',
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ loanId: 5, amount: payoff.toFixed(6) })
+    body: JSON.stringify({ loanId: 5, txHash: hashes[data.confirmStepIndex] })
   }
 );
 ```
 </RequestExample>
 
 <ResponseExample>
-```json Calldata Response
+```json Calldata Response - Full Repayment
 {
   "success": true,
   "data": {
@@ -84,16 +115,42 @@ await fetch(
     "steps": [
       {
         "action": "SIGN_TRANSACTION",
-        "transaction": { "to": "0x98aD0ca091552e23C564B41C74282e5343D03E8a", "data": "0x..." },
+        "transaction": {
+          "to": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
         "functionName": "approve",
         "description": "Approve the market to pull USDC"
       },
       {
         "action": "SIGN_TRANSACTION",
-        "transaction": { "to": "0x70A0...", "data": "0x..." },
+        "transaction": {
+          "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
         "functionName": "repay"
+      },
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "approve",
+        "description": "Clear the leftover USDC allowance granted for this repayment"
       }
-    ]
+    ],
+    "fullRepayment": true,
+    "confirmStepIndex": 1,
+    "confirmWith": "repay",
+    "outstandingDebt": "50412.881000",
+    "repayAmount": "50513.706763"
   }
 }
 ```
@@ -101,18 +158,18 @@ await fetch(
 {
   "success": true,
   "data": {
-    "txHash": "0xabc...def",
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
     "loanId": 5,
-    "repaidAmount": "10000"
+    "repaidAmount": "50412.913422"
   }
 }
 ```
-```json Error - Preflight Failed
+```json Error - Wrong Step Confirmed
 {
   "success": false,
   "error": {
-    "code": "PREFLIGHT_FAILED",
-    "message": "execution reverted: LoanNotActive"
+    "code": "TX_WRONG_TARGET",
+    "message": "This transaction does not target the market. A full repayment is signed as several steps and only the repay step can be confirmed — use the hash of the step whose functionName is \"repay\" (index 1 of the steps returned for this repayment), not the last one."
   }
 }
 ```
@@ -123,6 +180,12 @@ await fetch(
 | Code | HTTP | Cause |
 |---|---|---|
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
-| `PREFLIGHT_FAILED` | `400` | The repayment reverted during simulation. `message` carries the reason |
-| `REPAY_FAILED` | `400` | The transaction failed on-chain |
-| `VALIDATION_ERROR` | `400` | `amount` carries more decimal places than the borrow asset supports |
+| `VALIDATION_ERROR` | `400` | `loanId` is not a positive integer, or neither `amount` nor `all` was supplied |
+| `INVALID_AMOUNT` | `400` | `amount` carries more decimal places than the borrow asset supports |
+| `NO_OUTSTANDING_DEBT` | `400` | `all` was set on a loan that owes nothing |
+| `LOAN_NOT_ACTIVE` | `400` | The loan is closed and can no longer be modified |
+| `TX_WRONG_TARGET` | `400` | The confirmed transaction does not target the market. On a full repayment, confirm the `repay` step |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction repays a different loan |
+| `REPAY_FAILED` | `400` | The repayment could not be prepared and no more specific code applied |
+| `LOAN_NOT_FOUND` | `404` | No such loan on this market |
+| `LOAN_STATE_UNAVAILABLE` | `503` | The loan could not be read from the network right now. Retry shortly |

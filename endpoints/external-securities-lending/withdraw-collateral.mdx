@@ -15,7 +15,7 @@ Single transaction in both modes.
 ## Body Parameters
 
 <ParamField body="loanId" type="integer" required>
-  On-chain loan ID. Must be a positive integer sent as a JSON number.
+  On-chain loan ID. A positive integer. Accepted as a JSON number or as a numeric string, so the value [Get Loan](/endpoints/external-securities-lending/get-loan) returns passes straight back.
 </ParamField>
 
 <ParamField body="amount" type="string" required>
@@ -44,12 +44,19 @@ Single transaction in both modes.
     <ResponseField name="loanId" type="integer">Loan ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="amount" type="string">Collateral released, echoed back. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION` when `txHash` is omitted.</ResponseField>
-    <ResponseField name="transaction" type="object">`{ to, data }` for the `withdrawCollateral` call. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, for the `withdrawCollateral` call. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`withdrawCollateral`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="collateralRelease" type="object">Present on a `CUSTODY` market when the collateral token would refuse to return the collateral to the borrower. The withdrawal still succeeds; the adapter escrows the balance instead of reverting, and the borrower reclaims it through [Claim Escrowed Collateral](/endpoints/external-securities-lending/claim-escrowed-collateral).</ResponseField>
+    <ResponseField name="warning" type="string">Human-readable form of `collateralRelease`, present alongside it.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Warning>
-  This endpoint performs no preflight check. A withdrawal that would breach the health factor, exceed the posted collateral, or target an inactive loan reverts on-chain. Compute the safe amount from the loan's current state before submitting.
+  A withdrawal that would breach the health factor, exceed the posted collateral, or target an inactive loan is refused before a transaction is offered, with `WOULD_BREACH_HEALTH_FACTOR`, `INSUFFICIENT_COLLATERAL` or `LOAN_NOT_ACTIVE`. The price is only consulted while the loan still carries debt, so a debt-free withdrawal is never refused for a stale price.
+</Warning>
+
+<Warning>
+  A `CUSTODY` withdrawal the collateral token refuses does not revert. The adapter escrows the balance instead, so the borrower signs a transaction that confirms and delivers nothing. When that is the case the response carries `collateralRelease` and `warning`. Surface them to the borrower before they sign.
 </Warning>
 
 <Note>
@@ -87,3 +94,18 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `VALIDATION_ERROR` | `400` | `loanId` is not a positive integer, or `amount` carries more decimal places than the collateral token supports |
+| `LOAN_NOT_ACTIVE` | `400` | The loan is closed and can no longer be modified |
+| `INSUFFICIENT_COLLATERAL` | `400` | `amount` exceeds the collateral the loan holds |
+| `WOULD_BREACH_HEALTH_FACTOR` | `400` | The withdrawal would leave the loan under-collateralised against its outstanding debt |
+| `PRICE_STALE` | `400` | The loan carries debt and the oracle price is outside the market's `maxPriceAge`. Push a NAV with [Sync Oracle Price](/endpoints/external-securities-lending/sync-oracle), or supply a `signedPrice` |
+| `LOAN_NOT_FOUND` | `404` | No loan with that ID exists on this market |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to check its price window. Retry shortly |
+| `LOAN_STATE_UNAVAILABLE` | `503` | The loan or the resulting health factor could not be read. Retry shortly |

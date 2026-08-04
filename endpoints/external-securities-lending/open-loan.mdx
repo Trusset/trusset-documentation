@@ -22,6 +22,10 @@ The maximum borrow is the collateral value multiplied by the market's collateral
   Amount to borrow, as a decimal string. Parsed at the borrow asset's decimals. Must be at least the market's `minBorrowAmount`.
 </ParamField>
 
+<ParamField body="borrowerAddress" type="string" required>
+  Wallet that will sign the loan and hold the collateral. Required when building calldata. Every collateral, identity and supply-cap check runs against this address, and there is no loan to resolve it from yet. Omitting it returns `BORROWER_ADDRESS_REQUIRED`. Not needed on the confirm call, where the borrower is taken from the mined transaction.
+</ParamField>
+
 <ParamField body="signedPrice" type="object">
   EIP-712 signed price from [Sign Price](/endpoints/external-securities-lending/sign-price), applied atomically with the loan. Omit to price against the stored oracle value, which must not be stale.
   <Expandable>
@@ -44,6 +48,8 @@ When `txHash` is omitted the response is always `SIGN_TRANSACTIONS` with a `mode
 
 **`FREEZE`** returns one step: `openLoan`. No approval exists because the tokens never leave the borrower's wallet.
 
+Both shapes carry `confirmStepIndex` and `confirmWith: "openLoan"`, naming the step whose hash confirms the loan.
+
 ## Response Fields
 
 Confirming returns `201`.
@@ -59,7 +65,7 @@ Confirming returns `201`.
 </ResponseField>
 
 <Warning>
-  Loans cannot be opened until the market's collateral adapter is authorized on the token. The endpoint checks this before doing anything else and rejects with `COLLATERAL_ADAPTER_NOT_AUTHORIZED` or `FREEZE_MODE_UNSUPPORTED_TOKEN`. See [Get Setup Steps](/endpoints/external-securities-lending/get-setup-steps).
+  Loans cannot be opened until the market has a lender of record and its collateral adapter is authorized on the token. A market still seeking a lender of record is refused on that ground first, with `MARKET_PENDING_CURATOR`. The token-side authorizations are that party's to arrange, so naming them as the obstacle would send the borrower to the wrong place. Once the role is taken, an unauthorized adapter rejects with `COLLATERAL_ADAPTER_NOT_AUTHORIZED` or `FREEZE_MODE_UNSUPPORTED_TOKEN`. See [Get Setup Steps](/endpoints/external-securities-lending/get-setup-steps).
 </Warning>
 
 <Note>
@@ -73,7 +79,8 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
   -H "Content-Type: application/json" \
   -d '{
     "collateralAmount": "1000",
-    "borrowAmount": "50000"
+    "borrowAmount": "50000",
+    "borrowerAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"
   }'
 ```
 ```typescript TypeScript
@@ -88,6 +95,7 @@ const res = await fetch(
     body: JSON.stringify({
       collateralAmount: '1000',
       borrowAmount: '50000',
+      borrowerAddress: await wallet.getAddress(),
       signedPrice: {
         price: signed.price,
         timestamp: signed.timestamp,
@@ -111,7 +119,7 @@ for (const step of data.steps) {
 {
   "success": true,
   "data": {
-    "txHash": "0xabc...def",
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
     "loanId": "5",
     "positionId": "secpos_014",
     "collateralAmount": "1000",
@@ -128,16 +136,28 @@ for (const step of data.steps) {
     "steps": [
       {
         "action": "SIGN_TRANSACTION",
-        "transaction": { "to": "0xabc...def", "data": "0x..." },
+        "transaction": {
+          "to": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
         "functionName": "approve",
         "description": "Approve the custody adapter to pull collateral"
       },
       {
         "action": "SIGN_TRANSACTION",
-        "transaction": { "to": "0x70A0...", "data": "0x..." },
+        "transaction": {
+          "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
         "functionName": "openLoan"
       }
-    ]
+    ],
+    "confirmStepIndex": 1,
+    "confirmWith": "openLoan"
   }
 }
 ```
@@ -150,10 +170,17 @@ for (const step of data.steps) {
     "steps": [
       {
         "action": "SIGN_TRANSACTION",
-        "transaction": { "to": "0x70A0...", "data": "0x..." },
+        "transaction": {
+          "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
         "functionName": "openLoan"
       }
-    ]
+    ],
+    "confirmStepIndex": 0,
+    "confirmWith": "openLoan"
   }
 }
 ```
@@ -162,7 +189,7 @@ for (const step of data.steps) {
   "success": false,
   "error": {
     "code": "COLLATERAL_ADAPTER_NOT_AUTHORIZED",
-    "message": "The freeze adapter is not authorized on the collateral token yet. Complete market configuration (grant the adapter the agent role) before opening loans."
+    "message": "The custody adapter is not allow-listed on the collateral token yet. Complete market configuration (authorizeAdapterOnToken) before opening loans."
   }
 }
 ```
@@ -171,7 +198,16 @@ for (const step of data.steps) {
   "success": false,
   "error": {
     "code": "EXCEEDS_MAX_BORROW",
-    "message": "Borrow amount exceeds the maximum for this collateral"
+    "message": "That collateral supports at most 48250.000000 USDC of borrowing."
+  }
+}
+```
+```json Error - Pending Lender of Record
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_PENDING_CURATOR",
+    "message": "This market has no lender of record yet, so opening a loan is not possible. A nominated candidate must take the role before the market can hold liquidity or collateral."
   }
 }
 ```
@@ -179,11 +215,24 @@ for (const step of data.steps) {
 
 ## Error Codes
 
+The calldata call runs the same checks the contract would, in the same order. A refusal therefore names the condition the borrower would otherwise have hit on-chain.
+
 | Code | HTTP | Cause |
 |---|---|---|
-| `COLLATERAL_ADAPTER_NOT_AUTHORIZED` | `400` | The adapter lacks the agent role (`FREEZE`) or verified holder status (`CUSTODY`) on the collateral token |
-| `FREEZE_MODE_UNSUPPORTED_TOKEN` | `400` | The token does not implement the ERC-3643 freeze interface. Use a `CUSTODY` market |
-| `BELOW_MIN_BORROW` | `400` | `borrowAmount` is under the market's `minBorrowAmount`. Returned when `txHash` is omitted |
-| `EXCEEDS_MAX_BORROW` | `400` | `borrowAmount` exceeds what the collateral supports. Returned when `txHash` is omitted |
+| `BORROWER_ADDRESS_REQUIRED` | `400` | `borrowerAddress` was omitted while building calldata |
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
-| `TX_REVERTED` | `400` | The transaction reverted. Common causes are a stale oracle price, an exhausted supply cap, or insufficient pool liquidity |
+| `COLLATERAL_ADAPTER_NOT_AUTHORIZED` | `400` | The adapter lacks the agent role (`FREEZE`) or allow-listed or verified holder status (`CUSTODY`) on the collateral token |
+| `FREEZE_MODE_UNSUPPORTED_TOKEN` | `400` | The token does not implement the ERC-3643 freeze interface. Use a `CUSTODY` market |
+| `MARKET_PAUSED` | `400` | The market is paused. Its admin must unpause it |
+| `IDENTITY_NOT_VERIFIED` | `400` | `borrowerAddress` is not verified on the market's identity registry |
+| `BELOW_MIN_BORROW` | `400` | `borrowAmount` is under the market's `minBorrowAmount` |
+| `PRICE_STALE` | `400` | The oracle price is outside the market's `maxPriceAge`. Push a NAV with [Sync Oracle Price](/endpoints/external-securities-lending/sync-oracle), or supply a `signedPrice` |
+| `SUPPLY_CAP_EXCEEDED` | `400` | The pledge would push total collateral past `maxTotalCollateral` |
+| `USER_SUPPLY_CAP_EXCEEDED` | `400` | The pledge would push this borrower past `maxUserCollateral` |
+| `EXCEEDS_MAX_BORROW` | `400` | `borrowAmount` exceeds what the collateral supports. Skipped when a `signedPrice` is supplied |
+| `INSUFFICIENT_LIQUIDITY` | `400` | The pool holds less uncommitted liquidity than the loan needs |
+| `COLLATERAL_TRANSFER_RESTRICTED` | `400` | The collateral token's compliance rules block moving this collateral into the custody adapter |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet. See [Lender of record](/endpoints/external-securities-lending/introduction#lender-of-record) |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to run a check, so no transaction was prepared. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

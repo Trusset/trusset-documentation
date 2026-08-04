@@ -6,36 +6,26 @@ description: 'Deploy a lending market for an imported ERC-3643 security token'
 
 Deploys a complete market in one factory transaction: the lending market, its price oracle, interest rate model, insurance fund, collateral adapter, and a liquidation router dedicated to this market with the market pre-authorized on it.
 
-A collateral token can back one `FREEZE` market and one `CUSTODY` market at the same time. Deploying a second market for the same token and mode returns `409 MARKET_EXISTS`.
+The market is deployed **seeking a lender of record**. It names no admin, no issuer and no collateral agent at deployment. Instead you nominate one or more `candidates`, and the market stays inert until one of them takes the role. See [Lender of record](/endpoints/external-securities-lending/introduction#lender-of-record).
+
+A collateral token can back several markets as long as they differ in collateral mode or in settlement asset. Deploying a second market for the same token, mode and borrow asset returns `409 MARKET_EXISTS`.
 
 <Warning>
-  A freshly deployed market cannot accept loans. Token-side authorizations must be completed by the collateral token's agent or identity registry operator, who is typically not Trusset and not you. Call [Get Setup Steps](/endpoints/external-securities-lending/get-setup-steps) immediately after deployment for the outstanding items and their calldata.
+  A freshly deployed market cannot take loans or liquidity. Two things are outstanding. A nominated candidate must take the lender-of-record role. The token-side authorizations must then be completed by the collateral token's agent or identity registry operator, who is typically neither Trusset nor you. Call [Get Setup Steps](/endpoints/external-securities-lending/get-setup-steps) after deployment for the outstanding items and their calldata.
 </Warning>
 
 ## Body Parameters
 
 <ParamField body="collateralTokenAddress" type="string" required>
-  ERC-3643 security token accepted as collateral. Must be a token imported into your instance.
-</ParamField>
-
-<ParamField body="issuerAddress" type="string" required>
-  Wallet receiving `ISSUER_ROLE` on the market. Must not be the zero address.
-</ParamField>
-
-<ParamField body="adminAddress" type="string" required>
-  Wallet receiving `DEFAULT_ADMIN_ROLE` on the market and on the market's liquidation router. Must not be the zero address.
+  ERC-3643 security token accepted as collateral. Must already be imported into your instance, and must not be the same token as the borrow asset.
 </ParamField>
 
 <ParamField body="initialPrice" type="string" required>
-  Opening collateral price as a decimal string with up to 18 decimal places, for example `"104.82"`. Must be greater than zero. Denominated in the borrow asset and parsed at its decimals.
+  Opening collateral price as a decimal string with at most 18 decimal places, for example `"104.82"`. Must be greater than zero. Denominated in the borrow asset and parsed at its decimals, so a market settling in USDC accepts at most 6 decimal places here.
 </ParamField>
 
-<ParamField body="collateralAgent" type="string" required>
-  Named pledgee recorded on the market and on every adapter lock. This address carries no capabilities. It exists so the pledge is documented on-chain against a specific legal counterparty. Must not be the zero address.
-</ParamField>
-
-<ParamField body="liquidationOperator" type="string" required>
-  Wallet receiving `OPERATOR_ROLE` on the market's liquidation router. This is the address permitted to withdraw seized collateral for sale and settle proceeds. Use your registered wallet address to drive settlement through this API. Must not be the zero address.
+<ParamField body="candidates" type="array" required>
+  Addresses nominated to become the market's lender of record. Between 1 and 20 entries, none of them the zero address. A deployment with no candidate can never be adopted and would stay inert, so the field is rejected when empty.
 </ParamField>
 
 <ParamField body="mode" type="string" default="FREEZE">
@@ -43,15 +33,15 @@ A collateral token can back one `FREEZE` market and one `CUSTODY` market at the 
 </ParamField>
 
 <ParamField body="priceSource" type="string" default="NAV">
-  `NAV` or `MARKET`. `MARKET` causes the contract to reject Dutch auctions and to floor `auctionMinPremium` at 9800 basis points. Cannot be changed after deployment.
+  `NAV` or `MARKET`. `MARKET` causes the contract to reject Dutch auctions and to raise the auction floor premium, and requires `identityRegistry` to be set. Cannot be changed after deployment.
 </ParamField>
 
 <ParamField body="borrowAssetAddress" type="string">
-  Settlement token (stablecoin) for the market. Any ERC-20 with 6 to 18 decimals, validated on-chain. Omit to use USDC. Cannot be changed after deployment.
+  Settlement token (stablecoin) for the market. Any ERC-20 with 6 to 18 decimals, validated on-chain at deploy time. Omit to use USDC. Cannot be changed after deployment.
 </ParamField>
 
 <ParamField body="identityRegistry" type="string">
-  ERC-3643 identity registry for the collateral token, available on the imported token's metadata. Required in practice for `CUSTODY` mode, recommended for `FREEZE`. Defaults to the zero address, which leaves compliance checks unresolvable and reports authorization status as unknown.
+  ERC-3643 identity registry for the collateral token, available on the imported token's metadata. Required when `priceSource` is `MARKET`, required in practice for `CUSTODY` mode, recommended for `FREEZE`. Defaults to the zero address, which leaves compliance checks unresolvable and reports authorization status as unknown.
 </ParamField>
 
 <ParamField body="fallbackDecimals" type="integer" default="0">
@@ -64,6 +54,21 @@ A collateral token can back one `FREEZE` market and one `CUSTODY` market at the 
 
 ## Response Fields
 
+Without `txHash`, the response is the unsigned factory transaction.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`.</ResponseField>
+    <ResponseField name="functionName" type="string">`deployMarket`.</ResponseField>
+    <ResponseField name="collateralTokenAddress" type="string">Collateral token, lowercased.</ResponseField>
+    <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`.</ResponseField>
+    <ResponseField name="priceSource" type="string">`NAV` or `MARKET`.</ResponseField>
+    <ResponseField name="candidates" type="array">Nominated candidates, lowercased.</ResponseField>
+    <ResponseField name="seekingCurator" type="boolean">Always `true` on a new deployment.</ResponseField>
+  </Expandable>
+</ResponseField>
+
 Confirming with `txHash` returns `201` with the recorded market and its readiness state.
 
 <ResponseField name="data" type="object">
@@ -72,17 +77,19 @@ Confirming with `txHash` returns `201` with the recorded market and its readines
     <ResponseField name="txHash" type="string">Deployment transaction hash.</ResponseField>
     <ResponseField name="relayerAddress" type="string">The instance's registered wallet address, or null when no wallet is registered.</ResponseField>
     <ResponseField name="liquidationRouterAddress" type="string">Router deployed for this market.</ResponseField>
-    <ResponseField name="configurationStatus" type="object">Contract wiring state.</ResponseField>
+    <ResponseField name="configurationStatus" type="object">Contract wiring state, with `fullyConfigured`.</ResponseField>
     <ResponseField name="collateralAuthStatus" type="object">Whether the adapter is authorized on the collateral token, and what is required. See [Get Configuration Status](/endpoints/external-securities-lending/get-configuration-status).</ResponseField>
+    <ResponseField name="routerHolderAuthorized" type="boolean">Whether the market's liquidation router may receive the collateral token.</ResponseField>
     <ResponseField name="oracleSignerAuthorized" type="boolean">Whether the registered wallet can sign prices for this market's oracle.</ResponseField>
     <ResponseField name="liquidatorRoleGranted" type="boolean">Whether the registered wallet holds `LIQUIDATOR_ROLE` on the market.</ResponseField>
+    <ResponseField name="pendingCurator" type="boolean">`true` while the market still has no lender of record.</ResponseField>
     <ResponseField name="configurationSteps" type="array">Outstanding steps, each with `step`, `description`, `requiredRole`, `requiredBy`.</ResponseField>
     <ResponseField name="configurationCalldata" type="object">Ready-to-sign calldata keyed by step name, each `{ to, data, description }`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  If a market for this token and mode already exists on-chain but was not recorded in your instance, the factory deployment is skipped and the existing deployment is adopted instead. In that case `txHash` is null.
+  The uniqueness check is skipped when the existing market came from an earlier factory generation. A market that predates the lender-of-record model does not block a redeployment onto the current factory.
 </Note>
 
 <RequestExample>
@@ -91,15 +98,12 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/de
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{
-    "collateralTokenAddress": "0xabc...def",
-    "issuerAddress": "0x111...222",
-    "adminAddress": "0x333...444",
+    "collateralTokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
     "initialPrice": "104.82",
-    "collateralAgent": "0x555...666",
-    "liquidationOperator": "0x777...888",
+    "candidates": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
     "mode": "FREEZE",
     "priceSource": "NAV",
-    "identityRegistry": "0x9e3c...1145"
+    "identityRegistry": "0x9e3c8a15f4d70b2681c5a3f9027d4be8115c7d21"
   }'
 ```
 ```typescript TypeScript
@@ -112,12 +116,9 @@ const res = await fetch(
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      collateralTokenAddress: '0xabc...def',
-      issuerAddress: '0x111...222',
-      adminAddress: '0x333...444',
+      collateralTokenAddress: '0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f',
       initialPrice: '104.82',
-      collateralAgent: '0x555...666',
-      liquidationOperator: issuerWalletAddress,
+      candidates: [custodianBankAddress, assetManagerAddress],
       mode: 'CUSTODY',
       identityRegistry: token.metadata.identityRegistry,
       borrowAssetAddress: '0x6B175474E89094C44Da98b954EedeAC495271d0F'
@@ -135,12 +136,17 @@ const { data } = await res.json();
   "data": {
     "action": "SIGN_TRANSACTION",
     "transaction": {
-      "to": "0x37712db30A7B4fFD9C445793089118b60e56d752",
-      "data": "0x..."
+      "to": "0x37712db30a7b4ffd9c445793089118b60e56d752",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
     },
-    "collateralTokenAddress": "0xabc...def",
+    "functionName": "deployMarket",
+    "collateralTokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
     "mode": "FREEZE",
-    "priceSource": "NAV"
+    "priceSource": "NAV",
+    "candidates": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+    "seekingCurator": true
   }
 }
 ```
@@ -152,57 +158,63 @@ const { data } = await res.json();
       "id": "clx_secmarket_001",
       "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
       "oracleAddress": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
-      "insuranceFundAddress": "0x8f1a...9c22",
-      "adapterAddress": "0x4d2b...77ae",
+      "insuranceFundAddress": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+      "adapterAddress": "0x4d2b93f70e18c6a5d34b027fe95c81a6730d77ae",
       "liquidationRouterAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
-      "collateralTokenAddress": "0xabc...def",
+      "collateralTokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
       "collateralMode": "FREEZE",
       "collateralDecimals": 18,
       "borrowAssetAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
       "borrowAssetSymbol": "USDC",
       "borrowAssetDecimals": 6,
-      "collateralAgent": "0x555...666",
-      "liquidationOperator": "0x777...888",
       "priceSource": "NAV",
+      "seekingCurator": true,
+      "curator": null,
       "collateralFactor": "7500",
       "liquidationThreshold": "8500",
       "active": true
     },
-    "txHash": "0xabc...def",
-    "relayerAddress": "0x123...456",
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "relayerAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
     "liquidationRouterAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
-    "oracleSignerAuthorized": false,
-    "liquidatorRoleGranted": false,
+    "configurationStatus": { "fullyConfigured": false },
     "collateralAuthStatus": {
       "mode": "FREEZE",
       "adapterAuthorized": false,
       "interfaceSupported": true,
       "requirement": "adapter_must_hold_agent_role"
     },
+    "routerHolderAuthorized": false,
+    "oracleSignerAuthorized": false,
+    "liquidatorRoleGranted": false,
+    "pendingCurator": true,
     "configurationSteps": [
       {
         "step": "grantAdapterAgentRole",
-        "description": "Grant the freeze adapter the agent role on the collateral token",
+        "description": "Grant agent role to freeze adapter on the security token",
         "requiredRole": "TOKEN_AGENT_ADMIN",
-        "requiredBy": "0xabc...def"
+        "requiredBy": ""
       }
     ],
     "configurationCalldata": {
       "grantAdapterAgentRole": {
-        "to": "0xabc...def",
+        "to": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
         "data": "0x...",
-        "description": "Grant the freeze adapter the agent role on the collateral token"
+        "description": "Grant agent role to freeze adapter on the security token"
       }
     }
   }
 }
 ```
-```json Error - Market Exists
+```json Error - No Candidates
 {
   "success": false,
   "error": {
-    "code": "MARKET_EXISTS",
-    "message": "Market already exists for this token and mode"
+    "code": "CANDIDATES_REQUIRED",
+    "message": "At least one candidate lender of record must be nominated. A deployment with no candidate can never be adopted and would stay inert.",
+    "details": [
+      { "field": "candidates", "message": "Array must contain at least 1 element(s)" }
+    ]
   }
 }
 ```
@@ -221,19 +233,30 @@ const { data } = await res.json();
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `MARKET_EXISTS` | `409` | A market already exists for this token and mode on your instance |
+| `CANDIDATES_REQUIRED` | `400` | `candidates` is missing or empty |
+| `VALIDATION_ERROR` | `400` | A field failed schema validation. `error.details` names each offending field |
+| `TOKEN_NOT_IMPORTED` | `400` | `collateralTokenAddress` is not an imported security token in this instance |
+| `NOT_A_SECURITY_TOKEN` | `400` | The token exposes no identity registry, no contract allow-list and no freeze interface, so its adapter could never be authorized |
+| `BORROW_ASSET_IS_COLLATERAL` | `400` | `borrowAssetAddress` and `collateralTokenAddress` are the same token |
+| `COLLATERAL_TOKEN_NOT_CONTRACT` | `400` | No deployed bytecode at `collateralTokenAddress` on this network |
 | `FREEZE_MODE_UNSUPPORTED_TOKEN` | `400` | `mode` is `FREEZE` but the token lacks `isAgent` or `getFrozenTokens`. Deploy in `CUSTODY` mode instead |
-| `INVALID_INITIAL_PRICE` | `400` | `initialPrice` could not be parsed at the borrow asset's decimals |
-| `INVALID_COLLATERAL_AGENT` | `400` | `collateralAgent` is missing or the zero address |
-| `INVALID_LIQUIDATION_OPERATOR` | `400` | `liquidationOperator` is missing or the zero address |
+| `INVALID_INITIAL_PRICE` | `400` | `initialPrice` carries more decimal places than the borrow asset supports, or rounds to zero at its scale |
+| `IDENTITY_REGISTRY_REQUIRED` | `400` | `priceSource` is `MARKET` but no `identityRegistry` was given |
 | `INVALID_BORROW_ASSET` | `400` | `borrowAssetAddress` is not a valid address |
 | `BORROW_ASSET_NOT_CONTRACT` | `400` | No deployed bytecode at `borrowAssetAddress` |
 | `BORROW_ASSET_NOT_ERC20` | `400` | `decimals()` or `balanceOf()` could not be read |
 | `BORROW_ASSET_DECIMALS_UNSUPPORTED` | `400` | Borrow asset decimals outside 6 to 18 |
-| `DEPLOYER_NOT_AUTHORIZED` | `403` | The registered wallet is not on the factory's authorized deployer allowlist |
-| `DEPLOYER_AUTHORIZATION_FAILED` | `502` | Adding the registered wallet to the allowlist failed on-chain |
-| `DEPLOY_FAILED` | `500` | The factory call reverted during preflight. `message` carries the reason |
-| `FACTORY_UPGRADE_REQUIRED` | `503` | The factory predates per-market routers and cannot deploy this market |
+| `MARKET_EXISTS` | `409` | This instance already runs a market for this token, mode and borrow asset. The response carries `marketId` |
+| `PROVIDER_UNAVAILABLE` | `503` | The collateral token could not be read on-chain, so no transaction was prepared |
 | `SECURITY_LENDING_NOT_CONFIGURED` | `503` | External securities lending contracts are not deployed on the network your instance resolves to |
+
+Confirming with `txHash` can also return:
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `TX_WRONG_ARGS` | `400` | The transaction deployed a market for a different collateral token or collateral mode |
+| `MARKET_EXISTS` | `409` | This market is already recorded in this instance |
+| `DEPLOYMENT_NOT_INSTANCE_BOUND` | `403` | Neither the signer nor any party of the deployment is a verified wallet of this instance |
+| `ADAPTER_PLEDGEE_UNSUPPORTED` | `422` | The collateral adapter does not record a pledgee per lock, so encumbrances would name no attributable beneficiary |
 
 Confirming can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).
