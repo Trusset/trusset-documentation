@@ -1,0 +1,100 @@
+---
+title: 'Deposit'
+api: 'POST /lending-external-securities/api/vaults/{vaultId}/deposit'
+description: 'Approve-and-deposit calldata for a verified wallet'
+---
+
+Builds the two transactions a deposit needs: an ERC-20 approval for the vault to pull the settlement asset, then the deposit itself. Both come back as ordered steps for the depositor's wallet to sign. The depositor receives vault shares at the current share price.
+
+Deposits are identity-gated. The vault admits only wallets its identity register verifies, and the register is fixed for the life of the vault — the operator's register provider admits depositors, not Trusset.
+
+## Path Parameters
+
+<ParamField path="vaultId" type="string" required>Vault ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="amount" type="string" required>
+  Amount to deposit as a decimal string, for example `"1000"`. Denominated in the vault's settlement asset and parsed at `assetDecimals`.
+</ParamField>
+
+<ParamField body="holderAddress" type="string">
+  Wallet that will sign. When supplied, the API checks it against the vault's identity register before offering a transaction and refuses with `DEPOSITOR_NOT_VERIFIED` if the deposit would revert on-chain. Omit it to skip the preflight — the contract still enforces the gate.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="steps" type="array">Ordered transactions to sign and broadcast: the approval, then the `deposit` call. Each carries `to`, `data`, and a human-readable `description`.</ResponseField>
+    <ResponseField name="confirmWith" type="object">Where to report the hash: the `confirm-tx` endpoint with `txType: "DEPOSIT"`. Confirm with the **deposit** step's hash, not the approval's.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Errors
+
+| Code | Status | Meaning |
+|---|---|---|
+| `DEPOSITOR_NOT_VERIFIED` | 403 | The wallet is not verified on this vault's identity register. The message names the register; surface it verbatim. |
+| `DEPOSITS_PAUSED` | 409 | The operator paused deposits. Redemptions stay open. |
+| `VAULT_NOT_DEPLOYED` | 409 | The vault has no on-chain address yet. |
+| `VALIDATION_ERROR` | 400 | Malformed amount. `error.details` names the field. |
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/vaults/{vaultId}/deposit" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": "1000", "holderAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/vaults/${vaultId}/deposit`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount: '1000', holderAddress: wallet })
+  }
+);
+const { data } = await res.json();
+for (const step of data.steps) {
+  const tx = await signer.sendTransaction({ to: step.to, data: step.data });
+  await tx.wait();
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "steps": [
+      {
+        "to": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+        "data": "0x095ea7b3…",
+        "description": "Approve the vault to pull 1000 USDC"
+      },
+      {
+        "to": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+        "data": "0xb6b55f25…",
+        "description": "Deposit 1000 USDC into Trusset Prime Demo Vault"
+      }
+    ],
+    "functionName": "deposit",
+    "confirmWith": { "endpoint": "confirm-tx", "txHash": true, "txType": "DEPOSIT" }
+  }
+}
+```
+```json Error - Not Verified
+{
+  "success": false,
+  "error": {
+    "code": "DEPOSITOR_NOT_VERIFIED",
+    "message": "Wallet 0xabc…def is not verified on this vault's identity register (0xe9114c40934f6fb6bb317935156b731f7a86d006), so the deposit would revert. The vault operator's register provider admits depositors."
+  }
+}
+```
+</ResponseExample>

@@ -1,0 +1,142 @@
+---
+title: 'Get Vault'
+api: 'GET /lending-external-securities/api/vaults/{vaultId}'
+description: 'Full vault record plus live chain state and an optional holder position'
+---
+
+Returns the complete vault record with two enrichment blocks: `onChain`, the vault's live state read from the chain in one aggregate, and `holder`, the position of the wallet named in `address` (or `null` when no address is given).
+
+## Path Parameters
+
+<ParamField path="vaultId" type="string" required>Vault ID from [List Vaults](/endpoints/vaults/list-vaults).</ParamField>
+
+## Query Parameters
+
+<ParamField query="address" type="string">
+  Wallet to read a position for. When present, `holder` carries that wallet's shares and their current value.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="onChain" type="object">
+      <Expandable>
+        <ResponseField name="readFailed" type="boolean">True when the chain could not be read. Every other field in this block is then absent — hold your last verified values rather than rendering zeros.</ResponseField>
+        <ResponseField name="totalAssets" type="string">Everything the vault is worth: idle funds plus its value across allocated markets. Formatted at the vault's asset decimals.</ResponseField>
+        <ResponseField name="totalShares" type="string">Shares in issue.</ResponseField>
+        <ResponseField name="sharePrice" type="string">Value of one share in the settlement asset, as an 18-decimal string. `"1.0"` is par; it rises as the funded markets pay interest.</ResponseField>
+        <ResponseField name="idleAssets" type="string">Funds not allocated to any market. This is what a redemption can pay immediately.</ResponseField>
+        <ResponseField name="allocatedAssets" type="string">`totalAssets − idleAssets`: funds working in the operator's lending markets.</ResponseField>
+        <ResponseField name="depositsPaused" type="boolean">True while the operator has paused deposits. Redemptions are never pausable.</ResponseField>
+        <ResponseField name="performanceFeeBps" type="integer">Live fee. The contract refuses any increase.</ResponseField>
+        <ResponseField name="allocations" type="array">Per-market legs: `marketAddress`, `lpValue`, `lpShares`, `deposited`, `marketAvailable`, and a per-leg `readFailed` when one market could not be read.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="holder" type="object">
+      <Expandable>
+        <ResponseField name="shares" type="string">The wallet's share balance.</ResponseField>
+        <ResponseField name="value" type="string">Those shares at the current share price, in the settlement asset.</ResponseField>
+        <ResponseField name="readFailed" type="boolean">True when the position could not be read. `shares` and `value` are then `null`, not zero.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  `readFailed: true` means unavailable, never empty. A vault whose read failed still holds every deposit it held a minute ago. Surface stale-but-verified figures with a warning; never zeros.
+</Warning>
+
+<Note>
+  `sharePrice` is an 18-decimal string regardless of the asset's own decimals. Every other amount in the block is formatted at `assetDecimals`.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities/api/vaults/{vaultId}?address=0x5ad87a0621175206b72d10e4b8577b192e7f40ab" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/vaults/${vaultId}?address=${wallet}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+if (data.onChain?.readFailed) {
+  // hold last verified values — this is a loading problem, not a change to the vault
+} else {
+  console.log(`share price ${data.onChain.sharePrice}, ${data.onChain.idleAssets} ${data.assetSymbol} idle`);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "id": "cmssh8t2u0003cghxkx1w1fwd",
+    "own": false,
+    "vaultAddress": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+    "assetSymbol": "USDC",
+    "assetDecimals": 6,
+    "name": "Trusset Prime Demo Vault",
+    "symbol": "TPV",
+    "performanceFeeBps": 500,
+    "active": true,
+    "riskDisclosure": "Deposits fund overcollateralized security-token lending markets.",
+    "riskDisclosureUrl": "https://bank.example/vault-risk",
+    "operatedBy": { "instanceName": "Trusset Client Demo", "issuerName": "Trusset UG", "isBank": true },
+    "onChain": {
+      "isOnChain": true,
+      "readFailed": false,
+      "owner": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+      "asset": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "identityRegistry": "0xe9114c40934f6fb6bb317935156b731f7a86d006",
+      "totalAssets": "125000.0",
+      "totalShares": "123456.789012",
+      "sharePrice": "1.0125",
+      "idleAssets": "25000.0",
+      "allocatedAssets": "100000.0",
+      "depositsPaused": false,
+      "performanceFeeBps": 500,
+      "allocations": [
+        {
+          "marketAddress": "0xae10e07a899526e97be3940ca6ee03af28394495",
+          "lpShares": "100000000000",
+          "lpValue": "101250.0",
+          "deposited": "100000.0",
+          "marketAvailable": "62500.0"
+        }
+      ]
+    },
+    "holder": {
+      "holderAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+      "shares": "1000.0",
+      "value": "1012.5",
+      "readFailed": false
+    }
+  }
+}
+```
+```json Degraded read
+{
+  "success": true,
+  "data": {
+    "id": "cmssh8t2u0003cghxkx1w1fwd",
+    "name": "Trusset Prime Demo Vault",
+    "onChain": { "readFailed": true, "isOnChain": null },
+    "holder": null
+  }
+}
+```
+```json Error - Not Found
+{
+  "success": false,
+  "error": {
+    "code": "VAULT_NOT_FOUND",
+    "message": "Vault not found"
+  }
+}
+```
+</ResponseExample>
