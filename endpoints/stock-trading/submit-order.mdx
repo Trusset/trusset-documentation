@@ -1,115 +1,177 @@
 ---
 title: 'Submit Order'
-description: 'Place a new buy or sell order on an on-chain order book'
 api: 'POST /orderbooks/stocks/api/orders'
+description: 'Place an order on an on-chain stock order book'
 ---
 
-Submits a new order to an on-chain order book. Supports limit and market order types with configurable time-in-force, post-only, and self-trade prevention policies.
+Submits an order to an on-chain stock book. Orders on off-chain books go to [Submit Off-Chain Order](/endpoints/stock-trading/offchain-submit-order) instead, and this endpoint refuses them with `WRONG_SETTLEMENT_MODE`.
 
-For `LIMIT` orders, the `price` field is required and specifies the maximum (buy) or minimum (sell) acceptable price. `MARKET` orders execute immediately at the best available price.
+<Warning>
+  On-chain execution is not currently available for stock books. Locking a balance in `StockCustody` needs a signature from the custody settlement operator, and Trusset holds no key to produce one, so this endpoint answers `409 ONCHAIN_SETTLEMENT_UNAVAILABLE` for every stock book. The refusal happens before any lock row is written, so nothing is stranded.
 
-The `userAddress` must be a verified on-chain identity with sufficient custody balance for sell orders, or sufficient quote token balance for buy orders. When the order book has a price reference enabled, orders priced outside the configured band are rejected.
+  Move the book to off-chain settlement with [Update Order Book](/endpoints/stock-trading/update-order-book) and trade it there, or use [External Securities Trading](/endpoints/external-securities-trading/introduction), where the trader's own EIP-712 signature authorizes the movement and no operator key is needed.
+</Warning>
 
-## Authentication
-
-Requires an instance API key with the `trading` service enabled.
+The endpoint is documented here because the book-level checks in front of that refusal are real, and because the request shape is the one the venue will accept when an operator-signed lock path returns.
 
 ## Idempotency
 
-This endpoint accepts an optional `Idempotency-Key` header. When supplied, repeating a request with the same key and body returns the original result instead of placing a duplicate order. Reusing a key with a different body returns `IDEMPOTENCY_MISMATCH`.
+Accepts an optional `Idempotency-Key` header. A repeat with the same key and body replays the original response with `Idempotent-Replay: true`; the same key with a different body returns `409 IDEMPOTENCY_MISMATCH`. See [Idempotency](/endpoints/stock-trading/introduction#idempotency).
 
 ## Body Parameters
 
 <ParamField body="orderBookId" type="string" required>
-  The target order book identifier. Max 100 characters.
+  Target order book. Must be a book your instance owns or has imported.
 </ParamField>
 
 <ParamField body="userAddress" type="string" required>
-  EVM address of the trading user. Must match `0x[a-fA-F0-9]{40}`.
+  Wallet placing the order.
 </ParamField>
 
 <ParamField body="side" type="string" required>
-  Order side. One of `BUY` or `SELL`.
+  `BUY` or `SELL`.
 </ParamField>
 
 <ParamField body="orderType" type="string" required>
-  Order type. One of `LIMIT` or `MARKET`.
+  `LIMIT` or `MARKET`. A `LIMIT` order requires `price`.
 </ParamField>
 
 <ParamField body="price" type="string">
-  Limit price in quote token base units (wei). Required for `LIMIT` orders. Numeric string.
+  Limit price in order book units, as a digit-only string. Required for `LIMIT`, ignored for `MARKET`.
 </ParamField>
 
 <ParamField body="quantity" type="string" required>
-  Order quantity in base token units (wei). Numeric string.
+  Base quantity in order book units, as a digit-only string. Must sit between the book's `minOrderSize` and `maxOrderSize`.
 </ParamField>
 
-<ParamField body="timeInForce" type="string">
-  Time-in-force policy. One of:
-  - `GTC` - Good Till Cancelled (default). Remains on the book until filled or cancelled.
-  - `IOC` - Immediate or Cancel. Fills what it can immediately, cancels the rest.
-  - `FOK` - Fill or Kill. Must fill entirely or is rejected.
+<ParamField body="timeInForce" type="string" default="GTC">
+  `GTC` rests until filled or cancelled. `IOC` fills what it can immediately and cancels the rest. `FOK` must fill entirely or is cancelled.
 </ParamField>
 
-<ParamField body="postOnly" type="boolean">
-  When `true`, the order is rejected if it would match immediately as a taker. Use this to guarantee maker status. Defaults to `false`.
+<ParamField body="postOnly" type="boolean" default="false">
+  Reject the order rather than let it take. Checked against the whole eligible peer set, so a post-only order that would cross a pooled book is refused with `POST_ONLY_WOULD_CROSS`.
 </ParamField>
 
-<ParamField body="selfTradePreventionMode" type="string">
-  Controls what happens when an order would match against another order from the same `userAddress`. One of:
-  - `NONE` - Self-trades are allowed (default).
-  - `CANCEL_TAKER` - Cancel the incoming (taker) order.
-  - `CANCEL_MAKER` - Cancel the resting (maker) order.
-  - `CANCEL_BOTH` - Cancel both orders.
+<ParamField body="selfTradePreventionMode" type="string" default="NONE">
+  What happens when this order would match the same trading account. `NONE` allows it, `CANCEL_TAKER` drops the incoming order, `CANCEL_MAKER` drops the resting one, `CANCEL_BOTH` drops both. An unrecognised value falls back to `NONE`.
 </ParamField>
 
 <ParamField body="signature" type="string">
-  Optional signature over the order message, for instances that enforce signed orders. Max 256 characters.
+  Optional signature over `message`, verified against `userAddress`. Up to 256 characters.
 </ParamField>
 
 <ParamField body="message" type="string">
-  Optional signed message payload associated with `signature`. Max 512 characters.
+  The signed payload. Only checked when `signature` is also present. Up to 512 characters.
 </ParamField>
 
+## Response Fields
+
+This is the shape the endpoint returns once execution is available. It answers `201`.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="order" type="object">The order record, including `orderId`, `status`, `filledQuantity` and `remainingQuantity`.</ResponseField>
+    <ResponseField name="trades" type="array">Trades produced by this submission. Empty when the order rested without matching.</ResponseField>
+    <ResponseField name="filledQuantity" type="string">Quantity filled, in order book units.</ResponseField>
+    <ResponseField name="remainingQuantity" type="string">Quantity still resting, in order book units.</ResponseField>
+    <ResponseField name="status" type="string">`OPEN`, `PARTIALLY_FILLED`, `FILLED`, `CANCELLED` or `AUCTION_PENDING`.</ResponseField>
+    <ResponseField name="stpTriggered" type="boolean">Whether self-trade prevention acted on this submission.</ResponseField>
+    <ResponseField name="cancelReason" type="string">Why the order was cancelled, or `null`.</ResponseField>
+    <ResponseField name="auctionId" type="string">Auction the order was routed into, on a book running batches.</ResponseField>
+    <ResponseField name="auctionEndsAt" type="string">When that auction clears.</ResponseField>
+  </Expandable>
+</ResponseField>
+
 <RequestExample>
-```json
-{
-  "orderBookId": "ob_abc123",
-  "userAddress": "0x1111111111111111111111111111111111111111",
-  "side": "BUY",
-  "orderType": "LIMIT",
-  "price": "100000000000000000000",
-  "quantity": "5000000000000000000",
-  "timeInForce": "GTC",
-  "postOnly": true,
-  "selfTradePreventionMode": "CANCEL_TAKER"
-}
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/stocks/api/orders" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-2025-06-15-0001" \
+  -d '{
+    "orderBookId": "clx_ob_stock_002",
+    "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "side": "BUY",
+    "orderType": "LIMIT",
+    "price": "182350000",
+    "quantity": "5000000",
+    "timeInForce": "GTC",
+    "postOnly": true
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/orderbooks/stocks/api/orders',
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID()
+    },
+    body: JSON.stringify({
+      orderBookId,
+      userAddress: await wallet.getAddress(),
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: '182350000',
+      quantity: '5000000',
+      timeInForce: 'GTC'
+    })
+  }
+);
+const body = await res.json();
+if (!body.success) console.error(body.error.code, body.error.message);
 ```
 </RequestExample>
 
 <ResponseExample>
-```json
+```json Error - On-Chain Settlement Unavailable
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ONCHAIN_SETTLEMENT_UNAVAILABLE",
+    "message": "This order book uses ON_CHAIN settlement, which requires server-side signing that was removed. Switch the order book to OFF_CHAIN settlement (PATCH the order book with settlementMode OFF_CHAIN once no orders or locks are live) and use the off-chain order API."
+  }
+}
+```
+```json Error - Off-Chain Book
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "WRONG_SETTLEMENT_MODE",
+    "message": "Use off-chain API for off-chain orderbooks"
+  }
+}
+```
+```json Response (once execution is available)
 {
   "success": true,
   "data": {
-    "id": "ord_xyz789",
-    "orderBookId": "ob_abc123",
-    "userAddress": "0x1111111111111111111111111111111111111111",
-    "side": "BUY",
-    "orderType": "LIMIT",
-    "price": "100000000000000000000",
-    "quantity": "5000000000000000000",
+    "order": {
+      "orderId": "b7c1e0d4-6f2a-4f1e-9d33-5c8a1f0b2e77",
+      "orderBookId": "clx_ob_stock_002",
+      "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+      "side": "BUY",
+      "orderType": "LIMIT",
+      "price": "182350000",
+      "quantity": "5000000",
+      "filledQuantity": "0",
+      "remainingQuantity": "5000000",
+      "status": "OPEN",
+      "timeInForce": "GTC",
+      "postOnly": true,
+      "selfTradePreventionMode": "NONE",
+      "createdAt": "2025-06-15T12:00:00.000Z"
+    },
+    "trades": [],
     "filledQuantity": "0",
+    "remainingQuantity": "5000000",
     "status": "OPEN",
-    "timeInForce": "GTC",
-    "postOnly": true,
-    "selfTradePreventionMode": "CANCEL_TAKER",
-    "createdAt": "2025-01-15T10:30:00.000Z"
-  },
-  "metadata": {
-    "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-01-15T10:30:00.000Z",
-    "instanceId": "inst_abc"
+    "stpTriggered": false,
+    "cancelReason": null
   }
 }
 ```
@@ -117,23 +179,17 @@ This endpoint accepts an optional `Idempotency-Key` header. When supplied, repea
 
 ## Error Codes
 
-| Code | Status | Description |
-|------|--------|-------------|
-| `ORDER_BOOK_NOT_FOUND` | 404 | Order book does not exist |
-| `ORDER_BOOK_INACTIVE` | 400 | Order book is paused or closed |
-| `INSUFFICIENT_BALANCE` | 400 | User does not have sufficient balance |
-| `INSUFFICIENT_CUSTODY_BALANCE` | 400 | Insufficient balance in custody contract |
-| `ORDER_TOO_SMALL` | 400 | Order quantity below minimum |
-| `ORDER_TOO_LARGE` | 400 | Order quantity above maximum |
-| `PRICE_REQUIRED` | 400 | Price is required for limit orders |
-| `INVALID_QUANTITY` | 400 | Invalid quantity value |
-| `INVALID_PRICE` | 400 | Price does not align with tick size |
-| `PRICE_OUTSIDE_BAND` | 400 | Price is outside the allowed price reference band |
-| `PRICE_REF_STALE` | 503 | The price reference is stale and the book halts on stale references |
-| `PRICE_REF_UNAVAILABLE` | 503 | The price reference could not be retrieved |
-| `TRANSFER_RESTRICTED` | 400 | User is not eligible to trade this token |
-| `NO_CUSTODY_CONTRACT` | 400 | Order book has no custody contract configured |
-| `NO_LIQUIDITY` | 400 | No matching liquidity for a market or fill-or-kill order |
-| `SHARED_LIQUIDITY_DISABLED` | 400 | Shared liquidity routing is disabled for this order book |
-| `INVALID_SIGNATURE` | 401 | The provided order signature is invalid |
-| `IDEMPOTENCY_MISMATCH` | 409 | Idempotency key reused with a different request body |
+These are the refusals the endpoint can currently return. The checks that price, size and balance an order are behind the settlement refusal, so they are not reachable today.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field failed schema validation |
+| `IDEMPOTENCY_KEY_REQUIRED` | `400` | The `Idempotency-Key` header was sent but is not 8 to 200 characters of `A-Za-z0-9_-:.` |
+| `ORDER_BOOK_INACTIVE` | `400` | The book is `PAUSED` or `CLOSED` |
+| `WRONG_SETTLEMENT_MODE` | `400` | The book settles off-chain. Use [Submit Off-Chain Order](/endpoints/stock-trading/offchain-submit-order) |
+| `ORDER_BOOK_NOT_FOUND` | `404` | The book does not exist, or is not reachable from your instance |
+| `IDEMPOTENCY_MISMATCH` | `409` | The key was used before with a different body |
+| `ONCHAIN_SETTLEMENT_UNAVAILABLE` | `409` | On-chain custody settlement has no wallet in the loop to sign the balance lock |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |
+
+When execution returns, the order-level refusals will be those the other venues already raise: `ORDER_TOO_SMALL`, `ORDER_TOO_LARGE`, `PRICE_REQUIRED`, `INVALID_QUANTITY`, `INVALID_PRICE`, `PRICE_OUTSIDE_BAND`, `INSUFFICIENT_CUSTODY_BALANCE`, `POST_ONLY_WOULD_CROSS`, `MM_CONFIG_VIOLATION`, `NO_LIQUIDITY`, `INVALID_SIGNATURE`, `PRICE_REF_STALE` and `PRICE_REF_UNAVAILABLE`.

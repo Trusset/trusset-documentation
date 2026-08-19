@@ -1,59 +1,88 @@
 ---
 title: 'Get Auction'
-description: 'Retrieve a specific auction by ID'
 api: 'GET /orderbooks/stocks/api/order-books/{orderBookId}/auctions/{auctionId}'
+description: 'Read one auction batch and its result'
 ---
 
-Returns a single auction by ID, including its final clearing price and matched volume once the auction has settled. Use this to retrieve historical auction results or to inspect a specific batch.
+Returns a single auction on a book, live or historical. Once the batch has cleared, this is where the uniform clearing price and the matched volume are published.
 
-## Authentication
+`data` is `null` when no auction with that ID exists on that book. The endpoint does not distinguish a wrong ID from an auction that belongs to a different book.
 
-Requires an instance API key with the `trading` service enabled.
+## How the clearing price is chosen
+
+At the end of a batch the engine considers every distinct price present in the collected orders and computes how much volume would trade at each. It picks the price that maximizes matched volume; ties are broken by the smaller order imbalance, then by proximity to the book's reference price. Fills are then allocated at that single price by strict price then time priority, so an order that arrived earlier at the same price is filled first.
+
+Orders the batch could not fill either roll into the next batch or are cancelled, according to the book's `auctionRollUnmatched` setting.
 
 ## Path Parameters
 
-<ParamField path="orderBookId" type="string" required>
-  The order book identifier. Max 100 characters.
-</ParamField>
+<ParamField path="orderBookId" type="string" required>Order book ID.</ParamField>
 
-<ParamField path="auctionId" type="string" required>
-  The auction identifier. Max 100 characters.
-</ParamField>
+<ParamField path="auctionId" type="string" required>Auction ID, from [Get Current Auction](/endpoints/stock-trading/get-current-auction) or an order's `auctionId`.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  `null` when the auction does not exist on that book.
+  <Expandable>
+    <ResponseField name="id" type="string">Auction ID.</ResponseField>
+    <ResponseField name="orderBookId" type="string">Book the auction belongs to.</ResponseField>
+    <ResponseField name="startedAt" type="string">When collection opened.</ResponseField>
+    <ResponseField name="endsAt" type="string">When the batch closed, or is due to close.</ResponseField>
+    <ResponseField name="status" type="string">`COLLECTING`, `UNCROSSING`, `CLEARED` or `CANCELLED`.</ResponseField>
+    <ResponseField name="clearingPrice" type="string">Uniform execution price in order book units, or `null` if the batch has not cleared or found no crossing.</ResponseField>
+    <ResponseField name="matchedVolume" type="string">Base quantity matched, in order book units.</ResponseField>
+    <ResponseField name="orderCount" type="integer">Orders that took part in the clearing.</ResponseField>
+    <ResponseField name="createdAt" type="string">ISO 8601 timestamp.</ResponseField>
+    <ResponseField name="updatedAt" type="string">ISO 8601 timestamp.</ResponseField>
+  </Expandable>
+</ResponseField>
 
 <RequestExample>
-```bash
-curl -X GET "https://api.trusset.org/orderbooks/stocks/api/order-books/ob_abc123/auctions/auc_001" \
-  -H "x-api-key: trusset_{instanceRef}_{secret}"
+```bash cURL
+curl "https://api.trusset.org/orderbooks/stocks/api/order-books/clx_ob_stock_003/auctions/clx_auction_76" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/stocks/api/order-books/${orderBookId}/auctions/${auctionId}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+if (data?.status === 'CLEARED') console.log('cleared at', data.clearingPrice);
 ```
 </RequestExample>
 
 <ResponseExample>
-```json
+```json Response - Cleared
 {
   "success": true,
   "data": {
-    "auctionId": "auc_001",
-    "orderBookId": "ob_abc123",
-    "status": "SETTLED",
-    "startTime": "2025-01-15T10:30:00.000Z",
-    "endTime": "2025-01-15T10:35:00.000Z",
-    "clearingPrice": "100000000000000000000",
-    "matchedVolume": "12000000000000000000",
-    "tradeCount": 7,
-    "settledAt": "2025-01-15T10:35:02.000Z"
-  },
-  "metadata": {
-    "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-01-15T10:36:00.000Z",
-    "instanceId": "inst_abc"
+    "id": "clx_auction_76",
+    "orderBookId": "clx_ob_stock_003",
+    "startedAt": "2025-06-15T11:55:00.000Z",
+    "endsAt": "2025-06-15T12:00:00.000Z",
+    "status": "CLEARED",
+    "clearingPrice": "182200000",
+    "matchedVolume": "7000000",
+    "orderCount": 5,
+    "createdAt": "2025-06-15T11:55:00.000Z",
+    "updatedAt": "2025-06-15T12:00:02.000Z"
   }
+}
+```
+```json Response - Unknown Auction
+{
+  "success": true,
+  "data": null
 }
 ```
 </ResponseExample>
 
 ## Error Codes
 
-| Code | Status | Description |
-|------|--------|-------------|
-| `ORDER_BOOK_NOT_FOUND` | 404 | No order book found with this ID in your instance |
-| `NOT_FOUND` | 404 | No auction found with this ID for this order book |
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_PARAM` | `400` | `orderBookId` or `auctionId` is missing or longer than 100 characters |
+| `ORDER_BOOK_NOT_FOUND` | `404` | No such book on this instance, and not imported |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

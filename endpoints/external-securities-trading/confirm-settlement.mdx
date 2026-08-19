@@ -1,0 +1,128 @@
+---
+title: 'Confirm Settlement'
+api: 'POST /orderbooks/external-securities/api/settlements/{settlementId}/confirm'
+description: 'Verify the mined settlement receipt and consume the reservations'
+---
+
+Records a settlement you have broadcast. Trusset reads the receipt and checks that the transaction was mined, succeeded, targeted the custody contract, called the expected settlement function, and settled exactly the buyers, sellers, tokens, amounts and trade references this settlement covers. Only then is anything written.
+
+State is derived from the receipt, never from the request body. A confirm call that fails verification changes nothing.
+
+Confirming is what releases the trade from the queue: the settlement and its trades are marked `CONFIRMED`, and each side's reservation is reduced by what actually settled rather than by what was reserved.
+
+## Idempotency
+
+Accepts an optional `Idempotency-Key` header. Confirming an already-confirmed settlement is safe regardless: it returns the recorded result with `alreadyConfirmed: true` and does not touch state.
+
+## Path Parameters
+
+<ParamField path="settlementId" type="string" required>Settlement ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="txHash" type="string" required>
+  Hash of the settlement transaction you broadcast. Must be a 32-byte hex string.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="settlementId" type="string">Settlement ID.</ResponseField>
+    <ResponseField name="status" type="string">`CONFIRMED`.</ResponseField>
+    <ResponseField name="txHash" type="string">The verified transaction hash.</ResponseField>
+    <ResponseField name="blockNumber" type="integer">Block the transaction landed in.</ResponseField>
+    <ResponseField name="gasUsed" type="string">Gas consumed.</ResponseField>
+    <ResponseField name="tradeCount" type="integer">Trades confirmed by this call.</ResponseField>
+    <ResponseField name="alreadyConfirmed" type="boolean">Present and `true` when the settlement was already recorded.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## When confirmation fails
+
+A reverted transaction moved nothing, so the settlement and its trades are marked `FAILED` and the trade is unwound: the fill is reversed and both reservations are released. The orders are free again, and the traders can sign fresh ones.
+
+`TX_NOT_FOUND` is treated differently. The transaction may simply be unmined, so the settlement is marked failed but **not** unwound, since unwinding a trade whose transaction later lands would double-count it. Wait for a confirmation and call again.
+
+<Tip>
+  `TX_NOT_FOUND` is the expected answer when you confirm too early. Wait for one confirmation and retry rather than treating it as a failure.
+</Tip>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/external-securities/api/settlements/0f7c2a19-64b8-4d02-9e51-73ab0c5d6f18/confirm" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b" }'
+```
+```typescript TypeScript
+const tx = await operator.sendTransaction(settlement.transaction);
+await tx.wait();
+
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/external-securities/api/settlements/${settlementId}/confirm`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ txHash: tx.hash })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "settlementId": "0f7c2a19-64b8-4d02-9e51-73ab0c5d6f18",
+    "status": "CONFIRMED",
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "blockNumber": 6412901,
+    "gasUsed": "241880",
+    "tradeCount": 1
+  }
+}
+```
+```json Response - Already Confirmed
+{
+  "success": true,
+  "data": {
+    "settlementId": "0f7c2a19-64b8-4d02-9e51-73ab0c5d6f18",
+    "status": "CONFIRMED",
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "alreadyConfirmed": true
+  }
+}
+```
+```json Error - Wrong Transaction
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_ARGS_MISMATCH",
+    "message": "Transaction settles a different base amount"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `txHash` is missing or malformed |
+| `INVALID_TX` | `400` | `txHash` is not a well-formed 32-byte hash |
+| `TX_REVERTED` | `400` | The transaction was mined but reverted. The settlement is failed and unwound |
+| `TX_WRONG_TARGET` | `400` | The transaction was sent to a different contract |
+| `TX_WRONG_FUNCTION` | `400` | The calldata does not decode against the custody ABI, or calls a different function |
+| `TX_ARGS_MISMATCH` | `400` | The transaction settles different traders, tokens, amounts, trade references, or a different number of fills |
+| `TX_NOT_FOUND` | `404` | No receipt yet. The transaction is unmined, dropped, or on another network |
+| `SETTLEMENT_NOT_FOUND` | `404` | No settlement with that ID on your instance, it is not an external securities settlement, or it has no pending trades |
+| `SETTLEMENT_NOT_BUILDABLE` | `409` | The settlement's fills could not be reconstructed to verify against |
+| `IDEMPOTENCY_MISMATCH` | `409` | The key was used before with a different body |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

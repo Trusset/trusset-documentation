@@ -1,0 +1,118 @@
+---
+title: 'List Pending Settlements'
+api: 'GET /orderbooks/external-securities/api/settlements/pending'
+description: 'The venue operator’s signing queue'
+---
+
+Returns the settlements on your instance that still need a signature, oldest first. This is the operator's work list: everything here is actionable, and everything actionable is here.
+
+Scope is deliberately tight. Only settlements whose trades sit on external securities books appear, because a settlement from another book family would dead-end on the calldata route with nothing an operator could do about it. Settlements already `CONFIRMED` or `FAILED` are excluded: a failed settlement is terminal, its trades are reversed and its reservations released, so it is finished work rather than outstanding work. It stays readable through [Get Settlement](/endpoints/external-securities-trading/get-settlement).
+
+Within each settlement, trades that are individually confirmed or failed are filtered out, so `trades` lists only what the next transaction would cover.
+
+## Query Parameters
+
+<ParamField query="orderBookId" type="string">
+  Restrict to settlements touching one book, as maker's or taker's side.
+</ParamField>
+
+<ParamField query="limit" type="integer" default="25">
+  Maximum settlements to return. Capped at 25.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="settlements" type="array">
+      <Expandable>
+        <ResponseField name="settlementId" type="string">Settlement ID. Pass it to the calldata and confirm endpoints.</ResponseField>
+        <ResponseField name="status" type="string">`PENDING` or `PROCESSING`.</ResponseField>
+        <ResponseField name="createdAt" type="string">ISO 8601 timestamp.</ResponseField>
+        <ResponseField name="error" type="string">The last build failure recorded, or `null`. A settlement can carry an error and still be pending, when the failure was transient.</ResponseField>
+        <ResponseField name="trades" type="array">
+          <Expandable>
+            <ResponseField name="tradeId" type="string">Trade ID.</ResponseField>
+            <ResponseField name="orderBookId" type="string">Maker's book.</ResponseField>
+            <ResponseField name="takerOrderBookId" type="string">Taker's book, or `null`.</ResponseField>
+            <ResponseField name="price" type="string">Execution price in order book units.</ResponseField>
+            <ResponseField name="quantity" type="string">Base quantity in order book units.</ResponseField>
+            <ResponseField name="makerAddress" type="string">Seller or resting side.</ResponseField>
+            <ResponseField name="takerAddress" type="string">Aggressing side.</ResponseField>
+            <ResponseField name="settlementStatus" type="string">`AWAITING_SIGNATURE`, or `PROCESSING`.</ResponseField>
+            <ResponseField name="settlementError" type="string">Per-trade failure reason, or `null`.</ResponseField>
+            <ResponseField name="createdAt" type="string">ISO 8601 timestamp.</ResponseField>
+          </Expandable>
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  Fetch the transaction for each entry with [Get Settlement Calldata](/endpoints/external-securities-trading/get-settlement-calldata) rather than reusing a payload from an earlier response. The calldata is rebuilt against current chain state and the book's current settlement operator each time it is requested.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/orderbooks/external-securities/api/settlements/pending?limit=25" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/orderbooks/external-securities/api/settlements/pending',
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+
+for (const s of data.settlements) {
+  const cd = await fetch(
+    `https://api.trusset.org/orderbooks/external-securities/api/settlements/${s.settlementId}/calldata`,
+    { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+  ).then(r => r.json());
+
+  if (!cd.data.transaction) continue;
+  const tx = await operator.sendTransaction(cd.data.transaction);
+  await tx.wait();
+  // then confirm with tx.hash
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "settlements": [
+      {
+        "settlementId": "0f7c2a19-64b8-4d02-9e51-73ab0c5d6f18",
+        "status": "PENDING",
+        "createdAt": "2025-06-15T12:00:01.000Z",
+        "error": null,
+        "trades": [
+          {
+            "tradeId": "5b3c19e0-7a42-4d86-91f5-2c0e8d47b613",
+            "orderBookId": "clx_ob_extsec_001",
+            "takerOrderBookId": null,
+            "price": "104200000",
+            "quantity": "10000000",
+            "makerAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+            "takerAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+            "settlementStatus": "AWAITING_SIGNATURE",
+            "settlementError": null,
+            "createdAt": "2025-06-15T12:00:00.000Z"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

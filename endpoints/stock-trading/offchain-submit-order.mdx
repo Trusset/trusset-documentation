@@ -1,0 +1,178 @@
+---
+title: 'Submit Off-Chain Order'
+api: 'POST /orderbooks/stocks/api/offchain/orders'
+description: 'Place an order that settles against your custody ledger'
+---
+
+Submits an order on behalf of one of your customers. This is the working order path for stock trading. The order matches in the same engine as every other venue, but the transfer behind a fill moves ledger entries rather than tokens, so nothing needs to be signed.
+
+Orders are keyed by `customerRef`, not by wallet. The customer needs no address, no key and no on-chain identity; they need a balance in your instance's custody ledger for the token being sold or the token being spent.
+
+The book must belong to your instance and must settle off chain, otherwise the request is refused with `WRONG_SETTLEMENT_MODE`.
+
+## Authentication
+
+Authenticates with an instance API key. Does not require the Trading service entitlement.
+
+## How the balance is committed
+
+Before the order is created, the amount it could consume is locked in the ledger: the base quantity for a sell, the quote notional for a buy. A market buy locks against the submitted price of zero, so market buys are only meaningful when the book has depth to price against.
+
+If the order does not rest, whether it filled, was killed or was cancelled, the unconsumed remainder is unlocked immediately. If anything fails while the order is being created, the whole lock is released and the in-memory book is reloaded from the database, so a failure never leaves a customer's balance stranded.
+
+Fills settle in the background: each trade unlocks and moves both legs between the two customer references. A settlement failure is recorded on the trade rather than reversing the match.
+
+## Body Parameters
+
+<ParamField body="orderBookId" type="string" required>
+  Target book. Must be yours and settle off chain.
+</ParamField>
+
+<ParamField body="customerRef" type="string" required>
+  Your reference for the customer placing the order, 1 to 256 characters. This is the key the ledger balance is held under, and the key you use to read the customer's orders and trades back.
+</ParamField>
+
+<ParamField body="side" type="string" required>`BUY` or `SELL`.</ParamField>
+
+<ParamField body="orderType" type="string" required>`LIMIT` or `MARKET`. A `LIMIT` order requires `price`.</ParamField>
+
+<ParamField body="price" type="string">
+  Limit price in order book units, as a digit-only string.
+</ParamField>
+
+<ParamField body="quantity" type="string" required>
+  Base quantity in order book units, as a digit-only string. Must sit between the book's `minOrderSize` and `maxOrderSize`.
+</ParamField>
+
+<ParamField body="timeInForce" type="string" default="GTC">
+  `GTC` rests until filled or cancelled. `IOC` fills what it can and cancels the rest. `FOK` must fill entirely.
+</ParamField>
+
+## Response Fields
+
+Returns `201`.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="order" type="object">
+      The order record after matching. `userAddress` carries `offchain:<customerRef>`.
+    </ResponseField>
+    <ResponseField name="trades" type="array">Trades produced by this submission.</ResponseField>
+    <ResponseField name="filledQuantity" type="string">Quantity filled, in order book units.</ResponseField>
+    <ResponseField name="remainingQuantity" type="string">Quantity still resting.</ResponseField>
+    <ResponseField name="status" type="string">`OPEN`, `PARTIALLY_FILLED`, `FILLED` or `CANCELLED`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  Both tokens on the pair must be registered in your instance's custody ledger. An unregistered token is refused with `TOKEN_NOT_REGISTERED` before any balance is touched.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/stocks/api/offchain/orders" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "orderBookId": "clx_ob_stock_001",
+    "customerRef": "cust_1042",
+    "side": "BUY",
+    "orderType": "LIMIT",
+    "price": "182350000",
+    "quantity": "5000000",
+    "timeInForce": "GTC"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/orderbooks/stocks/api/offchain/orders',
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      orderBookId,
+      customerRef: 'cust_1042',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: '182350000',
+      quantity: '5000000',
+      timeInForce: 'GTC'
+    })
+  }
+);
+const { data } = await res.json();
+console.log(data.status, data.filledQuantity, data.trades.length);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "order": {
+      "orderId": "b7c1e0d4-6f2a-4f1e-9d33-5c8a1f0b2e77",
+      "orderBookId": "clx_ob_stock_001",
+      "instanceId": "inst_abc123",
+      "userAddress": "offchain:cust_1042",
+      "side": "BUY",
+      "orderType": "LIMIT",
+      "price": "182350000",
+      "quantity": "5000000",
+      "filledQuantity": "1000000",
+      "remainingQuantity": "4000000",
+      "status": "PARTIALLY_FILLED",
+      "timeInForce": "GTC",
+      "createdAt": "2025-06-15T12:00:00.000Z"
+    },
+    "trades": [
+      {
+        "tradeId": "1c9e0f22-2b74-4a51-9f8e-73c1a0d4b6e5",
+        "price": "182350000",
+        "quantity": "1000000",
+        "makerAddress": "offchain:cust_2288",
+        "takerAddress": "offchain:cust_1042",
+        "side": "BUY",
+        "createdAt": "2025-06-15T12:00:00.000Z"
+      }
+    ],
+    "filledQuantity": "1000000",
+    "remainingQuantity": "4000000",
+    "status": "PARTIALLY_FILLED"
+  }
+}
+```
+```json Error - Insufficient Ledger Balance
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "INSUFFICIENT_BALANCE",
+    "message": "Insufficient balance. Required: 911.75, Available: 400.0",
+    "required": "911.75",
+    "available": "400.0"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field failed schema validation |
+| `ORDER_BOOK_NOT_FOUND` | `404` | The book does not exist, is not `ACTIVE`, or does not belong to your instance |
+| `WRONG_SETTLEMENT_MODE` | `400` | The book settles on chain |
+| `ORDER_TOO_SMALL` | `400` | `quantity` is below the book's `minOrderSize` |
+| `ORDER_TOO_LARGE` | `400` | `quantity` is above the book's `maxOrderSize` |
+| `PRICE_REQUIRED` | `400` | A `LIMIT` order without a `price` |
+| `INVALID_QUANTITY` | `400` | `quantity` is zero |
+| `INVALID_PRICE` | `400` | A `LIMIT` price of zero |
+| `PRICE_OUTSIDE_BAND` | `400` | The price falls outside the reference band |
+| `TOKEN_NOT_REGISTERED` | `400` | The token being locked is not registered in your custody ledger |
+| `INSUFFICIENT_BALANCE` | `400` | The customer's available ledger balance does not cover the order. Carries `required` and `available` as decimal strings |
+| `PRICE_REF_STALE` | `503` | The reference price is stale and the book halts on stale references |
+| `PRICE_REF_UNAVAILABLE` | `503` | No reference price could be obtained and the book halts without one |

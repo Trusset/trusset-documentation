@@ -1,0 +1,157 @@
+---
+title: 'Update Order Book'
+api: 'PATCH /orderbooks/external-securities/api/order-books/{orderBookId}'
+description: 'Change status, sizing, fees, settlement operator, or price reference'
+---
+
+Applies a partial update to a book your instance owns. Imported books are not updatable here; a request against another instance's book returns `ORDER_BOOK_NOT_FOUND`.
+
+Only the fields you send are touched. Two properties of this venue are immutable: the custody contract and the token type. Neither the settlement mode nor the trading mode can be changed either, since external securities books are always on-chain and always continuous.
+
+## Idempotency
+
+Accepts an optional `Idempotency-Key` header. A repeat with the same key and body replays the original response.
+
+## Path Parameters
+
+<ParamField path="orderBookId" type="string" required>Order book ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="status" type="string">
+  `ACTIVE`, `PAUSED` or `CLOSED`. Pausing stops new orders without touching resting ones. Reopening a `CLOSED` book is refused with `ORDER_BOOK_EXISTS` if another open book now quotes the same pair.
+</ParamField>
+
+<ParamField body="settlementOperator" type="string">
+  Rotate the wallet that signs settlements. The new wallet must already be authorized on the custody contract for this security. If it is not, the request is refused with `409 CUSTODY_SETUP_REQUIRED` and the response carries the `setOperator` transaction for the security admin to sign.
+</ParamField>
+
+<ParamField body="minOrderSize" type="string">Smallest accepted quantity, in order book units.</ParamField>
+
+<ParamField body="maxOrderSize" type="string">Largest accepted quantity. Send `null` to remove the ceiling.</ParamField>
+
+<ParamField body="tickSize" type="string">Price increment, in order book units.</ParamField>
+
+<ParamField body="makerFeeBps" type="integer">Maker fee in basis points, 0 to 1000.</ParamField>
+
+<ParamField body="takerFeeBps" type="integer">Taker fee in basis points, 0 to 1000.</ParamField>
+
+<ParamField body="mmMakerRebateBps" type="integer">Market maker fee override, −1000 to 1000, or `null` to remove it.</ParamField>
+
+<ParamField body="allowImport" type="boolean">Publish or unpublish the book for import.</ParamField>
+
+<ParamField body="allowSharedLiquidity" type="boolean">
+  Turn depth pooling on or off. The peer cache is invalidated immediately, so the change takes effect on the next order rather than after the 30-second window.
+</ParamField>
+
+<ParamField body="custodySetupTxs" type="object">
+  Hash of the `setOperator` transaction you signed for a settlement operator rotation, under the `operator` key.
+</ParamField>
+
+<ParamField body="priceRefEnabled" type="boolean">Turn the reference band on or off. Turning it off clears the cached reference price.</ParamField>
+
+<ParamField body="priceRefMode" type="string">`MANUAL`, `STOCK_FEED` or `EXTERNAL_FEED`.</ParamField>
+
+<ParamField body="priceRefFeedUrl" type="string">HTTPS feed endpoint, or `null`. Must resolve to a public host.</ParamField>
+
+<ParamField body="priceRefFeedHeaders" type="string">Feed headers as a JSON string, or `null`.</ParamField>
+
+<ParamField body="priceRefFeedPath" type="string">JSON path, or the ticker symbol in `STOCK_FEED` mode.</ParamField>
+
+<ParamField body="priceRefEnforcement" type="string">Refresh interval, from `EVERY_TRADE` to `1DAY`.</ParamField>
+
+<ParamField body="priceRefSpreadBps" type="integer">Band half-width in basis points, 1 to 10000, or `null`.</ParamField>
+
+<ParamField body="priceRefHaltOnStale" type="boolean">Whether a stale reference stops trading.</ParamField>
+
+<ParamField body="priceRefStaleTolerance" type="integer">Staleness window in seconds, 60 to 604800, or `null`.</ParamField>
+
+<ParamField body="priceRefCircuitBreakerBps" type="integer">Reference move that pauses the book, 10 to 10000, or `null`.</ParamField>
+
+## Response Fields
+
+Returns the updated book, in the same shape as [Get Order Book](/endpoints/external-securities-trading/get-order-book).
+
+<Warning>
+  Rotating the settlement operator does not retire settlements already staged for the old one. A pending settlement's calldata is rebuilt against the book's current operator when you fetch it, so re-fetch with [Get Settlement Calldata](/endpoints/external-securities-trading/get-settlement-calldata) after a rotation rather than broadcasting a payload built earlier.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X PATCH "https://api.trusset.org/orderbooks/external-securities/api/order-books/clx_ob_extsec_001" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "takerFeeBps": 15,
+    "allowSharedLiquidity": true,
+    "priceRefSpreadBps": 400
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/external-securities/api/order-books/${orderBookId}`,
+  {
+    method: 'PATCH',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ takerFeeBps: 15, allowSharedLiquidity: true })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "id": "clx_ob_extsec_001",
+    "takerFeeBps": 15,
+    "allowSharedLiquidity": true,
+    "priceRefSpreadBps": 400,
+    "updatedAt": "2025-06-15T12:04:00.000Z"
+  }
+}
+```
+```json Error - Operator Not Authorized Yet
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "CUSTODY_SETUP_REQUIRED",
+    "message": "The new settlement operator is not authorized on the custody contract yet. Sign the returned transaction and retry.",
+    "setup": {
+      "action": "SIGN_TRANSACTIONS",
+      "custodyContract": "0x489aee4ae9546081d55848f157e03192e826988c",
+      "confirmWith": { "field": "custodySetupTxs", "keyedBy": "key" },
+      "steps": [
+        {
+          "key": "operator",
+          "to": "0x489aee4ae9546081d55848f157e03192e826988c",
+          "data": "0x...",
+          "functionName": "setOperator",
+          "description": "Authorize 0x9f8c... as a settlement operator for 0x51f2...",
+          "requiredSigner": "0x7712db30a7b4ffd9c445793089118b60e56d752a",
+          "requiredRole": null
+        }
+      ]
+    }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field failed schema validation |
+| `INVALID_CONFIG` | `400` | `settlementOperator` is not an address, a non-continuous trading mode was requested, or a price reference value is invalid |
+| `ORDER_BOOK_NOT_FOUND` | `404` | The book does not exist on your instance. Imported books cannot be updated |
+| `ORDER_BOOK_EXISTS` | `409` | Reopening a closed book collides with another open book on the same pair |
+| `CUSTODY_SETUP_REQUIRED` | `409` | A new settlement operator is not yet authorized on chain |
+| `IDEMPOTENCY_MISMATCH` | `409` | The key was used before with a different body |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

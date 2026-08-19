@@ -1,0 +1,124 @@
+---
+title: 'Update Order Book'
+api: 'PATCH /orderbooks/commodities/api/order-books/{orderBookId}'
+description: 'Change status, sizing, fees, pooling, or price reference on a book you own'
+---
+
+Applies a partial update to a book your instance owns. Imported books are not updatable here; a request against another instance's book returns `ORDER_BOOK_NOT_FOUND`.
+
+Only the fields you send are touched. The custody contract and settlement mode are not changeable on this surface.
+
+## Path Parameters
+
+<ParamField path="orderBookId" type="string" required>Order book ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="status" type="string">
+  `ACTIVE`, `PAUSED` or `CLOSED`. Pausing stops new orders without touching resting ones. Reopening a `CLOSED` book is refused with `ORDER_BOOK_EXISTS` if another open book now quotes the same pair.
+</ParamField>
+
+<ParamField body="minOrderSize" type="string">Smallest accepted quantity, in order book units.</ParamField>
+
+<ParamField body="maxOrderSize" type="string">Largest accepted quantity. Send `null` to remove the ceiling.</ParamField>
+
+<ParamField body="tickSize" type="string">Price increment, in order book units.</ParamField>
+
+<ParamField body="makerFeeBps" type="integer">Maker fee in basis points, 0 to 1000.</ParamField>
+
+<ParamField body="takerFeeBps" type="integer">Taker fee in basis points, 0 to 1000.</ParamField>
+
+<ParamField body="allowImport" type="boolean">Publish or unpublish the book for import.</ParamField>
+
+<ParamField body="allowSharedLiquidity" type="boolean">
+  Turn depth pooling on or off. Turning it on re-derives the fungibility class from the token's current reserve attestation, and the request fails if no usable attestation exists. Turning it off leaves the recorded class in place but stops the book matching against it.
+</ParamField>
+
+<ParamField body="priceRefEnabled" type="boolean">Turn the reference band on or off. Turning it off clears the cached reference price.</ParamField>
+
+<ParamField body="priceRefMode" type="string">`MANUAL`, `STOCK_FEED` or `EXTERNAL_FEED`.</ParamField>
+
+<ParamField body="priceRefFeedUrl" type="string">HTTPS feed endpoint, or `null`. Must resolve to a public host.</ParamField>
+
+<ParamField body="priceRefFeedHeaders" type="string">Feed headers as a JSON string, or `null`.</ParamField>
+
+<ParamField body="priceRefFeedPath" type="string">JSON path, or the ticker symbol in `STOCK_FEED` mode.</ParamField>
+
+<ParamField body="priceRefEnforcement" type="string">Refresh interval, from `EVERY_TRADE` to `1DAY`.</ParamField>
+
+<ParamField body="priceRefSpreadBps" type="integer">Band half-width in basis points, 1 to 10000, or `null`.</ParamField>
+
+<ParamField body="priceRefHaltOnStale" type="boolean">Whether a stale reference stops trading.</ParamField>
+
+<ParamField body="priceRefStaleTolerance" type="integer">Staleness window in seconds, 60 to 604800, or `null`.</ParamField>
+
+<ParamField body="priceRefCircuitBreakerBps" type="integer">Reference move that pauses the book, 10 to 10000, or `null`.</ParamField>
+
+## Response Fields
+
+Returns the updated book, in the same shape as [Get Order Book](/endpoints/commodity-trading/get-order-book).
+
+<Note>
+  Changing `status` or `allowSharedLiquidity` invalidates the peer cache immediately, so the change takes effect on the next order rather than after the 30-second window.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X PATCH "https://api.trusset.org/orderbooks/commodities/api/order-books/clx_ob_comm_001" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "status": "PAUSED", "takerFeeBps": 10 }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/commodities/api/order-books/${orderBookId}`,
+  {
+    method: 'PATCH',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ status: 'PAUSED', takerFeeBps: 10 })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "id": "clx_ob_comm_001",
+    "status": "PAUSED",
+    "takerFeeBps": 10,
+    "updatedAt": "2025-06-15T12:04:00.000Z"
+  }
+}
+```
+```json Error - Attestation Missing for Pooling
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ATTESTATION_NOT_FOUND",
+    "message": "No reserve attestation exists for this commodity token"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field failed schema validation |
+| `INVALID_PARAM` | `400` | `orderBookId` is missing or longer than 100 characters |
+| `INVALID_CONFIG` | `400` | An invalid price reference mode or enforcement interval, or a feed URL that is not HTTPS on a public host |
+| `ATTESTATION_NOT_FOUND` | `400` | Pooling was requested but no reserve attestation exists for the token |
+| `ATTESTATION_INCOMPLETE` | `400` | The attestation carries no valid fungibility classification |
+| `CFID_UNVERIFIED` | `400` | The attested symbol does not match the token's on-chain symbol |
+| `ORDER_BOOK_NOT_FOUND` | `404` | The book does not exist on your instance. Imported books cannot be updated |
+| `ORDER_BOOK_EXISTS` | `409` | Reopening a closed book collides with another open book on the same pair |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

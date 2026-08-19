@@ -1,0 +1,139 @@
+---
+title: 'Stock Trading'
+description: 'Central limit order book venue for tokenized stocks'
+icon: 'chart-line'
+---
+
+Stock trading runs a central limit order book over the stock tokens your instance issued. Orders match off-chain in Trusset's engine; where the resulting trade is settled depends on how the book was created. Two other venues run on the same engine with different custody: [External Securities Trading](/endpoints/external-securities-trading/introduction) for imported ERC-3643 tokens, and [Commodity Trading](/endpoints/commodity-trading/introduction) for commodity tokens.
+
+## Base Path
+
+```
+https://api.trusset.org/orderbooks/stocks/api
+```
+
+Three route families sit under that path:
+
+| Family | Path | Covers |
+|---|---|---|
+| Order books | `/order-books`, `/imports` | Book creation, configuration, market data, price reference, auctions |
+| Orders | `/orders`, `/users`, `/settlements`, `/custody` | Order entry, order and trade history, settlement and balance lookups |
+| Overlays | `/rfq`, `/offchain` | Request for quote, and the off-chain settlement surface |
+
+Every request authenticates with an instance API key in the `X-API-Key` header. See [Authentication](/endpoints/authentication). The instance bound to your key determines both the network and the data you can reach; a book belonging to another instance returns `ORDER_BOOK_NOT_FOUND` unless you have imported it. Every route except the `/offchain` surface also requires the Trading service on your instance, and returns `403 SERVICE_NOT_ENABLED` without it. The off-chain routes touch no custody contract, so they are reachable with any instance key.
+
+## Response envelope
+
+```json
+{
+  "success": true,
+  "data": { },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2025-06-15T12:00:00.000Z",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+
+On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. Schema failures use `VALIDATION_ERROR` with `error.details` listing each offending field. Always branch on `success` rather than on the HTTP status alone.
+
+## Settlement modes
+
+A book is created in one of two settlement modes, and the mode decides which order endpoint it accepts.
+
+**`OFF_CHAIN`** is the default on this surface, and the mode orders execute in today. The book holds no custody contract. Balances come from your instance's custody ledger, keyed by a `customerRef` rather than a wallet address, and a fill moves ledger entries. Orders go to [Submit Off-Chain Order](/endpoints/stock-trading/offchain-submit-order).
+
+**`ON_CHAIN`** books settle through `StockCustody`. Creating one is supported and its market data reads work, but order entry does not. Locking a balance in that contract needs a signature from the custody settlement operator, and Trusset holds no key to produce one. [Submit Order](/endpoints/stock-trading/submit-order) therefore answers `409 ONCHAIN_SETTLEMENT_UNAVAILABLE` on every such book, and so does [Accept Quote](/endpoints/stock-trading/accept-rfq-quote), which locks the requester's funds in the same way. Wallet-signed on-chain execution exists only on [External Securities Trading](/endpoints/external-securities-trading/introduction), where the trader's own EIP-712 signature authorizes the movement.
+
+<Note>
+  An existing on-chain book can be moved to off-chain settlement with [Update Order Book](/endpoints/stock-trading/update-order-book), once it holds no resting orders and no live balance locks. The reverse is refused: `settlementMode` accepts `OFF_CHAIN` only.
+</Note>
+
+## Units
+
+Prices and quantities are **order book units**: integers in a fixed-point representation with 6 decimal places. `1000000` is one whole unit. Send them as digit-only strings.
+
+| Field | Meaning |
+|---|---|
+| `quantity` | Base token amount, at 6 decimal places |
+| `price` | Quote token per whole base unit, at 6 decimal places |
+| `minOrderSize`, `maxOrderSize`, `tickSize` | Quantities and price increments in the same units |
+
+Notional follows from `quantity × price / 1000000`, again in order book units. The engine converts to on-chain amounts using each token's own decimals when a fill is settled. An order book unit is therefore not a wei value, and must not be sent as one.
+
+Fees are integers in basis points, capped at `1000` (10 percent) for both maker and taker. A fee recorded on a trade is charged as base quantity: `quantity × feeBps / 10000`, in the same order book units.
+
+## Order books
+
+A book pairs one base token with one quote token, and one instance may hold only one open book per pair. Recreating a pair while an `ACTIVE` or `PAUSED` book exists returns `ORDER_BOOK_EXISTS`; a `CLOSED` book does not block a new one.
+
+An on-chain book cannot exist until `StockCustody` admits both tokens and the stock token allow-lists the custody contract. Those writes are role-gated on chain, so [Create Order Book](/endpoints/stock-trading/create-order-book) never signs them. It resolves what is still outstanding from live chain reads and refuses with `409 CUSTODY_SETUP_REQUIRED`, returning the unsigned transactions and naming the wallet that must send each one. You sign what you can, then repeat the same request with those transaction hashes in `custodySetupTxs`. Each hash is receipt-verified before the prerequisite is re-read from the chain. The fresh read, not the hash, is the authority, so partial progress survives and re-posting is always the correct recovery.
+
+[Get Trade Readiness](/endpoints/stock-trading/get-trade-readiness) reports the same prerequisites for a book that already exists.
+
+## Trading modes
+
+`CONTINUOUS` is the default: every order matches against the resting book as it arrives.
+
+`PERIODIC_AUCTION` collects orders into batches instead. Orders rest with status `AUCTION_PENDING` and do not match until the auction ends. At that point a uniform clearing price is computed to maximize matched volume, and fills are allocated by strict price then time priority. Set the batch length with `auctionIntervalSeconds` (30 to 3600). `auctionRollUnmatched` decides whether unfilled orders roll into the next batch or are cancelled.
+
+`HYBRID` runs continuously and falls back to auctions on its own. A background sampler watches the top-of-book spread once a minute. Five consecutive samples above `hybridSwitchSpreadBps` flip the book into auctions, and five at or below flip it back. `hybridSwitchSpreadBps` must be greater than zero for this mode.
+
+## Shared liquidity
+
+Two books that quote the same instrument can pool their depth. When both set `allowSharedLiquidity`, the engine widens its search for counter-orders across the whole eligible peer set, and the market data reads widen with it.
+
+For stock books, eligibility is an exact match on the ISIN recorded on the token. The quote token, the custody contract, the token type and the network must match too, and both sides must have opted in and be `ACTIVE`. A book whose token exposes no ISIN can never pool. Fees still accrue per book: the maker's book charges the maker fee, the taker's book charges the taker fee.
+
+[Get Shared Peers](/endpoints/stock-trading/get-shared-peers) shows the current peer set, which is cached for 30 seconds.
+
+<Note>
+  `allowSharedLiquidity` is not settable on this surface. For stock books it is turned on from the Issuer App. The peer set and the widened reads are visible here either way.
+</Note>
+
+## Imports
+
+An order book owner can publish a book with `allowImport`. Another instance on the same network then imports it with [Import Order Book](/endpoints/stock-trading/import-order-book), and can read and trade it as if it were its own. The owner keeps configuration control, and only on-chain books can be imported. [Remove Import](/endpoints/stock-trading/remove-import) deactivates the link without deleting history.
+
+## Price reference
+
+A book can be pinned to an external reference price, and orders priced too far from it are refused with `PRICE_OUTSIDE_BAND`. Three modes supply the reference:
+
+| Mode | Source |
+|---|---|
+| `MANUAL` | A price you push with [Set Price Reference](/endpoints/stock-trading/set-price-reference) |
+| `STOCK_FEED` | Trusset's market data feed, for the symbol named in `priceRefFeedPath` |
+| `EXTERNAL_FEED` | An HTTPS endpoint of your own at `priceRefFeedUrl`, read at the JSON path in `priceRefFeedPath` |
+
+`priceRefEnforcement` sets how often the reference is refreshed, from `EVERY_TRADE` to `1DAY`. `priceRefSpreadBps` sets the half-width of the accepted band. `priceRefStaleTolerance` is how old a reference may be before it counts as stale, defaulting to three enforcement intervals, or five minutes when enforcement is `EVERY_TRADE`. `priceRefHaltOnStale` decides whether a stale reference stops trading (`PRICE_REF_STALE`, `503`) or is served anyway.
+
+The reference price is a plain decimal in the instrument's own currency, such as `"182.35"`. Order prices are order book units, and the band check divides by 1000000 before comparing.
+
+`priceRefCircuitBreakerBps` adds a second control. A reference that moves further than that threshold in one update pauses the book and writes a `CIRCUIT_BREAKER_TRIGGERED` entry into the price reference log. Separately, whenever the reference moves and a spread is configured, resting orders that fall outside the new band are cancelled with `PRICE_BAND_VIOLATION`.
+
+<Warning>
+  A feed URL must be HTTPS and must resolve to a public address. Private, loopback, link-local and metadata addresses are rejected with `INVALID_CONFIG`, and the response is capped at 64 KB with an 8 second timeout.
+</Warning>
+
+## Idempotency
+
+Mutating endpoints accept an `Idempotency-Key` header of 8 to 200 characters from `A-Za-z0-9_-:.`. A repeat with the same key and the same body replays the original status and body with `Idempotent-Replay: true`. The same key with a different body returns `409 IDEMPOTENCY_MISMATCH`. Keys are scoped to your instance and the specific endpoint, and expire after 24 hours.
+
+[Accept Quote](/endpoints/stock-trading/accept-rfq-quote) requires the header and rejects a request without one with `400 IDEMPOTENCY_KEY_REQUIRED`. [Submit Order](/endpoints/stock-trading/submit-order), [Create RFQ](/endpoints/stock-trading/create-rfq) and [Cancel RFQ](/endpoints/stock-trading/cancel-rfq) accept it optionally.
+
+## Rate limits
+
+Every request made with an instance API key counts against a ceiling of 200 requests per minute for that key. Writes carry a second, tighter limit on top of it:
+
+| Limit | Applies to |
+|---|---|
+| 200 per minute | Every request on this surface, keyed by API key |
+| 10 per minute | Book creation and updates, imports, order entry and cancellation, price reference updates, and every RFQ write |
+
+Exceeding a limit returns `429` with code `RATE_LIMIT_EXCEEDED` and `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`. See [Rate Limits](/endpoints/rate-limits).
+
+## Credits
+
+Requests on this surface also draw on your instance's monthly API credit allowance. Every response carries `X-Credits-Limit`, `X-Credits-Remaining` and `X-Credits-Reset`, plus an `X-Request-Id` you can quote in support requests. When the allowance is exhausted the request is refused with `402` and code `CREDIT_LIMIT_EXCEEDED`, and `metadata` carries `creditsLimit`, `creditsRemaining` and `resetsAt`. Credits consumed by a request that fails with a `5xx` are refunded automatically.

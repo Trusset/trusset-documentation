@@ -1,85 +1,130 @@
 ---
 title: 'Create RFQ'
-description: 'Open a request for quote and solicit market maker pricing'
 api: 'POST /orderbooks/stocks/api/rfq'
+description: 'Ask liquidity providers for an executable price on a size'
 ---
 
-Opens a request for quote (RFQ). The requester specifies a token pair, a side, and a base amount, and registered market makers respond with executable quotes. RFQs are short-lived: they expire after `expiryMs` (default applies if omitted), after which no further quotes or acceptances are accepted.
+Opens a request for quote. Instead of resting on the book, you name a pair, a side and a size, and registered liquidity providers respond with executable prices. Use it for sizes the visible book cannot absorb without moving.
 
-Use [List Quotes](/endpoints/stock-trading/list-rfq-quotes) to retrieve the quotes received, then [Accept Quote](/endpoints/stock-trading/accept-rfq-quote) to execute against one.
+An RFQ is addressed by custody contract and token pair, not by order book ID. Providers subscribed to that pair are notified immediately over the venue's real-time channel. If a book exists on your instance for the same triple, its price reference is used to validate quotes.
 
-## Authentication
+RFQs are short-lived by design: a quote is only executable while the provider's funds are still committed to it.
 
-Requires an instance API key with the `trading` service enabled.
+## Lifecycle
+
+An RFQ starts `PENDING`. It becomes `QUOTED` when a provider responds, `ACCEPTED` when you take a quote, `CANCELLED` when you withdraw it, and `EXPIRED` when its deadline passes. A background sweeper runs every five seconds and expires stale requests and quotes, releasing the funds each had committed.
+
+Providers quote from the Trusset issuer application rather than through this API surface, and quoting is gated on a provider being configured to respond to RFQs.
 
 ## Idempotency
 
-This endpoint accepts an optional `Idempotency-Key` header. Reusing a key with the same body returns the original RFQ; reusing it with a different body returns `IDEMPOTENCY_MISMATCH`.
+Accepts an optional `Idempotency-Key` header. A repeat with the same key and body replays the original response rather than opening a second request.
 
 ## Body Parameters
 
 <ParamField body="requesterAddress" type="string" required>
-  EVM address of the requesting party. Must match `0x[a-fA-F0-9]{40}`.
+  Wallet asking for the quote. Only this address may accept or cancel the resulting RFQ.
 </ParamField>
 
-<ParamField body="baseToken" type="string" required>
-  EVM address of the base token (the asset being bought or sold). Must match `0x[a-fA-F0-9]{40}`.
-</ParamField>
+<ParamField body="baseToken" type="string" required>Token you want to buy or sell.</ParamField>
 
-<ParamField body="quoteToken" type="string" required>
-  EVM address of the quote token (the currency used for pricing). Must match `0x[a-fA-F0-9]{40}`.
-</ParamField>
+<ParamField body="quoteToken" type="string" required>Settlement token (stablecoin).</ParamField>
 
 <ParamField body="custodyContract" type="string" required>
-  EVM address of the custody contract that will escrow and settle the trade. Must match `0x[a-fA-F0-9]{40}`.
+  Custody contract the trade would settle through. Together with the two token addresses this is what providers subscribe to.
 </ParamField>
 
 <ParamField body="side" type="string" required>
-  The requester's side. One of `BUY` or `SELL`.
+  `BUY` or `SELL`, from the requester's point of view.
 </ParamField>
 
 <ParamField body="baseAmount" type="string" required>
-  Amount of the base token to trade, in base units (wei). Numeric string.
+  Size in order book units, as a digit-only string. Must be greater than zero.
 </ParamField>
 
-<ParamField body="expiryMs" type="integer">
-  Lifetime of the RFQ in milliseconds. 5000-60000. If omitted, the instance default applies.
+<ParamField body="expiryMs" type="integer" default="30000">
+  How long the request stays open, in milliseconds. Clamped to between 5000 and 60000.
 </ParamField>
+
+## Response Fields
+
+Returns `201`.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="id" type="string">RFQ ID. Use it on every other RFQ endpoint.</ResponseField>
+    <ResponseField name="instanceId" type="string">Your instance.</ResponseField>
+    <ResponseField name="requesterAddress" type="string">Requesting wallet, lower-cased.</ResponseField>
+    <ResponseField name="baseToken" type="string">Base token, lower-cased.</ResponseField>
+    <ResponseField name="quoteToken" type="string">Quote token, lower-cased.</ResponseField>
+    <ResponseField name="custodyContract" type="string">Custody contract, lower-cased.</ResponseField>
+    <ResponseField name="side" type="string">`BUY` or `SELL`.</ResponseField>
+    <ResponseField name="baseAmount" type="string">Requested size in order book units.</ResponseField>
+    <ResponseField name="status" type="string">`PENDING`.</ResponseField>
+    <ResponseField name="expiresAt" type="string">ISO 8601 deadline.</ResponseField>
+    <ResponseField name="createdAt" type="string">ISO 8601 timestamp.</ResponseField>
+    <ResponseField name="updatedAt" type="string">ISO 8601 timestamp.</ResponseField>
+  </Expandable>
+</ResponseField>
 
 <RequestExample>
-```json
-{
-  "requesterAddress": "0x1111111111111111111111111111111111111111",
-  "baseToken": "0x1234567890abcdef1234567890abcdef12345678",
-  "quoteToken": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-  "custodyContract": "0x9876543210fedcba9876543210fedcba98765432",
-  "side": "BUY",
-  "baseAmount": "5000000000000000000",
-  "expiryMs": 15000
-}
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/stocks/api/rfq" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: rfq-2025-06-15-0001" \
+  -d '{
+    "requesterAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "baseToken": "0x51f2b9d0e77c4a1b83ce6d4a9271e5f3a0c8b912",
+    "quoteToken": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+    "custodyContract": "0x98c33b10823172e62a31d6048773df1054c4f821",
+    "side": "BUY",
+    "baseAmount": "250000000",
+    "expiryMs": 30000
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/orderbooks/stocks/api/rfq',
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID()
+    },
+    body: JSON.stringify({
+      requesterAddress: await wallet.getAddress(),
+      baseToken,
+      quoteToken,
+      custodyContract,
+      side: 'BUY',
+      baseAmount: '250000000'
+    })
+  }
+);
+const { data } = await res.json();
+// poll GET /rfq/{id}/quotes until expiresAt
 ```
 </RequestExample>
 
 <ResponseExample>
-```json
+```json Response
 {
   "success": true,
   "data": {
-    "id": "rfq_abc123",
-    "requesterAddress": "0x1111111111111111111111111111111111111111",
-    "baseToken": "0x1234567890abcdef1234567890abcdef12345678",
-    "quoteToken": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-    "custodyContract": "0x9876543210fedcba9876543210fedcba98765432",
+    "id": "clx_rfq_0091",
+    "instanceId": "inst_abc123",
+    "requesterAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "baseToken": "0x51f2b9d0e77c4a1b83ce6d4a9271e5f3a0c8b912",
+    "quoteToken": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+    "custodyContract": "0x98c33b10823172e62a31d6048773df1054c4f821",
     "side": "BUY",
-    "baseAmount": "5000000000000000000",
-    "status": "OPEN",
-    "expiresAt": "2025-01-15T10:30:15.000Z",
-    "createdAt": "2025-01-15T10:30:00.000Z"
-  },
-  "metadata": {
-    "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-01-15T10:30:00.000Z",
-    "instanceId": "inst_abc"
+    "baseAmount": "250000000",
+    "status": "PENDING",
+    "expiresAt": "2025-06-15T12:00:30.000Z",
+    "createdAt": "2025-06-15T12:00:00.000Z",
+    "updatedAt": "2025-06-15T12:00:00.000Z"
   }
 }
 ```
@@ -87,10 +132,10 @@ This endpoint accepts an optional `Idempotency-Key` header. Reusing a key with t
 
 ## Error Codes
 
-| Code | Status | Description |
-|------|--------|-------------|
-| `INSUFFICIENT_CUSTODY_BALANCE` | 400 | The requester lacks sufficient custody balance for the trade |
-| `MM_REQUIRED` | 403 | No eligible market maker is available for this pair |
-| `MM_CONFIG_VIOLATION` | 400 | The request violates market maker configuration constraints |
-| `IDEMPOTENCY_MISMATCH` | 409 | Idempotency key reused with a different request body |
-| `VALIDATION_ERROR` | 400 | Request body failed schema validation |
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field failed schema validation |
+| `INVALID_PARAM` | `400` | A required address is missing, `side` is not `BUY` or `SELL`, or `baseAmount` is not positive |
+| `INSTANCE_REQUIRED` | `400` | The request carried no resolvable instance |
+| `IDEMPOTENCY_MISMATCH` | `409` | The key was used before with a different body |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

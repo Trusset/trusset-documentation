@@ -1,64 +1,96 @@
 ---
 title: 'Get User Orders'
-description: 'Retrieve all orders placed by a specific user'
 api: 'GET /orderbooks/stocks/api/users/{userAddress}/orders'
+description: "List a wallet's orders across the stock books you can reach"
 ---
 
-Returns a paginated list of orders placed by the specified user across all on-chain order books in the instance.
-
-## Authentication
-
-Requires an instance API key with the `trading` service enabled.
+Returns orders placed by one wallet, newest first. Without `orderBookId` the search covers every stock book your instance owns or has imported. With it, the search is confined to that book, which must resolve for your instance.
 
 ## Path Parameters
 
-<ParamField path="userAddress" type="string" required>
-  EVM address of the user. Must match `0x[a-fA-F0-9]{40}`.
-</ParamField>
+<ParamField path="userAddress" type="string" required>Wallet address. Matched case-insensitively.</ParamField>
 
 ## Query Parameters
 
+<ParamField query="orderBookId" type="string">
+  Restrict to one book. Ignored if longer than 100 characters.
+</ParamField>
+
 <ParamField query="status" type="string">
-  Filter by order status (e.g. `OPEN`, `FILLED`, `CANCELLED`, `PARTIALLY_FILLED`).
+  Restrict to one status: `OPEN`, `PARTIALLY_FILLED`, `FILLED`, `CANCELLED`, `EXPIRED`, `REJECTED` or `AUCTION_PENDING`.
 </ParamField>
 
-<ParamField query="limit" type="integer">
-  Number of results to return. Default `50`, maximum `100`.
+<ParamField query="limit" type="integer" default="50">
+  Page size, capped at 100.
 </ParamField>
 
-<ParamField query="offset" type="integer">
-  Offset for pagination. Default `0`.
+<ParamField query="offset" type="integer" default="0">
+  Rows to skip.
 </ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="orders" type="array">
+      Order records, each carrying its `orderBook`. Same shape as [Get Order](/endpoints/stock-trading/get-order), without the trade arrays.
+    </ResponseField>
+    <ResponseField name="total" type="integer">Total matching orders, ignoring pagination.</ResponseField>
+    <ResponseField name="limit" type="integer">Page size applied.</ResponseField>
+    <ResponseField name="offset" type="integer">Offset applied.</ResponseField>
+  </Expandable>
+</ResponseField>
 
 <RequestExample>
-```bash
-curl -X GET "https://api.trusset.org/orderbooks/stocks/api/users/0x1111111111111111111111111111111111111111/orders?status=OPEN&limit=20" \
-  -H "x-api-key: trusset_{instanceRef}_{secret}"
+```bash cURL
+curl "https://api.trusset.org/orderbooks/stocks/api/users/0xabc7f1093d5e26b804a1c3f78de025916b47c0d3/orders?status=OPEN&limit=25" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const params = new URLSearchParams({ status: 'OPEN', limit: '25' });
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/stocks/api/users/${address}/orders?${params}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+console.log(`${data.orders.length} of ${data.total}`);
 ```
 </RequestExample>
 
 <ResponseExample>
-```json
+```json Response
 {
   "success": true,
-  "data": [
-    {
-      "id": "ord_xyz789",
-      "orderBookId": "ob_abc123",
-      "side": "BUY",
-      "orderType": "LIMIT",
-      "price": "100000000000000000000",
-      "quantity": "5000000000000000000",
-      "filledQuantity": "0",
-      "status": "OPEN",
-      "createdAt": "2025-01-15T10:30:00.000Z"
-    }
-  ],
-  "metadata": {
-    "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-01-15T10:35:00.000Z",
-    "instanceId": "inst_abc"
+  "data": {
+    "orders": [
+      {
+        "orderId": "b7c1e0d4-6f2a-4f1e-9d33-5c8a1f0b2e77",
+        "orderBookId": "clx_ob_stock_002",
+        "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+        "side": "BUY",
+        "orderType": "LIMIT",
+        "price": "182350000",
+        "quantity": "5000000",
+        "filledQuantity": "1000000",
+        "remainingQuantity": "4000000",
+        "status": "PARTIALLY_FILLED",
+        "timeInForce": "GTC",
+        "createdAt": "2025-06-15T12:00:00.000Z",
+        "orderBook": { "id": "clx_ob_stock_002", "symbol": "NYF1" }
+      }
+    ],
+    "total": 1,
+    "limit": 25,
+    "offset": 0
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `userAddress` is not a valid address |
+| `ORDER_BOOK_NOT_FOUND` | `404` | The `orderBookId` filter names a book your instance cannot reach |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

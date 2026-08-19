@@ -1,0 +1,96 @@
+---
+title: 'Approve Settlement Asset'
+api: 'POST /orderbooks/external-securities/api/order-books/{orderBookId}/quote-approval'
+description: 'Build the ERC-20 approval a buyer needs before their orders can settle'
+---
+
+Returns unsigned `approve` calldata letting the custody contract pull the settlement asset from a buyer's wallet at settlement.
+
+Buyers need this; sellers do not. The cash leg moves by `transferFrom` against an allowance, while the security leg moves by a forced transfer the custody contract is already authorized to make. Without an allowance a buy order's tradable balance reads as zero, because the venue reports the lesser of balance and allowance.
+
+The transaction is signed by the buyer, targets the settlement asset, and is not specific to one order. Approve once for the size you intend to trade rather than per order.
+
+## Path Parameters
+
+<ParamField path="orderBookId" type="string" required>
+  Order book whose settlement asset and custody contract the approval is for. Must be `ACTIVE` and reachable from your instance.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="amount" type="string" required>
+  Allowance to set, in the settlement asset's base units, as a digit-only string. This replaces any existing allowance rather than adding to it.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">
+      <Expandable>
+        <ResponseField name="to" type="string">The settlement asset contract.</ResponseField>
+        <ResponseField name="data" type="string">Encoded `approve` calldata.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="functionName" type="string">`approve`.</ResponseField>
+    <ResponseField name="description" type="string">The spender and amount the approval covers.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  Read the current allowance from `quoteAllowance` on [Get Security Status](/endpoints/external-securities-trading/get-security-status). Some settlement assets refuse to move a non-zero allowance straight to another non-zero value; where that applies, approve zero first.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/external-securities/api/order-books/clx_ob_extsec_001/quote-approval" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "amount": "50000000000" }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/external-securities/api/order-books/${orderBookId}/quote-approval`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ amount: '50000000000' })
+  }
+);
+const { data } = await res.json();
+
+const tx = await buyer.sendTransaction(data.transaction);
+await tx.wait();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "data": "0x095ea7b3..."
+    },
+    "functionName": "approve",
+    "description": "Approve 0x489aee4ae9546081d55848f157e03192e826988c to settle up to 50000000000 of 0x98ad0ca091552e23c564b41c74282e5343d03e8a"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `amount` is missing or not a digit-only string |
+| `INSTANCE_REQUIRED` | `400` | The request carried no resolvable instance |
+| `ORDER_BOOK_INACTIVE` | `400` | The book is `PAUSED` or `CLOSED` |
+| `ORDER_BOOK_NOT_FOUND` | `404` | The book does not exist, is not reachable, or is not an external securities book |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

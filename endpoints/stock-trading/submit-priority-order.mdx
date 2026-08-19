@@ -1,64 +1,141 @@
 ---
 title: 'Submit Priority Order'
-description: 'Submit a liquidation or forced-execution order that bypasses the normal queue'
 api: 'POST /orderbooks/stocks/api/orders/priority'
+description: 'Force-sell a liquidated position into the book, bypassing the price band'
 ---
 
-Submits a priority order that takes precedence over standard orders. Designed for liquidation scenarios where a user's collateral position must be unwound.
+Places a market sell on behalf of a liquidated borrower. This is the liquidation path, not a trading path: the order is always a `SELL`, always `MARKET`, always `IOC`, and it is exempt from the reference price band so a forced sale cannot be blocked by a band that the liquidation itself moved.
 
-Priority orders execute ahead of the regular order queue. The `reason` field should document the liquidation trigger for audit purposes.
+The endpoint requires the Lending service in addition to Trading, and only the owning instance may call it. The book must be its own, `ACTIVE`, and settling on-chain; anything else returns `ORDER_BOOK_NOT_FOUND`.
 
-## Authentication
-
-Requires an instance API key with both the `trading` and `lending` services enabled. Priority orders are typically issued by the lending and liquidation engine rather than by end users.
+<Warning>
+  The fill is matched and recorded, but the custody transfer behind it needs a signature from the custody settlement operator that Trusset cannot produce. Settlement therefore fails, the settlement record is written as `FAILED`, and the trades are marked `FAILED` with the reason. Failed trades are excluded from last price, volume and trade counts, so the tape is not polluted, but the position is not actually liquidated on chain. Treat this endpoint as unavailable for stock books until an operator-signed settlement path returns.
+</Warning>
 
 ## Body Parameters
 
 <ParamField body="orderBookId" type="string" required>
-  The target order book identifier. Max 100 characters.
+  Book to sell into. Must belong to your instance, be `ACTIVE`, and settle on-chain.
 </ParamField>
 
 <ParamField body="liquidatedUser" type="string" required>
-  EVM address of the user being liquidated. Must match `0x[a-fA-F0-9]{40}`.
+  Wallet whose position is being sold. Recorded as the order's owner.
 </ParamField>
 
 <ParamField body="amount" type="string" required>
-  Amount to liquidate in base token units (wei). Numeric string.
+  Base quantity to sell, in order book units, as a digit-only string.
 </ParamField>
 
 <ParamField body="reason" type="string">
-  Human-readable reason for the liquidation. Max 256 characters.
+  Free-text reason recorded on the order, up to 256 characters. Defaults to `LIQUIDATION_PRIORITY`.
 </ParamField>
 
+## Response Fields
+
+Returns `201`.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="order" type="object">The order record after matching, including `orderId` and `status`.</ResponseField>
+    <ResponseField name="trades" type="array">Trades produced by the sweep.</ResponseField>
+    <ResponseField name="filledQuantity" type="string">Quantity sold, in order book units.</ResponseField>
+    <ResponseField name="remainingQuantity" type="string">Quantity the book could not absorb.</ResponseField>
+    <ResponseField name="status" type="string">`FILLED`, `PARTIALLY_FILLED` or `CANCELLED`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  Because the order is `IOC`, anything the book cannot absorb immediately is cancelled rather than rested. A book with no bids leaves `filledQuantity` at `0`.
+</Note>
+
 <RequestExample>
-```json
-{
-  "orderBookId": "ob_abc123",
-  "liquidatedUser": "0x1111111111111111111111111111111111111111",
-  "amount": "10000000000000000000",
-  "reason": "Collateral ratio below minimum threshold"
-}
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/stocks/api/orders/priority" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "orderBookId": "clx_ob_stock_002",
+    "liquidatedUser": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+    "amount": "12000000",
+    "reason": "LOAN_5_LIQUIDATION"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/orderbooks/stocks/api/orders/priority',
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      orderBookId,
+      liquidatedUser: borrower,
+      amount: '12000000',
+      reason: 'LOAN_5_LIQUIDATION'
+    })
+  }
+);
+const { data } = await res.json();
+console.log(data.status, data.filledQuantity);
 ```
 </RequestExample>
 
 <ResponseExample>
-```json
+```json Response
 {
   "success": true,
   "data": {
-    "id": "pord_liq001",
-    "orderBookId": "ob_abc123",
-    "liquidatedUser": "0x1111111111111111111111111111111111111111",
-    "amount": "10000000000000000000",
-    "reason": "Collateral ratio below minimum threshold",
-    "status": "EXECUTED",
-    "createdAt": "2025-01-15T10:30:00.000Z"
-  },
-  "metadata": {
-    "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-01-15T10:30:00.000Z",
-    "instanceId": "inst_abc"
+    "order": {
+      "orderId": "3f7d2b91-84ac-4a2e-b1f0-6d5c9e0a3771",
+      "orderBookId": "clx_ob_stock_002",
+      "userAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+      "side": "SELL",
+      "orderType": "MARKET",
+      "price": null,
+      "quantity": "12000000",
+      "filledQuantity": "12000000",
+      "remainingQuantity": "0",
+      "status": "FILLED",
+      "timeInForce": "IOC",
+      "cancelReason": "LOAN_5_LIQUIDATION",
+      "createdAt": "2025-06-15T12:00:00.000Z"
+    },
+    "trades": [
+      {
+        "tradeId": "1c9e0f22-2b74-4a51-9f8e-73c1a0d4b6e5",
+        "price": "181900000",
+        "quantity": "12000000",
+        "makerAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+        "takerAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+        "side": "SELL",
+        "settlementStatus": "PROCESSING"
+      }
+    ],
+    "filledQuantity": "12000000",
+    "remainingQuantity": "0",
+    "status": "FILLED"
+  }
+}
+```
+```json Error - Lending Not Enabled
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "SERVICE_NOT_ENABLED",
+    "message": "Service 'lending' is not enabled for this instance"
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field failed schema validation |
+| `NO_CUSTODY_CONTRACT` | `400` | The book has no custody contract recorded |
+| `ORDER_BOOK_NOT_FOUND` | `404` | The book is not yours, not `ACTIVE`, or not settling on-chain |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading or Lending service is not enabled on this instance |

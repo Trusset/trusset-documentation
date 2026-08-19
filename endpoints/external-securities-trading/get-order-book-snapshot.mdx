@@ -1,0 +1,120 @@
+---
+title: 'Get Order Book Snapshot'
+api: 'GET /orderbooks/external-securities/api/order-books/{orderBookId}/snapshot'
+description: 'Read current depth, last price, and the 24-hour tape'
+---
+
+Returns a point-in-time view of one book: aggregated depth on both sides, the last traded price, the live price reference where one is configured, and rolling 24-hour statistics.
+
+When the book pools depth with peers, all four widen to the whole eligible set, so the depth you see is the depth an order would actually reach.
+
+Depth counts only orders that can be hit: `OPEN` or `PARTIALLY_FILLED`, not past their signed expiry, and backed by a reservation. It does not re-read the chain, so a signature a trader retired on chain without telling the venue can still appear here until an incoming order reaches it and it is pruned. Treat the depth as indicative and the fill as authoritative.
+
+A depth read that fails returns empty sides rather than an error.
+
+## Path Parameters
+
+<ParamField path="orderBookId" type="string" required>Order book ID.</ParamField>
+
+## Query Parameters
+
+<ParamField query="levels" type="integer" default="20">Price levels per side, capped at 100.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="orderBook" type="object">
+      Trading rules that apply to an order right now: `id`, `tokenAddress`, `quoteTokenAddress`, `name`, `symbol`, `status`, `tokenType`, `settlementMode`, `custodyContract`, `allowImport`, `priceRefEnabled`, `makerFeeBps`, `takerFeeBps`, `minOrderSize`, `maxOrderSize` and `tickSize`.
+    </ResponseField>
+    <ResponseField name="depth" type="object">
+      <Expandable>
+        <ResponseField name="bids" type="array">Buy levels, highest price first. Each carries `price`, `quantity` and `orderCount`.</ResponseField>
+        <ResponseField name="asks" type="array">Sell levels, lowest price first. Each carries `price`, `quantity` and `orderCount`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="lastPrice" type="string">Price of the most recent trade in order book units, or `null`.</ResponseField>
+    <ResponseField name="priceReference" type="object">
+      Live reference state, or `null`. Carries `price`, `mode`, `enforcement`, `spreadBps`, `lowerBound`, `upperBound` and `lastUpdated`.
+    </ResponseField>
+    <ResponseField name="stats24h" type="object">
+      <Expandable>
+        <ResponseField name="volume" type="string">Base volume over 24 hours, in order book units.</ResponseField>
+        <ResponseField name="trades" type="integer">Trade count over 24 hours.</ResponseField>
+        <ResponseField name="high" type="string">Highest trade price, or `null`.</ResponseField>
+        <ResponseField name="low" type="string">Lowest trade price, or `null`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="timestamp" type="string">When the snapshot was taken.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  Trades whose settlement failed permanently are excluded from `lastPrice` and `stats24h`. On this venue that matters more than elsewhere: a refused settlement is reversed outright, so counting it would print a trade that never happened.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/orderbooks/external-securities/api/order-books/clx_ob_extsec_001/snapshot?levels=10" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/external-securities/api/order-books/${orderBookId}/snapshot?levels=10`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+console.log(data.depth.bids[0]?.price, data.depth.asks[0]?.price, data.lastPrice);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "orderBook": {
+      "id": "clx_ob_extsec_001",
+      "tokenAddress": "0x51f2b9d0e77c4a1b83ce6d4a9271e5f3a0c8b912",
+      "quoteTokenAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "name": "Helvetia Growth Fund",
+      "symbol": "HELG",
+      "status": "ACTIVE",
+      "tokenType": "EXTERNAL_SECURITY",
+      "settlementMode": "ON_CHAIN",
+      "custodyContract": "0x489aee4ae9546081d55848f157e03192e826988c",
+      "allowImport": true,
+      "priceRefEnabled": true,
+      "makerFeeBps": 0,
+      "takerFeeBps": 10,
+      "minOrderSize": "1000000",
+      "maxOrderSize": null,
+      "tickSize": "10000"
+    },
+    "depth": {
+      "bids": [{ "price": "104200000", "quantity": "6000000", "orderCount": 1 }],
+      "asks": [{ "price": "104800000", "quantity": "15000000", "orderCount": 2 }]
+    },
+    "lastPrice": "104200000",
+    "priceReference": {
+      "price": "104.20",
+      "mode": "MANUAL",
+      "enforcement": "1HOUR",
+      "spreadBps": 500,
+      "lowerBound": "98.99",
+      "upperBound": "109.41",
+      "lastUpdated": "2025-06-15T11:00:00.000Z"
+    },
+    "stats24h": { "volume": "40000000", "trades": 6, "high": "104800000", "low": "103900000" },
+    "timestamp": "2025-06-15T12:00:00.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `ORDER_BOOK_NOT_FOUND` | `404` | No such external securities book on this instance, and not imported |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

@@ -1,0 +1,136 @@
+---
+title: 'Commodity Trading'
+description: 'Order book venue for tokenized commodities'
+icon: 'coins'
+---
+
+Commodity trading runs an order book over tokenized commodities, meaning gold and the other metals issued through Trusset's commodity tokenization, settling through `CommodityCustody`. It shares its matching engine, its market data reads, its price reference machinery and its import model with the other two venues: [Stock Trading](/endpoints/stock-trading/introduction) and [External Securities Trading](/endpoints/external-securities-trading/introduction).
+
+What makes it its own venue is fungibility. Two gold tokens are only interchangeable if they describe the same metal at the same fineness, on the same unit basis, with the same backing. This venue therefore derives a fungibility class from each token's reserve attestation, and pools depth on that class rather than on an instrument identifier.
+
+## Base Path
+
+```
+https://api.trusset.org/orderbooks/commodities/api
+```
+
+Three route families sit under that path:
+
+| Family | Path | Covers |
+|---|---|---|
+| Order books | `/order-books`, `/imports` | Book creation, custody setup, market data, price reference |
+| Orders | `/orders`, `/users` | Order entry, cancellation, order and trade history |
+| Settlement | `/settlements`, `/custody` | Settlement records and custody balance lookups |
+
+Every request authenticates with an instance API key in the `X-API-Key` header and requires the Trading service on your instance. See [Authentication](/endpoints/authentication). A book belonging to another instance returns `ORDER_BOOK_NOT_FOUND` unless you have imported it.
+
+## Response envelope
+
+```json
+{
+  "success": true,
+  "data": { },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2025-06-15T12:00:00.000Z",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+
+On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. Schema failures use `VALIDATION_ERROR` with `error.details` listing each offending field. Always branch on `success` rather than on the HTTP status alone.
+
+## Settlement
+
+Commodity books always settle on-chain, through `CommodityCustody`. There is no off-chain mode on this venue: creating a book requires a custody contract, and the settlement mode cannot be changed afterwards.
+
+<Warning>
+  Order entry is not currently available. Locking a balance in `CommodityCustody` needs a signature from the custody settlement operator, and Trusset holds no key to produce one. [Submit Order](/endpoints/commodity-trading/submit-order) therefore answers `409 ONCHAIN_SETTLEMENT_UNAVAILABLE` on every commodity book. The refusal happens before any lock row is written, so nothing is stranded.
+
+  Everything else on this surface works: book creation and configuration, custody setup, imports, market data, price reference, and every read. Wallet-signed on-chain execution exists today only on [External Securities Trading](/endpoints/external-securities-trading/introduction), where the trader's own EIP-712 signature is what authorizes the movement.
+</Warning>
+
+## Units
+
+Prices and quantities are **order book units**: integers in a fixed-point representation with 6 decimal places, sent as digit-only strings. `1000000` is one whole unit.
+
+| Field | Meaning |
+|---|---|
+| `quantity` | Base token amount, at 6 decimal places |
+| `price` | Quote token per whole base unit, at 6 decimal places |
+| `minOrderSize`, `maxOrderSize`, `tickSize` | Quantities and price increments in the same units |
+
+Notional follows from `quantity × price / 1000000`, again in order book units. The engine converts to on-chain amounts using each token's decimals when a fill is settled, so an order book unit is not a wei value.
+
+Fees are integers in basis points, capped at 1000 for both maker and taker. A fee recorded on a trade is charged as base quantity: `quantity × feeBps / 10000`, in the same order book units.
+
+## Custody setup
+
+A book cannot be created until `CommodityCustody` admits both tokens. `addSupportedToken` is restricted to the custody contract's admin, so [Create Order Book](/endpoints/commodity-trading/create-order-book) never signs it. It reads what is outstanding from the chain and refuses with `409 CUSTODY_SETUP_REQUIRED`, writing no database row and returning the unsigned transactions with the wallet that must send each one.
+
+Sign what you can, then repeat the same request with those hashes in `custodySetupTxs`, keyed `baseToken` and `quoteToken`. Each hash is receipt-verified before the prerequisite is re-read from the chain. The fresh read is the authority, so partial progress is durable and re-posting is always the correct recovery.
+
+[Get Trade Readiness](/endpoints/commodity-trading/get-trade-readiness) reports the same prerequisites for a book that already exists.
+
+## Fungibility classes
+
+Commodity books pool depth on a **fungibility class**, derived from the token's most recent reserve attestation rather than declared by the issuer. Four attested properties go into it, along with the quote token and the custody contract:
+
+| Property | Accepted values |
+|---|---|
+| Commodity symbol | `XAU` |
+| Fineness | `999.9`, `999.5`, `916` |
+| Unit basis | `GRAM`, `TROY_OUNCE` |
+| Backing type | `ALLOCATED_REDEEMABLE`, `UNALLOCATED_CASH_SETTLED` |
+
+The attested symbol is cross-checked against the token's own on-chain symbol before the class is computed, so an attestation that disagrees with the contract cannot be used.
+
+Two books pool only when their classes are identical and both have `allowSharedLiquidity` set, both are `ACTIVE`, and both resolve to the same network. Turning pooling on without a usable attestation is refused rather than silently ignored: the point of the class is that unlike metal never trades as if it were alike. Leaving pooling off, the book is created with no class and trades on its own depth.
+
+## Trading mode
+
+Commodity books run continuously: every order matches against the resting book as it arrives. The periodic auction and hybrid failover modes that exist on the engine are not exposed on this venue, on either the API or the application surface. `tradingMode` is therefore always `CONTINUOUS`, and the auction endpoints have no counterpart here.
+
+## Price reference
+
+A book can be pinned to an external reference price, and orders priced too far from it are refused with `PRICE_OUTSIDE_BAND`. Three modes supply the reference:
+
+| Mode | Source |
+|---|---|
+| `MANUAL` | A price you push with [Set Price Reference](/endpoints/commodity-trading/set-price-reference) |
+| `STOCK_FEED` | Trusset's market data feed, for the symbol named in `priceRefFeedPath` |
+| `EXTERNAL_FEED` | An HTTPS endpoint of your own at `priceRefFeedUrl`, read at the JSON path in `priceRefFeedPath` |
+
+`priceRefEnforcement` sets how often the reference is refreshed, from `EVERY_TRADE` to `1DAY`. `priceRefSpreadBps` sets the half-width of the accepted band. `priceRefStaleTolerance` is how old a reference may be before it counts as stale, defaulting to three enforcement intervals, or five minutes when enforcement is `EVERY_TRADE`. `priceRefHaltOnStale` decides whether a stale reference stops trading (`PRICE_REF_STALE`, `503`) or is served anyway.
+
+The reference price is a plain decimal in the quote currency, such as `"2412.55"`. Order prices are order book units, and the band check divides by 1000000 before comparing.
+
+`priceRefCircuitBreakerBps` adds a second control: a reference that moves further than that threshold in one update pauses the book and writes a `CIRCUIT_BREAKER_TRIGGERED` entry into the price reference log. Separately, whenever the reference moves and a spread is configured, resting orders outside the new band are cancelled with `PRICE_BAND_VIOLATION`.
+
+<Warning>
+  A feed URL must be HTTPS and must resolve to a public address. Private, loopback, link-local and metadata addresses are rejected with `INVALID_CONFIG`, and the response is capped at 64 KB with an 8 second timeout.
+</Warning>
+
+## Imports
+
+An order book owner can publish a book with `allowImport`. Another instance on the same network then imports it with [Import Order Book](/endpoints/commodity-trading/import-order-book), and can read and trade it as if it were its own. The owner keeps configuration control. [Remove Import](/endpoints/commodity-trading/remove-import) deactivates the link without deleting history.
+
+## Idempotency
+
+No endpoint on this surface reads an `Idempotency-Key`. The header is ignored, so a retried write is a fresh write. Plan retries accordingly, and read back before repeating a create.
+
+## Rate limits
+
+Every request made with an instance API key counts against a ceiling of 200 requests per minute for that key. Writes carry a second, tighter limit on top of it:
+
+| Limit | Applies to |
+|---|---|
+| 200 per minute | Every request on this surface, keyed by API key |
+| 10 per minute | Book creation and updates, imports, order entry and cancellation, and price reference updates |
+
+Exceeding a limit returns `429` with code `RATE_LIMIT_EXCEEDED` and `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`. See [Rate Limits](/endpoints/rate-limits).
+
+## Credits
+
+Requests on this surface also draw on your instance's monthly API credit allowance. Every response carries `X-Credits-Limit`, `X-Credits-Remaining` and `X-Credits-Reset`, plus an `X-Request-Id` you can quote in support requests. When the allowance is exhausted the request is refused with `402` and code `CREDIT_LIMIT_EXCEEDED`, and `metadata` carries `creditsLimit`, `creditsRemaining` and `resetsAt`. Credits consumed by a request that fails with a `5xx` are refunded automatically.

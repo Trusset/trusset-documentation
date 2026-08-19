@@ -1,0 +1,188 @@
+---
+title: 'External Securities Trading'
+description: 'Order book trading for ERC-3643 security tokens issued outside Trusset'
+icon: 'building-columns'
+---
+
+External securities trading runs an order book over ERC-3643 (T-REX) security tokens that were issued somewhere else and imported into your instance. Orders match off-chain in the same engine as the other venues, and settle on-chain in a single atomic transaction that carries both traders' signatures.
+
+This is the only Trusset venue where an order book settles on chain today, and the reason is the custody model. Nothing is escrowed and nothing is pooled, so no operator key is needed to move a position into custody: the traders themselves authorize every settlement by signing their orders.
+
+The sibling venues are [Stock Trading](/endpoints/stock-trading/introduction) for tokens Trusset issued and [Commodity Trading](/endpoints/commodity-trading/introduction) for commodity tokens.
+
+## Base Path
+
+```
+https://api.trusset.org/orderbooks/external-securities/api
+```
+
+Five route families sit under that path:
+
+| Family | Path | Covers |
+|---|---|---|
+| Venue | `/custody-contract`, `/security-tokens` | The custody address for your network, and the securities you have imported |
+| Order books | `/order-books`, `/imports` | Book creation, custody setup, market data, price reference |
+| Orders | `/orders`, `/users` | Order preparation, signed submission, cancellation, history |
+| Settlements | `/settlements` | The operator's signing queue, calldata, and receipt-verified confirmation |
+| Custody | `/custody` | Balance lookups against the custody contract |
+
+Every request authenticates with an instance API key in the `X-API-Key` header and requires the Trading service on your instance. See [Authentication](/endpoints/authentication). A book belonging to another instance returns `ORDER_BOOK_NOT_FOUND` unless you have imported it.
+
+## Response envelope
+
+```json
+{
+  "success": true,
+  "data": { },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2025-06-15T12:00:00.000Z",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+
+On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. Schema failures use `VALIDATION_ERROR` with `error.details` listing each offending field. Several refusals carry extra context beside the code: `deliveryCode`, `tokenRestrictionCode`, `required`, `available`, `referencePrice`, `lowerBound`, `upperBound`, `orderHash`, `reason` and `remainingBase`. Those fields are named on the endpoints that raise them.
+
+## The custody model
+
+`TRexCustody` is one contract per network with no owner, no admin and no upgrade path. It holds no balances at all.
+
+An ERC-3643 token only accepts a transfer whose recipient is verified in the issuer's own identity registry. A pooled vault would therefore have to be entered into someone else's register as a holder. Worse, once tokens sit in one omnibus balance the token sees a single holder, and country limits, holder counts and address freezes stop applying to the actual counterparties. The model here inverts that:
+
+| Leg | Where it lives | How it moves at settlement |
+|---|---|---|
+| Security | The holder's own wallet | A forced transfer by the custody contract, which holds the token's own delivery role |
+| Cash | The buyer's own wallet | `transferFrom` against an allowance the buyer granted the custody contract |
+
+The seller stays the registered holder for the whole life of an order, and the buyer is checked against the token's own compliance layer on every delivery.
+
+Each security is administered by its own controller, not by Trusset. The security admin recorded at registration is who authorizes settlement asset and venue operator changes, and who can stop all trading in that security at any time. Trusset holds no role on the contract.
+
+## Order lifecycle
+
+<Steps>
+  <Step title="Prepare">
+    [Prepare Order](/endpoints/external-securities-trading/prepare-order) returns the EIP-712 `domain`, `types` and `order` to sign, plus the `orderHash`. It also previews the reservation, so you know whether the trader's tradable balance covers the order.
+  </Step>
+  <Step title="Sign">
+    The trader signs the typed data in their own wallet. Nothing is sent to Trusset but the resulting signature. EOA signatures and EIP-1271 smart contract wallets are both accepted.
+  </Step>
+  <Step title="Submit">
+    [Submit Order](/endpoints/external-securities-trading/submit-order) verifies the signature, checks the order is still live on chain, reserves the balance, and matches. If it fills, a settlement is staged and its calldata comes back in the same response.
+  </Step>
+  <Step title="Settle">
+    The venue operator signs and broadcasts that transaction. The contract verifies both orders' signatures itself, so the operator can only execute a trade both sides actually signed, at or better than each side's limit.
+  </Step>
+  <Step title="Confirm">
+    [Confirm Settlement](/endpoints/external-securities-trading/confirm-settlement) verifies the mined receipt before writing anything, checking status, target, function and every argument, then consumes the reservations.
+  </Step>
+</Steps>
+
+Only limit orders can be signed, since a market order carries no price for a signature to bind. Sweeping the book is done with a limit price and `timeInForce: IOC`.
+
+## Reservations
+
+There is no on-chain lock. A resting order reserves the trader's balance off-chain, and every balance the venue reports is net of those reservations.
+
+`available` is what a new order can draw on: the unfrozen security balance for a sell, or the lesser of balance and allowance for the settlement asset on a buy, minus everything already reserved. A reservation is reduced by the settled amount when a settlement confirms, and released on cancellation. A background sweeper expires it once the signed order passes its on-chain deadline.
+
+Because the chain cannot see a reservation, [Get Custody Balance](/endpoints/external-securities-trading/get-custody-balance) answers with the same net figure the order gate uses rather than the raw chain number. Publishing the raw number would overstate inventory by exactly the trader's own resting quotes and then refuse their next order.
+
+## Signed order liveness
+
+A signature is a bearer authorization the chain can retire without telling the venue. A trader can cancel it, raise their nonce floor, or consume it in another settlement. The venue therefore re-reads liveness at three points rather than only when a settlement is built.
+
+**On submit**, for the incoming order. A signature already cancelled, nonce-invalidated or filled on chain is refused with `ORDER_NOT_LIVE`. A signature already resting on the book is refused with `DUPLICATE_ORDER`. One signature authorizes one quantity once, so sign a fresh salt to rest again. The duplicate check is serialized on the order hash, so two simultaneous submissions of the same signature cannot both pass.
+
+**Before matching**, for the resting orders the incoming order can actually reach. The maker's signature is the one that goes stale while it rests, because [Cancel Orders On Chain](/endpoints/external-securities-trading/cancel-on-chain) lets a trader invalidate it without the venue. Orders the chain has retired are cancelled and their reservations released before a trade can be booked against them. Only the depth the order can consume is re-read, so the chain cost tracks the fill rather than the book size.
+
+**At settlement build**, where a permanently doomed settlement is marked `FAILED` and unwound as it is diagnosed, reversing the trade and releasing both reservations rather than stranding them.
+
+## Units and decimals
+
+Prices and quantities on the API are **order book units**: integers in a fixed-point representation with 6 decimal places, sent as digit-only strings. `1000000` is one whole unit.
+
+Each book records the real decimals of both its tokens, read from the chain at creation, and converts between order book units and on-chain amounts with those. A quantity that does not convert to a whole number of indivisible token units is refused rather than silently rounded, and the message states the step size. A 0-decimal whole-share register therefore requires quantities in whole multiples of 1000000 order book units.
+
+| Field | Domain |
+|---|---|
+| `quantity`, `minOrderSize`, `maxOrderSize` | Order book units, converted at `baseDecimals` |
+| `price`, `tickSize` | Order book units, converted at `quoteDecimals` |
+| `signedQuantity`, `signedPrice` in the EIP-712 order | On-chain base units, at the tokens' own decimals |
+| Balances from the custody reads | On-chain base units |
+
+Fees are integers in basis points, capped at 1000. A fee recorded on a trade is charged as base quantity: `quantity × feeBps / 10000`, in the same order book units.
+
+## Custody setup
+
+A book cannot be created until four on-chain prerequisites hold. All four are role-gated on the token or the security's own admin, so Trusset never signs them. [Create Order Book](/endpoints/external-securities-trading/create-order-book) resolves what is outstanding from live chain reads and refuses with `409 CUSTODY_SETUP_REQUIRED`, returning the unsigned transactions.
+
+| Key | Target | Call | Signed by |
+|---|---|---|---|
+| `agentRole` | The security token | `addAgent` or `addController`, whichever dialect the token uses | The token owner, or an issuer role holder |
+| `security` | The custody contract | `registerSecurity` | The token owner, an agent, or an issuer or admin role holder |
+| `quoteAsset` | The custody contract | `setQuoteAsset` | The security admin recorded at registration |
+| `operator` | The custody contract | `setOperator` | The security admin |
+
+Sign what you can, then repeat the same request with those hashes in `custodySetupTxs`. Each hash is receipt-verified before the prerequisite is re-read from the chain, and the fresh read, not the hash, is the authority. Partial progress is durable, a step signed by a different wallet in another session still counts, and re-posting is always the correct recovery.
+
+[Get Trade Readiness](/endpoints/external-securities-trading/get-trade-readiness) reports the same four for a book that already exists.
+
+## Delivery checks
+
+A forced transfer deliberately bypasses the token's compliance modules, which is what the agent role is for, so the venue runs the checks itself before using it. The custody contract exposes the same logic as a view, and the venue calls it before a sell order is allowed to rest.
+
+| Code | Condition |
+|---|---|
+| `1` | The security is registered on the custody contract |
+| `2` | The security is active, meaning its issuer has not stopped venue trading |
+| `3` | The recipient is not the zero address |
+| `4` | The token is not paused |
+| `5` / `6` | The seller and the buyer are not frozen on the token |
+| `7` / `8` | The token exposes an identity registry and it answers |
+| `9` | The buyer is verified on that identity registry |
+| `10` | The seller's unfrozen balance covers the trade |
+| `11` / `12` | The compliance module answers, and allows |
+| `13` | The token's own transfer rules allow the pair |
+| `14` | The custody contract still holds the token's delivery role |
+
+A refusal comes back as `DELIVERY_NOT_ALLOWED` with the numeric `deliveryCode`. Where the token reports its own ERC-1404 reason, the message carries it and `tokenRestrictionCode` names the token's code.
+
+<Note>
+  Codes `6` and `9` are not checked when a sell order rests, because both describe the buyer and no buyer is known yet. They are enforced at settlement, against the actual counterparty.
+</Note>
+
+## Shared liquidity
+
+Two books quoting the same security can pool their depth. Eligibility is an exact match on the instrument identifier recorded on the custody contract. The token address, the settlement asset, the custody contract and the network must match too, and both sides must be `ACTIVE` with `allowSharedLiquidity` set.
+
+Same-token identity is what keeps a cross-venue fill atomically settleable: both sides of a pooled trade settle in one transaction on one contract. The identifier is free-form, up to 31 characters: an ISIN, a WKN or an issuer's own reference. The only rule is that venues quoting the same instrument agree on the same string.
+
+Settlement authority stays with the book's owner. An instance trading on an imported book receives the settlement reference rather than a transaction it is not authorized to send.
+
+## Trading modes
+
+External securities books run continuously. `PERIODIC_AUCTION` and `HYBRID` are rejected at creation and on update, so `tradingMode` is always `CONTINUOUS` and the auction endpoints have no counterpart on this venue.
+
+## Idempotency
+
+Mutating endpoints accept an `Idempotency-Key` header of 8 to 200 characters from `A-Za-z0-9_-:.`. A repeat with the same key and body replays the original status and body with `Idempotent-Replay: true`; the same key with a different body returns `409 IDEMPOTENCY_MISMATCH`. Keys are scoped to your instance and the specific endpoint, and expire after 24 hours.
+
+[Submit Order](/endpoints/external-securities-trading/submit-order), [Update Order Book](/endpoints/external-securities-trading/update-order-book) and [Confirm Settlement](/endpoints/external-securities-trading/confirm-settlement) accept it. None of them require it.
+
+## Rate limits
+
+Every request made with an instance API key counts against a ceiling of 200 requests per minute for that key. Writes carry a second, tighter limit on top of it:
+
+| Limit | Applies to |
+|---|---|
+| 200 per minute | Every request on this surface, keyed by API key |
+| 10 per minute | Book creation and updates, imports, order preparation, submission and cancellation, quote approvals, price reference updates, and settlement confirmation |
+
+Exceeding a limit returns `429` with code `RATE_LIMIT_EXCEEDED` and `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`. See [Rate Limits](/endpoints/rate-limits).
+
+## Credits
+
+Requests on this surface also draw on your instance's monthly API credit allowance. Every response carries `X-Credits-Limit`, `X-Credits-Remaining` and `X-Credits-Reset`, plus an `X-Request-Id` you can quote in support requests. When the allowance is exhausted the request is refused with `402` and code `CREDIT_LIMIT_EXCEEDED`, and `metadata` carries `creditsLimit`, `creditsRemaining` and `resetsAt`. Credits consumed by a request that fails with a `5xx` are refunded automatically.

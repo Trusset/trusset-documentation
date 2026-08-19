@@ -1,0 +1,166 @@
+---
+title: 'Get Security Status'
+api: 'GET /orderbooks/external-securities/api/order-books/{orderBookId}/security'
+description: 'Read on-chain registration, the EIP-712 domain, and a wallet’s tradable balances'
+---
+
+Returns everything a client needs to build and sign an order for this book: the security's live registration state, the exact EIP-712 domain and type definitions the custody contract expects, and, when you name a wallet, that wallet's tradable balances and its settlement asset allowance.
+
+Use it before [Prepare Order](/endpoints/external-securities-trading/prepare-order) if you want to build the typed data yourself, and to show a trader what they can actually trade.
+
+## Path Parameters
+
+<ParamField path="orderBookId" type="string" required>Order book ID.</ParamField>
+
+## Query Parameters
+
+<ParamField query="userAddress" type="string">
+  Wallet to report balances for. Omit for the registration and domain data only.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="orderBookId" type="string">Order book ID.</ResponseField>
+    <ResponseField name="custodyContract" type="string">Custody contract the book settles through.</ResponseField>
+    <ResponseField name="tokenAddress" type="string">Security token.</ResponseField>
+    <ResponseField name="quoteTokenAddress" type="string">Settlement asset.</ResponseField>
+    <ResponseField name="underlyingIdentifier" type="string">Identifier recorded on the book.</ResponseField>
+    <ResponseField name="baseDecimals" type="integer">Security token decimals.</ResponseField>
+    <ResponseField name="quoteDecimals" type="integer">Settlement asset decimals.</ResponseField>
+    <ResponseField name="settlementOperator" type="string">Wallet authorized to sign settlements.</ResponseField>
+    <ResponseField name="security" type="object">
+      Live state read from the custody contract.
+      <Expandable>
+        <ResponseField name="admin" type="string">Security admin recorded at registration.</ResponseField>
+        <ResponseField name="isin" type="string">Identifier as a readable string.</ResponseField>
+        <ResponseField name="isinRaw" type="string">The same identifier as the raw 32-byte value.</ResponseField>
+        <ResponseField name="baseUnit" type="string">One whole unit of the security, in base units.</ResponseField>
+        <ResponseField name="registered" type="boolean">Whether the security is registered.</ResponseField>
+        <ResponseField name="active" type="boolean">Whether the issuer still permits venue trading.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="eip712" type="object">
+      <Expandable>
+        <ResponseField name="domain" type="object">
+          `name` is `TRexCustody`, `version` is `1`, `chainId` is your instance's chain, and `verifyingContract` is the custody contract.
+        </ResponseField>
+        <ResponseField name="types" type="object">
+          The `Order` struct: `trader` and `token` and `quote` as addresses, `isBuy` as a bool, `quantity` and `price` as uint256, `expiry` and `nonce` as uint64, and `salt` as bytes32, in that order.
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="balances" type="object">
+      Present only when `userAddress` was supplied.
+      <Expandable>
+        <ResponseField name="base" type="object">
+          Security balances, in the security's base units, carrying `total`, `locked`, `onChainAvailable`, `reserved` and `available`.
+        </ResponseField>
+        <ResponseField name="quote" type="object">Settlement asset balances, same shape, in the asset's base units.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="quoteAllowance" type="string">
+      Present only when `userAddress` was supplied. What the wallet has approved the custody contract to spend of the settlement asset, in base units.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Reading the balances
+
+`onChainAvailable` is what the contract reports. `reserved` is what this venue has committed to the wallet's own resting orders. `available` is the difference, and is the number an order is checked against.
+
+For the settlement asset, the contract's available figure is already the lesser of balance and allowance, so a wallet with plenty of tokens but no approval reads as zero. Raise it with [Approve Settlement Asset](/endpoints/external-securities-trading/approve-quote-asset).
+
+<Note>
+  A balance read that fails answers with zeros rather than an error. Treat an unexpected zero as suspect if the wallet is known to be funded, and check [Get Trade Readiness](/endpoints/external-securities-trading/get-trade-readiness), which does surface a chain failure explicitly.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/orderbooks/external-securities/api/order-books/clx_ob_extsec_001/security?userAddress=0xabc7f1093d5e26b804a1c3f78de025916b47c0d3" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/external-securities/api/order-books/${orderBookId}/security?userAddress=${address}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+
+const signature = await signer._signTypedData(data.eip712.domain, data.eip712.types, order);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "orderBookId": "clx_ob_extsec_001",
+    "custodyContract": "0x489aee4ae9546081d55848f157e03192e826988c",
+    "tokenAddress": "0x51f2b9d0e77c4a1b83ce6d4a9271e5f3a0c8b912",
+    "quoteTokenAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+    "underlyingIdentifier": "CH0012032048",
+    "baseDecimals": 18,
+    "quoteDecimals": 6,
+    "settlementOperator": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "security": {
+      "admin": "0x7712db30a7b4ffd9c445793089118b60e56d752a",
+      "isin": "CH0012032048",
+      "isinRaw": "0x4348303031323033323034380000000000000000000000000000000000000000",
+      "baseUnit": "1000000000000000000",
+      "registered": true,
+      "active": true
+    },
+    "eip712": {
+      "domain": {
+        "name": "TRexCustody",
+        "version": "1",
+        "chainId": 11155111,
+        "verifyingContract": "0x489AeE4ae9546081d55848F157E03192e826988c"
+      },
+      "types": {
+        "Order": [
+          { "name": "trader", "type": "address" },
+          { "name": "token", "type": "address" },
+          { "name": "quote", "type": "address" },
+          { "name": "isBuy", "type": "bool" },
+          { "name": "quantity", "type": "uint256" },
+          { "name": "price", "type": "uint256" },
+          { "name": "expiry", "type": "uint64" },
+          { "name": "nonce", "type": "uint64" },
+          { "name": "salt", "type": "bytes32" }
+        ]
+      }
+    },
+    "balances": {
+      "base": {
+        "total": "500000000000000000000",
+        "locked": "0",
+        "onChainAvailable": "500000000000000000000",
+        "reserved": "20000000000000000000",
+        "available": "480000000000000000000"
+      },
+      "quote": {
+        "total": "100000000000",
+        "locked": "0",
+        "onChainAvailable": "50000000000",
+        "reserved": "0",
+        "available": "50000000000"
+      }
+    },
+    "quoteAllowance": "50000000000"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `userAddress` is not a valid address |
+| `ORDER_BOOK_NOT_FOUND` | `404` | No such external securities book on this instance, and not imported |
+| `CHAIN_UNAVAILABLE` | `502` | The custody contract could not be read |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

@@ -1,0 +1,136 @@
+---
+title: 'Get Settlement Calldata'
+api: 'GET /orderbooks/external-securities/api/settlements/{settlementId}/calldata'
+description: 'Rebuild the settlement transaction for a pending settlement'
+---
+
+Returns the unsigned transaction that settles one pending settlement. Use it to recover a payload you did not keep from [Submit Order](/endpoints/external-securities-trading/submit-order), and to work through the queue from [List Pending Settlements](/endpoints/external-securities-trading/list-pending-settlements).
+
+The transaction is rebuilt each time from the signed orders behind the trades, and simulated as the book's current settlement operator before it is returned. A settlement that can no longer succeed is diagnosed here rather than reverting on chain at your expense.
+
+Only the trades still awaiting settlement are included, so a partially confirmed settlement produces a smaller transaction on the second attempt.
+
+## Path Parameters
+
+<ParamField path="settlementId" type="string" required>Settlement ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="settlementId" type="string">Settlement ID.</ResponseField>
+    <ResponseField name="status" type="string">The settlement's current status.</ResponseField>
+    <ResponseField name="tradeCount" type="integer">Trades this transaction covers.</ResponseField>
+    <ResponseField name="skipped" type="array">
+      Trades excluded from the transaction, each with `tradeId` and `reason`.
+    </ResponseField>
+    <ResponseField name="confirmWith" type="object">The endpoint and field to confirm with once broadcast.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">
+      <Expandable>
+        <ResponseField name="to" type="string">The custody contract.</ResponseField>
+        <ResponseField name="data" type="string">Encoded settlement calldata.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="functionName" type="string">`settleTrade` for one fill, `batchSettleTrades` for several.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction settles.</ResponseField>
+    <ResponseField name="expectedSigner" type="string">The operator the transaction was simulated as.</ResponseField>
+    <ResponseField name="tradeRef" type="string">On a single fill, the trade reference the contract records.</ResponseField>
+    <ResponseField name="batchRef" type="string">On a batch, the batch reference.</ResponseField>
+    <ResponseField name="tradeCount" type="integer">On a batch, the number of fills.</ResponseField>
+    <ResponseField name="alreadySettled" type="boolean">
+      Present and `true` when the settlement is already confirmed or has no pending trades. No transaction is returned.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  A settlement whose revert is permanent is marked `FAILED` and unwound as it is diagnosed. Permanent means a cancelled or expired signature, an invalidated nonce, an over-filled order, a self-trade, or a side or market mismatch. The trades are reversed and both reservations released, and the request returns the diagnosis rather than a transaction. A transient failure, such as an unreachable node, leaves the settlement pending and is safe to retry.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/orderbooks/external-securities/api/settlements/0f7c2a19-64b8-4d02-9e51-73ab0c5d6f18/calldata" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/external-securities/api/settlements/${settlementId}/calldata`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+
+if (!data.alreadySettled) {
+  const tx = await operator.sendTransaction(data.transaction);
+  await tx.wait();
+  await fetch(
+    `https://api.trusset.org/orderbooks/external-securities/api/settlements/${settlementId}/confirm`,
+    {
+      method: 'POST',
+      headers: {
+        'X-API-Key': 'trusset_your_key_here',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ txHash: tx.hash })
+    }
+  );
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "settlementId": "0f7c2a19-64b8-4d02-9e51-73ab0c5d6f18",
+    "status": "PENDING",
+    "tradeCount": 1,
+    "skipped": [],
+    "confirmWith": { "endpoint": "POST /settlements/:settlementId/confirm", "field": "txHash" },
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x489aee4ae9546081d55848f157e03192e826988c",
+      "data": "0x..."
+    },
+    "functionName": "settleTrade",
+    "description": "Settle trade 0x8a1c... between 0xABC7... and 0x9F8c...",
+    "expectedSigner": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "tradeRef": "0x8a1c3f70d24e5b8916af02c5d7e34b18906fa2c1d5083e7649bb102f37cd5a44"
+  }
+}
+```
+```json Response - Already Settled
+{
+  "success": true,
+  "data": {
+    "settlementId": "0f7c2a19-64b8-4d02-9e51-73ab0c5d6f18",
+    "status": "CONFIRMED",
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "alreadySettled": true
+  }
+}
+```
+```json Error - Operator Not Authorized
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "SETTLEMENT_OPERATOR_UNAUTHORIZED",
+    "message": "The configured settlement operator is not authorized on this security. The token issuer must authorize it on the custody contract."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `SETTLEMENT_NOT_FOUND` | `404` | No settlement with that ID on your instance, or it is not an external securities settlement |
+| `SETTLEMENT_NOT_BUILDABLE` | `409` | No settleable fills remain. `skipped` names why each was excluded |
+| `SETTLEMENT_REJECTED` | `409` | The simulation reverted. Carries `reason` naming the contract error |
+| `SETTLEMENT_OPERATOR_UNAUTHORIZED` | `409` | The book's settlement operator is not authorized on this security |
+| `DELIVERY_NOT_ALLOWED` | `409` | The token's compliance layer refuses the delivery. Carries `deliveryCode`, and `tokenRestrictionCode` where the token reports its own |
+| `CHAIN_UNAVAILABLE` | `502` | The custody contract could not be read |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

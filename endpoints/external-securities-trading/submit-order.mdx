@@ -1,0 +1,331 @@
+---
+title: 'Submit Order'
+api: 'POST /orderbooks/external-securities/api/orders'
+description: 'Rest a signed limit order, match it, and stage the settlement'
+---
+
+Submits a signed order. The signature is verified against the custody contract's domain, the order is checked for liveness on chain, the trader's balance is reserved off-chain, and the order is matched against the book.
+
+If it fills, a settlement is staged in the same call and its calldata comes back in the response, ready for the venue operator to sign. If it rests, `settlement` is `null`.
+
+Send the same `expiry`, `nonce` and `salt` that [Prepare Order](/endpoints/external-securities-trading/prepare-order) returned. All three are part of the signed struct, so any difference changes the hash and the signature is rejected.
+
+## Idempotency
+
+Accepts an optional `Idempotency-Key` header. Sending one is strongly recommended: a retry after a network timeout would otherwise be refused as a `DUPLICATE_ORDER` rather than returning the original result.
+
+## Body Parameters
+
+<ParamField body="orderBookId" type="string" required>Target book. Must be `ACTIVE` and reachable from your instance.</ParamField>
+
+<ParamField body="userAddress" type="string" required>The trader's wallet. Must be the address that produced the signature.</ParamField>
+
+<ParamField body="side" type="string" required>`BUY` or `SELL`.</ParamField>
+
+<ParamField body="price" type="string" required>
+  Limit price in order book units. Must be a multiple of the book's `tickSize`.
+</ParamField>
+
+<ParamField body="quantity" type="string" required>
+  Base quantity in order book units. Must sit between the book's `minOrderSize` and `maxOrderSize`.
+</ParamField>
+
+<ParamField body="expiry" type="integer" required>Unix seconds from the prepared order.</ParamField>
+
+<ParamField body="nonce" type="string" required>Nonce from the prepared order.</ParamField>
+
+<ParamField body="salt" type="string" required>32-byte hex salt from the prepared order.</ParamField>
+
+<ParamField body="signature" type="string" required>
+  The trader's EIP-712 signature over the prepared order. An EOA signature or an EIP-1271 smart contract wallet signature is accepted.
+</ParamField>
+
+<ParamField body="orderType" type="string" default="LIMIT">
+  Only `LIMIT` is accepted. Anything else returns `MARKET_ORDER_NOT_SUPPORTED`, because a market order carries no price for a signature to bind.
+</ParamField>
+
+<ParamField body="timeInForce" type="string" default="GTC">
+  `GTC` rests until filled, cancelled or expired. `IOC` fills what it can and cancels the rest. `FOK` must fill entirely. Use a limit price with `IOC` to sweep the book.
+</ParamField>
+
+<ParamField body="postOnly" type="boolean" default="false">
+  Reject the order rather than let it take. Checked against the whole eligible peer set.
+</ParamField>
+
+<ParamField body="selfTradePreventionMode" type="string" default="NONE">
+  `NONE`, `CANCEL_TAKER`, `CANCEL_MAKER` or `CANCEL_BOTH`. An unrecognised value falls back to `NONE`.
+</ParamField>
+
+## What runs before the order rests
+
+The checks run in a fixed order, so the first refusal names the earliest condition that failed.
+
+<Steps>
+  <Step title="Field shape">
+    The order struct is rebuilt from your fields. Quantity and price must convert to whole token units, and `expiry`, `nonce` and `salt` must be in range.
+  </Step>
+  <Step title="Signature">
+    The order hash is derived from that struct, and the signature must recover to `userAddress` or validate through the wallet's own EIP-1271 check.
+  </Step>
+  <Step title="Book rules">
+    Size against `minOrderSize` and `maxOrderSize`, price against `tickSize`, the reference price band where one is configured, any account restriction on which books may be traded, and the post-only check against the eligible peer set.
+  </Step>
+  <Step title="Liveness">
+    The signature must not already be cancelled, nonce-invalidated or filled on chain, and must not already be resting on the book. See [Signed order liveness](/endpoints/external-securities-trading/introduction#signed-order-liveness).
+  </Step>
+  <Step title="Balance">
+    The tradable balance, net of the trader's existing reservations, must cover the order.
+  </Step>
+  <Step title="Delivery">
+    On a sell, the token's own compliance layer must permit the delivery. See [Delivery checks](/endpoints/external-securities-trading/introduction#delivery-checks).
+  </Step>
+  <Step title="Stale depth">
+    Resting orders the incoming order could reach are re-read on chain, and any the chain has retired are cancelled before a trade can be booked against them.
+  </Step>
+</Steps>
+
+## Response Fields
+
+Returns `201`.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="order" type="object">The order record, including `orderId`, `status`, `filledQuantity`, `remainingQuantity` and `expiresAt`.</ResponseField>
+    <ResponseField name="trades" type="array">Trades produced by this submission.</ResponseField>
+    <ResponseField name="filledQuantity" type="string">Quantity filled, in order book units.</ResponseField>
+    <ResponseField name="remainingQuantity" type="string">Quantity still resting.</ResponseField>
+    <ResponseField name="status" type="string">`OPEN`, `PARTIALLY_FILLED`, `FILLED` or `CANCELLED`.</ResponseField>
+    <ResponseField name="stpTriggered" type="boolean">Whether self-trade prevention acted.</ResponseField>
+    <ResponseField name="cancelReason" type="string">Why the order closed, or `null`.</ResponseField>
+    <ResponseField name="stpCancelledMakerIds" type="array">Resting orders self-trade prevention cancelled.</ResponseField>
+    <ResponseField name="orderHash" type="string">The EIP-712 hash of the submitted order.</ResponseField>
+    <ResponseField name="signedOrder" type="object">The struct as it was signed, echoed back.</ResponseField>
+    <ResponseField name="settlement" type="object">
+      `null` when nothing filled.
+      <Expandable>
+        <ResponseField name="settlementId" type="string">Settlement to confirm once broadcast.</ResponseField>
+        <ResponseField name="status" type="string">`AWAITING_SIGNATURE`.</ResponseField>
+        <ResponseField name="tradeCount" type="integer">Fills in this settlement.</ResponseField>
+        <ResponseField name="skipped" type="array">Trades excluded from the transaction, each with `tradeId` and `reason`.</ResponseField>
+        <ResponseField name="settlementOperator" type="string">Wallet that must sign.</ResponseField>
+        <ResponseField name="confirmWith" type="object">The endpoint and field to confirm with.</ResponseField>
+        <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+        <ResponseField name="transaction" type="object">`to` and `data` for the settlement transaction.</ResponseField>
+        <ResponseField name="functionName" type="string">`settleTrade` for one fill, `batchSettleTrades` for several.</ResponseField>
+        <ResponseField name="expectedSigner" type="string">The operator the transaction was simulated as.</ResponseField>
+        <ResponseField name="tradeRef" type="string">On a single fill, the trade reference the contract records.</ResponseField>
+        <ResponseField name="batchRef" type="string">On a batch, the batch reference.</ResponseField>
+        <ResponseField name="settledByOrderBookOwner" type="boolean">
+          Present and `true` when the book belongs to another instance. No calldata is returned; the owner's operator settles it.
+        </ResponseField>
+        <ResponseField name="error" type="object">
+          Present when staging failed, carrying `code`, `message`, and `unwound: true` if the fill was reversed.
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  A settlement whose revert is permanent is diagnosed at staging and unwound immediately: the trade is reversed, both reservations are released, and `settlement.error.unwound` is `true`. The `order` in the response is re-read after the unwind, so it reflects the reversal rather than the fill that was rolled back.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/external-securities/api/orders" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: extsec-order-0001" \
+  -d '{
+    "orderBookId": "clx_ob_extsec_001",
+    "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "side": "BUY",
+    "price": "104200000",
+    "quantity": "10000000",
+    "expiry": 1750593600,
+    "nonce": "0",
+    "salt": "0x7c1d0a5f3b8e29406d1af7c58b2e0349d6a1f80b3c5e97246fa0d81b5e37c204",
+    "signature": "0x9b1e...1c",
+    "timeInForce": "GTC"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/orderbooks/external-securities/api/orders',
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': prep.data.orderHash
+    },
+    body: JSON.stringify({
+      orderBookId,
+      userAddress: order.trader,
+      side: 'BUY',
+      price: '104200000',
+      quantity: '10000000',
+      expiry: Number(order.expiry),
+      nonce: order.nonce,
+      salt: order.salt,
+      signature
+    })
+  }
+);
+const { data } = await res.json();
+
+if (data.settlement?.transaction) {
+  const tx = await operator.sendTransaction(data.settlement.transaction);
+  await tx.wait();
+  // then POST /settlements/{settlementId}/confirm { txHash: tx.hash }
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - Filled, Settlement Staged
+{
+  "success": true,
+  "data": {
+    "order": {
+      "orderId": "c81f4a9e-2d70-4bb3-9f16-08a5c7d1e320",
+      "orderBookId": "clx_ob_extsec_001",
+      "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+      "side": "BUY",
+      "orderType": "LIMIT",
+      "price": "104200000",
+      "quantity": "10000000",
+      "filledQuantity": "10000000",
+      "remainingQuantity": "0",
+      "status": "FILLED",
+      "timeInForce": "GTC",
+      "expiresAt": "2025-06-22T12:00:00.000Z",
+      "createdAt": "2025-06-15T12:00:00.000Z"
+    },
+    "trades": [
+      {
+        "tradeId": "5b3c19e0-7a42-4d86-91f5-2c0e8d47b613",
+        "price": "104200000",
+        "quantity": "10000000",
+        "makerAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+        "takerAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+        "side": "BUY",
+        "settlementStatus": "AWAITING_SIGNATURE"
+      }
+    ],
+    "filledQuantity": "10000000",
+    "remainingQuantity": "0",
+    "status": "FILLED",
+    "stpTriggered": false,
+    "cancelReason": null,
+    "stpCancelledMakerIds": [],
+    "orderHash": "0x2f9d41c8b7a05e3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "signedOrder": {
+      "trader": "0xABC7f1093D5e26b804a1C3f78dE025916B47c0d3",
+      "token": "0x51F2B9d0E77c4a1B83Ce6d4A9271E5f3a0C8b912",
+      "quote": "0x98aD0ca091552e23C564B41C74282e5343D03E8a",
+      "isBuy": true,
+      "quantity": "10000000000000000000",
+      "price": "104200000",
+      "expiry": "1750593600",
+      "nonce": "0",
+      "salt": "0x7c1d0a5f3b8e29406d1af7c58b2e0349d6a1f80b3c5e97246fa0d81b5e37c204"
+    },
+    "settlement": {
+      "settlementId": "0f7c2a19-64b8-4d02-9e51-73ab0c5d6f18",
+      "status": "AWAITING_SIGNATURE",
+      "tradeCount": 1,
+      "skipped": [],
+      "settlementOperator": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+      "confirmWith": { "endpoint": "POST /settlements/:settlementId/confirm", "field": "txHash" },
+      "action": "SIGN_TRANSACTION",
+      "transaction": {
+        "to": "0x489aee4ae9546081d55848f157e03192e826988c",
+        "data": "0x..."
+      },
+      "functionName": "settleTrade",
+      "description": "Settle trade 0x8a1c... between 0xABC7... and 0x9F8c...",
+      "expectedSigner": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+      "tradeRef": "0x8a1c3f70d24e5b8916af02c5d7e34b18906fa2c1d5083e7649bb102f37cd5a44"
+    }
+  }
+}
+```
+```json Response - Rested, No Fill
+{
+  "success": true,
+  "data": {
+    "order": {
+      "orderId": "c81f4a9e-2d70-4bb3-9f16-08a5c7d1e320",
+      "status": "OPEN",
+      "filledQuantity": "0",
+      "remainingQuantity": "10000000",
+      "expiresAt": "2025-06-22T12:00:00.000Z"
+    },
+    "trades": [],
+    "filledQuantity": "0",
+    "remainingQuantity": "10000000",
+    "status": "OPEN",
+    "stpTriggered": false,
+    "cancelReason": null,
+    "stpCancelledMakerIds": [],
+    "orderHash": "0x2f9d41c8b7a05e3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "settlement": null
+  }
+}
+```
+```json Error - Signature Already Resting
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "DUPLICATE_ORDER",
+    "message": "This signed order is already resting on the book. Sign a new order (a fresh salt) instead of resubmitting this signature.",
+    "orderId": "c81f4a9e-2d70-4bb3-9f16-08a5c7d1e320",
+    "orderHash": "0x2f9d41c8b7a05e3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b"
+  }
+}
+```
+```json Error - Delivery Refused
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "DELIVERY_NOT_ALLOWED",
+    "message": "Seller does not hold enough unfrozen tokens",
+    "deliveryCode": 10
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field failed schema validation |
+| `SIGNATURE_REQUIRED` | `400` | `signature` is missing or not hex |
+| `MARKET_ORDER_NOT_SUPPORTED` | `400` | `orderType` is anything other than `LIMIT` |
+| `INVALID_SIGNATURE` | `401` | The signature does not recover to the trading wallet |
+| `ORDER_TOO_SMALL` | `400` | `quantity` is below the book's `minOrderSize` |
+| `ORDER_TOO_LARGE` | `400` | `quantity` is above the book's `maxOrderSize` |
+| `INVALID_PRICE` | `400` | The price is not a multiple of `tickSize`, or does not convert cleanly |
+| `INVALID_QUANTITY` | `400` | The quantity does not convert to a whole number of token units |
+| `PRICE_OUTSIDE_BAND` | `400` | The price falls outside the reference band. Carries `referencePrice`, `lowerBound`, `upperBound` and `spreadBps` |
+| `INSUFFICIENT_CUSTODY_BALANCE` | `400` | The tradable balance, net of reservations, does not cover the order. Carries `required`, `available` and `tokenAddress` |
+| `ORDER_BOOK_INACTIVE` | `400` | The book is `PAUSED` or `CLOSED` |
+| `WRONG_SETTLEMENT_MODE` | `400` | The book does not settle on chain |
+| `ORDER_NOT_LIVE` | `409` | The signature was cancelled, nonce-invalidated, or already filled on chain. Carries `reason` and sometimes `remainingBase` |
+| `DUPLICATE_ORDER` | `409` | The same signature is already resting. Carries `orderId` and `orderHash` |
+| `POST_ONLY_WOULD_CROSS` | `409` | A post-only order would have taken liquidity |
+| `DELIVERY_NOT_ALLOWED` | `409` | The token's compliance layer refuses the delivery. Carries `deliveryCode`, and `tokenRestrictionCode` where the token reports its own |
+| `MM_CONFIG_VIOLATION` | `403` | The account is restricted to a set of books that excludes this one |
+| `ORDER_BOOK_NOT_FOUND` | `404` | The book does not exist, or is not reachable from your instance |
+| `SETTLEMENT_NOT_BUILDABLE` | `409` | The fill could not be turned into a settlement transaction |
+| `SETTLEMENT_REJECTED` | `409` | The settlement simulation reverted. Carries `reason` |
+| `SETTLEMENT_OPERATOR_UNAUTHORIZED` | `409` | The book's settlement operator is not authorized on this security |
+| `PRICE_REF_STALE` | `503` | The reference price is stale and the book halts on stale references |
+| `PRICE_REF_UNAVAILABLE` | `503` | No reference price could be obtained and the book halts without one |
+| `CHAIN_UNAVAILABLE` | `502` | A required chain read did not answer |
+| `IDEMPOTENCY_MISMATCH` | `409` | The key was used before with a different body |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

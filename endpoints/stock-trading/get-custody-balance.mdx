@@ -1,51 +1,70 @@
 ---
 title: 'Get Custody Balance'
-description: "Check a user's token balance within a custody contract"
 api: 'GET /orderbooks/stocks/api/custody/{custodyContract}/balance/{userAddress}/{tokenAddress}'
+description: 'Read a wallet’s balance inside a custody contract'
 ---
 
-Returns the balance of a specific token held by a user within a custody contract. Custody contracts escrow tokens during the trading and settlement lifecycle.
+Returns what one wallet holds of one token inside a custody contract, split into what is free and what is committed to resting orders.
 
-## Authentication
+Amounts are on-chain base units in the token's own decimals, not order book units. Convert before comparing against an order's `quantity` or `price`.
 
-Requires an instance API key with the `trading` service enabled.
+The contract is read live. If the read fails, the endpoint answers with zeros rather than an error, so a zero balance and an unreachable node look alike. Treat a sudden zero as suspect if the wallet was funded.
 
 ## Path Parameters
 
 <ParamField path="custodyContract" type="string" required>
-  EVM address of the custody contract. Must match `0x[a-fA-F0-9]{40}`.
+  Custody contract address. Which flavour it is decides how the balance is read, resolved from your instance's network.
 </ParamField>
 
-<ParamField path="userAddress" type="string" required>
-  EVM address of the user. Must match `0x[a-fA-F0-9]{40}`.
-</ParamField>
+<ParamField path="userAddress" type="string" required>Wallet to read.</ParamField>
 
-<ParamField path="tokenAddress" type="string" required>
-  EVM address of the token. Must match `0x[a-fA-F0-9]{40}`.
-</ParamField>
+<ParamField path="tokenAddress" type="string" required>Token to read. Either side of a pair.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="total" type="string">Everything the wallet holds in custody, in the token's base units.</ResponseField>
+    <ResponseField name="locked" type="string">Amount committed to resting orders and pending settlements.</ResponseField>
+    <ResponseField name="available" type="string">Free balance, `total` minus `locked`. This is what a new order can draw on.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  Off-chain books hold no custody contract. Balances for off-chain trading live in your instance's custody ledger and are keyed by `customerRef`, not by wallet.
+</Note>
 
 <RequestExample>
-```bash
-curl -X GET "https://api.trusset.org/orderbooks/stocks/api/custody/0x9876.../balance/0x1111.../0x1234..." \
-  -H "x-api-key: trusset_{instanceRef}_{secret}"
+```bash cURL
+curl "https://api.trusset.org/orderbooks/stocks/api/custody/0x98c33b10823172e62a31d6048773df1054c4f821/balance/0xabc7f1093d5e26b804a1c3f78de025916b47c0d3/0x98ad0ca091552e23c564b41c74282e5343d03e8a" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/stocks/api/custody/${custody}/balance/${user}/${token}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+console.log(ethers.utils.formatUnits(data.available, 6), 'USDC free');
 ```
 </RequestExample>
 
 <ResponseExample>
-```json
+```json Response
 {
   "success": true,
   "data": {
-    "custodyContract": "0x9876543210fedcba9876543210fedcba98765432",
-    "userAddress": "0x1111111111111111111111111111111111111111",
-    "tokenAddress": "0x1234567890abcdef1234567890abcdef12345678",
-    "balance": "50000000000000000000"
-  },
-  "metadata": {
-    "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-01-15T10:35:00.000Z",
-    "instanceId": "inst_abc"
+    "total": "50000000000",
+    "locked": "9117500000",
+    "available": "40882500000"
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | One of the three path addresses is malformed |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

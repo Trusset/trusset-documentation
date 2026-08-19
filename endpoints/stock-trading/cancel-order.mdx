@@ -1,48 +1,104 @@
 ---
 title: 'Cancel Order'
-description: 'Cancel an open order on an on-chain order book'
 api: 'DELETE /orderbooks/stocks/api/orders/{orderId}'
+description: 'Withdraw a resting order and release what it reserved'
 ---
 
-Cancels an open order. Only the original submitter (identified by `userAddress`) can cancel their own orders.
+Cancels an order that is still `OPEN` or `PARTIALLY_FILLED`. Only the wallet that placed the order can cancel it: `userAddress` must match the order's owner, and a mismatch reads the same as a missing order.
 
-## Authentication
+Filled, expired and already-cancelled orders return `ORDER_NOT_FOUND`. Cancelling is idempotent in effect. A second attempt on the same order fails the same way as an order that never existed.
 
-Requires an instance API key with the `trading` service enabled.
+Orders placed through the off-chain surface belong to a customer reference rather than a wallet and are cancelled with [Cancel Off-Chain Order](/endpoints/stock-trading/offchain-cancel-order).
 
 ## Path Parameters
 
 <ParamField path="orderId" type="string" required>
-  The order identifier. Max 100 characters.
+  The order's `orderId`, as returned when it was submitted. Up to 100 characters.
 </ParamField>
 
 ## Body Parameters
 
 <ParamField body="userAddress" type="string" required>
-  EVM address of the user who placed the order. Must match the original order's `userAddress`. Format: `0x[a-fA-F0-9]{40}`.
+  Wallet that placed the order.
 </ParamField>
 
+## Releasing the reservation
+
+The order row is marked `CANCELLED` first, so the depth disappears immediately. Releasing the custody lock behind it is attempted afterwards, and a failure there is logged rather than surfaced: the cancel still succeeds, and the lock is retried by the balance lock reconciler.
+
+Only the unfilled remainder is released. A lock that is already `PENDING`, `FAILED` or `RELEASED` is left alone.
+
+## Response Fields
+
+Returns the cancelled order.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="orderId" type="string">Order ID.</ResponseField>
+    <ResponseField name="orderBookId" type="string">Book the order was on.</ResponseField>
+    <ResponseField name="userAddress" type="string">Owning wallet, lower-cased.</ResponseField>
+    <ResponseField name="side" type="string">`BUY` or `SELL`.</ResponseField>
+    <ResponseField name="orderType" type="string">`LIMIT` or `MARKET`.</ResponseField>
+    <ResponseField name="price" type="string">Limit price in order book units, or `null`.</ResponseField>
+    <ResponseField name="quantity" type="string">Original quantity.</ResponseField>
+    <ResponseField name="filledQuantity" type="string">Quantity filled before the cancel.</ResponseField>
+    <ResponseField name="remainingQuantity" type="string">Quantity withdrawn.</ResponseField>
+    <ResponseField name="status" type="string">`CANCELLED`.</ResponseField>
+    <ResponseField name="cancelReason" type="string">`USER_CANCELLED`.</ResponseField>
+    <ResponseField name="updatedAt" type="string">ISO 8601 timestamp.</ResponseField>
+  </Expandable>
+</ResponseField>
+
 <RequestExample>
-```json
-{
-  "userAddress": "0x1111111111111111111111111111111111111111"
-}
+```bash cURL
+curl -X DELETE "https://api.trusset.org/orderbooks/stocks/api/orders/b7c1e0d4-6f2a-4f1e-9d33-5c8a1f0b2e77" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3" }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/stocks/api/orders/${orderId}`,
+  {
+    method: 'DELETE',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ userAddress: await wallet.getAddress() })
+  }
+);
+const { data } = await res.json();
 ```
 </RequestExample>
 
 <ResponseExample>
-```json
+```json Response
 {
   "success": true,
   "data": {
-    "id": "ord_xyz789",
+    "orderId": "b7c1e0d4-6f2a-4f1e-9d33-5c8a1f0b2e77",
+    "orderBookId": "clx_ob_stock_002",
+    "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "side": "BUY",
+    "orderType": "LIMIT",
+    "price": "182350000",
+    "quantity": "5000000",
+    "filledQuantity": "1000000",
+    "remainingQuantity": "4000000",
     "status": "CANCELLED",
-    "cancelledAt": "2025-01-15T10:35:00.000Z"
-  },
-  "metadata": {
-    "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-01-15T10:35:00.000Z",
-    "instanceId": "inst_abc"
+    "cancelReason": "USER_CANCELLED",
+    "updatedAt": "2025-06-15T12:06:00.000Z"
+  }
+}
+```
+```json Error - Already Closed
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ORDER_NOT_FOUND",
+    "message": "Order not found or already closed"
   }
 }
 ```
@@ -50,6 +106,9 @@ Requires an instance API key with the `trading` service enabled.
 
 ## Error Codes
 
-| Code | Status | Description |
-|------|--------|-------------|
-| `ORDER_NOT_FOUND` | 404 | Order does not exist or does not belong to this instance |
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `userAddress` is missing or not an address |
+| `INVALID_PARAM` | `400` | `orderId` is missing or longer than 100 characters |
+| `ORDER_NOT_FOUND` | `404` | No open order with that ID for this wallet, or the book is not reachable from your instance |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

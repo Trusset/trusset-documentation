@@ -1,0 +1,205 @@
+---
+title: 'Prepare Order'
+api: 'POST /orderbooks/external-securities/api/orders/prepare'
+description: 'Build the EIP-712 payload a trader signs, and preview the reservation'
+---
+
+Builds the exact typed data the custody contract will verify, and tells you whether the trader's tradable balance covers the order. Nothing is created and nothing is reserved: this is a construction step.
+
+Call it, have the trader sign `order` against `domain` and `types`, then send the signature back with the same `expiry`, `nonce` and `salt` to [Submit Order](/endpoints/external-securities-trading/submit-order). Those three fields are part of the signed struct, so a value that differs from what was signed produces a different hash and the signature fails.
+
+Only limit orders exist on this venue, so `price` is always required.
+
+## Path and units
+
+`price` and `quantity` go in as order book units. What comes back in `order.quantity` and `order.price` are on-chain amounts in each token's own decimals, because that is what the contract signs over. Both conversions use the decimals recorded on the book.
+
+A quantity or price that does not convert cleanly is refused rather than rounded, and the message states the step size the token allows.
+
+## Body Parameters
+
+<ParamField body="orderBookId" type="string" required>
+  Target book. Must be an external securities book you own or have imported, and must be `ACTIVE`.
+</ParamField>
+
+<ParamField body="userAddress" type="string" required>The trader's wallet. Becomes `order.trader`.</ParamField>
+
+<ParamField body="side" type="string" required>`BUY` or `SELL`.</ParamField>
+
+<ParamField body="price" type="string" required>
+  Limit price in order book units, as a digit-only string. Must be greater than zero.
+</ParamField>
+
+<ParamField body="quantity" type="string" required>
+  Base quantity in order book units, as a digit-only string. Must be greater than zero.
+</ParamField>
+
+<ParamField body="expiry" type="integer">
+  Unix timestamp in seconds after which the signature can no longer settle. Defaults to seven days out. Must be at least 60 seconds and at most 90 days in the future.
+</ParamField>
+
+<ParamField body="nonce" type="string">
+  Order nonce, as a digit-only string that fits in a uint64. Defaults to `"0"`. A trader can invalidate every order below a nonce by raising their on-chain nonce floor, so use this to group orders you may want to retire together.
+</ParamField>
+
+<ParamField body="salt" type="string">
+  32-byte hex value making the order hash unique. Generated randomly if omitted. Two orders identical in every other field need different salts, otherwise the second is a duplicate of the first.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="order" type="object">
+      The struct to sign, with fields in signing order.
+      <Expandable>
+        <ResponseField name="trader" type="string">Checksummed trader address.</ResponseField>
+        <ResponseField name="token" type="string">Checksummed security token.</ResponseField>
+        <ResponseField name="quote" type="string">Checksummed settlement asset.</ResponseField>
+        <ResponseField name="isBuy" type="boolean">True for a buy.</ResponseField>
+        <ResponseField name="quantity" type="string">Quantity in the security's base units.</ResponseField>
+        <ResponseField name="price" type="string">Price in the settlement asset's base units, per whole security unit.</ResponseField>
+        <ResponseField name="expiry" type="string">Unix seconds, as a string.</ResponseField>
+        <ResponseField name="nonce" type="string">Nonce, as a string.</ResponseField>
+        <ResponseField name="salt" type="string">32-byte hex.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="domain" type="object">EIP-712 domain: `name`, `version`, `chainId`, `verifyingContract`.</ResponseField>
+    <ResponseField name="types" type="object">The `Order` type definition.</ResponseField>
+    <ResponseField name="orderHash" type="string">The EIP-712 hash of this order, as the contract computes it.</ResponseField>
+    <ResponseField name="notional" type="string">Settlement asset amount this order would move at its limit, in base units.</ResponseField>
+    <ResponseField name="orderBookId" type="string">The book the order is for.</ResponseField>
+    <ResponseField name="custodyContract" type="string">The contract that will verify the signature.</ResponseField>
+    <ResponseField name="reservation" type="object">
+      <Expandable>
+        <ResponseField name="tokenAddress" type="string">What would be reserved: the security on a sell, the settlement asset on a buy.</ResponseField>
+        <ResponseField name="amount" type="string">Amount that would be reserved, in that token's base units.</ResponseField>
+        <ResponseField name="available" type="string">What the trader can still commit, net of existing reservations.</ResponseField>
+        <ResponseField name="onChainAvailable" type="string">What the contract reports, before reservations.</ResponseField>
+        <ResponseField name="reserved" type="string">Already committed to this trader's other resting orders.</ResponseField>
+        <ResponseField name="sufficient" type="boolean">Whether `available` covers `amount`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  `sufficient: false` is a warning, not a refusal. The order is still buildable. Submission is where the balance is enforced, with `INSUFFICIENT_CUSTODY_BALANCE`. On a buy, an insufficient figure usually means the settlement asset allowance is too low rather than the balance; raise it with [Approve Settlement Asset](/endpoints/external-securities-trading/approve-quote-asset).
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/external-securities/api/orders/prepare" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "orderBookId": "clx_ob_extsec_001",
+    "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "side": "BUY",
+    "price": "104200000",
+    "quantity": "10000000"
+  }'
+```
+```typescript TypeScript
+const prep = await fetch(
+  'https://api.trusset.org/orderbooks/external-securities/api/orders/prepare',
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      orderBookId,
+      userAddress: await signer.getAddress(),
+      side: 'BUY',
+      price: '104200000',
+      quantity: '10000000'
+    })
+  }
+).then(r => r.json());
+
+const { order, domain, types } = prep.data;
+const signature = await signer._signTypedData(domain, types, order);
+
+// submit with the same expiry, nonce and salt the preparation returned
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "order": {
+      "trader": "0xABC7f1093D5e26b804a1C3f78dE025916B47c0d3",
+      "token": "0x51F2B9d0E77c4a1B83Ce6d4A9271E5f3a0C8b912",
+      "quote": "0x98aD0ca091552e23C564B41C74282e5343D03E8a",
+      "isBuy": true,
+      "quantity": "10000000000000000000",
+      "price": "104200000",
+      "expiry": "1750593600",
+      "nonce": "0",
+      "salt": "0x7c1d0a5f3b8e29406d1af7c58b2e0349d6a1f80b3c5e97246fa0d81b5e37c204"
+    },
+    "domain": {
+      "name": "TRexCustody",
+      "version": "1",
+      "chainId": 11155111,
+      "verifyingContract": "0x489AeE4ae9546081d55848F157E03192e826988c"
+    },
+    "types": {
+      "Order": [
+        { "name": "trader", "type": "address" },
+        { "name": "token", "type": "address" },
+        { "name": "quote", "type": "address" },
+        { "name": "isBuy", "type": "bool" },
+        { "name": "quantity", "type": "uint256" },
+        { "name": "price", "type": "uint256" },
+        { "name": "expiry", "type": "uint64" },
+        { "name": "nonce", "type": "uint64" },
+        { "name": "salt", "type": "bytes32" }
+      ]
+    },
+    "orderHash": "0x2f9d41c8b7a05e3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "notional": "1042000000",
+    "orderBookId": "clx_ob_extsec_001",
+    "custodyContract": "0x489aee4ae9546081d55848f157e03192e826988c",
+    "reservation": {
+      "tokenAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "amount": "1042000000",
+      "available": "50000000000",
+      "onChainAvailable": "50000000000",
+      "reserved": "0",
+      "sufficient": true
+    }
+  }
+}
+```
+```json Error - Quantity Below One Unit
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "INVALID_QUANTITY",
+    "message": "This security has 0 decimals, so order quantities must be whole multiples of 1000000 order book units"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field failed schema validation |
+| `INVALID_SIDE` | `400` | `side` is not `BUY` or `SELL` |
+| `INVALID_QUANTITY` | `400` | `quantity` is zero, or does not convert to a whole number of token units |
+| `INVALID_PRICE` | `400` | `price` is zero, or does not convert to a whole number of settlement asset units |
+| `ORDER_TOO_SMALL` | `400` | The quantity is below one indivisible unit, or the notional rounds to zero |
+| `INVALID_ORDER_EXPIRY` | `400` | `expiry` is not an integer, is under 60 seconds out, or is over 90 days out |
+| `INVALID_ORDER_NONCE` | `400` | `nonce` is not an integer, or does not fit in a uint64 |
+| `INVALID_ORDER_SALT` | `400` | `salt` is not a 32-byte hex string |
+| `ORDER_BOOK_INACTIVE` | `400` | The book is `PAUSED` or `CLOSED` |
+| `ORDER_BOOK_NOT_FOUND` | `404` | The book does not exist, is not reachable, or is not an external securities book |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

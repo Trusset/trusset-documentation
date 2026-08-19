@@ -1,148 +1,142 @@
 ---
 title: 'Update Order Book'
-description: 'Modify configuration or status of an existing order book'
 api: 'PATCH /orderbooks/stocks/api/order-books/{orderBookId}'
+description: 'Change status, sizing, fees, settlement mode, or price reference on a book you own'
 ---
 
-Updates the configuration of an on-chain order book. Use this to pause or resume trading, adjust the fee structure, modify order size constraints, change the matching mode, or reconfigure the price reference layer.
+Applies a partial update to a book your instance owns. Imported books are not updatable here: only the owning instance may change a book's configuration, and a request against someone else's book returns `ORDER_BOOK_NOT_FOUND`.
 
-## Authentication
-
-Requires an instance API key with the `trading` service enabled.
+Only the fields you send are touched. Everything else keeps its stored value.
 
 ## Path Parameters
 
-<ParamField path="orderBookId" type="string" required>
-  The order book identifier. Max 100 characters.
-</ParamField>
+<ParamField path="orderBookId" type="string" required>Order book ID.</ParamField>
 
 ## Body Parameters
 
-All fields are optional. Only include fields you want to change.
-
 <ParamField body="status" type="string">
-  Order book status. One of `ACTIVE`, `PAUSED`, or `CLOSED`. Setting to `PAUSED` stops new order submissions. `CLOSED` permanently deactivates the book.
+  `ACTIVE`, `PAUSED` or `CLOSED`. Pausing stops new orders without touching resting ones. Reopening a `CLOSED` book is refused with `ORDER_BOOK_EXISTS` if another open book now quotes the same pair.
 </ParamField>
 
-<ParamField body="minOrderSize" type="string">
-  Updated minimum order size in base units (wei).
-</ParamField>
+<ParamField body="minOrderSize" type="string">Smallest accepted quantity, in order book units.</ParamField>
 
-<ParamField body="maxOrderSize" type="string | null">
-  Updated maximum order size. Set to `null` to remove the upper limit.
-</ParamField>
+<ParamField body="maxOrderSize" type="string">Largest accepted quantity. Send `null` to remove the ceiling.</ParamField>
 
-<ParamField body="tickSize" type="string">
-  Updated minimum price increment.
-</ParamField>
+<ParamField body="tickSize" type="string">Price increment, in order book units.</ParamField>
 
-<ParamField body="makerFeeBps" type="integer">
-  Updated maker fee in basis points. 0-1000.
-</ParamField>
+<ParamField body="makerFeeBps" type="integer">Maker fee in basis points, 0 to 1000.</ParamField>
 
-<ParamField body="takerFeeBps" type="integer">
-  Updated taker fee in basis points. 0-1000.
-</ParamField>
+<ParamField body="takerFeeBps" type="integer">Taker fee in basis points, 0 to 1000.</ParamField>
+
+<ParamField body="mmMakerRebateBps" type="integer">Market maker fee override, −1000 to 1000, or `null` to remove it.</ParamField>
 
 <ParamField body="allowImport" type="boolean">
-  Whether other instances can import this order book.
+  Publish or unpublish the book for import. Ignored on an off-chain book, which can never be imported.
 </ParamField>
 
-### Trading Mode (Hybrid Order Books)
+<ParamField body="settlementMode" type="string">
+  `OFF_CHAIN` only. Moving a book off-chain clears its custody contract and turns off `allowImport`. Setting `ON_CHAIN` returns `409 ONCHAIN_SETTLEMENT_UNAVAILABLE`.
+</ParamField>
+
+<ParamField body="custodyContract" type="string">
+  Replace the custody contract on a book that stays on-chain. The new contract must already admit both tokens, otherwise the request returns `CUSTODY_SETUP_REQUIRED` with the outstanding steps.
+</ParamField>
+
+<ParamField body="custodySetupTxs" type="object">
+  Hashes of the custody transactions you signed for a contract change, keyed by `baseToken`, `quoteToken` and `tokenAuthorization`.
+</ParamField>
 
 <ParamField body="tradingMode" type="string">
-  Matching engine mode. One of `CONTINUOUS`, `PERIODIC_AUCTION`, or `HYBRID`.
+  `CONTINUOUS`, `PERIODIC_AUCTION` or `HYBRID`. Switching to `CONTINUOUS` also clears `currentAuctionId`. `HYBRID` requires a `hybridSwitchSpreadBps` above zero, either sent here or already stored.
 </ParamField>
 
-<ParamField body="auctionIntervalSeconds" type="integer">
-  Auction clearing interval in seconds. Applies to `PERIODIC_AUCTION` and `HYBRID`. 30-3600. Nullable.
-</ParamField>
+<ParamField body="auctionIntervalSeconds" type="integer">Auction batch length, 30 to 3600 seconds.</ParamField>
 
-<ParamField body="hybridSwitchSpreadBps" type="integer">
-  Spread threshold in basis points that switches a `HYBRID` book between continuous matching and auction batching. 1-10000. Nullable.
-</ParamField>
+<ParamField body="hybridSwitchSpreadBps" type="integer">Hybrid failover threshold in basis points, 1 to 10000.</ParamField>
 
-<ParamField body="auctionRollUnmatched" type="boolean">
-  Whether orders left unmatched at the end of an auction roll forward into the next auction.
-</ParamField>
+<ParamField body="auctionRollUnmatched" type="boolean">Whether unmatched auction orders roll into the next batch.</ParamField>
 
-<ParamField body="mmMakerRebateBps" type="integer">
-  Maker rebate paid to registered market makers, in basis points. -1000 to 1000. Nullable.
-</ParamField>
+<ParamField body="priceRefEnabled" type="boolean">Turn the reference band on or off. Turning it off also clears the cached reference price.</ParamField>
 
-### Price Reference
+<ParamField body="priceRefMode" type="string">`MANUAL`, `STOCK_FEED` or `EXTERNAL_FEED`.</ParamField>
 
-<ParamField body="priceRefEnabled" type="boolean">
-  Enable or disable price reference enforcement.
-</ParamField>
+<ParamField body="priceRefFeedUrl" type="string">HTTPS feed endpoint, or `null`. Must resolve to a public host.</ParamField>
 
-<ParamField body="priceRefMode" type="string">
-  Source of the reference price. One of `MANUAL`, `STOCK_FEED`, or `EXTERNAL_FEED`.
-</ParamField>
+<ParamField body="priceRefFeedHeaders" type="string">Feed headers as a JSON string, or `null`.</ParamField>
 
-<ParamField body="priceRefFeedUrl" type="string">
-  Feed endpoint for `EXTERNAL_FEED`. Max 2048 characters. Nullable.
-</ParamField>
+<ParamField body="priceRefFeedPath" type="string">JSON path to the price, or the ticker symbol in `STOCK_FEED` mode. `null` clears it.</ParamField>
 
-<ParamField body="priceRefFeedHeaders" type="string">
-  Serialized headers sent with the feed request. Max 4096 characters. Nullable.
-</ParamField>
+<ParamField body="priceRefEnforcement" type="string">Refresh interval, from `EVERY_TRADE` to `1DAY`.</ParamField>
 
-<ParamField body="priceRefFeedPath" type="string">
-  Path used to extract the price from the feed response. Max 256 characters. Nullable.
-</ParamField>
+<ParamField body="priceRefSpreadBps" type="integer">Band half-width in basis points, 1 to 10000, or `null`.</ParamField>
 
-<ParamField body="priceRefEnforcement" type="string">
-  Refresh and enforcement cadence. One of `EVERY_TRADE`, `1MIN`, `5MIN`, `10MIN`, `30MIN`, `1HOUR`, `6HOUR`, `12HOUR`, `1DAY`.
-</ParamField>
+<ParamField body="priceRefHaltOnStale" type="boolean">Whether a stale reference stops trading.</ParamField>
 
-<ParamField body="priceRefSpreadBps" type="integer">
-  Allowed band around the reference price, in basis points. 1-10000. Nullable.
-</ParamField>
+<ParamField body="priceRefStaleTolerance" type="integer">Staleness window in seconds, 60 to 604800, or `null`.</ParamField>
 
-<ParamField body="priceRefHaltOnStale" type="boolean">
-  Halt the order book when the reference price is stale.
-</ParamField>
+<ParamField body="priceRefCircuitBreakerBps" type="integer">Reference move that pauses the book, 10 to 10000, or `null`.</ParamField>
 
-<ParamField body="priceRefStaleTolerance" type="integer">
-  Maximum reference price age before it is considered stale, in seconds. 60-604800. Nullable.
-</ParamField>
+## Changing settlement mode
 
-<ParamField body="priceRefCircuitBreakerBps" type="integer">
-  Circuit breaker threshold in basis points. 10-10000. Nullable.
-</ParamField>
+A book only moves to off-chain settlement when nothing is in flight on it. The request is refused with `INVALID_CONFIG` while any order is `OPEN`, `PARTIALLY_FILLED` or `AUCTION_PENDING`, while any balance lock is `PENDING` or `ACTIVE`, and while any trade is still settling. Cancel resting orders and release their locks first.
+
+The same conditions guard a custody contract change on a book that stays on-chain.
+
+<Note>
+  `allowSharedLiquidity` is not accepted on this surface. For stock books it is turned on from the Issuer App.
+</Note>
+
+## Response Fields
+
+Returns the updated book, in the same shape as [Get Order Book](/endpoints/stock-trading/get-order-book).
 
 <RequestExample>
-```json
-{
-  "status": "PAUSED",
-  "makerFeeBps": 5,
-  "takerFeeBps": 15,
-  "tradingMode": "HYBRID",
-  "hybridSwitchSpreadBps": 75,
-  "priceRefSpreadBps": 150
-}
+```bash cURL
+curl -X PATCH "https://api.trusset.org/orderbooks/stocks/api/order-books/clx_ob_stock_001" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "status": "PAUSED",
+    "takerFeeBps": 20,
+    "priceRefSpreadBps": 150
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/stocks/api/order-books/${orderBookId}`,
+  {
+    method: 'PATCH',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ status: 'PAUSED', takerFeeBps: 20, priceRefSpreadBps: 150 })
+  }
+);
+const { data } = await res.json();
 ```
 </RequestExample>
 
 <ResponseExample>
-```json
+```json Response
 {
   "success": true,
   "data": {
-    "id": "ob_abc123",
+    "id": "clx_ob_stock_001",
     "status": "PAUSED",
-    "makerFeeBps": 5,
-    "takerFeeBps": 15,
-    "tradingMode": "HYBRID",
-    "hybridSwitchSpreadBps": 75,
-    "priceRefEnabled": true,
-    "priceRefSpreadBps": 150
-  },
-  "metadata": {
-    "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-01-15T10:30:00.000Z",
-    "instanceId": "inst_abc"
+    "takerFeeBps": 20,
+    "priceRefSpreadBps": 150,
+    "updatedAt": "2025-06-15T12:04:00.000Z"
+  }
+}
+```
+```json Error - Live Orders Block the Change
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "INVALID_CONFIG",
+    "message": "Cannot change settlementMode while the order book has open orders or active balance locks. Cancel resting orders and release their locks with wallet-signed custody transactions first."
   }
 }
 ```
@@ -150,8 +144,13 @@ All fields are optional. Only include fields you want to change.
 
 ## Error Codes
 
-| Code | Status | Description |
-|------|--------|-------------|
-| `ORDER_BOOK_NOT_FOUND` | 404 | No order book found with this ID in your instance |
-| `INVALID_CONFIG` | 400 | Invalid configuration values |
-| `VALIDATION_ERROR` | 400 | Request body failed schema validation |
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field failed schema validation |
+| `INVALID_PARAM` | `400` | `orderBookId` is missing or longer than 100 characters |
+| `INVALID_CONFIG` | `400` | An invalid trading mode or price reference value, a custody contract removed from an on-chain book, or live orders, locks or settling trades blocking the change |
+| `ORDER_BOOK_NOT_FOUND` | `404` | The book does not exist on your instance. Imported books cannot be updated |
+| `ORDER_BOOK_EXISTS` | `409` | Reopening a closed book collides with another open book on the same pair |
+| `CUSTODY_SETUP_REQUIRED` | `409` | A new custody contract has outstanding prerequisites. `error.setup.steps` carries the unsigned transactions |
+| `ONCHAIN_SETTLEMENT_UNAVAILABLE` | `409` | `settlementMode` was set to anything other than `OFF_CHAIN` |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

@@ -1,216 +1,338 @@
 ---
 title: 'Create Order Book'
-description: 'Deploy a new on-chain order book for a token pair'
 api: 'POST /orderbooks/stocks/api/order-books'
+description: 'Open a trading venue for a stock token against a quote token'
 ---
 
-Creates a new on-chain order book that pairs a stock token with a quote token. The order book settles trades through a custody contract on-chain.
+Creates an order book for one base token quoted in one settlement token (stablecoin). The book is created off-chain by default, which is the mode orders execute in. See [Settlement modes](/endpoints/stock-trading/introduction#settlement-modes).
 
-Both `tokenAddress` and `quoteTokenAddress` must reference deployed, registered tokens within the instance. The custody contract handles escrow during the settlement lifecycle.
-
-Order books support three matching modes (continuous, periodic auction, and hybrid) and an optional price reference layer that bounds execution prices against an external or manual reference. Both are configured at creation and can be adjusted later with [Update Order Book](/endpoints/stock-trading/update-order-book).
-
-## Authentication
-
-Requires an instance API key with the `trading` service enabled. Pass the key as `x-api-key` header in the format `trusset_{instanceRef}_{secret}`.
+One instance may hold a single open book per pair. If an `ACTIVE` or `PAUSED` book already quotes this pair, the request returns `ORDER_BOOK_EXISTS`; a `CLOSED` book does not block a new one.
 
 ## Body Parameters
 
 <ParamField body="tokenAddress" type="string" required>
-  EVM address of the base token (the asset being traded). Must match `0x[a-fA-F0-9]{40}`.
+  Base token contract. Lower-cased before storage.
 </ParamField>
 
 <ParamField body="quoteTokenAddress" type="string" required>
-  EVM address of the quote token (the currency used for pricing). Must match `0x[a-fA-F0-9]{40}`.
+  Settlement token contract. A well-known USDC address is normalised to your network's USDC. Must differ from `tokenAddress`, otherwise `INVALID_PAIR`.
 </ParamField>
 
 <ParamField body="name" type="string" required>
-  Display name of the order book. 1-64 characters.
+  Display name, 1 to 64 characters.
 </ParamField>
 
 <ParamField body="symbol" type="string" required>
-  Short symbol for the trading pair. 1-16 characters.
+  Display symbol, 1 to 16 characters.
+</ParamField>
+
+<ParamField body="settlementMode" type="string" default="OFF_CHAIN">
+  `OFF_CHAIN` or `ON_CHAIN`. `ON_CHAIN` requires `custodyContract` and a custody contract that already admits both tokens. `OFF_CHAIN` must not carry a `custodyContract`, and forces `allowImport` to false.
+</ParamField>
+
+<ParamField body="tokenType" type="string" default="LIGHT_TOKEN">
+  `STOCK_TOKEN` or `LIGHT_TOKEN`. Set `STOCK_TOKEN` for a Trusset stock token. The stock reads on this surface are filtered to `STOCK_TOKEN`, so a book left at the default will not appear in [List Order Books](/endpoints/stock-trading/list-order-books).
 </ParamField>
 
 <ParamField body="custodyContract" type="string">
-  EVM address of the custody contract for on-chain settlement. If omitted, trades require manual settlement coordination.
-</ParamField>
-
-<ParamField body="minOrderSize" type="string">
-  Minimum order size in base units (wei). Numeric string.
-</ParamField>
-
-<ParamField body="maxOrderSize" type="string">
-  Maximum order size in base units (wei). Numeric string. Omit for no upper limit.
-</ParamField>
-
-<ParamField body="tickSize" type="string">
-  Minimum price increment in quote token base units. Numeric string.
-</ParamField>
-
-<ParamField body="makerFeeBps" type="integer">
-  Fee charged to makers in basis points. 0-1000 (0%-10%).
-</ParamField>
-
-<ParamField body="takerFeeBps" type="integer">
-  Fee charged to takers in basis points. 0-1000 (0%-10%).
-</ParamField>
-
-<ParamField body="tokenType" type="string">
-  Type of the base token. One of `LIGHT_TOKEN` or `STOCK_TOKEN`. Defaults to `LIGHT_TOKEN`.
+  `StockCustody` address for an on-chain book. Required when `settlementMode` is `ON_CHAIN`, refused otherwise.
 </ParamField>
 
 <ParamField body="stockTokenId" type="string">
-  Reference ID for stock tokens. Required when `tokenType` is `STOCK_TOKEN`. Max 100 characters.
+  Your Trusset stock token record ID, linking the book to an issuance. Up to 100 characters.
 </ParamField>
 
 <ParamField body="underlyingIdentifier" type="string">
-  Identifier of the underlying instrument (for example an ISIN). Exactly 12 alphanumeric characters, matching `[A-Za-z0-9]{12}`.
+  Declared ISIN, exactly 12 alphanumeric characters. Only checked on an on-chain `STOCK_TOKEN` book, where it must equal the ISIN the token reports on chain, otherwise `ISIN_MISMATCH`. The stored value always comes from the chain, never from this field.
 </ParamField>
 
-<ParamField body="allowImport" type="boolean">
-  Whether other instances can import this order book for cross-instance trading. Defaults to `false`.
+<ParamField body="minOrderSize" type="string" default="0">
+  Smallest accepted quantity, in order book units.
 </ParamField>
 
-### Trading Mode (Hybrid Order Books)
-
-These fields control the matching engine. Continuous books match orders on arrival; periodic auction books batch orders and clear at fixed intervals; hybrid books switch between the two based on live spread.
-
-<ParamField body="tradingMode" type="string">
-  Matching engine mode. One of `CONTINUOUS` (default), `PERIODIC_AUCTION`, or `HYBRID`.
+<ParamField body="maxOrderSize" type="string">
+  Largest accepted quantity, in order book units. Omit for no ceiling.
 </ParamField>
 
-<ParamField body="auctionIntervalSeconds" type="integer">
-  Auction clearing interval in seconds. Applies to `PERIODIC_AUCTION` and `HYBRID`. 30-3600. Nullable.
+<ParamField body="tickSize" type="string" default="1">
+  Price increment, in order book units.
 </ParamField>
 
-<ParamField body="hybridSwitchSpreadBps" type="integer">
-  Spread threshold in basis points that switches a `HYBRID` book between continuous matching and auction batching. 1-10000. Nullable.
+<ParamField body="makerFeeBps" type="integer" default="0">
+  Maker fee in basis points, 0 to 1000.
 </ParamField>
 
-<ParamField body="auctionRollUnmatched" type="boolean">
-  Whether orders left unmatched at the end of an auction roll forward into the next auction.
+<ParamField body="takerFeeBps" type="integer" default="0">
+  Taker fee in basis points, 0 to 1000.
 </ParamField>
 
 <ParamField body="mmMakerRebateBps" type="integer">
-  Maker rebate paid to registered market makers, in basis points. -1000 to 1000 (negative values charge makers). Nullable.
+  Fee applied in place of `makerFeeBps` when the resting side is a market maker account, −1000 to 1000. A negative value pays the market maker for providing liquidity.
 </ParamField>
 
-### Price Reference
-
-When enabled, the price reference layer bounds order and trade prices to a band around a reference price. Stale or out-of-band conditions can halt the book or reject orders.
-
-<ParamField body="priceRefEnabled" type="boolean">
-  Enable price reference enforcement for this order book.
+<ParamField body="allowImport" type="boolean" default="false">
+  Publish the book so other instances on the same network can import it. On-chain books only.
 </ParamField>
 
-<ParamField body="priceRefMode" type="string">
-  Source of the reference price. One of `MANUAL`, `STOCK_FEED`, or `EXTERNAL_FEED`.
+<ParamField body="tradingMode" type="string" default="CONTINUOUS">
+  `CONTINUOUS`, `PERIODIC_AUCTION` or `HYBRID`. See [Trading modes](/endpoints/stock-trading/introduction#trading-modes).
+</ParamField>
+
+<ParamField body="auctionIntervalSeconds" type="integer">
+  Auction batch length, 30 to 3600 seconds.
+</ParamField>
+
+<ParamField body="hybridSwitchSpreadBps" type="integer">
+  Spread in basis points that flips a `HYBRID` book into auctions. 1 to 10000, and required above zero when `tradingMode` is `HYBRID`.
+</ParamField>
+
+<ParamField body="auctionRollUnmatched" type="boolean" default="true">
+  Whether orders left unfilled by an auction roll into the next batch instead of being cancelled.
+</ParamField>
+
+<ParamField body="priceRefEnabled" type="boolean" default="false">
+  Enforce a reference price band on incoming orders.
+</ParamField>
+
+<ParamField body="priceRefMode" type="string" default="MANUAL">
+  `MANUAL`, `STOCK_FEED` or `EXTERNAL_FEED`.
 </ParamField>
 
 <ParamField body="priceRefFeedUrl" type="string">
-  Feed endpoint to poll when `priceRefMode` is `EXTERNAL_FEED`. Max 2048 characters. Nullable.
+  HTTPS endpoint for `EXTERNAL_FEED`, up to 2048 characters. Must resolve to a public host.
 </ParamField>
 
 <ParamField body="priceRefFeedHeaders" type="string">
-  Headers to send with the feed request, as a serialized string (for example a JSON object of header pairs). Max 4096 characters. Nullable.
+  JSON object of request headers for the feed, as a string, up to 4096 characters. `Host`, `Cookie` and `Authorization` are dropped.
 </ParamField>
 
 <ParamField body="priceRefFeedPath" type="string">
-  Path used to extract the price from the feed response (for example a JSON path). Max 256 characters. Nullable.
+  Dot-separated JSON path to the price in an `EXTERNAL_FEED` response, or the ticker symbol in `STOCK_FEED` mode. Up to 256 characters.
 </ParamField>
 
-<ParamField body="priceRefEnforcement" type="string">
-  How often the reference is refreshed and enforced. One of `EVERY_TRADE`, `1MIN`, `5MIN`, `10MIN`, `30MIN`, `1HOUR`, `6HOUR`, `12HOUR`, `1DAY`.
+<ParamField body="priceRefEnforcement" type="string" default="EVERY_TRADE">
+  How often the reference is refreshed. One of `EVERY_TRADE`, `1MIN`, `5MIN`, `10MIN`, `30MIN`, `1HOUR`, `6HOUR`, `12HOUR`, `1DAY`.
 </ParamField>
 
 <ParamField body="priceRefSpreadBps" type="integer">
-  Allowed band around the reference price, in basis points. Orders priced outside the band are rejected. 1-10000. Nullable.
+  Half-width of the accepted band in basis points, 1 to 10000. Without it no band is enforced.
 </ParamField>
 
-<ParamField body="priceRefHaltOnStale" type="boolean">
-  Halt the order book when the reference price is older than `priceRefStaleTolerance`.
+<ParamField body="priceRefHaltOnStale" type="boolean" default="false">
+  Refuse orders when the reference is stale, instead of serving the last known price.
 </ParamField>
 
 <ParamField body="priceRefStaleTolerance" type="integer">
-  Maximum age of the reference price before it is considered stale, in seconds. 60-604800. Nullable.
+  Seconds before a reference counts as stale, 60 to 604800. Defaults to three enforcement intervals, or 300 when enforcement is `EVERY_TRADE`.
 </ParamField>
 
 <ParamField body="priceRefCircuitBreakerBps" type="integer">
-  Circuit breaker threshold in basis points. A reference move beyond this bound trips the breaker. 10-10000. Nullable.
+  Reference move in basis points that pauses the book, 10 to 10000.
 </ParamField>
 
+<ParamField body="custodySetupTxs" type="object">
+  Hashes of the custody transactions you signed after a `CUSTODY_SETUP_REQUIRED` refusal, keyed by the step key. Unknown keys are rejected.
+  <Expandable>
+    <ParamField body="baseToken" type="string">Hash of `addSupportedToken` for the base token.</ParamField>
+    <ParamField body="quoteToken" type="string">Hash of `addSupportedToken` for the quote token.</ParamField>
+    <ParamField body="tokenAuthorization" type="string">Hash of `addAuthorizedContract` on the stock token.</ParamField>
+  </Expandable>
+</ParamField>
+
+## Custody setup
+
+An on-chain book only exists once `StockCustody` admits both tokens and the stock token allow-lists the custody contract. Those calls are role-gated on chain, so this endpoint never signs them. It reads what is outstanding and refuses with `409 CUSTODY_SETUP_REQUIRED`, writing no database row and returning the unsigned transactions in `error.setup.steps`.
+
+`requiredSigner` is read from the contract's own `admin()`, so you always know which account must send each step; `requiredRole` names the role instead where no single address answers. Sign what you can, then repeat the same `POST` with those hashes in `custodySetupTxs`. Each hash is receipt-verified before the prerequisite is re-read from the chain, and the fresh read is the authority, so a step signed by a different wallet in another session still counts and re-posting is always safe.
+
+## Response Fields
+
+Returns `201` with the created book.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="id" type="string">Order book ID. Use this as `orderBookId` everywhere else.</ResponseField>
+    <ResponseField name="instanceId" type="string">Owning instance.</ResponseField>
+    <ResponseField name="tokenAddress" type="string">Base token, lower-cased.</ResponseField>
+    <ResponseField name="quoteTokenAddress" type="string">Quote token, lower-cased and normalised.</ResponseField>
+    <ResponseField name="name" type="string">Display name.</ResponseField>
+    <ResponseField name="symbol" type="string">Display symbol.</ResponseField>
+    <ResponseField name="status" type="string">`ACTIVE` on creation.</ResponseField>
+    <ResponseField name="tokenType" type="string">`STOCK_TOKEN` or `LIGHT_TOKEN`.</ResponseField>
+    <ResponseField name="settlementMode" type="string">`OFF_CHAIN` or `ON_CHAIN`.</ResponseField>
+    <ResponseField name="custodyContract" type="string">Custody contract, or `null` off-chain.</ResponseField>
+    <ResponseField name="underlyingIdentifier" type="string">ISIN read from the token on an on-chain stock book, otherwise `null`.</ResponseField>
+    <ResponseField name="stockTokenId" type="string">Linked stock token record, or `null`.</ResponseField>
+    <ResponseField name="minOrderSize" type="string">Minimum quantity.</ResponseField>
+    <ResponseField name="maxOrderSize" type="string">Maximum quantity, or `null`.</ResponseField>
+    <ResponseField name="tickSize" type="string">Price increment.</ResponseField>
+    <ResponseField name="makerFeeBps" type="integer">Maker fee in basis points.</ResponseField>
+    <ResponseField name="takerFeeBps" type="integer">Taker fee in basis points.</ResponseField>
+    <ResponseField name="mmMakerRebateBps" type="integer">Market maker fee override, or `null`.</ResponseField>
+    <ResponseField name="allowImport" type="boolean">Whether other instances may import the book.</ResponseField>
+    <ResponseField name="allowSharedLiquidity" type="boolean">Always `false` when created through this surface.</ResponseField>
+    <ResponseField name="tradingMode" type="string">`CONTINUOUS`, `PERIODIC_AUCTION` or `HYBRID`.</ResponseField>
+    <ResponseField name="auctionIntervalSeconds" type="integer">Auction batch length, or `null`.</ResponseField>
+    <ResponseField name="currentAuctionId" type="string">Live auction, or `null`.</ResponseField>
+    <ResponseField name="hybridSwitchSpreadBps" type="integer">Hybrid failover threshold, or `null`.</ResponseField>
+    <ResponseField name="auctionRollUnmatched" type="boolean">Whether unmatched auction orders roll forward.</ResponseField>
+    <ResponseField name="baseDecimals" type="integer">Base token decimals, recorded for external securities books only. `null` here.</ResponseField>
+    <ResponseField name="quoteDecimals" type="integer">Quote token decimals, recorded for external securities books only. `null` here.</ResponseField>
+    <ResponseField name="cfid" type="string">Commodity fungibility class. `null` on stock books.</ResponseField>
+    <ResponseField name="priceRefEnabled" type="boolean">Whether the band is enforced.</ResponseField>
+    <ResponseField name="priceRefMode" type="string">Reference source.</ResponseField>
+    <ResponseField name="priceRefEnforcement" type="string">Refresh interval.</ResponseField>
+    <ResponseField name="priceRefSpreadBps" type="integer">Band half-width, or `null`.</ResponseField>
+    <ResponseField name="priceRefLastPrice" type="string">Last recorded reference, or `null`.</ResponseField>
+    <ResponseField name="priceRefLastUpdated" type="string">ISO 8601 timestamp, or `null`.</ResponseField>
+    <ResponseField name="createdAt" type="string">ISO 8601 timestamp.</ResponseField>
+  </Expandable>
+</ResponseField>
+
 <RequestExample>
-```json
-{
-  "tokenAddress": "0x1234567890abcdef1234567890abcdef12345678",
-  "quoteTokenAddress": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-  "name": "ACME Corp Shares / EURC",
-  "symbol": "ACME/EURC",
-  "custodyContract": "0x9876543210fedcba9876543210fedcba98765432",
-  "minOrderSize": "1000000000000000000",
-  "tickSize": "100000000000000",
-  "makerFeeBps": 10,
-  "takerFeeBps": 25,
-  "tokenType": "STOCK_TOKEN",
-  "stockTokenId": "acme-corp-001",
-  "underlyingIdentifier": "US0000ACME01",
-  "allowImport": true,
-  "tradingMode": "HYBRID",
-  "auctionIntervalSeconds": 300,
-  "hybridSwitchSpreadBps": 50,
-  "auctionRollUnmatched": true,
-  "mmMakerRebateBps": 5,
-  "priceRefEnabled": true,
-  "priceRefMode": "EXTERNAL_FEED",
-  "priceRefFeedUrl": "https://feed.example.com/acme",
-  "priceRefFeedPath": "data.last",
-  "priceRefEnforcement": "1MIN",
-  "priceRefSpreadBps": 200,
-  "priceRefHaltOnStale": true,
-  "priceRefStaleTolerance": 300
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/stocks/api/order-books" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tokenAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "quoteTokenAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+    "name": "Nyala Fund I",
+    "symbol": "NYF1",
+    "tokenType": "STOCK_TOKEN",
+    "tickSize": "10000",
+    "minOrderSize": "1000000",
+    "makerFeeBps": 5,
+    "takerFeeBps": 15
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/orderbooks/stocks/api/order-books',
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      tokenAddress: '0xabc7f1093d5e26b804a1c3f78de025916b47c0d3',
+      quoteTokenAddress: '0x98ad0ca091552e23c564b41c74282e5343d03e8a',
+      name: 'Nyala Fund I',
+      symbol: 'NYF1',
+      tokenType: 'STOCK_TOKEN',
+      tickSize: '10000',
+      minOrderSize: '1000000',
+      makerFeeBps: 5,
+      takerFeeBps: 15
+    })
+  }
+);
+const body = await res.json();
+
+if (!body.success && body.error.code === 'CUSTODY_SETUP_REQUIRED') {
+  const signed: Record<string, string> = {};
+  for (const step of body.error.setup.steps) {
+    const tx = await wallet.sendTransaction({ to: step.to, data: step.data });
+    await tx.wait();
+    signed[step.key] = tx.hash;
+  }
+  // repeat the same POST with custodySetupTxs: signed
 }
 ```
 </RequestExample>
 
 <ResponseExample>
-```json
+```json Response
 {
   "success": true,
   "data": {
-    "id": "ob_abc123",
-    "tokenAddress": "0x1234567890abcdef1234567890abcdef12345678",
-    "quoteTokenAddress": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-    "name": "ACME Corp Shares / EURC",
-    "symbol": "ACME/EURC",
+    "id": "clx_ob_stock_001",
+    "instanceId": "inst_abc123",
+    "tokenAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "quoteTokenAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+    "name": "Nyala Fund I",
+    "symbol": "NYF1",
     "status": "ACTIVE",
-    "settlementMode": "ON_CHAIN",
-    "custodyContract": "0x9876543210fedcba9876543210fedcba98765432",
-    "minOrderSize": "1000000000000000000",
-    "maxOrderSize": null,
-    "tickSize": "100000000000000",
-    "makerFeeBps": 10,
-    "takerFeeBps": 25,
     "tokenType": "STOCK_TOKEN",
-    "stockTokenId": "acme-corp-001",
-    "underlyingIdentifier": "US0000ACME01",
-    "allowImport": true,
-    "tradingMode": "HYBRID",
-    "auctionIntervalSeconds": 300,
-    "hybridSwitchSpreadBps": 50,
+    "settlementMode": "OFF_CHAIN",
+    "custodyContract": null,
+    "underlyingIdentifier": null,
+    "stockTokenId": null,
+    "minOrderSize": "1000000",
+    "maxOrderSize": null,
+    "tickSize": "10000",
+    "makerFeeBps": 5,
+    "takerFeeBps": 15,
+    "mmMakerRebateBps": null,
+    "allowImport": false,
+    "allowSharedLiquidity": false,
+    "tradingMode": "CONTINUOUS",
+    "auctionIntervalSeconds": null,
+    "currentAuctionId": null,
+    "hybridSwitchSpreadBps": null,
     "auctionRollUnmatched": true,
-    "mmMakerRebateBps": 5,
-    "priceRefEnabled": true,
-    "priceRefMode": "EXTERNAL_FEED",
-    "priceRefEnforcement": "1MIN",
-    "priceRefSpreadBps": 200,
-    "priceRefHaltOnStale": true,
-    "priceRefStaleTolerance": 300
+    "baseDecimals": null,
+    "quoteDecimals": null,
+    "cfid": null,
+    "priceRefEnabled": false,
+    "priceRefMode": "MANUAL",
+    "priceRefEnforcement": "EVERY_TRADE",
+    "priceRefSpreadBps": null,
+    "priceRefLastPrice": null,
+    "priceRefLastUpdated": null,
+    "createdAt": "2025-06-15T12:00:00.000Z"
   },
+  "error": null,
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-01-15T10:30:00.000Z",
-    "instanceId": "inst_abc"
+    "timestamp": "2025-06-15T12:00:00.000Z",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Custody Setup Required
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "CUSTODY_SETUP_REQUIRED",
+    "message": "This on-chain order book needs 2 custody transactions signed before it can be created. Sign the returned transactions with the indicated wallet and submit the request again with their transaction hashes in custodySetupTxs.",
+    "setup": {
+      "action": "SIGN_TRANSACTIONS",
+      "custodyContract": "0x98c33b10823172e62a31d6048773df1054c4f821",
+      "confirmWith": { "field": "custodySetupTxs", "keyedBy": "key" },
+      "steps": [
+        {
+          "key": "baseToken",
+          "to": "0x98c33b10823172e62a31d6048773df1054c4f821",
+          "data": "0x...",
+          "functionName": "addSupportedToken",
+          "description": "Register 0xabc7... as a supported custody token",
+          "requiredSigner": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+          "requiredRole": null
+        },
+        {
+          "key": "tokenAuthorization",
+          "to": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+          "data": "0x...",
+          "functionName": "addAuthorizedContract",
+          "description": "Authorize the custody contract on the stock token",
+          "requiredSigner": null,
+          "requiredRole": "ISSUER_ROLE"
+        }
+      ]
+    }
+  }
+}
+```
+```json Error - Pair Already Open
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ORDER_BOOK_EXISTS",
+    "message": "Order book already exists for this pair"
   }
 }
 ```
@@ -218,17 +340,17 @@ When enabled, the price reference layer bounds order and trade prices to a band 
 
 ## Error Codes
 
-| Code | Status | Description |
-|------|--------|-------------|
-| `ORDER_BOOK_EXISTS` | 409 | An order book for this token pair already exists |
-| `INVALID_CONFIG` | 400 | Invalid order book configuration |
-| `INVALID_PAIR` | 400 | Invalid token pair (e.g. same token for both sides) |
-| `TOKEN_NOT_REGISTERED` | 400 | One or both tokens are not registered in this instance |
-| `BASE_TOKEN_NOT_SUPPORTED` | 503 | The base token is not supported by the settlement layer |
-| `QUOTE_TOKEN_NOT_SUPPORTED` | 503 | The quote token is not supported by the settlement layer |
-| `BASE_TOKEN_REGISTRATION_FAILED` | 503 | On-chain registration of the base token failed |
-| `QUOTE_TOKEN_REGISTRATION_FAILED` | 503 | On-chain registration of the quote token failed |
-| `CUSTODY_NOT_AUTHORIZED` | 503 | The custody contract has not authorized this order book |
-| `CUSTODY_SETUP_FAILED` | 503 | Custody contract setup failed |
-| `NETWORK_MISMATCH` | 400 | Token and custody contract are on different networks |
-| `VALIDATION_ERROR` | 400 | Request body failed schema validation |
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field failed schema validation. `error.details` names each one |
+| `INVALID_PAIR` | `400` | Base and quote token are the same |
+| `INVALID_CONFIG` | `400` | An off-chain book was given a custody contract, a price reference field is invalid, or `HYBRID` was requested without `hybridSwitchSpreadBps` |
+| `NO_CUSTODY_CONTRACT` | `400` | `settlementMode` is `ON_CHAIN` and `custodyContract` was omitted |
+| `INVALID_CUSTODY_CONTRACT` | `400` | The address does not resolve to a Trusset custody contract on this network |
+| `TOKEN_NO_ISIN` | `400` | The stock token exposes no valid on-chain ISIN |
+| `ISIN_MISMATCH` | `400` | The declared `underlyingIdentifier` does not match the on-chain ISIN |
+| `ORDER_BOOK_EXISTS` | `409` | An `ACTIVE` or `PAUSED` book already quotes this pair |
+| `CUSTODY_SETUP_REQUIRED` | `409` | On-chain prerequisites are outstanding. `error.setup.steps` carries the unsigned transactions |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |
+| `BASE_TOKEN_NOT_SUPPORTED` | `503` | The custody contract does not admit the base token and no setup step could be built |
+| `QUOTE_TOKEN_NOT_SUPPORTED` | `503` | The custody contract does not admit the quote token and no setup step could be built |

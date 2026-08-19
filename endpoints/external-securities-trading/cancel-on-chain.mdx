@@ -1,0 +1,112 @@
+---
+title: 'Cancel Orders On Chain'
+api: 'POST /orderbooks/external-securities/api/orders/cancel-on-chain'
+description: 'Build the transaction that invalidates signed orders on the custody contract'
+---
+
+Returns unsigned calldata for `cancelOrders`, which permanently invalidates one or more signed orders on the custody contract. Once mined, no venue can settle those signatures, whatever it still holds.
+
+This is the trader's own escape hatch, and it is deliberately not blockable: a trader does not need the venue's cooperation to retire an authorization they signed. It is the counterpart to [Cancel Order](/endpoints/external-securities-trading/cancel-order), which only removes the order from this venue's book.
+
+The transaction is signed by the trader, not by the venue operator. The contract records the cancellation against the calling address, so it only ever affects that trader's own orders.
+
+## After it is mined
+
+There is no confirm endpoint. The venue reads liveness from the chain rather than from a hash you report: the next time an incoming order could match one of these, it is found retired, cancelled with the reason recorded, and its reservation released.
+
+To free the reservation immediately, call [Cancel Order](/endpoints/external-securities-trading/cancel-order) as well.
+
+## Body Parameters
+
+<ParamField body="userAddress" type="string" required>
+  The trader's wallet. Only orders belonging to this wallet are included.
+</ParamField>
+
+<ParamField body="orderIds" type="array" required>
+  Order IDs to invalidate, 1 to 50 entries. IDs that do not belong to this wallet are silently dropped; if none match, the request returns `ORDER_NOT_FOUND`.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">
+      <Expandable>
+        <ResponseField name="to" type="string">The custody contract.</ResponseField>
+        <ResponseField name="data" type="string">Encoded `cancelOrders` calldata.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="functionName" type="string">`cancelOrders`.</ResponseField>
+    <ResponseField name="description" type="string">How many signed orders the transaction invalidates.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  All the orders in one call must sit on the same custody contract, since the transaction targets a single contract. In practice that is automatic: there is one custody contract per network.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/external-securities/api/orders/cancel-on-chain" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "orderIds": ["c81f4a9e-2d70-4bb3-9f16-08a5c7d1e320"]
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/orderbooks/external-securities/api/orders/cancel-on-chain',
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ userAddress: await signer.getAddress(), orderIds })
+  }
+);
+const { data } = await res.json();
+
+const tx = await signer.sendTransaction(data.transaction);
+await tx.wait();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x489aee4ae9546081d55848f157e03192e826988c",
+      "data": "0x..."
+    },
+    "functionName": "cancelOrders",
+    "description": "Invalidate 1 signed order on chain"
+  }
+}
+```
+```json Error - Nothing to Cancel
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ORDER_NOT_FOUND",
+    "message": "No matching orders for this wallet"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `userAddress` is not an address, or `orderIds` is empty or over 50 entries |
+| `INSTANCE_REQUIRED` | `400` | The request carried no resolvable instance |
+| `ORDER_NOT_FOUND` | `404` | No orders matched the wallet, or none of them carry a signed order record |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

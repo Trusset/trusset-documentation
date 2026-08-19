@@ -1,56 +1,97 @@
 ---
-title: 'List Quotes'
-description: 'Retrieve the quotes received for an RFQ'
+title: 'List RFQ Quotes'
 api: 'GET /orderbooks/stocks/api/rfq/{id}/quotes'
+description: 'Read the quotes on one request, oldest first'
 ---
 
-Returns the quotes submitted by market makers in response to an RFQ. Each quote carries an executable price, the quote amount, and its own expiry. Pass a quote's `quoteId` to [Accept Quote](/endpoints/stock-trading/accept-rfq-quote) to execute.
+Returns an RFQ together with its quotes in submission order. This is the polling endpoint: open a request, then read this until a quote you want appears or the request expires.
 
-## Authentication
+Ordering is by arrival, not by price. Pick the best executable quote yourself, and check `validUntil` before accepting, since a quote can expire between two polls.
 
-Requires an instance API key with the `trading` service enabled.
+Only quotes with `status: ACTIVE` can be accepted.
 
 ## Path Parameters
 
-<ParamField path="id" type="string" required>
-  The RFQ identifier. Max 100 characters.
-</ParamField>
+<ParamField path="id" type="string" required>RFQ ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="rfq" type="object">
+      The request itself, including its own `quotes` array. Same shape as [Get RFQ](/endpoints/stock-trading/get-rfq).
+    </ResponseField>
+    <ResponseField name="quotes" type="array">
+      Quotes on this request, oldest first.
+      <Expandable>
+        <ResponseField name="id" type="string">Quote ID.</ResponseField>
+        <ResponseField name="lpAddress" type="string">Liquidity provider's wallet.</ResponseField>
+        <ResponseField name="lpAccountId" type="string">Provider's trading account, or `null`.</ResponseField>
+        <ResponseField name="price" type="string">Quoted price in order book units.</ResponseField>
+        <ResponseField name="validUntil" type="string">When the quote stops being executable.</ResponseField>
+        <ResponseField name="lockId" type="string">Balance lock committing the provider's funds.</ResponseField>
+        <ResponseField name="status" type="string">`ACTIVE`, `ACCEPTED`, `EXPIRED` or `WITHDRAWN`.</ResponseField>
+        <ResponseField name="createdAt" type="string">ISO 8601 timestamp.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
 
 <RequestExample>
-```bash
-curl -X GET "https://api.trusset.org/orderbooks/stocks/api/rfq/rfq_abc123/quotes" \
-  -H "x-api-key: trusset_{instanceRef}_{secret}"
+```bash cURL
+curl "https://api.trusset.org/orderbooks/stocks/api/rfq/clx_rfq_0091/quotes" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/stocks/api/rfq/${rfqId}/quotes`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+
+const now = Date.now();
+const best = data.quotes
+  .filter((q: any) => q.status === 'ACTIVE' && Date.parse(q.validUntil) > now)
+  .sort((a: any, b: any) =>
+    data.rfq.side === 'BUY' ? Number(a.price) - Number(b.price) : Number(b.price) - Number(a.price)
+  )[0];
 ```
 </RequestExample>
 
 <ResponseExample>
-```json
+```json Response
 {
   "success": true,
-  "data": [
-    {
-      "quoteId": "qt_001",
-      "makerAddress": "0x2222222222222222222222222222222222222222",
-      "price": "100000000000000000000",
-      "baseAmount": "5000000000000000000",
-      "quoteAmount": "500000000000000000000",
-      "status": "ACTIVE",
-      "expiresAt": "2025-01-15T10:30:12.000Z"
+  "data": {
+    "rfq": {
+      "id": "clx_rfq_0091",
+      "side": "BUY",
+      "baseAmount": "250000000",
+      "status": "QUOTED",
+      "expiresAt": "2025-06-15T12:00:30.000Z"
     },
-    {
-      "quoteId": "qt_002",
-      "makerAddress": "0x3333333333333333333333333333333333333333",
-      "price": "100200000000000000000",
-      "baseAmount": "5000000000000000000",
-      "quoteAmount": "501000000000000000000",
-      "status": "ACTIVE",
-      "expiresAt": "2025-01-15T10:30:13.000Z"
-    }
-  ],
-  "metadata": {
-    "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-01-15T10:30:05.000Z",
-    "instanceId": "inst_abc"
+    "quotes": [
+      {
+        "id": "clx_quote_441",
+        "lpAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+        "lpAccountId": "clx_acct_31",
+        "price": "182410000",
+        "validUntil": "2025-06-15T12:00:28.000Z",
+        "lockId": "clx_lock_91",
+        "status": "ACTIVE",
+        "createdAt": "2025-06-15T12:00:08.000Z"
+      },
+      {
+        "id": "clx_quote_442",
+        "lpAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+        "lpAccountId": "clx_acct_44",
+        "price": "182380000",
+        "validUntil": "2025-06-15T12:00:29.000Z",
+        "lockId": "clx_lock_92",
+        "status": "ACTIVE",
+        "createdAt": "2025-06-15T12:00:11.000Z"
+      }
+    ]
   }
 }
 ```
@@ -58,7 +99,8 @@ curl -X GET "https://api.trusset.org/orderbooks/stocks/api/rfq/rfq_abc123/quotes
 
 ## Error Codes
 
-| Code | Status | Description |
-|------|--------|-------------|
-| `NOT_FOUND` | 404 | No RFQ found with this ID in your instance |
-| `INVALID_PARAM` | 400 | Invalid RFQ identifier |
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_PARAM` | `400` | `id` is missing or longer than 100 characters |
+| `NOT_FOUND` | `404` | No RFQ with that ID on your instance |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

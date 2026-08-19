@@ -1,52 +1,91 @@
 ---
 title: 'Cancel RFQ'
-description: 'Cancel an open request for quote'
 api: 'POST /orderbooks/stocks/api/rfq/{id}/cancel'
+description: 'Withdraw an open request and release the quotes against it'
 ---
 
-Cancels an open RFQ before it expires or is filled. Only the original `requesterAddress` may cancel. Once cancelled, the RFQ transitions to `CANCELLED` and no further quotes or acceptances are accepted.
+Cancels an RFQ you opened. Only the original `requesterAddress` may cancel.
 
-## Authentication
+Cancelling withdraws every live quote and releases the funds each provider had committed, so it is the courteous way to close a request you no longer want rather than letting it expire. Providers get their inventory back immediately instead of at the next sweep.
 
-Requires an instance API key with the `trading` service enabled.
+An RFQ that is already `ACCEPTED`, `CANCELLED` or `EXPIRED` is returned unchanged. The call succeeds, so a retry is safe.
 
 ## Idempotency
 
-This endpoint accepts an optional `Idempotency-Key` header. Reusing a key with a different body returns `IDEMPOTENCY_MISMATCH`.
+Accepts an optional `Idempotency-Key` header.
 
 ## Path Parameters
 
-<ParamField path="id" type="string" required>
-  The RFQ identifier. Max 100 characters.
-</ParamField>
+<ParamField path="id" type="string" required>RFQ ID.</ParamField>
 
 ## Body Parameters
 
 <ParamField body="requesterAddress" type="string" required>
-  EVM address of the requester. Must match the RFQ's original `requesterAddress`. Format `0x[a-fA-F0-9]{40}`.
+  Must equal the RFQ's `requesterAddress`.
 </ParamField>
 
+## Response Fields
+
+Returns the RFQ with its quotes, in the same shape as [Get RFQ](/endpoints/stock-trading/get-rfq). Live quotes now read `WITHDRAWN`.
+
+<Note>
+  Releasing a provider's committed funds is a custody operation. Where that release needs a signature that is not available, the release is retried by the balance lock reconciler rather than failing the cancel: the RFQ is cancelled either way.
+</Note>
+
 <RequestExample>
-```json
-{
-  "requesterAddress": "0x1111111111111111111111111111111111111111"
-}
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/stocks/api/rfq/clx_rfq_0091/cancel" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "requesterAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3" }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/stocks/api/rfq/${rfqId}/cancel`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ requesterAddress: await wallet.getAddress() })
+  }
+);
+const { data } = await res.json();
 ```
 </RequestExample>
 
 <ResponseExample>
-```json
+```json Response
 {
   "success": true,
   "data": {
-    "id": "rfq_abc123",
+    "id": "clx_rfq_0091",
+    "requesterAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "side": "BUY",
+    "baseAmount": "250000000",
     "status": "CANCELLED",
-    "cancelledAt": "2025-01-15T10:30:06.000Z"
-  },
-  "metadata": {
-    "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-01-15T10:30:06.000Z",
-    "instanceId": "inst_abc"
+    "expiresAt": "2025-06-15T12:00:30.000Z",
+    "updatedAt": "2025-06-15T12:00:19.000Z",
+    "quotes": [
+      {
+        "id": "clx_quote_441",
+        "lpAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+        "price": "182410000",
+        "status": "WITHDRAWN",
+        "validUntil": "2025-06-15T12:00:28.000Z"
+      }
+    ]
+  }
+}
+```
+```json Error - Not the Requester
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "FORBIDDEN",
+    "message": "Only the requester can cancel the RFQ"
   }
 }
 ```
@@ -54,10 +93,11 @@ This endpoint accepts an optional `Idempotency-Key` header. Reusing a key with a
 
 ## Error Codes
 
-| Code | Status | Description |
-|------|--------|-------------|
-| `NOT_FOUND` | 404 | No RFQ found with this ID in your instance |
-| `FORBIDDEN` | 403 | The caller is not the RFQ requester |
-| `RFQ_EXPIRED` | 410 | The RFQ has already expired |
-| `IDEMPOTENCY_MISMATCH` | 409 | Idempotency key reused with a different request body |
-| `INVALID_PARAM` | 400 | Invalid RFQ identifier |
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `requesterAddress` is missing or not an address |
+| `INVALID_PARAM` | `400` | `id` is missing or longer than 100 characters |
+| `FORBIDDEN` | `403` | The caller is not the RFQ's requester |
+| `NOT_FOUND` | `404` | No RFQ with that ID on your instance |
+| `IDEMPOTENCY_MISMATCH` | `409` | The key was used before with a different body |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

@@ -1,0 +1,94 @@
+---
+title: 'Set Price Reference'
+api: 'POST /orderbooks/external-securities/api/order-books/{orderBookId}/price-reference'
+description: 'Publish a manual reference price for a security book'
+---
+
+Records a reference price on a book and makes it effective immediately. Use this in `MANUAL` mode; in the feed modes the reference is fetched, and a value posted here is overwritten by the next fetch.
+
+For a security with no continuous market price, a periodically published net asset value is the natural reference. Enforcement of `1HOUR` or `1DAY` with a wide `priceRefSpreadBps` fits that pattern better than tick-by-tick enforcement.
+
+The book must belong to your instance and have `priceRefEnabled` set, otherwise the request is refused with `PRICE_REF_DISABLED`.
+
+## Path Parameters
+
+<ParamField path="orderBookId" type="string" required>Order book ID. Must be a book your instance owns.</ParamField>
+
+## Body Parameters
+
+<ParamField body="price" type="string" required>
+  Reference price as a plain positive decimal, such as `"104.20"`. The instrument's price in the settlement currency, not an order book unit value. Up to 64 characters.
+</ParamField>
+
+## Side effects
+
+**Circuit breaker.** If `priceRefCircuitBreakerBps` is set and the new price differs from the previous one by more than that threshold, the book is moved to `PAUSED` and a `CIRCUIT_BREAKER_TRIGGERED` entry is written to the log. The request still succeeds; the pause is the response to it.
+
+**Band sweep.** If the circuit breaker did not trip and `priceRefSpreadBps` is set, resting orders now outside the band are cancelled with `PRICE_BAND_VIOLATION` and their reservations released. This runs in the background, so cancellations may land a moment after the response.
+
+Neither runs on the first price a book ever receives.
+
+<Note>
+  Cancelling an order for a band violation removes it from this venue and frees the reservation. It does not invalidate the trader's signature on chain. If the price moved because something changed about the instrument, tell traders to retire their signatures with [Cancel Orders On Chain](/endpoints/external-securities-trading/cancel-on-chain).
+</Note>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="price" type="string">The stored price, normalised.</ResponseField>
+    <ResponseField name="updatedAt" type="string">ISO 8601 timestamp.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/external-securities/api/order-books/clx_ob_extsec_001/price-reference" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "price": "104.20" }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/external-securities/api/order-books/${orderBookId}/price-reference`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ price: '104.20' })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": { "price": "104.2", "updatedAt": "2025-06-15T12:00:00.000Z" }
+}
+```
+```json Error - Reference Not Enabled
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "PRICE_REF_DISABLED",
+    "message": "Price reference is not enabled for this order book"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `price` is missing or not a positive decimal string |
+| `INVALID_PRICE` | `400` | `price` parses to zero, a negative number, or a non-finite value |
+| `PRICE_REF_DISABLED` | `400` | The book does not have `priceRefEnabled` set |
+| `ORDER_BOOK_NOT_FOUND` | `404` | The book does not exist on your instance. Imported books cannot be repriced |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

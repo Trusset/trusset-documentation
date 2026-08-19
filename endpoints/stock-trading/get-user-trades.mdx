@@ -1,57 +1,114 @@
 ---
 title: 'Get User Trades'
-description: 'Retrieve all executed trades for a specific user'
 api: 'GET /orderbooks/stocks/api/users/{userAddress}/trades'
+description: "List a wallet's fills across the stock books you can reach"
 ---
 
-Returns a paginated list of trades where the specified user was either the maker or taker, across all on-chain order books in the instance.
+Returns trades where the wallet was maker or taker, newest first, across every stock book your instance owns or has imported. Trades that originated from a [request for quote](/endpoints/stock-trading/create-rfq) on your instance are included even when they carry no book, since an RFQ trade can stand alone.
 
-## Authentication
-
-Requires an instance API key with the `trading` service enabled.
+The scope follows shared liquidity: a fill against a pooled peer book appears here because the trade is recorded against both the maker's and the taker's book.
 
 ## Path Parameters
 
-<ParamField path="userAddress" type="string" required>
-  EVM address of the user. Must match `0x[a-fA-F0-9]{40}`.
-</ParamField>
+<ParamField path="userAddress" type="string" required>Wallet address. Matched case-insensitively.</ParamField>
 
 ## Query Parameters
 
-<ParamField query="limit" type="integer">
-  Number of results to return. Default `50`, maximum `100`.
-</ParamField>
+<ParamField query="limit" type="integer" default="50">Page size, capped at 100.</ParamField>
 
-<ParamField query="offset" type="integer">
-  Offset for pagination. Default `0`.
-</ParamField>
+<ParamField query="offset" type="integer" default="0">Rows to skip.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="trades" type="array">
+      <Expandable>
+        <ResponseField name="tradeId" type="string">Trade ID.</ResponseField>
+        <ResponseField name="orderBookId" type="string">Maker's book, or `null` on a standalone RFQ trade.</ResponseField>
+        <ResponseField name="takerOrderBookId" type="string">Taker's book when the fill crossed a pooled peer, otherwise `null`.</ResponseField>
+        <ResponseField name="origin" type="string">`CLOB`, `RFQ` or `AUCTION`.</ResponseField>
+        <ResponseField name="makerAddress" type="string">Resting side.</ResponseField>
+        <ResponseField name="takerAddress" type="string">Aggressing side.</ResponseField>
+        <ResponseField name="price" type="string">Execution price in order book units.</ResponseField>
+        <ResponseField name="quantity" type="string">Base quantity in order book units.</ResponseField>
+        <ResponseField name="makerFee" type="string">Fee charged to the maker, as base quantity in order book units.</ResponseField>
+        <ResponseField name="takerFee" type="string">Fee charged to the taker, as base quantity in order book units.</ResponseField>
+        <ResponseField name="side" type="string">Side of the aggressing order.</ResponseField>
+        <ResponseField name="settlementId" type="string">Settlement grouping this trade, or `null`.</ResponseField>
+        <ResponseField name="settlementStatus" type="string">`PROCESSING`, `CONFIRMED`, `FAILED`, `AWAITING_SIGNATURE`, or `null` where the book stages no settlement.</ResponseField>
+        <ResponseField name="settlementError" type="string">Why settlement failed, or `null`.</ResponseField>
+        <ResponseField name="quoteId" type="string">Accepted RFQ quote, or `null`.</ResponseField>
+        <ResponseField name="createdAt" type="string">ISO 8601 timestamp.</ResponseField>
+        <ResponseField name="orderBook" type="object">The maker's book record, or `null`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="total" type="integer">Total matching trades.</ResponseField>
+    <ResponseField name="limit" type="integer">Page size applied.</ResponseField>
+    <ResponseField name="offset" type="integer">Offset applied.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  This list is unfiltered by settlement outcome, so a trade whose settlement failed still appears. The market data reads take the opposite view and exclude failed trades from last price, volume and counts.
+</Note>
 
 <RequestExample>
-```bash
-curl -X GET "https://api.trusset.org/orderbooks/stocks/api/users/0x1111111111111111111111111111111111111111/trades?limit=20" \
-  -H "x-api-key: trusset_{instanceRef}_{secret}"
+```bash cURL
+curl "https://api.trusset.org/orderbooks/stocks/api/users/0xabc7f1093d5e26b804a1c3f78de025916b47c0d3/trades?limit=50" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/stocks/api/users/${address}/trades?limit=50`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+
+for (const t of data.trades) {
+  const role = t.makerAddress === address.toLowerCase() ? 'maker' : 'taker';
+  console.log(role, t.price, t.quantity, t.settlementStatus);
+}
 ```
 </RequestExample>
 
 <ResponseExample>
-```json
+```json Response
 {
   "success": true,
-  "data": [
-    {
-      "id": "trade_001",
-      "orderBookId": "ob_abc123",
-      "price": "100000000000000000000",
-      "quantity": "2000000000000000000",
-      "side": "BUY",
-      "timestamp": "2025-01-15T10:30:00.000Z"
-    }
-  ],
-  "metadata": {
-    "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-01-15T10:35:00.000Z",
-    "instanceId": "inst_abc"
+  "data": {
+    "trades": [
+      {
+        "tradeId": "1c9e0f22-2b74-4a51-9f8e-73c1a0d4b6e5",
+        "orderBookId": "clx_ob_stock_002",
+        "takerOrderBookId": null,
+        "origin": "CLOB",
+        "makerAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+        "takerAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+        "price": "182350000",
+        "quantity": "1000000",
+        "makerFee": "500",
+        "takerFee": "1500",
+        "side": "BUY",
+        "settlementId": "clx_settle_51",
+        "settlementStatus": "CONFIRMED",
+        "settlementError": null,
+        "quoteId": null,
+        "createdAt": "2025-06-15T12:02:00.000Z",
+        "orderBook": { "id": "clx_ob_stock_002", "symbol": "NYF1" }
+      }
+    ],
+    "total": 1,
+    "limit": 50,
+    "offset": 0
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `userAddress` is not a valid address |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

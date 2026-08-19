@@ -1,64 +1,130 @@
 ---
 title: 'Accept Quote'
-description: 'Accept a market maker quote and execute the RFQ'
 api: 'POST /orderbooks/stocks/api/rfq/{id}/accept'
+description: 'Execute against one quote and close the request'
 ---
 
-Accepts a specific quote on an open RFQ and executes the trade through the custody contract. Only the original `requesterAddress` may accept. Once accepted, the RFQ transitions to `FILLED` and remaining quotes are discarded.
+Takes one quote on an open RFQ. Only the original `requesterAddress` may accept, and only while both the request and the quote are still live.
 
-The RFQ and the selected quote must both still be within their expiry windows at acceptance time.
+Acceptance is not a simple state change. The price is re-validated against the reference feed at the moment you accept, rather than at the price checked when the provider quoted. Your own funds are then committed, the winning quote is marked accepted and every other quote is withdrawn, and the trade is settled through the custody contract.
 
-## Authentication
-
-Requires an instance API key with the `trading` service enabled.
+<Warning>
+  Committing the requester's funds needs a balance lock in `StockCustody`, which requires a signature from the custody settlement operator that Trusset cannot produce. This endpoint therefore answers `409 ONCHAIN_SETTLEMENT_UNAVAILABLE` today. The refusal happens before the RFQ is marked accepted and before any trade row is written, and the lock row it had staged is deleted, so the request stays open for its remaining lifetime and nothing is stranded.
+</Warning>
 
 ## Idempotency
 
-The `Idempotency-Key` header is **required** for this endpoint. It guarantees that a retried acceptance does not execute the trade twice. Reusing a key with a different body returns `IDEMPOTENCY_MISMATCH`; omitting it returns `IDEMPOTENCY_KEY_REQUIRED`.
+This endpoint **requires** an `Idempotency-Key` header. Without one it returns `400 IDEMPOTENCY_KEY_REQUIRED`. Acceptance both moves funds and destroys the other quotes, so a retry after a network timeout must not be able to execute twice.
 
 ## Path Parameters
 
-<ParamField path="id" type="string" required>
-  The RFQ identifier. Max 100 characters.
-</ParamField>
+<ParamField path="id" type="string" required>RFQ ID.</ParamField>
 
 ## Body Parameters
 
 <ParamField body="requesterAddress" type="string" required>
-  EVM address of the requester. Must match the RFQ's original `requesterAddress`. Format `0x[a-fA-F0-9]{40}`.
+  Must equal the RFQ's `requesterAddress`. Anyone else is refused with `FORBIDDEN`.
 </ParamField>
 
 <ParamField body="quoteId" type="string" required>
-  The identifier of the quote to accept. Max 100 characters.
+  The quote to take. Must belong to this RFQ and still be `ACTIVE`.
 </ParamField>
 
+## Response Fields
+
+This is the shape the endpoint returns once execution is available.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="trade" type="object">
+      The executed trade, with `origin: "RFQ"`, the quoted `price`, the requested `quantity`, and `quoteId` pointing at the accepted quote. Fees are zero on RFQ trades.
+    </ResponseField>
+    <ResponseField name="settlement" type="object">
+      The settlement record created for the trade, keyed by `settlementId`.
+    </ResponseField>
+    <ResponseField name="settlementOutcome" type="object">
+      The on-chain result, carrying `txHash`, `blockNumber` and `gasUsed`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
 <RequestExample>
-```json
-{
-  "requesterAddress": "0x1111111111111111111111111111111111111111",
-  "quoteId": "qt_001"
-}
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/stocks/api/rfq/clx_rfq_0091/accept" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: rfq-0091-accept-441" \
+  -d '{
+    "requesterAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "quoteId": "clx_quote_442"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/stocks/api/rfq/${rfqId}/accept`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': `${rfqId}-accept-${quoteId}`
+    },
+    body: JSON.stringify({ requesterAddress: await wallet.getAddress(), quoteId })
+  }
+);
+const body = await res.json();
+if (!body.success) console.error(body.error.code, body.error.message);
 ```
 </RequestExample>
 
 <ResponseExample>
-```json
+```json Error - On-Chain Settlement Unavailable
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ONCHAIN_SETTLEMENT_UNAVAILABLE",
+    "message": "On-chain custody settlement requires the issuer wallet signature; server-side signing was removed. Switch this order book to OFF_CHAIN settlement or settle via wallet-signed custody endpoints."
+  }
+}
+```
+```json Response (once execution is available)
 {
   "success": true,
   "data": {
-    "id": "rfq_abc123",
-    "status": "FILLED",
-    "acceptedQuoteId": "qt_001",
-    "price": "100000000000000000000",
-    "baseAmount": "5000000000000000000",
-    "quoteAmount": "500000000000000000000",
-    "settlementId": "stl_rfq_001",
-    "filledAt": "2025-01-15T10:30:08.000Z"
-  },
-  "metadata": {
-    "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-01-15T10:30:08.000Z",
-    "instanceId": "inst_abc"
+    "trade": {
+      "tradeId": "d41f8a02-9e75-4c6b-a3d1-0f28b7c95e64",
+      "origin": "RFQ",
+      "orderBookId": "clx_ob_stock_002",
+      "makerAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+      "takerAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+      "price": "182380000",
+      "quantity": "250000000",
+      "makerFee": "0",
+      "takerFee": "0",
+      "side": "BUY",
+      "quoteId": "clx_quote_442",
+      "createdAt": "2025-06-15T12:00:14.000Z"
+    },
+    "settlement": {
+      "settlementId": "0f7c2a19-64b8-4d02-9e51-73ab0c5d6f18",
+      "status": "PROCESSING"
+    },
+    "settlementOutcome": {
+      "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+      "blockNumber": 6412901,
+      "gasUsed": "212440"
+    }
+  }
+}
+```
+```json Error - Quote No Longer Executable
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "QUOTE_EXPIRED",
+    "message": "Quote validity expired"
   }
 }
 ```
@@ -66,13 +132,17 @@ The `Idempotency-Key` header is **required** for this endpoint. It guarantees th
 
 ## Error Codes
 
-| Code | Status | Description |
-|------|--------|-------------|
-| `NOT_FOUND` | 404 | No RFQ or quote found with this ID |
-| `FORBIDDEN` | 403 | The caller is not the RFQ requester |
-| `RFQ_EXPIRED` | 410 | The RFQ has expired |
-| `QUOTE_EXPIRED` | 410 | The selected quote has expired |
-| `QUOTE_PRICE_OUT_OF_BOUNDS` | 400 | The quote price is outside the permitted bounds |
-| `INSUFFICIENT_CUSTODY_BALANCE` | 400 | Insufficient custody balance to settle the trade |
-| `IDEMPOTENCY_KEY_REQUIRED` | 400 | The `Idempotency-Key` header is missing |
-| `IDEMPOTENCY_MISMATCH` | 409 | Idempotency key reused with a different request body |
+| Code | HTTP | Cause |
+|---|---|---|
+| `IDEMPOTENCY_KEY_REQUIRED` | `400` | The `Idempotency-Key` header is missing or malformed |
+| `VALIDATION_ERROR` | `400` | `requesterAddress` or `quoteId` failed validation |
+| `INVALID_PARAM` | `400` | `id` is malformed, or the accepted notional rounds to zero |
+| `INSUFFICIENT_CUSTODY_BALANCE` | `400` | The requester's custody balance does not cover the trade |
+| `QUOTE_PRICE_OUT_OF_BOUNDS` | `400` | The quoted price now falls outside the reference band |
+| `FORBIDDEN` | `403` | The caller is not the RFQ's requester |
+| `NOT_FOUND` | `404` | No such RFQ on your instance, or the quote does not belong to it |
+| `RFQ_EXPIRED` | `410` | The request was already accepted, is in a terminal state, or passed its deadline |
+| `QUOTE_EXPIRED` | `410` | The quote is not `ACTIVE`, or passed its `validUntil` |
+| `IDEMPOTENCY_MISMATCH` | `409` | The key was used before with a different body |
+| `ONCHAIN_SETTLEMENT_UNAVAILABLE` | `409` | Committing the requester's funds needs a custody signature that has no wallet in the loop |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

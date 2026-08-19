@@ -1,49 +1,82 @@
 ---
 title: 'Set Price Reference'
-description: 'Set the manual reference price for an order book'
 api: 'POST /orderbooks/stocks/api/order-books/{orderBookId}/price-reference'
+description: 'Publish a manual reference price for a book'
 ---
 
-Sets the manual reference price for an order book. This applies when `priceRefMode` is `MANUAL`: the submitted price becomes the new reference around which the spread band is computed. Each update is recorded in the price reference history.
+Records a reference price on a book and makes it effective immediately. Use this when the book is in `MANUAL` mode; in `STOCK_FEED` or `EXTERNAL_FEED` mode the reference is fetched rather than pushed, and a value posted here is overwritten by the next fetch.
 
-## Authentication
+The book must belong to your instance and must have `priceRefEnabled` set, otherwise the request is refused with `PRICE_REF_DISABLED`.
 
-Requires an instance API key with the `trading` service enabled.
+Publishing a price has three effects beyond storing it. It resets the staleness clock. It writes an entry into the price reference log. And if the move is large enough it can pause the book or cancel resting orders.
 
 ## Path Parameters
 
-<ParamField path="orderBookId" type="string" required>
-  The order book identifier. Max 100 characters.
-</ParamField>
+<ParamField path="orderBookId" type="string" required>Order book ID. Must be a book your instance owns.</ParamField>
 
 ## Body Parameters
 
 <ParamField body="price" type="string" required>
-  The reference price as a decimal string. 1-64 characters, matching `^\d+\.?\d*$` (for example `"100.25"`).
+  Reference price as a plain positive decimal, such as `"182.35"`. This is the instrument's price in the quote currency, not an order book unit value. Up to 64 characters, digits with at most one decimal point.
 </ParamField>
 
+## Side effects
+
+**Circuit breaker.** If `priceRefCircuitBreakerBps` is set and the new price differs from the previous one by more than that threshold, the book is moved to `PAUSED` and a `CIRCUIT_BREAKER_TRIGGERED` entry is written to the log. The request still succeeds; the pause is the response to it. Reopen the book with [Update Order Book](/endpoints/stock-trading/update-order-book) once you are satisfied the move is real.
+
+**Band sweep.** If the circuit breaker did not trip and `priceRefSpreadBps` is set, resting limit orders that now fall outside the band are cancelled with `PRICE_BAND_VIOLATION` and their reservations released. This runs in the background, so the cancellations may land a moment after the response.
+
+Neither runs on the first price a book ever receives, since there is nothing to compare against.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="price" type="string">The stored price, normalised.</ResponseField>
+    <ResponseField name="updatedAt" type="string">ISO 8601 timestamp.</ResponseField>
+  </Expandable>
+</ResponseField>
+
 <RequestExample>
-```json
-{
-  "price": "100.25"
-}
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/stocks/api/order-books/clx_ob_stock_002/price-reference" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "price": "182.35" }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/stocks/api/order-books/${orderBookId}/price-reference`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ price: '182.35' })
+  }
+);
+const { data } = await res.json();
 ```
 </RequestExample>
 
 <ResponseExample>
-```json
+```json Response
 {
   "success": true,
   "data": {
-    "orderBookId": "ob_abc123",
-    "price": "100.25",
-    "mode": "MANUAL",
-    "updatedAt": "2025-01-15T10:30:00.000Z"
-  },
-  "metadata": {
-    "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-01-15T10:30:00.000Z",
-    "instanceId": "inst_abc"
+    "price": "182.35",
+    "updatedAt": "2025-06-15T12:00:00.000Z"
+  }
+}
+```
+```json Error - Reference Not Enabled
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "PRICE_REF_DISABLED",
+    "message": "Price reference is not enabled for this order book"
   }
 }
 ```
@@ -51,9 +84,11 @@ Requires an instance API key with the `trading` service enabled.
 
 ## Error Codes
 
-| Code | Status | Description |
-|------|--------|-------------|
-| `ORDER_BOOK_NOT_FOUND` | 404 | No order book found with this ID in your instance |
-| `PRICE_REF_DISABLED` | 400 | Price reference is not enabled for this order book |
-| `INVALID_PRICE` | 400 | Invalid price value |
-| `VALIDATION_ERROR` | 400 | Request body failed schema validation |
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `price` is missing or not a positive decimal string |
+| `INVALID_PARAM` | `400` | `orderBookId` is missing or longer than 100 characters |
+| `INVALID_PRICE` | `400` | `price` parses to zero, a negative number, or a non-finite value |
+| `PRICE_REF_DISABLED` | `400` | The book does not have `priceRefEnabled` set |
+| `ORDER_BOOK_NOT_FOUND` | `404` | The book does not exist on your instance. Imported books cannot be repriced |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

@@ -1,0 +1,158 @@
+---
+title: 'Submit Order'
+api: 'POST /orderbooks/commodities/api/orders'
+description: 'Place an order on a commodity order book'
+---
+
+Submits an order to a commodity book. Supports limit and market orders with configurable time in force.
+
+<Warning>
+  Order entry is not currently available on this venue. Locking a balance in `CommodityCustody` needs a signature from the custody settlement operator, and Trusset holds no key to produce one, so this endpoint answers `409 ONCHAIN_SETTLEMENT_UNAVAILABLE` on every commodity book. The refusal happens before any lock row is written, so nothing is stranded and no partial state is left behind.
+
+  Wallet-signed on-chain execution exists today only on [External Securities Trading](/endpoints/external-securities-trading/introduction), where the trader's own EIP-712 signature authorizes the movement and no operator key is needed.
+</Warning>
+
+The endpoint is documented here because the book-level checks in front of that refusal are real, and because this is the request shape the venue will accept when an operator-signed lock path returns.
+
+## Body Parameters
+
+<ParamField body="orderBookId" type="string" required>
+  Target order book. Must be a book your instance owns or has imported.
+</ParamField>
+
+<ParamField body="userAddress" type="string" required>Wallet placing the order.</ParamField>
+
+<ParamField body="side" type="string" required>`BUY` or `SELL`.</ParamField>
+
+<ParamField body="orderType" type="string" required>
+  `LIMIT` or `MARKET`. A `LIMIT` order requires `price`.
+</ParamField>
+
+<ParamField body="price" type="string">
+  Limit price in order book units, as a digit-only string. Required for `LIMIT`, ignored for `MARKET`.
+</ParamField>
+
+<ParamField body="quantity" type="string" required>
+  Base quantity in order book units, as a digit-only string. Must sit between the book's `minOrderSize` and `maxOrderSize`.
+</ParamField>
+
+<ParamField body="timeInForce" type="string" default="GTC">
+  `GTC` rests until filled or cancelled. `IOC` fills what it can immediately and cancels the rest. `FOK` must fill entirely or is cancelled.
+</ParamField>
+
+<ParamField body="signature" type="string">
+  Optional signature over `message`, verified against `userAddress`. Up to 256 characters.
+</ParamField>
+
+<ParamField body="message" type="string">
+  The signed payload. Only checked when `signature` is also present. Up to 512 characters.
+</ParamField>
+
+## Response Fields
+
+This is the shape the endpoint returns once execution is available. It answers `201`.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="order" type="object">The order record, including `orderId`, `status`, `filledQuantity` and `remainingQuantity`.</ResponseField>
+    <ResponseField name="trades" type="array">Trades produced by this submission.</ResponseField>
+    <ResponseField name="filledQuantity" type="string">Quantity filled, in order book units.</ResponseField>
+    <ResponseField name="remainingQuantity" type="string">Quantity still resting.</ResponseField>
+    <ResponseField name="status" type="string">`OPEN`, `PARTIALLY_FILLED`, `FILLED` or `CANCELLED`.</ResponseField>
+    <ResponseField name="stpTriggered" type="boolean">Whether self-trade prevention acted on this submission.</ResponseField>
+    <ResponseField name="cancelReason" type="string">Why the order was cancelled, or `null`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/commodities/api/orders" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "orderBookId": "clx_ob_comm_001",
+    "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "side": "BUY",
+    "orderType": "LIMIT",
+    "price": "2412550000",
+    "quantity": "1000000",
+    "timeInForce": "GTC"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/orderbooks/commodities/api/orders',
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      orderBookId,
+      userAddress: await wallet.getAddress(),
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: '2412550000',
+      quantity: '1000000'
+    })
+  }
+);
+const body = await res.json();
+if (!body.success) console.error(body.error.code, body.error.message);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Error - On-Chain Settlement Unavailable
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ONCHAIN_SETTLEMENT_UNAVAILABLE",
+    "message": "This order book uses ON_CHAIN settlement, which requires server-side signing that was removed. Switch the order book to OFF_CHAIN settlement (PATCH the order book with settlementMode OFF_CHAIN once no orders or locks are live) and use the off-chain order API."
+  }
+}
+```
+```json Response (once execution is available)
+{
+  "success": true,
+  "data": {
+    "order": {
+      "orderId": "f2a9c7d1-40e6-4b83-95c0-7d18a3e6b204",
+      "orderBookId": "clx_ob_comm_001",
+      "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+      "side": "BUY",
+      "orderType": "LIMIT",
+      "price": "2412550000",
+      "quantity": "1000000",
+      "filledQuantity": "0",
+      "remainingQuantity": "1000000",
+      "status": "OPEN",
+      "timeInForce": "GTC",
+      "createdAt": "2025-06-15T12:00:00.000Z"
+    },
+    "trades": [],
+    "filledQuantity": "0",
+    "remainingQuantity": "1000000",
+    "status": "OPEN",
+    "stpTriggered": false,
+    "cancelReason": null
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+These are the refusals the endpoint can currently return. The checks that price, size and balance an order are behind the settlement refusal, so they are not reachable today.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field failed schema validation |
+| `ORDER_BOOK_INACTIVE` | `400` | The book is `PAUSED` or `CLOSED` |
+| `ORDER_BOOK_NOT_FOUND` | `404` | The book does not exist, or is not reachable from your instance |
+| `ONCHAIN_SETTLEMENT_UNAVAILABLE` | `409` | On-chain custody settlement has no wallet in the loop to sign the balance lock |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |
+
+When execution returns, the order-level refusals will be those the other venues already raise: `ORDER_TOO_SMALL`, `ORDER_TOO_LARGE`, `PRICE_REQUIRED`, `INVALID_QUANTITY`, `INVALID_PRICE`, `PRICE_OUTSIDE_BAND`, `INSUFFICIENT_CUSTODY_BALANCE`, `NO_CUSTODY_CONTRACT`, `NO_LIQUIDITY`, `INVALID_SIGNATURE`, `BASE_TOKEN_NOT_SUPPORTED`, `QUOTE_TOKEN_NOT_SUPPORTED`, `PRICE_REF_STALE` and `PRICE_REF_UNAVAILABLE`.

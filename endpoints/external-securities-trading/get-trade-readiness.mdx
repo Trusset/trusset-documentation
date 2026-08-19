@@ -1,0 +1,147 @@
+---
+title: 'Get Trade Readiness'
+api: 'GET /orderbooks/external-securities/api/order-books/{orderBookId}/readiness'
+description: 'Verify the four on-chain prerequisites for a book that already exists'
+---
+
+Reads the custody contract and the security token live, and reports whether the book can trade. `ready` is true only when `issues` is empty.
+
+This is the post-creation counterpart to the setup steps [Create Order Book](/endpoints/external-securities-trading/create-order-book) returns. A book can become unready after creation without anything on the venue changing: the issuer can deactivate the security, revoke the custody contract's delivery role, de-authorize the settlement asset, or drop the venue operator, all from their own contracts.
+
+If a chain read fails, the report stops and returns `CHAIN_UNAVAILABLE` as an issue rather than reporting the prerequisite as unmet.
+
+## Path Parameters
+
+<ParamField path="orderBookId" type="string" required>Order book ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="ready" type="boolean">True when `issues` is empty.</ResponseField>
+    <ResponseField name="orderBookId" type="string">Order book ID.</ResponseField>
+    <ResponseField name="status" type="string">`ACTIVE`, `PAUSED` or `CLOSED`.</ResponseField>
+    <ResponseField name="settlementMode" type="string">`ON_CHAIN`.</ResponseField>
+    <ResponseField name="tokenType" type="string">`EXTERNAL_SECURITY`.</ResponseField>
+    <ResponseField name="custodyContract" type="string">Custody contract.</ResponseField>
+    <ResponseField name="tokenAddress" type="string">Security token.</ResponseField>
+    <ResponseField name="quoteTokenAddress" type="string">Settlement asset.</ResponseField>
+    <ResponseField name="settlementOperator" type="string">Wallet the book expects to sign settlements.</ResponseField>
+    <ResponseField name="underlyingIdentifier" type="string">Identifier recorded on the book.</ResponseField>
+    <ResponseField name="baseDecimals" type="integer">Security token decimals.</ResponseField>
+    <ResponseField name="quoteDecimals" type="integer">Settlement asset decimals.</ResponseField>
+    <ResponseField name="security" type="object">
+      Live registration state read from the custody contract.
+      <Expandable>
+        <ResponseField name="registered" type="boolean">Whether the security is registered.</ResponseField>
+        <ResponseField name="active" type="boolean">Whether the issuer still permits venue trading.</ResponseField>
+        <ResponseField name="isin" type="string">Identifier as recorded on chain.</ResponseField>
+        <ResponseField name="admin" type="string">Security admin recorded at registration.</ResponseField>
+        <ResponseField name="baseUnit" type="string">One whole unit of the security, in base units.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="tokenAuthorizationScheme" type="integer">
+      Which dialect the token uses for the delivery role: `1` for the T-REX agent scheme, `2` for the controller scheme, `0` when neither was detected.
+    </ResponseField>
+    <ResponseField name="custodyIsTokenAgent" type="boolean">Whether the custody contract still holds the delivery role.</ResponseField>
+    <ResponseField name="quoteAssetAuthorized" type="boolean">Whether the settlement asset is authorized for this security.</ResponseField>
+    <ResponseField name="operatorAuthorized" type="boolean">Whether the book's settlement operator is authorized.</ResponseField>
+    <ResponseField name="issues" type="array">
+      Outstanding problems, each with `code` and `message`. Empty when ready.
+    </ResponseField>
+    <ResponseField name="sharedPeers" type="object">
+      Peer summary. See [Get Shared Peers](/endpoints/external-securities-trading/get-shared-peers).
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Issue Codes
+
+| Code | Meaning |
+|---|---|
+| `ORDER_BOOK_INACTIVE` | The book is `PAUSED` or `CLOSED` |
+| `SECURITY_NOT_REGISTERED` | The security is not registered on the custody contract |
+| `SECURITY_INACTIVE` | The issuer has deactivated this security |
+| `ISIN_MISMATCH` | The on-chain identifier no longer matches the one recorded on the book |
+| `CUSTODY_NOT_AUTHORIZED` | The custody contract does not hold the token's delivery role |
+| `QUOTE_TOKEN_NOT_SUPPORTED` | The settlement asset is not authorized for this security |
+| `SETTLEMENT_OPERATOR_UNAUTHORIZED` | The configured operator is not authorized on this security |
+| `INVALID_CUSTODY_CONTRACT` | The address did not answer as the external securities custody contract |
+| `CHAIN_UNAVAILABLE` | On-chain state could not be read. The report stops here |
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/orderbooks/external-securities/api/order-books/clx_ob_extsec_001/readiness" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/external-securities/api/order-books/${orderBookId}/readiness`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+
+if (!data.ready) for (const i of data.issues) console.warn(i.code, i.message);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - Ready
+{
+  "success": true,
+  "data": {
+    "ready": true,
+    "orderBookId": "clx_ob_extsec_001",
+    "status": "ACTIVE",
+    "settlementMode": "ON_CHAIN",
+    "tokenType": "EXTERNAL_SECURITY",
+    "custodyContract": "0x489aee4ae9546081d55848f157e03192e826988c",
+    "tokenAddress": "0x51f2b9d0e77c4a1b83ce6d4a9271e5f3a0c8b912",
+    "quoteTokenAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+    "settlementOperator": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "underlyingIdentifier": "CH0012032048",
+    "baseDecimals": 18,
+    "quoteDecimals": 6,
+    "security": {
+      "registered": true,
+      "active": true,
+      "isin": "CH0012032048",
+      "admin": "0x7712db30a7b4ffd9c445793089118b60e56d752a",
+      "baseUnit": "1000000000000000000"
+    },
+    "tokenAuthorizationScheme": 1,
+    "custodyIsTokenAgent": true,
+    "quoteAssetAuthorized": true,
+    "operatorAuthorized": true,
+    "issues": [],
+    "sharedPeers": { "enabled": true, "peerCount": 0, "peerIds": [], "peers": [] }
+  }
+}
+```
+```json Response - Delivery Role Revoked
+{
+  "success": true,
+  "data": {
+    "ready": false,
+    "orderBookId": "clx_ob_extsec_001",
+    "status": "ACTIVE",
+    "custodyIsTokenAgent": false,
+    "quoteAssetAuthorized": true,
+    "operatorAuthorized": true,
+    "issues": [
+      {
+        "code": "CUSTODY_NOT_AUTHORIZED",
+        "message": "The custody contract is not authorized to move this security token yet"
+      }
+    ]
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `ORDER_BOOK_NOT_FOUND` | `404` | No such external securities book on this instance, and not imported |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |
