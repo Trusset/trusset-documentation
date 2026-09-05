@@ -1,0 +1,123 @@
+---
+title: 'Import Token'
+api: 'POST /external-tokens/api/import'
+description: 'Record a tokenized asset against your instance'
+---
+
+Writes the import record. The contract is detected again as part of the call, so the stored framework and metadata are the chain's answer rather than anything you send.
+
+The record is what makes the token usable elsewhere. A [Lending](/endpoints/lending/introduction) market can only be deployed against a token this instance has imported and holds as active.
+
+## Body Parameters
+
+<ParamField body="tokenAddress" type="string" required>
+  Contract to import, on the network your instance resolves to.
+</ParamField>
+
+<ParamField body="assetType" type="string" required>
+  What the asset is. Your classification, not read from the chain, and not verified. One of `PUBLIC_EQUITY`, `PRIVATE_EQUITY`, `REAL_ESTATE`, `COMMODITY`, `ART`, `WATCH`, `INFRASTRUCTURE`, `BOND`, `CRYPTO_ASSET`.
+</ParamField>
+
+<ParamField body="imageURI" type="string">
+  Icon for the asset. An `https://` or `ipfs://` URI, at most 1024 characters. Pin one with [Upload File](/endpoints/tokenization/upload-file) if you do not host it yourself. Omit it or send an empty string to store none.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="tokenAddress" type="string">The imported address, lowercased.</ResponseField>
+    <ResponseField name="name" type="string">Name read from the contract.</ResponseField>
+    <ResponseField name="symbol" type="string">Symbol read from the contract.</ResponseField>
+    <ResponseField name="decimals" type="integer">Decimals read from the contract.</ResponseField>
+    <ResponseField name="framework" type="string">The standard detection settled on.</ResponseField>
+    <ResponseField name="assetType" type="string">The classification you sent, echoed back.</ResponseField>
+    <ResponseField name="imageURI" type="string">The icon you sent, or `null`.</ResponseField>
+    <ResponseField name="totalSupply" type="string">Supply at the time of import. It is not kept current by this endpoint. Re-read it with [Refresh On-Chain State](/endpoints/tokenization/refresh-onchain).</ResponseField>
+    <ResponseField name="importedAt" type="string">ISO 8601 timestamp.</ResponseField>
+    <ResponseField name="status" type="string">Always `active` on a successful import.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  Importing writes a record and nothing else. No transaction is built, nothing is signed, and no claim is made over the token. The issuer of that token is unaffected by the import and does not learn of it.
+</Note>
+
+<Warning>
+  An instance holds at most 200 active imports. The 201st is refused with `IMPORT_LIMIT_REACHED`. Remove one with [Remove Import](/endpoints/tokenization/remove-import) to free a slot.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/external-tokens/api/import" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+    "assetType": "BOND",
+    "imageURI": "ipfs://bafkreigh2akiscaildc7fh4dqwv6zqm4"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/external-tokens/api/import',
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tokenAddress, assetType: 'BOND' })
+  }
+);
+const { success, data, error } = await res.json();
+
+if (!success && error.code === 'ALREADY_IMPORTED') {
+  return;
+}
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+console.log(`${data.symbol} imported as ${data.framework}`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "tokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+    "name": "Nyala Fund I",
+    "symbol": "NYF1",
+    "decimals": 18,
+    "framework": "erc3643",
+    "assetType": "BOND",
+    "imageURI": "ipfs://bafkreigh2akiscaildc7fh4dqwv6zqm4",
+    "totalSupply": "5000000.0",
+    "importedAt": "2026-09-05T12:00:00.000Z",
+    "status": "active"
+  }
+}
+```
+```json Error - Already Imported
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ALREADY_IMPORTED",
+    "message": "Token is already imported in this instance"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `tokenAddress` is missing or not a valid address |
+| `INVALID_ASSET_TYPE` | `400` | `assetType` is missing or not one of the nine values. The message lists them |
+| `INVALID_IMAGE_URI` | `400` | `imageURI` is not a valid `https` or `ipfs` URI, or is over 1024 characters |
+| `NOT_A_CONTRACT` | `400` | No deployed bytecode at the address on this network |
+| `UNSUPPORTED_TOKEN` | `400` | The contract answers for none of the five standards |
+| `TOKEN_IS_OWN` | `400` | The asset already belongs to this instance and is listed in its own assets |
+| `ALREADY_IMPORTED` | `400` | This instance already holds an active import for the address |
+| `IMPORT_LIMIT_REACHED` | `400` | The instance already holds 200 active imports |
+| `DETECTION_FAILED` | `400` | A Trusset-issued token could not be verified as ERC-3643 on chain |
+| `PROVIDER_UNAVAILABLE` | `503` | The chain could not be reached. Nothing was written. Retry shortly |

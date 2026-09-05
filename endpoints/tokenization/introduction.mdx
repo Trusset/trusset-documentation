@@ -1,0 +1,87 @@
+---
+title: 'Tokenization'
+description: 'Import a tokenized asset issued elsewhere and describe it for your instance'
+icon: 'cubes'
+---
+
+Importing is how an asset that already exists on chain becomes usable inside your instance. Trusset does not deploy it, does not hold it, and does not become a party to it. What the import creates is a record: what the token is, which standard it follows, what your instance calls it, and what you publish about it.
+
+That record is what the rest of the platform reads. A [Lending](/endpoints/lending/introduction) market can only be deployed against a token this instance has imported, and the trading venues resolve their instruments the same way.
+
+## Base Path
+
+```
+https://api.trusset.org/external-tokens/api
+```
+
+Every request authenticates with an instance API key in the `X-API-Key` header. See [Authentication](/endpoints/authentication). An import belongs to the instance that made it, so two instances importing the same contract each hold their own record.
+
+## What can be imported
+
+Detection reads the contract and decides which standard it follows. Five are recognized.
+
+| `framework` | Recognized by | Carried in `details` |
+|---|---|---|
+| `erc3643` | A readable `identityRegistry()` | `identityRegistry`, `compliance`, `onchainID`, `paused` |
+| `erc1400` | `isControllable()` and `isIssuable()` both answering | `isControllable`, `isIssuable`, `granularity` |
+| `erc721` | ERC-165 reporting the ERC-721 interface | Nothing |
+| `erc1155` | ERC-165 reporting the ERC-1155 interface | `uri` |
+| `erc20` | Name, symbol, decimals and total supply all readable | Nothing |
+
+Detection stops at the first match, in that order. A contract that answers none of them is refused with `UNSUPPORTED_TOKEN`.
+
+<Note>
+  A token this instance issued through Trusset is detected as `erc3643` and carries `details.trussetStockToken: true` with its `isin`. It cannot be imported: it already belongs to the instance and is listed in its own assets. [Import Token](/endpoints/tokenization/import-token) refuses it with `TOKEN_IS_OWN`.
+</Note>
+
+## Import a token
+
+<Steps>
+  <Step title="Detect">
+    [Detect Token](/endpoints/tokenization/detect-token) reads the contract and returns what it is, before anything is written. It also answers `alreadyImported` and `isOwn`, so a form is never filled in for a request that can only be refused.
+  </Step>
+  <Step title="Import">
+    [Import Token](/endpoints/tokenization/import-token) writes the record. You supply the `assetType`, which is your classification of the asset and is not read from the chain.
+  </Step>
+  <Step title="Describe">
+    [Update Profile](/endpoints/tokenization/update-profile) publishes what you assert about the instrument: issuer, jurisdiction, ISIN, LEI, documents. Everything here is your assertion, not a Trusset verification.
+  </Step>
+  <Step title="Keep it current">
+    [Refresh On-Chain State](/endpoints/tokenization/refresh-onchain) re-reads the contract and reports whether the stored framework still matches what the chain says.
+  </Step>
+</Steps>
+
+## Chain-read facts and issuer assertions stay apart
+
+The record holds two kinds of thing and never merges them.
+
+`name`, `symbol`, `decimals`, `framework`, `totalSupply` and `metadata` come from the contract. They are re-read by [Refresh On-Chain State](/endpoints/tokenization/refresh-onchain) and by nothing else.
+
+`assetType`, `imageURI` and everything under `profile` are yours. No endpoint verifies them, and anywhere they surface downstream they are marked as issuer-asserted. The [instrument record](/endpoints/lending/list-pending-markets) that a lending market publishes carries that provenance explicitly.
+
+## Response envelope
+
+```json
+{
+  "success": true,
+  "data": { },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-09-05T12:00:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+
+On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. Always branch on `success` rather than on the HTTP status alone.
+
+<Warning>
+  `IMPORT_NOT_FOUND` answers with `400`, not `404`. Branch on the code.
+</Warning>
+
+## Limits
+
+An instance holds at most 200 active imports. The 201st is refused with `IMPORT_LIMIT_REACHED`. Removing an import frees a slot.
+
+Writes on this surface are limited to 10 requests per minute, keyed by API key. [List Imports](/endpoints/tokenization/list-imports) and [Get Import](/endpoints/tokenization/get-import) are limited to 100 per minute. Both sit inside the ceiling of 200 per minute that applies to every request made with an instance API key. See [Rate Limits](/endpoints/rate-limits).

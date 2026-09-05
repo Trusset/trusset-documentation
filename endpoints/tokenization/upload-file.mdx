@@ -1,0 +1,97 @@
+---
+title: 'Upload File'
+api: 'POST /external-tokens/api/upload'
+description: 'Pin an image or document to IPFS and get its URI'
+---
+
+Pins a file to IPFS and returns the URI to reference it by. Use it for the icon on [Import Token](/endpoints/tokenization/import-token) and for the documents on [Update Profile](/endpoints/tokenization/update-profile), when you do not host those files yourself.
+
+The request is `multipart/form-data` with a single field named `file`.
+
+## Accepted files
+
+PNG, JPEG, WebP, GIF, PDF and JSON. The type is determined from the file's own bytes, not from its name or from the content type you send. Anything else is refused with `UNSUPPORTED_FILE_TYPE`.
+
+Documents must be 1022 KB or smaller. Images are re-encoded before pinning, so they are held to a budget rather than a hard limit and a larger source image is usually fine. The transport itself caps any single upload at 10 MB.
+
+For a document over the limit, host it yourself and give the `https` URL with a `sha256` content hash instead. The refusal says so.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="ipfsUri" type="string">`ipfs://` URI. This is the value to store on a profile or an image field.</ResponseField>
+    <ResponseField name="cid" type="string">The content identifier on its own.</ResponseField>
+    <ResponseField name="gatewayUrl" type="string">An `https` gateway URL for the same content, for previewing it in a browser.</ResponseField>
+    <ResponseField name="fileName" type="string">The name you uploaded it under.</ResponseField>
+    <ResponseField name="fileSize" type="integer">Bytes pinned. For a re-encoded image this is the encoded size, not the size you sent.</ResponseField>
+    <ResponseField name="mimeType" type="string">The type resolved from the bytes.</ResponseField>
+    <ResponseField name="contentHash" type="string">SHA-256 of the pinned content. Record it alongside any document you publish, so the file can be shown to be the one that was referenced.</ResponseField>
+    <ResponseField name="limitBytes" type="integer">The document pinning limit in bytes, so a client can size its own guidance from the response.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  Pinned content is public and permanent for as long as it is pinned. Anyone with the CID can read it. Never upload anything holding personal data, and treat a mistaken upload as published rather than as deletable.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/external-tokens/api/upload" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -F "file=@anleihebedingungen.pdf"
+```
+```typescript TypeScript
+const form = new FormData();
+form.append('file', file, file.name);
+
+const res = await fetch(
+  'https://api.trusset.org/external-tokens/api/upload',
+  { method: 'POST', headers: { 'X-API-Key': 'trusset_your_key_here' }, body: form }
+);
+const { success, data, error } = await res.json();
+
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+const document = { name: file.name, uri: data.ipfsUri };
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "ipfsUri": "ipfs://bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
+    "cid": "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
+    "gatewayUrl": "https://ipfs.io/ipfs/bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
+    "fileName": "anleihebedingungen.pdf",
+    "fileSize": 284119,
+    "mimeType": "application/pdf",
+    "contentHash": "9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "limitBytes": 1046528
+  }
+}
+```
+```json Error - Too Large
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "FILE_TOO_LARGE",
+    "message": "This file is 3204 KB. Documents pinned through Trusset must be 1022 KB or smaller. Host the document yourself and supply its uri with a sha256 contentHash instead.",
+    "limitBytes": 1046528
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_FILE` | `400` | No `file` field in the request |
+| `INVALID_FILE` | `400` | The file could not be read |
+| `UPLOAD_ERROR` | `400` | The multipart request was malformed |
+| `FILE_TOO_LARGE` | `413` | A document over the pinning limit, or an upload over 10 MB. The error carries `limitBytes` |
+| `UNSUPPORTED_FILE_TYPE` | `415` | The bytes are not PNG, JPEG, WebP, GIF, PDF or JSON |
+| `UPLOAD_FAILED` | `500` | Pinning failed. Nothing was stored |

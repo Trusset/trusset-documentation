@@ -1,0 +1,111 @@
+---
+title: 'Refresh On-Chain State'
+api: 'GET /external-tokens/api/{tokenAddress}/onchain'
+description: 'Re-read the contract and reconcile it against the stored record'
+---
+
+Reads the contract again and compares it with what the import record holds. This is the only endpoint that refreshes the chain-read half of a record. Name, symbol, decimals, supply and metadata are otherwise frozen at import time.
+
+It is a `GET` that writes. The refreshed values are persisted when the framework still matches, which is why it counts against the write rate limit rather than the read one.
+
+## Path Parameters
+
+<ParamField path="tokenAddress" type="string" required>The imported contract address.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="onchain" type="object">What the contract answers right now, in the same shape [Detect Token](/endpoints/tokenization/detect-token) returns: `framework`, `name`, `symbol`, `decimals`, `totalSupply`, `environment` and `details`.</ResponseField>
+    <ResponseField name="frameworkMatches" type="boolean">Whether the framework detected now is the one stored at import.</ResponseField>
+    <ResponseField name="persisted" type="boolean">Whether the refreshed values were written to the record.</ResponseField>
+    <ResponseField name="storedFramework" type="string">The framework the record holds, which is the one every other endpoint reports.</ResponseField>
+    <ResponseField name="record" type="object">The record as it stands after the call: `tokenAddress`, `name`, `symbol`, `decimals`, `framework`, `totalSupply`, `metadata`, `updatedAt`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## When the framework has changed
+
+A contract can start answering for a different standard than it did at import, usually because it was upgraded behind a proxy.
+
+When that happens `frameworkMatches` is `false` and `persisted` is `false`. The record is left exactly as it was, and `onchain` shows what the contract says now. Nothing is silently rewritten, because a framework change alters what the token is and what can be done with it, and that is a decision rather than a sync.
+
+Compare `onchain.framework` against `storedFramework` to see it. To act on it, remove the import and add it again.
+
+<Warning>
+  A market already deployed against this token is not affected by anything here. It reads the chain directly and holds its own record of the collateral. Refreshing an import does not reconcile a live lending market, and a framework change under a deployed market is a situation to handle deliberately.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/external-tokens/api/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f/onchain" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/external-tokens/api/${tokenAddress}/onchain`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+
+if (!data.frameworkMatches) {
+  console.warn(
+    `${tokenAddress} now answers as ${data.onchain.framework}, recorded as ${data.storedFramework}`
+  );
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "onchain": {
+      "tokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+      "framework": "erc3643",
+      "name": "Nyala Fund I",
+      "symbol": "NYF1",
+      "decimals": 18,
+      "totalSupply": "5250000.0",
+      "environment": "PRODUCTION",
+      "details": {
+        "identityRegistry": "0x9e3c8A15f4d70b2681C5a3f9027d4bE8115C7d21",
+        "compliance": "0x2b7Ff4E80a1c53D6970bC81dE4a5f0917Ac3d829",
+        "onchainID": null,
+        "paused": false
+      }
+    },
+    "frameworkMatches": true,
+    "persisted": true,
+    "storedFramework": "erc3643",
+    "record": {
+      "tokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+      "name": "Nyala Fund I",
+      "symbol": "NYF1",
+      "decimals": 18,
+      "framework": "erc3643",
+      "totalSupply": "5250000.0",
+      "metadata": {
+        "identityRegistry": "0x9e3c8A15f4d70b2681C5a3f9027d4bE8115C7d21",
+        "compliance": "0x2b7Ff4E80a1c53D6970bC81dE4a5f0917Ac3d829",
+        "onchainID": null,
+        "paused": false
+      },
+      "updatedAt": "2026-09-05T12:20:00.000Z"
+    }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `tokenAddress` is not a valid address |
+| `IMPORT_NOT_FOUND` | `400` | No active import for that address on your instance |
+| `NOT_A_CONTRACT` | `400` | The contract is gone from this network |
+| `UNSUPPORTED_TOKEN` | `400` | The contract no longer answers for any supported standard |
+| `DETECTION_FAILED` | `400` | The read completed but produced nothing usable |
+| `PROVIDER_UNAVAILABLE` | `503` | The chain could not be reached. The record is untouched. Retry shortly |

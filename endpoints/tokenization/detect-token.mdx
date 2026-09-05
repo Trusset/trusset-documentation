@@ -1,0 +1,139 @@
+---
+title: 'Detect Token'
+api: 'POST /external-tokens/api/detect'
+description: 'Read a contract and report which token standard it follows'
+---
+
+Reads the contract at an address and reports what it is, without writing anything. Call it before [Import Token](/endpoints/tokenization/import-token) so a form is never filled in for a request that can only be refused.
+
+## Body Parameters
+
+<ParamField body="tokenAddress" type="string" required>
+  Contract to read, on the network your instance resolves to. Case-insensitive, lowercased in the response.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="tokenAddress" type="string">The address read, lowercased.</ResponseField>
+    <ResponseField name="framework" type="string">`erc3643`, `erc1400`, `erc721`, `erc1155` or `erc20`. The first standard the contract answers for, tested in that order.</ResponseField>
+    <ResponseField name="name" type="string">Token name. Falls back to the symbol, then to a name derived from the framework, when the contract does not answer.</ResponseField>
+    <ResponseField name="symbol" type="string">Token symbol, at most 16 characters.</ResponseField>
+    <ResponseField name="decimals" type="integer">Decimals, defaulting to `18` when unreadable. Always `0` for `erc721` and `erc1155`.</ResponseField>
+    <ResponseField name="totalSupply" type="string">Total supply formatted at `decimals`. Always `"0"` for `erc1155`, which has no single supply.</ResponseField>
+    <ResponseField name="environment" type="string">The instance type this read ran against.</ResponseField>
+    <ResponseField name="degradedMetadata" type="boolean">Present and `true` when part of the metadata could not be read and a fallback was used. Absent on a clean read. Do not treat a fallback name or symbol as the token's own.</ResponseField>
+    <ResponseField name="details" type="object">Framework-specific facts. See below.</ResponseField>
+    <ResponseField name="alreadyImported" type="boolean">`true` when this instance already holds an active import for the address. Importing again is refused.</ResponseField>
+    <ResponseField name="isOwn" type="boolean">`true` when the asset belongs to this instance already. Importing it is refused.</ResponseField>
+    <ResponseField name="ownTokenKind" type="string">What kind of own asset it is, or `null`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## The details block
+
+`details` carries only what the detected standard exposes. It is `{}` for `erc20` and `erc721`.
+
+| `framework` | `details` |
+|---|---|
+| `erc3643` | `identityRegistry`, `compliance`, `onchainID`, `paused` |
+| `erc1400` | `isControllable`, `isIssuable`, `granularity` |
+| `erc1155` | `uri`, the collection metadata URI |
+
+An address inside `details` is `null` when the contract returned nothing usable, and `paused` is `null` when the flag could not be read, which is not the same as unpaused.
+
+A token this instance issued through Trusset comes back as `erc3643` with two extra keys: `trussetStockToken: true` and `isin`. It is reported so it can be recognized, not so it can be imported.
+
+<Warning>
+  Detection reports the standard a contract answers for, not that the contract is safe or that the asset behind it is what anyone claims. It reads public view functions and nothing more.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/external-tokens/api/detect" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"tokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/external-tokens/api/detect',
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tokenAddress })
+  }
+);
+const { success, data, error } = await res.json();
+
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+if (data.alreadyImported || data.isOwn) {
+  throw new Error('This token cannot be imported into this instance');
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - ERC-3643
+{
+  "success": true,
+  "data": {
+    "tokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+    "framework": "erc3643",
+    "name": "Nyala Fund I",
+    "symbol": "NYF1",
+    "decimals": 18,
+    "totalSupply": "5000000.0",
+    "environment": "PRODUCTION",
+    "details": {
+      "identityRegistry": "0x9e3c8A15f4d70b2681C5a3f9027d4bE8115C7d21",
+      "compliance": "0x2b7Ff4E80a1c53D6970bC81dE4a5f0917Ac3d829",
+      "onchainID": null,
+      "paused": false
+    },
+    "alreadyImported": false,
+    "isOwn": false,
+    "ownTokenKind": null
+  }
+}
+```
+```json Response - Plain ERC-20
+{
+  "success": true,
+  "data": {
+    "tokenAddress": "0x3f8b1c7e2a9d5f4b6c8e0a2d7f1b3c9e5a4d6b8c",
+    "framework": "erc20",
+    "name": "Wrapped Asset",
+    "symbol": "WRAP",
+    "decimals": 18,
+    "totalSupply": "1200000.0",
+    "environment": "PRODUCTION",
+    "details": {},
+    "alreadyImported": false,
+    "isOwn": false,
+    "ownTokenKind": null
+  }
+}
+```
+```json Error - Not a Contract
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "NOT_A_CONTRACT",
+    "message": "No contract found at this address on the selected network"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `tokenAddress` is missing or not a valid address |
+| `NOT_A_CONTRACT` | `400` | No deployed bytecode at the address on this network |
+| `UNSUPPORTED_TOKEN` | `400` | The contract answers for none of the five standards |
+| `DETECTION_FAILED` | `400` | The read completed but produced nothing usable |
+| `PROVIDER_UNAVAILABLE` | `503` | The chain could not be reached. Nothing was read. Retry shortly |

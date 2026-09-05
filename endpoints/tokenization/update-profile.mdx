@@ -1,0 +1,137 @@
+---
+title: 'Update Profile'
+api: 'PUT /external-tokens/api/{tokenAddress}/profile'
+description: 'Publish what your instance asserts about an imported instrument'
+---
+
+Replaces the published description of an imported asset: who issued it, where, its identifiers, and the documents that stand behind it.
+
+<Warning>
+  Everything here is your assertion. No field is verified against a register, a regulator, or the chain. `isin` and `lei` are checked for format and check digit only, which proves they are well-formed, not that they belong to this instrument. Wherever this profile surfaces downstream it is labelled `ISSUER_ASSERTED` for exactly that reason.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="tokenAddress" type="string" required>The imported contract address.</ParamField>
+
+## Body Parameters
+
+<ParamField body="profile" type="object" required>
+  The whole profile. This is a replace, not a merge, and a key you leave out is cleared.
+
+  Read the current profile from [Get Import](/endpoints/tokenization/get-import) and send it back with your changes applied.
+  <Expandable>
+    <ParamField body="issuerName" type="string">Who issued the instrument. At most 120 characters.</ParamField>
+    <ParamField body="jurisdiction" type="string">Governing jurisdiction. At most 64 characters.</ParamField>
+    <ParamField body="sector" type="string">Sector or asset class. At most 64 characters.</ParamField>
+    <ParamField body="description" type="string">Free text about the instrument. At most 2000 characters.</ParamField>
+    <ParamField body="isin" type="string">12 characters, two letters then nine alphanumerics then a check digit. The check digit is validated.</ParamField>
+    <ParamField body="lei" type="string">20 characters, 18 alphanumerics then two check digits. The ISO 17442 check digits are validated.</ParamField>
+    <ParamField body="website" type="string">An `https://` URL, at most 512 characters.</ParamField>
+    <ParamField body="ammAddress" type="string">A contract address, where a venue exists for the asset.</ParamField>
+    <ParamField body="reserveURI" type="string">Reserve attestation. An `https://` or `ipfs://` URI, at most 1024 characters.</ParamField>
+    <ParamField body="prospectusURI" type="string">Prospectus or offering document. Same URI rules.</ParamField>
+    <ParamField body="documents" type="array">Up to 20 entries, each `{ name, uri }`. `name` is at most 120 characters and `uri` follows the same `https` or `ipfs` rules.</ParamField>
+  </Expandable>
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="tokenAddress" type="string">The address, lowercased.</ResponseField>
+    <ResponseField name="profile" type="object">The stored profile after the write.</ResponseField>
+    <ResponseField name="presentation" type="object">The normalized values that were accepted. Strings are trimmed and truncated to their limits here, so compare it against what you sent to see what was kept.</ResponseField>
+    <ResponseField name="updatedAt" type="string">ISO 8601 timestamp of the write.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  Pin a document with [Upload File](/endpoints/tokenization/upload-file) and use the `ipfsUri` it returns. For anything over the pinning limit, host it yourself and give the `https` URL instead.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X PUT "https://api.trusset.org/external-tokens/api/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f/profile" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "profile": {
+      "issuerName": "Nyala Digital Asset Solutions",
+      "jurisdiction": "DE",
+      "sector": "Fixed income",
+      "isin": "DE000A0F5UF5",
+      "website": "https://nyala.example",
+      "documents": [
+        { "name": "Anleihebedingungen", "uri": "ipfs://bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku" }
+      ]
+    }
+  }'
+```
+```typescript TypeScript
+const current = await fetch(
+  `https://api.trusset.org/external-tokens/api/${tokenAddress}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+).then(r => r.json());
+
+const profile = { ...(current.data.profile ?? {}), sector: 'Fixed income' };
+
+await fetch(
+  `https://api.trusset.org/external-tokens/api/${tokenAddress}/profile`,
+  {
+    method: 'PUT',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile })
+  }
+);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "tokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+    "profile": {
+      "issuerName": "Nyala Digital Asset Solutions",
+      "jurisdiction": "DE",
+      "sector": "Fixed income",
+      "isin": "DE000A0F5UF5",
+      "website": "https://nyala.example",
+      "documents": [
+        { "name": "Anleihebedingungen", "uri": "ipfs://bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku" }
+      ]
+    },
+    "presentation": {
+      "issuerName": "Nyala Digital Asset Solutions",
+      "jurisdiction": "DE",
+      "sector": "Fixed income",
+      "isin": "DE000A0F5UF5",
+      "website": "https://nyala.example"
+    },
+    "updatedAt": "2026-09-05T12:25:00.000Z"
+  }
+}
+```
+```json Error - Bad Check Digit
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "INVALID_PROFILE",
+    "message": "isin must be a valid ISIN: the check digit does not match"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `tokenAddress` is not a valid address |
+| `INVALID_PROFILE` | `400` | A field failed validation. The message names it |
+| `INVALID_PRESENTATION` | `400` | The profile object itself is malformed, or carries a key that is not one of the eleven above |
+| `TOKEN_NOT_IMPORTED` | `404` | No active import for that address on your instance |
+| `IMPORT_LOOKUP_FAILED` | `503` | The record could not be read. Nothing was written. Retry shortly |
