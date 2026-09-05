@@ -1,0 +1,156 @@
+---
+title: 'Update Market Config'
+api: 'POST /lending-external-securities/api/markets/{marketId}/config'
+description: 'Set the on-chain risk parameters for a market'
+---
+
+Writes the market's full `config` struct. Every field is required on every call, so read the current values with [Get Market Config](/endpoints/lending/get-config) first and send them back with your changes applied. Partial updates are not supported: an omitted field fails validation rather than retaining its current value.
+
+Requires `ISSUER_ROLE` on the market contract.
+
+<Warning>
+  Changing `liquidationThreshold` moves the point at which existing loans become liquidatable. Raising it immediately puts loans at risk that were healthy a moment earlier. The contract caps each change at 10 percent per call.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="config" type="object" required>
+  <Expandable>
+    <ParamField body="collateralFactor" type="integer" required>Maximum loan to value in basis points. 1000 to 9500.</ParamField>
+    <ParamField body="liquidationThreshold" type="integer" required>Liquidation trigger in basis points. 1000 to 9800. Must exceed `collateralFactor` to leave borrowers any buffer.</ParamField>
+    <ParamField body="liquidationPenalty" type="integer" required>Penalty on liquidated debt in basis points. 0 to 5000.</ParamField>
+    <ParamField body="protocolFeeRate" type="integer" required>Issuer share of accrued interest in basis points. 0 to 10000.</ParamField>
+    <ParamField body="minBorrowAmount" type="string" required>Minimum borrow per loan, as a decimal string in borrow asset units.</ParamField>
+    <ParamField body="closeFactor" type="integer" required>Maximum fraction of a loan's debt repayable in one liquidation, in basis points. 1000 to 5000.</ParamField>
+    <ParamField body="maxTotalCollateral" type="string" required>Global collateral cap as a decimal string in collateral token units. `"0"` means uncapped.</ParamField>
+    <ParamField body="maxUserCollateral" type="string" required>Per-borrower collateral cap as a decimal string in collateral token units. `"0"` means uncapped.</ParamField>
+    <ParamField body="useDutchAuction" type="boolean" required>Whether liquidations open a Dutch auction. Rejected on-chain when the market's `priceSource` is `MARKET`.</ParamField>
+    <ParamField body="auctionDuration" type="integer" required>Auction length in seconds. 600 to 86400.</ParamField>
+    <ParamField body="auctionStartPremium" type="integer" required>Opening price multiplier in basis points. 10000 to 20000, where 10000 is oracle price.</ParamField>
+    <ParamField body="auctionMinPremium" type="integer" required>Floor price multiplier in basis points. 8000 to 10000. Floored at 9800 on-chain when `priceSource` is `MARKET`.</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+</ParamField>
+
+<Note>
+  `maxPriceAge` is not part of this struct. It is an oracle setting, not a market setting, and it is read from [Get Oracle Status](/endpoints/lending/get-oracle-status) rather than written here. It still interacts directly with your NAV publication cadence. A fund that publishes NAV daily needs `maxPriceAge` above 86400 seconds, or every loan action will revert against a stale price between publications.
+</Note>
+
+## Bounds the contract adds
+
+The per-field ranges above are what the request schema accepts. The contract is stricter on four of them, and the API mirrors those rules so no signature is asked for a tuple that would revert with a bare selector.
+
+| Rule | Refused with |
+|---|---|
+| `collateralFactor` at most 9000, whatever the schema allows | `INVALID_CONFIG` |
+| `liquidationThreshold` at most 9500, whatever the schema allows | `INVALID_CONFIG` |
+| `liquidationThreshold` strictly greater than `collateralFactor` | `INVALID_CONFIG` |
+| `auctionStartPremium` strictly greater than `auctionMinPremium`, when auctions are on | `INVALID_CONFIG` |
+
+A market that runs loan terms adds one more: `liquidationPenalty` cannot drop below the market's own `termPenalty`. Lower the term penalty first.
+
+A market whose `priceSource` is `MARKET` cannot run Dutch auctions at all, and needs an `auctionMinPremium` of at least 9800. Turning auctions on there is refused with `AUCTION_UNSUPPORTED_PRICE_SOURCE`.
+
+<Warning>
+  Turning `useDutchAuction` off withdraws the market from the public feed in the same write. Auctions are what makes a realization publicly actionable, so a market without them would otherwise keep advertising a participation route that no longer exists. The confirm response reports it as `publicListingWithdrawn`.
+</Warning>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction for the `setConfig` call. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`setConfig`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="requiredRole" type="string">Role the signing wallet must hold on the market.</ResponseField>
+    <ResponseField name="heldByThisInstance" type="boolean">Whether a verified wallet of your instance holds that role. When `false`, the transaction has to be signed by another party.</ResponseField>
+    <ResponseField name="signerAddress" type="string">The wallet the role check ran against.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming.</ResponseField>
+    <ResponseField name="publicListingWithdrawn" type="boolean">`true` when this write took the market off the public feed because Dutch auctions were turned off. Returned when confirming.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/config" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "collateralFactor": 7000,
+      "liquidationThreshold": 8000,
+      "liquidationPenalty": 500,
+      "protocolFeeRate": 2500,
+      "minBorrowAmount": "1000",
+      "closeFactor": 5000,
+      "maxTotalCollateral": "0",
+      "maxUserCollateral": "0",
+      "useDutchAuction": false,
+      "auctionDuration": 3600,
+      "auctionStartPremium": 13000,
+      "auctionMinPremium": 9500
+    }
+  }'
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": { "to": "0x70A0...", "data": "0x..." }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0xabc...def",
+    "publicListingWithdrawn": false
+  }
+}
+```
+```json Error - Update Failed
+{
+  "success": false,
+  "error": {
+    "code": "CONFIG_UPDATE_FAILED",
+    "message": "execution reverted: ThresholdChangeTooLarge"
+  }
+}
+```
+```json Error - Validation
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Invalid request parameters",
+    "details": [
+      { "field": "config.collateralFactor", "message": "Number must be less than or equal to 9500" }
+    ]
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `VALIDATION_ERROR` | `400` | A `config` field is outside its accepted range. `error.details` names each offending field |
+| `INVALID_CONFIG` | `400` | A cross-field rule the contract enforces was broken. The message names which one |
+| `AUCTION_UNSUPPORTED_PRICE_SOURCE` | `400` | Dutch auctions were turned on for a market whose `priceSource` is `MARKET` |
+| `CONFIG_UPDATE_FAILED` | `400` | The confirmed transaction could not be verified against this market |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds the admin role this change requires. Skipped when confirming with `txHash` |

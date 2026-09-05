@@ -1,0 +1,94 @@
+---
+title: 'Get Liquidatable Loans'
+api: 'GET /lending-external-securities/api/liquidations/{marketId}/liquidatable-loans'
+description: 'List loans whose health factor has fallen below 1.0'
+---
+
+Scans every active loan in the market and returns those whose health factor is strictly below `1.0`.
+
+This is a full scan of the market's loan book, so response time grows with the number of loans. Poll it on a schedule rather than per page view.
+
+<Warning>
+  This list covers one of the two liquidation triggers. A market that runs loan terms can also liquidate a loan whose term has run out, past its grace period, however healthy its collateral is. Those loans are not in this list, and this endpoint does not report them.
+
+  A market's term offering is on `termConfig` from [Get Market Metrics](/endpoints/lending/get-metrics). A market whose `maxLoanDuration` and `terminalDueDate` are both `"0"` makes open-ended loans, and for it this list is complete.
+
+  For any other market, take the term side from [List Positions](/endpoints/lending/list-positions), where each open position carries a `term` block. A position with `term.enforceable: true` is liquidatable now whatever its health factor says. Poll both and act on the union.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="totalActiveLoans" type="integer">Active loans scanned.</ResponseField>
+    <ResponseField name="liquidatableLoans" type="array">
+      <Expandable>
+        <ResponseField name="loanId" type="integer">On-chain loan ID. Pass this to [Liquidate Loan](/endpoints/lending/liquidate).</ResponseField>
+        <ResponseField name="borrower" type="string">Borrower address.</ResponseField>
+        <ResponseField name="collateralAmount" type="string">Collateral pledged, in collateral token units.</ResponseField>
+        <ResponseField name="principal" type="string">Outstanding principal, in borrow asset units.</ResponseField>
+        <ResponseField name="accruedInterest" type="string">Accrued unpaid interest, in borrow asset units.</ResponseField>
+        <ResponseField name="healthFactor" type="string">Health factor at 18 decimal places. Always below `1.0` in this list.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="onChainError" type="string">Present when the scan failed. Both counters read zero in that case.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  When the chain read fails the endpoint returns `200` with `totalActiveLoans: 0`, an empty `liquidatableLoans`, and an `onChainError` string. An empty list is therefore not proof that no loan is liquidatable. Always check for `onChainError` before concluding the book is healthy.
+</Warning>
+
+<Note>
+  Health factors are computed against the oracle's stored price. If the price is stale the figures here are stale too. Push a current NAV with [Sync Oracle Price](/endpoints/lending/sync-oracle) before acting on this list, or pass a `signedPrice` when liquidating so the contract prices against a fresh value.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities/api/liquidations/{marketId}/liquidatable-loans" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/liquidations/${marketId}/liquidatable-loans`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+if (data.onChainError) throw new Error(`Scan failed: ${data.onChainError}`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "totalActiveLoans": 12,
+    "liquidatableLoans": [
+      {
+        "loanId": 7,
+        "borrower": "0xabc...def",
+        "collateralAmount": "500.000000000000000000",
+        "principal": "42000.000000",
+        "accruedInterest": "318.400000",
+        "healthFactor": "0.942000000000000000"
+      }
+    ]
+  }
+}
+```
+```json Response - Scan Failed
+{
+  "success": true,
+  "data": {
+    "totalActiveLoans": 0,
+    "liquidatableLoans": [],
+    "onChainError": "could not detect network"
+  }
+}
+```
+</ResponseExample>

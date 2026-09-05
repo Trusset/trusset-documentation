@@ -1,0 +1,164 @@
+---
+title: 'Withdraw Collateral for Sale'
+api: 'POST /lending-external-securities/api/liquidations/withdraw-collateral/{liquidationId}'
+description: 'Move seized collateral out of the router to the designated sale recipient'
+---
+
+Transfers seized collateral from the liquidation router to the market's sale recipient, so it can be sold off-platform. This is step one of the manual settlement workflow.
+
+External securities have no on-platform venue, so nothing sells automatically. The operator withdraws the collateral, arranges the sale through their own channel, and reports the proceeds back.
+
+<Warning>
+  The destination is not yours to choose. The lender of record fixed a sale recipient when it took the role, and the router has no setter for it. Sending seized collateral anywhere else is impossible; rotating the destination means deploying a new market.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="liquidationId" type="string" required>
+  Liquidation ID on the market's router, from [Get Pending Liquidations](/endpoints/lending/get-pending-liquidations) or from the [Liquidate Loan](/endpoints/lending/liquidate) response.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="amount" type="string" required>
+  Collateral to withdraw, as a decimal string in collateral token units. Must be greater than zero and no more than `collateralRemaining`.
+</ParamField>
+
+<ParamField body="recipientAddress" type="string">
+  The destination is fixed on the market, so this field cannot choose one. Supply nothing, or supply exactly the market's `saleRecipient`. Any other address is refused with `RECIPIENT_FIXED`, and the refusal names the recipient the market will accept.
+</ParamField>
+
+<ParamField body="marketId" type="string">
+  Names the market whose liquidation you mean. Every market runs its own liquidation router and IDs restart at `1` on each of them, so the same `liquidationId` can exist on several markets in one instance. Supply this when it does, otherwise the call is refused with `AMBIGUOUS_LIQUIDATION_ID` and the response lists the candidates.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+</ParamField>
+
+<Note>
+  The signing wallet must hold `OPERATOR_ROLE` on the market's liquidation router. If it does not, the calldata is not returned: the response carries `ROUTER_OPERATOR_ROLE_MISSING` along with the `calldata` that grants the role.
+</Note>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="liquidationId" type="string">Liquidation ID, echoed back.</ResponseField>
+    <ResponseField name="success" type="boolean">Nested inside `data` on the calldata response.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the liquidation router. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`withdrawCollateralForSale`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="recipient" type="string">Address the collateral will reach. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="saleRecipient" type="string">The destination fixed for this market. Absent on older markets. Omitted when confirming.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  Withdrawal is repeatable. Take the collateral out in tranches as sales are arranged. Each call reduces `collateralRemaining` on the router. The liquidation's `status` stays `PENDING` throughout, so track progress through `collateralRemaining` rather than status.
+</Note>
+
+<Tip>
+  If the liquidation ID exists on-chain but has no Trusset record, the endpoint adopts it automatically by scanning your instance's routers. Liquidations triggered outside this API are therefore still settleable through it.
+</Tip>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidations/withdraw-collateral/14" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": "100"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/liquidations/withdraw-collateral/${liquidationId}`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ amount: '100', marketId })
+  }
+);
+const { data } = await res.json();
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "liquidationId": "14",
+    "recipient": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
+    "saleRecipient": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "withdrawCollateralForSale"
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "liquidationId": "14",
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b"
+  }
+}
+```
+```json Error - Recipient Fixed
+{
+  "success": false,
+  "error": {
+    "code": "RECIPIENT_FIXED",
+    "message": "Seized collateral can only be sent to the sale recipient designated for this market (0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473). Rotating it means deploying a new market.",
+    "saleRecipient": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473"
+  }
+}
+```
+```json Error - Missing Operator Role
+{
+  "success": false,
+  "error": {
+    "code": "ROUTER_OPERATOR_ROLE_MISSING",
+    "message": "Wallet 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 does not hold OPERATOR_ROLE on the liquidation router 0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+    "calldata": {
+      "to": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+      "data": "0x...",
+      "description": "Grant OPERATOR_ROLE to 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 on the liquidation router (requires router DEFAULT_ADMIN_ROLE)"
+    }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_ID` | `400` | No liquidation ID in the path |
+| `VALIDATION_ERROR` | `400` | `amount` is not a positive decimal string, or `recipientAddress` is not a valid address |
+| `AMBIGUOUS_LIQUIDATION_ID` | `400` | This ID exists on more than one market in your instance. The error carries `candidates`; resend with `marketId` |
+| `ALREADY_SETTLED` | `400` | The liquidation is already settled |
+| `RECIPIENT_FIXED` | `400` | `recipientAddress` is not the market's designated sale recipient. The error carries `saleRecipient` |
+| `SALE_RECIPIENT_NOT_SET` | `400` | The market has no lender of record yet, so no destination for seized collateral has been designated |
+| `SALE_RECIPIENT_TRANSFER_RESTRICTED` | `400` | The collateral token blocks the transfer to the designated recipient. The error carries `saleRecipient` and `saleDeliveryCode` |
+| `WALLET_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance to resolve the signer against |
+| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | The resolved wallet lacks `OPERATOR_ROLE`. The error carries grant `calldata` for the router admin |
+| `ROUTER_NOT_CONFIGURED` | `400` | No liquidation router resolved for this market |
+| `ROUTER_UNREADABLE` | `503` | The router could not be read to resolve the sale recipient. Nothing was built. Retry shortly |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction targets a different liquidation |
+| `WITHDRAW_TX_REVERTED` | `400` | The withdrawal reverted. `error.txHash` carries the hash when one exists |
+| `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
+| `MARKET_NOT_FOUND` | `404` | `marketId` was supplied but names no market on your instance |

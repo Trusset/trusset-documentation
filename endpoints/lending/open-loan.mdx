@@ -1,0 +1,266 @@
+---
+title: 'Open Loan'
+api: 'POST /lending-external-securities/api/positions/{marketId}/open-loan'
+description: 'Pledge security tokens as collateral and borrow the settlement asset'
+---
+
+Opens an overcollateralized loan. The borrower pledges ERC-3643 security tokens and receives the market's borrow asset. How the collateral is secured depends on the market's mode: `FREEZE` locks the tokens in the borrower's own wallet, `CUSTODY` escrows them in the adapter.
+
+The maximum borrow is the collateral value multiplied by the market's collateral factor. Quote it first with [Get Max Borrow](/endpoints/lending/get-max-borrow).
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="collateralAmount" type="string" required>
+  Security tokens to pledge, as a decimal string. Parsed at the collateral token's decimals.
+</ParamField>
+
+<ParamField body="borrowAmount" type="string" required>
+  Amount to borrow, as a decimal string. Parsed at the borrow asset's decimals. Must be at least the market's `minBorrowAmount`.
+</ParamField>
+
+<ParamField body="borrowerAddress" type="string" required>
+  Wallet that will sign the loan and hold the collateral. Required when building calldata. Every collateral, identity and supply-cap check runs against this address, and there is no loan to resolve it from yet. Omitting it returns `BORROWER_ADDRESS_REQUIRED`. Not needed on the confirm call, where the borrower is taken from the mined transaction.
+</ParamField>
+
+<ParamField body="signedPrice" type="object">
+  EIP-712 signed price from [Sign Price](/endpoints/lending/sign-price), applied atomically with the loan. Omit to price against the stored oracle value, which must not be stale.
+  <Expandable>
+    <ParamField body="price" type="string">Price in base units.</ParamField>
+    <ParamField body="timestamp" type="integer">Signing timestamp.</ParamField>
+    <ParamField body="validUntil" type="integer">Signature expiry.</ParamField>
+    <ParamField body="signature" type="string">EIP-712 signature.</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+</ParamField>
+
+## Transaction Shape by Mode
+
+When `txHash` is omitted the response is always `SIGN_TRANSACTIONS` with a `mode` field, and the step count depends on the market.
+
+**`CUSTODY`** returns two steps: `approve` on the collateral token for the adapter, then `openLoan`. Broadcast in order.
+
+**`FREEZE`** returns one step: `openLoan`. No approval exists because the tokens never leave the borrower's wallet.
+
+Both shapes carry `confirmStepIndex` and `confirmWith: "openLoan"`, naming the step whose hash confirms the loan.
+
+## What the loan will cost and when it is due
+
+The calldata response carries an `offering` block whenever the market runs loan terms or a fixed rate. A market on the default curve with no term returns no `offering` at all. Show it before the borrower signs: it is the only place the due date and the stamped rate appear ahead of the loan existing.
+
+<ResponseField name="offering" type="object">
+  <Expandable>
+    <ResponseField name="approximateDueAt" type="string">Unix seconds when this loan would fall due, computed at build time from the market's term config. Present only when the market runs terms. It is approximate because the clock starts when the transaction mines, not when the payload was built.</ResponseField>
+    <ResponseField name="termGracePeriodSeconds" type="string">Seconds after the due date before the term penalty applies.</ResponseField>
+    <ResponseField name="fixedRateBps" type="integer">The rate this loan would be stamped with, in basis points. Present only when the market's interest model stamps a fixed rate. A stamped rate does not move with utilization for the life of the loan.</ResponseField>
+    <ResponseField name="newLoansOnly" type="boolean">Always `true`. These figures describe the loan this payload would open, not any loan already outstanding.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Warnings
+
+The calldata response carries a `warnings` array when a preflight found something the borrower should see but that does not block the loan. The array is absent when there is nothing to say. Every entry carries `kind`, `enforcement`, `message` and `note`.
+
+| `kind` | What it means |
+|---|---|
+| `TERMS_NOT_PUBLISHED` | The lender of record has published no terms of use, so the loan is governed by none |
+| `MATURITY_APPROACHING` | The collateral instrument's recorded maturity falls inside the warning window. Carries `maturityDate` and `daysRemaining` |
+| `MATURITY_RECORDED` | The instrument has a recorded maturity further out. Carries `maturityDate` and `daysRemaining` |
+| `MATURITY_PASSED_FOREIGN_RECORD` | The recorded maturity has passed, but it was asserted by an instance that is not a party to this market, so the loan is not refused on it |
+| `MATURITY_UNCHECKED` | The recorded maturity could not be read, so this preflight did not check it |
+
+`enforcement` is `OFF_CHAIN` on every one of these. The contract does not know about them, so acting on a warning is the caller's decision.
+
+## Response Fields
+
+Confirming returns `201`.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
+    <ResponseField name="loanId" type="string">On-chain loan ID, parsed from the `LoanOpened` event. Use this on every subsequent loan operation.</ResponseField>
+    <ResponseField name="positionId" type="string">Trusset position record ID, or null if the record could not be written.</ResponseField>
+    <ResponseField name="collateralAmount" type="string">Collateral pledged, echoed back.</ResponseField>
+    <ResponseField name="borrowAmount" type="string">Amount borrowed, echoed back.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  Loans cannot be opened until the market has a lender of record and its collateral adapter is authorized on the token. A market still seeking a lender of record is refused on that ground first, with `MARKET_PENDING_CURATOR`. The token-side authorizations are that party's to arrange, so naming them as the obstacle would send the borrower to the wrong place. Once the role is taken, an unauthorized adapter rejects with `COLLATERAL_ADAPTER_NOT_AUTHORIZED` or `FREEZE_MODE_UNSUPPORTED_TOKEN`. See [Get Setup Steps](/endpoints/lending/get-setup-steps).
+</Warning>
+
+<Note>
+  Minimum and maximum borrow are checked when the calldata is built, not when you confirm. Broadcasting an out-of-range amount reverts on-chain rather than returning `BELOW_MIN_BORROW` or `EXCEEDS_MAX_BORROW`. The maximum borrow check is also skipped whenever a `signedPrice` is supplied, since the contract will price against the signature rather than the stored value.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/open-loan" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "collateralAmount": "1000",
+    "borrowAmount": "50000",
+    "borrowerAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/open-loan`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      collateralAmount: '1000',
+      borrowAmount: '50000',
+      borrowerAddress: await wallet.getAddress(),
+      signedPrice: {
+        price: signed.price,
+        timestamp: signed.timestamp,
+        validUntil: signed.validUntil,
+        signature: signed.signature
+      }
+    })
+  }
+);
+const { data } = await res.json();
+
+for (const step of data.steps) {
+  const tx = await wallet.sendTransaction(step.transaction);
+  await tx.wait();
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "loanId": "5",
+    "positionId": "secpos_014",
+    "collateralAmount": "1000",
+    "borrowAmount": "50000"
+  }
+}
+```
+```json Calldata Response (CUSTODY)
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "mode": "CUSTODY",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "approve",
+        "description": "Approve the custody adapter to pull collateral"
+      },
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "openLoan"
+      }
+    ],
+    "confirmStepIndex": 1,
+    "confirmWith": "openLoan"
+  }
+}
+```
+```json Calldata Response (FREEZE)
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "mode": "FREEZE",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "openLoan"
+      }
+    ],
+    "confirmStepIndex": 0,
+    "confirmWith": "openLoan"
+  }
+}
+```
+```json Error - Adapter Not Authorized
+{
+  "success": false,
+  "error": {
+    "code": "COLLATERAL_ADAPTER_NOT_AUTHORIZED",
+    "message": "The custody adapter is not allow-listed on the collateral token yet. Complete market configuration (authorizeAdapterOnToken) before opening loans."
+  }
+}
+```
+```json Error - Exceeds Max Borrow
+{
+  "success": false,
+  "error": {
+    "code": "EXCEEDS_MAX_BORROW",
+    "message": "That collateral supports at most 48250.000000 USDC of borrowing."
+  }
+}
+```
+```json Error - Pending Lender of Record
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_PENDING_CURATOR",
+    "message": "This market has no lender of record yet, so opening a loan is not possible. A nominated candidate must take the role before the market can hold liquidity or collateral."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+The calldata call runs the same checks the contract would, in the same order. A refusal therefore names the condition the borrower would otherwise have hit on-chain.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `BORROWER_ADDRESS_REQUIRED` | `400` | `borrowerAddress` was omitted while building calldata |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `COLLATERAL_ADAPTER_NOT_AUTHORIZED` | `400` | The adapter lacks the agent role (`FREEZE`) or allow-listed or verified holder status (`CUSTODY`) on the collateral token |
+| `FREEZE_MODE_UNSUPPORTED_TOKEN` | `400` | The token does not implement the ERC-3643 freeze interface. Use a `CUSTODY` market |
+| `MARKET_PAUSED` | `400` | The market is paused. Its admin must unpause it |
+| `IDENTITY_NOT_VERIFIED` | `400` | `borrowerAddress` is not verified on the market's identity registry |
+| `BELOW_MIN_BORROW` | `400` | `borrowAmount` is under the market's `minBorrowAmount` |
+| `PRICE_STALE` | `400` | The oracle price is outside the market's `maxPriceAge`. Push a NAV with [Sync Oracle Price](/endpoints/lending/sync-oracle), or supply a `signedPrice` |
+| `SUPPLY_CAP_EXCEEDED` | `400` | The pledge would push total collateral past `maxTotalCollateral` |
+| `USER_SUPPLY_CAP_EXCEEDED` | `400` | The pledge would push this borrower past `maxUserCollateral` |
+| `EXCEEDS_MAX_BORROW` | `400` | `borrowAmount` exceeds what the collateral supports. Skipped when a `signedPrice` is supplied |
+| `INSUFFICIENT_LIQUIDITY` | `400` | The pool holds less uncommitted liquidity than the loan needs |
+| `COLLATERAL_TRANSFER_RESTRICTED` | `400` | The collateral token's compliance rules block moving this collateral into the custody adapter |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet. See [Lender of record](/endpoints/lending/introduction#lender-of-record) |
+| `COLLATERAL_MATURED` | `409` | The collateral instrument passed its recorded maturity, and the record was asserted by a party to this market. `error.details` carries `maturityDate` |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to run a check, so no transaction was prepared. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

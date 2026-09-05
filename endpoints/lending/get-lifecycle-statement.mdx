@@ -1,0 +1,105 @@
+---
+title: 'Get Lifecycle Statement'
+api: 'GET /lending-external-securities/api/markets/{marketId}/lifecycle-statement'
+description: 'Download a PDF statement of a market lifecycle'
+---
+
+Returns a PDF statement covering the market's configuration, roles, encumbrances, loans, liquidations and auctions, assembled from indexed on-chain events. Use it for reporting and audit rather than for programmatic reads.
+
+<Warning>
+  This endpoint does not return the JSON envelope. On success it responds with `Content-Type: application/pdf` and a `Content-Disposition: attachment` header carrying the generated filename. Errors are returned as the usual JSON envelope, so branch on the response content type rather than parsing unconditionally.
+</Warning>
+
+This endpoint counts against the write rate limit rather than the read limit. See [Rate Limits](/endpoints/lending/introduction#rate-limits).
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Query Parameters
+
+<ParamField query="categories" type="string">
+  Comma-separated sections to include. Any of `config`, `roles`, `encumbrances`, `loans`, `liquidations`, `auctions`. Omit for all six. Maximum 200 characters. Unknown names are rejected.
+</ParamField>
+
+<ParamField query="loanId" type="string">
+  Restrict the statement to a single loan. A positive integer of at most 18 digits.
+</ParamField>
+
+<ParamField query="from" type="string">
+  Start of the reporting window as `YYYY-MM-DD`. Not earlier than `2015-01-01`.
+</ParamField>
+
+<ParamField query="to" type="string">
+  End of the reporting window as `YYYY-MM-DD`, inclusive. Must not be earlier than `from`.
+</ParamField>
+
+## Response
+
+A PDF document. The filename is set by the server on the `Content-Disposition` header and identifies the market and the reporting window.
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/lifecycle-statement?from=2025-01-01&to=2025-06-30" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -o statement.pdf
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/lifecycle-statement?categories=loans,liquidations`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+
+if (res.headers.get('content-type')?.includes('application/pdf')) {
+  const blob = await res.blob();
+  save(blob);
+} else {
+  const { error } = await res.json();
+  throw new Error(error.message);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Error - Invalid Categories
+{
+  "success": false,
+  "error": {
+    "code": "INVALID_CATEGORIES",
+    "message": "Unknown category: positions. Valid: config, roles, encumbrances, loans, liquidations, auctions"
+  }
+}
+```
+```json Error - Index Unavailable
+{
+  "success": false,
+  "error": {
+    "code": "INDEX_UNAVAILABLE",
+    "message": "Historical indexing is not available for this network right now"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address |
+| `VALIDATION_ERROR` | `400` | A query parameter is malformed, for example a `from` that is not `YYYY-MM-DD` |
+| `INVALID_CATEGORIES` | `400` | `categories` is empty or names a section that does not exist |
+| `INVALID_LOAN_ID` | `400` | `loanId` is not a positive integer |
+| `INVALID_DATE` | `400` | `from` or `to` is not a valid date, or falls outside the supported range |
+| `INVALID_DATE_RANGE` | `400` | `from` is after `to` |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `LOAN_NOT_FOUND` | `404` | The requested `loanId` does not exist on this market |
+| `DATASET_TOO_LARGE` | `413` | The window covers more activity than one statement can carry. Narrow it with `from`, `to` or `categories` |
+| `NOT_CONFIGURED` | `503` | Historical indexing is not configured for this network |
+| `INDEX_UNAVAILABLE` | `503` | The index could not be reached |
+| `INDEX_UNHEALTHY` | `503` | The index reports errors and its data is not fit to state |
+| `MARKET_NOT_INDEXED` | `503` | The market has produced no indexed history yet |
+| `UPSTREAM_ERROR` | `503` | The index returned an error |
+| `QUERY_ERROR` | `503` | The statement query was rejected by the index |
+| `EMPTY_RESPONSE` | `503` | The index returned no payload |
+| `TIMEOUT` | `503` | The index did not respond in time |
+| `NETWORK_ERROR` | `503` | The index could not be reached over the network |

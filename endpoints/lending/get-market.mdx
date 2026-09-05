@@ -1,0 +1,156 @@
+---
+title: 'Get Market'
+api: 'GET /lending-external-securities/api/markets/{marketId}'
+description: 'Retrieve full detail for a single market'
+---
+
+Returns the complete market record plus five enrichment blocks read live from the chain: `onChain`, `oracleStatus`, `configurationStatus`, `identityGate`, and `liquidationStats`. The lender-of-record fields are reconciled against the factory on the same call, so `curator`, `seekingCurator`, `realizationMode`, `liquidityCommitment` and `collateralAgent` are the chain's answer rather than a stored one.
+
+Unlike [List Markets](/endpoints/lending/list-markets), which returns a fixed projection, this endpoint returns every stored field on the market, including the settlement asset triple and the decimals the backend uses when parsing your amounts.
+
+<Warning>
+  Each block falls back on its own. One failed read leaves that block `null` and does not empty the others, and a `null` block signals an unavailable RPC rather than a misconfigured market.
+
+  `errors` names every section that could not be read, as `{ section, message }`. It is empty on a clean read. Branch on it rather than inferring an outage from a `null`, because some blocks are legitimately `null` on a market that has no address or no oracle yet.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="collateralDecimals" type="integer">Decimals of the collateral token. Every collateral amount you send is parsed at this precision, and every collateral amount returned is formatted with it.</ResponseField>
+    <ResponseField name="borrowAssetAddress" type="string">Settlement token (stablecoin) address.</ResponseField>
+    <ResponseField name="borrowAssetSymbol" type="string">Settlement token symbol.</ResponseField>
+    <ResponseField name="borrowAssetDecimals" type="integer">Settlement token decimals. Every borrow, repay, and liquidity amount is parsed at this precision.</ResponseField>
+    <ResponseField name="identityRegistryAddress" type="string">ERC-3643 identity registry for the collateral token. The lowercased zero address means no registry was supplied at deployment.</ResponseField>
+    <ResponseField name="liquidationBonus" type="string">Liquidator incentive in basis points.</ResponseField>
+    <ResponseField name="signerAuthorized" type="boolean">Last recorded oracle signer authorization state. `oracleStatus.signerAuthorized` is the live value.</ResponseField>
+    <ResponseField name="lastOracleUpdate" type="string">ISO 8601 timestamp of the last price push through this API.</ResponseField>
+    <ResponseField name="controllerImported" type="boolean">True when this market was deployed under another instance and imported here by proving on-chain admin control.</ResponseField>
+    <ResponseField name="onChain" type="object">Live market metrics. See [Get Market Metrics](/endpoints/lending/get-metrics).</ResponseField>
+    <ResponseField name="oracleStatus" type="object">Live oracle state. See [Get Oracle Status](/endpoints/lending/get-oracle-status).</ResponseField>
+    <ResponseField name="configurationStatus" type="object">Contract wiring state: `liquidationContract`, `insuranceFund`, `adapter`, `liquidationConfigured`, `insuranceFundConfigured`, `adapterConfigured`, `routerAuthorized`, `fullyConfigured`.</ResponseField>
+    <ResponseField name="liquidationStats" type="object">`totalLiquidations`, `pendingLiquidationDebt`, `totalAuctions`.</ResponseField>
+    <ResponseField name="identityGate" type="object">
+      What the market's identity registry answers, and whether the market can work with it.
+      <Expandable>
+        <ResponseField name="shape" type="string">`none` when no registry is installed, `tuple` when the registry answers in the shape the market decodes, `bool` when it answers `isVerified(address)` with a single boolean, `unknown` when it could not be established.</ResponseField>
+        <ResponseField name="usable" type="boolean">Whether the market can read the gate at all. `false` on `bool`.</ResponseField>
+        <ResponseField name="note" type="string">What a `false` means and what can be done about it. `null` when the gate is usable.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="errors" type="array">Sections that could not be read, each `{ section, message }`. Empty on a clean read.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  An `identityGate` of `shape: "bool"` is not a configuration problem that can be fixed. The gate is written at deployment and can never be replaced, so taking the lender-of-record role would revert, and so would every deposit and every borrow. Such a market has to be redeployed, with the identity registry left empty or naming one that answers in the shape the market decodes. `note` says so in full: show it verbatim.
+</Warning>
+
+<Note>
+  The `configurationStatus` block here covers contract wiring only. It does not include the token-side authorizations a market needs before loans can be opened. Use [Get Configuration Status](/endpoints/lending/get-configuration-status) or [Get Setup Steps](/endpoints/lending/get-setup-steps) for readiness.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+console.log(`${data.borrowAssetSymbol} market, ${data.collateralDecimals} collateral decimals`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "id": "clx_secmarket_001",
+    "marketAddress": "0x70A0E25c7b768B87e658348B3b577678A173E038",
+    "oracleAddress": "0x3b25752c1459C5Cf1b0bfcFdF0D56883c8047423",
+    "insuranceFundAddress": "0x8f1a...9c22",
+    "adapterAddress": "0x4d2b...77ae",
+    "identityRegistryAddress": "0x9e3c...1145",
+    "liquidationRouterAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+    "collateralTokenAddress": "0xabc...def",
+    "collateralTokenName": "Nyala Fund I",
+    "collateralTokenSymbol": "NYF1",
+    "collateralTokenIsin": "DE000A0F5UF5",
+    "collateralMode": "FREEZE",
+    "collateralDecimals": 18,
+    "borrowAssetAddress": "0x98aD0ca091552e23C564B41C74282e5343D03E8a",
+    "borrowAssetSymbol": "USDC",
+    "borrowAssetDecimals": 6,
+    "collateralAgent": "0x555...666",
+    "liquidationOperator": "0x777...888",
+    "priceSource": "NAV",
+    "collateralFactor": "7500",
+    "liquidationThreshold": "8500",
+    "liquidationBonus": "500",
+    "closeFactor": "5000",
+    "useDutchAuction": false,
+    "totalDeposits": "1000000",
+    "totalBorrows": "250000",
+    "utilizationRate": "2500",
+    "borrowRate": "450",
+    "supplyRate": "84",
+    "signerAuthorized": true,
+    "lastOracleUpdate": "2025-06-15T06:00:00.000Z",
+    "controllerImported": false,
+    "active": true,
+    "createdAt": "2025-06-01T09:00:00.000Z",
+    "onChain": {
+      "isOnChain": true,
+      "paused": false,
+      "totalDeposits": "1000000.000000",
+      "totalBorrows": "250000.000000",
+      "availableLiquidity": "750000.000000",
+      "utilizationRate": "2500",
+      "borrowRate": "450",
+      "supplyRate": "84",
+      "activeLoans": 4,
+      "activeAuctions": 0,
+      "pendingLiquidations": 0,
+      "pendingLiquidationDebt": "0.000000"
+    },
+    "oracleStatus": {
+      "price": "104.820000",
+      "isStale": false,
+      "priceAge": 1200,
+      "signerAuthorized": true
+    },
+    "configurationStatus": {
+      "liquidationConfigured": true,
+      "insuranceFundConfigured": true,
+      "adapterConfigured": true,
+      "routerAuthorized": true,
+      "fullyConfigured": true
+    },
+    "liquidationStats": {
+      "totalLiquidations": 0,
+      "pendingLiquidationDebt": "0.000000",
+      "totalAuctions": 0
+    }
+  }
+}
+```
+```json Error - Not Found
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_NOT_FOUND",
+    "message": "Market not found"
+  }
+}
+```
+</ResponseExample>

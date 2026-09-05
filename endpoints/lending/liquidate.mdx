@@ -1,0 +1,245 @@
+---
+title: 'Liquidate Loan'
+api: 'POST /lending-external-securities/api/liquidations/{marketId}/liquidate/{loanId}'
+description: 'Seize collateral from an undercollateralized loan'
+---
+
+Liquidates a loan on either of two triggers. A loan qualifies when its health factor is below `1.0`, and it qualifies when its term has run past its due date plus grace, whatever its health. A market that makes open-ended loans has only the first trigger.
+
+What the transaction produces depends on the market's `useDutchAuction` setting.
+
+With Dutch auctions **disabled**, collateral is seized and transferred to the market's liquidation router, and a pending liquidation is created. The response carries `liquidationId` and `collateralSeized`, and settlement becomes a manual operator workflow.
+
+With Dutch auctions **enabled**, an auction is opened instead. The response carries `auctionId` and `borrower`, while `liquidationId`, `collateralSeized`, and `debtRepaid` are all `null`. No pending liquidation exists yet. One is created only if the auction expires unsold and is settled with [Settle Expired Auction](/endpoints/lending/settle-expired-auction).
+
+<Warning>
+  The signing wallet must hold `LIQUIDATOR_ROLE` on the market. Role state is reported in `readiness` but never blocks the calldata. You sign in your own environment, so the wallet this API knows about is not necessarily the one that will call. A wallet without the role has its transaction reverted on-chain rather than rejected here. Pass `signerAddress` to have `readiness` answer for the wallet you intend to use.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="loanId" type="integer" required>On-chain loan ID. Must be a positive integer.</ParamField>
+
+## Body Parameters
+
+<ParamField body="signedPrice" type="object">
+  EIP-712 signed price from [Sign Price](/endpoints/lending/sign-price), applied atomically with the liquidation. Omit to price against the stored oracle value. Nothing is signed on your behalf. A stale stored price is refused with `PRICE_STALE`. Either push a NAV with [Sync Oracle Price](/endpoints/lending/sync-oracle), or supply a `signedPrice` here.
+  <Expandable>
+    <ParamField body="price" type="string">Price in base units.</ParamField>
+    <ParamField body="timestamp" type="integer">Signing timestamp.</ParamField>
+    <ParamField body="validUntil" type="integer">Signature expiry.</ParamField>
+    <ParamField body="signature" type="string">EIP-712 signature.</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  Wallet you intend to liquidate with. Used to resolve `readiness` against that address rather than against your instance's registered wallet. It does not appear in the transaction and does not gate it.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+</ParamField>
+
+## Response Fields
+
+Without `txHash` the response is the unsigned `liquidate` call, alongside a `readiness` object describing every gate the contract passes through.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`liquidate`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="readiness" type="object">
+      Realization readiness for this market. Returned when `txHash` is omitted, and also attached to the errors below.
+      <Expandable>
+        <ResponseField name="routerAddress" type="string">Liquidation router for this market.</ResponseField>
+        <ResponseField name="routerAuthorized" type="boolean">Whether the router accepts seizures from this market.</ResponseField>
+        <ResponseField name="routerTokenEligible" type="boolean">Whether the collateral token permits the router to hold it. `null` when the token would not answer.</ResponseField>
+        <ResponseField name="routerTokenRequirement" type="string">What the token asks of the router, when it could be established: `adapter_must_be_authorized_contract`, `holder_status_unreadable`, `unknown`, or a verified-holder requirement.</ResponseField>
+        <ResponseField name="liquidatorRoleReady" type="boolean">Whether `LIQUIDATOR_ROLE` is held by something this instance can sign with. `null` when it could not be read.</ResponseField>
+        <ResponseField name="liquidatorViaBot" type="boolean">`true` when the role is held by a connected liquidation bot rather than by the signer wallet.</ResponseField>
+        <ResponseField name="liquidatorBotAddress" type="string">That bot's address, or `null`.</ResponseField>
+        <ResponseField name="operatorRoleReady" type="boolean">Whether the market's liquidation operator holds `OPERATOR_ROLE` on the router.</ResponseField>
+        <ResponseField name="operatorAddress" type="string">The address that check ran against.</ResponseField>
+        <ResponseField name="operatorDeclared" type="boolean">Whether the market records a liquidation operator at all. When `false`, the check fell back to a signer wallet and no other party could settle.</ResponseField>
+        <ResponseField name="signerAddress" type="string">The address readiness was resolved against.</ResponseField>
+        <ResponseField name="collateralTransferAllowed" type="boolean">Whether the token would allow the seizure transfer to the router. `collateralTransferChecked`, `collateralTransferCode` and `collateralTransferAmount` accompany it. See [Transfer Restriction Codes](/endpoints/lending/get-liquidation-config#transfer-restriction-codes).</ResponseField>
+        <ResponseField name="saleRecipient" type="string">Recipient the lender of record fixed for onward sale, or null.</ResponseField>
+        <ResponseField name="saleRecipientFixed" type="boolean">Whether that recipient is fixed on the router. A market where this is `false` and no venue is configured cannot move collateral out at all.</ResponseField>
+        <ResponseField name="saleRecipientRotatable" type="boolean">Whether the router supports rotating the recipient.</ResponseField>
+        <ResponseField name="configuredSaleVenue" type="string">A trading venue recorded for the market, used when no recipient is fixed.</ResponseField>
+        <ResponseField name="saleVenue" type="string">Whichever of the two applies.</ResponseField>
+        <ResponseField name="saleDeliveryAllowed" type="boolean">Whether the token would allow the onward transfer to that recipient. `saleDeliveryChecked`, `saleDeliveryCode` and `saleDeliveryAmount` accompany it.</ResponseField>
+        <ResponseField name="priceStale" type="boolean">Whether the oracle price is outside its window. `priceAge` in seconds accompanies it.</ResponseField>
+        <ResponseField name="seizureConfigured" type="boolean">Whether every gate up to and including the seizure is satisfied.</ResponseField>
+        <ResponseField name="isConfigured" type="boolean">Whether onward delivery to the sale recipient is also satisfied.</ResponseField>
+        <ResponseField name="canSeizeNow" type="boolean">`seizureConfigured` and the price is not stale.</ResponseField>
+        <ResponseField name="canRealizeNow" type="boolean">`isConfigured` and the price is not stale.</ResponseField>
+        <ResponseField name="blockedConfirmed" type="boolean">`true` when a gate was actually read and found closed, as opposed to unread.</ResponseField>
+        <ResponseField name="seizureBlockedConfirmed" type="boolean">The same, restricted to the gates the seizure passes through.</ResponseField>
+        <ResponseField name="readFailed" type="boolean">`true` when at least one gate could not be read.</ResponseField>
+        <ResponseField name="unverifiedSections" type="array">Which reads failed, or `null`. `errors` carries the same list as objects, and `unverifiedReason` states it in one sentence.</ResponseField>
+        <ResponseField name="blockedReason" type="string">The first gate that fails, in words. Null when nothing blocks.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="loanId" type="integer">Loan ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="liquidationId" type="string">Liquidation ID on the market's router. Use this on every settlement endpoint. `null` in Dutch auction mode. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="auctionId" type="string">Dutch auction ID. `null` in instant liquidation mode. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="collateralSeized" type="string">Collateral moved to the router, in collateral token units. `null` in Dutch auction mode. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="debtRepaid" type="string">Debt covered by the seizure, in borrow asset units. `null` in Dutch auction mode. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="borrower" type="string">Borrower address, or null when it could not be resolved. Returned when confirming with `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Seizure Bounds
+
+A liquidation does not close the whole loan. The amount seized is bounded by `closeFactor`, capping how much of the debt one call can repay, and marked up by `liquidationPenalty`. A deeply underwater loan therefore needs several liquidations to clear, or resolves through the auction path.
+
+There is no auto-sell for external securities. Once collateral reaches the router it stays there until an operator sells it and settles the proceeds. See [Settle Liquidation](/endpoints/lending/settle-liquidation).
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidations/{marketId}/liquidate/7" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/liquidations/${marketId}/liquidate/7`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      signedPrice: {
+        price: signed.price,
+        timestamp: signed.timestamp,
+        validUntil: signed.validUntil,
+        signature: signed.signature
+      }
+    })
+  }
+);
+const { data } = await res.json();
+
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - Instant Liquidation
+{
+  "success": true,
+  "data": {
+    "loanId": 7,
+    "liquidationId": "14",
+    "auctionId": null,
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "collateralSeized": "220.000000000000000000",
+    "debtRepaid": "21159.200000",
+    "borrower": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"
+  }
+}
+```
+```json Response - Dutch Auction
+{
+  "success": true,
+  "data": {
+    "loanId": 7,
+    "liquidationId": null,
+    "auctionId": "3",
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "collateralSeized": null,
+    "debtRepaid": null,
+    "borrower": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"
+  }
+}
+```
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "liquidate",
+    "readiness": {
+      "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+      "routerAuthorized": true,
+      "routerTokenEligible": true,
+      "operatorRoleReady": true,
+      "liquidatorRoleReady": true,
+      "signerAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "collateralTransferChecked": true,
+      "collateralTransferAllowed": true,
+      "collateralTransferCode": null,
+      "saleRecipient": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
+      "saleDeliveryChecked": true,
+      "saleDeliveryAllowed": true,
+      "saleDeliveryCode": null,
+      "priceStale": false,
+      "priceAge": 184,
+      "seizureConfigured": true,
+      "isConfigured": true,
+      "canSeizeNow": true,
+      "canRealizeNow": true,
+      "blockedReason": null
+    }
+  }
+}
+```
+```json Error - Loan Healthy
+{
+  "success": false,
+  "error": {
+    "code": "LOAN_NOT_LIQUIDATABLE",
+    "message": "Loan 7 is healthy: health factor 1.204813 is at or above the 1.0 liquidation threshold, so liquidate reverts.",
+    "loan": {
+      "loanId": "7",
+      "active": true,
+      "healthFactor": "1.204813",
+      "healthFactorThreshold": "1.0",
+      "borrower": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"
+    }
+  }
+}
+```
+```json Error - Router Not Ready
+{
+  "success": false,
+  "error": {
+    "code": "LIQUIDATION_NOT_READY",
+    "message": "The liquidation router is not an eligible holder of the collateral token."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+Errors raised while building calldata carry the full `readiness` object alongside `code` and `message`, so the failing gate can be inspected without a second call.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MARKET_NOT_CONFIGURED` | `400` | The market has no address or no oracle recorded |
+| `INVALID_LOAN_ID` | `400` | `loanId` is not a positive integer |
+| `LIQUIDATION_NOT_READY` | `400` | The router is not authorized on the market, or the collateral token will not let the router hold the seized tokens |
+| `COLLATERAL_TRANSFER_RESTRICTED` | `400` | The collateral token's compliance rules block the seizure transfer to the router |
+| `PRICE_STALE` | `400` | The oracle price is stale, so `liquidate` reverts. Push a NAV or supply a `signedPrice` |
+| `LOAN_NOT_ACTIVE` | `400` | The loan is closed, so there is nothing to realize. The error carries `loan` |
+| `LOAN_NOT_LIQUIDATABLE` | `400` | The loan's health factor is at or above `1.0` and it carries no enforceable term. The error carries `loan`, including its `term` when the market runs one |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction liquidates a different loan |
+| `LIQUIDATION_FAILED` | `400` | The liquidation could not be prepared or confirmed and no more specific code applied |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+
+<Tip>
+  A missing `LIQUIDATOR_ROLE` shows as `liquidatorRoleReady: false` in `readiness` rather than as an error. Resolve it through [Set Liquidator Role](/endpoints/lending/set-liquidator-role) when the market admin drives the grant.
+</Tip>

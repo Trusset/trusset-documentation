@@ -1,0 +1,389 @@
+---
+title: 'Deploy Market'
+api: 'POST /lending-external-securities/api/markets/deploy'
+description: 'Deploy a lending market for an imported ERC-3643 security token'
+---
+
+Deploys a complete market in one factory transaction: the lending market, its price oracle, interest rate model, insurance fund, collateral adapter, and a liquidation router dedicated to this market with the market pre-authorized on it.
+
+The market is deployed **seeking a lender of record**. It names no admin, no issuer and no collateral agent at deployment. You nominate `candidates`, or set `openToAnyCurator` to offer it to every approved institution, and the market stays inert until one of them takes the role. See [Lender of record](/endpoints/lending/introduction#lender-of-record).
+
+The deployment also fixes how the market prices interest and whether its loans carry a maturity. Both are set here and both change what a borrower is quoted, so decide them before the market goes out to candidates.
+
+A collateral token can back several markets as long as they differ in collateral mode or in settlement asset. Deploying a second market for the same token, mode and borrow asset returns `409 MARKET_EXISTS`.
+
+<Warning>
+  A freshly deployed market cannot take loans or liquidity. Two things are outstanding. A nominated candidate must take the lender-of-record role. The token-side authorizations must then be completed by the collateral token's agent or identity registry operator, who is typically neither Trusset nor you. Call [Get Setup Steps](/endpoints/lending/get-setup-steps) after deployment for the outstanding items and their calldata.
+</Warning>
+
+## Body Parameters
+
+<ParamField body="collateralTokenAddress" type="string" required>
+  ERC-3643 security token accepted as collateral. Must already be imported into your instance, and must not be the same token as the borrow asset.
+</ParamField>
+
+<ParamField body="initialPrice" type="string">
+  Opening collateral price as a decimal string, for example `"104.82"`. Must be greater than zero. Denominated in the borrow asset and parsed at its decimals, so a market settling in USDC accepts at most 6 decimal places here.
+
+  Required for the `NAV` and `MARKET` price sources. An `ORACLE` market takes its first price from the feed, which the factory probes inside the deployment, so no opening price is stated there.
+</ParamField>
+
+<ParamField body="candidates" type="array" default="[]">
+  Addresses nominated to become the market's lender of record. Up to 20 entries, none of them the zero address. Nominating is available at any time after deployment, so an empty list is a market nobody can take yet rather than a market nobody can ever take.
+</ParamField>
+
+<ParamField body="openToAnyCurator" type="boolean" default="false">
+  Offer the market to every institution Trusset has approved as a lender of record, not only to the named candidates.
+
+  An open market deployed with no `identityRegistry` is narrowed rather than refused. On an open market the registry is the one thing standing between the market and any caller. The factory therefore refuses a gate installed by a claimant nobody nominated, and what the deployment produces is a market only a nominee can take.
+</ParamField>
+
+<ParamField body="mode" type="string" default="FREEZE">
+  `FREEZE` or `CUSTODY`. See [Collateral Modes](/endpoints/lending/introduction#collateral-modes). Cannot be changed after deployment.
+</ParamField>
+
+<ParamField body="priceSource" type="string" default="NAV">
+  `NAV`, `MARKET` or `ORACLE`. Cannot be changed after deployment.
+
+  `NAV` is a price the issuer publishes. `MARKET` signals an observable market price: the contract responds by disallowing Dutch auctions and raising the auction floor premium. `ORACLE` reads an external feed named in `oracleAddress` and takes no pushed price at all.
+</ParamField>
+
+<ParamField body="oracleAddress" type="string">
+  The external feed an `ORACLE` market reads prices from. Required when `priceSource` is `ORACLE`, and rejected for every other price source. The feed is probed before any calldata is handed out.
+</ParamField>
+
+<ParamField body="borrowAssetAddress" type="string">
+  Settlement token (stablecoin) for the market. Any ERC-20 with 6 to 18 decimals, validated on-chain at deploy time. Omit to use USDC. Cannot be changed after deployment.
+</ParamField>
+
+<ParamField body="identityRegistry" type="string">
+  ERC-3643 identity registry for the collateral token, available on the imported token's metadata. Optional at deployment for every price source, because most markets run their register off-chain. Defaults to the zero address, which leaves compliance checks unresolvable and reports authorization status as unknown.
+
+  Adoption still refuses to complete without a gate installed, so no live market ever lends without a borrower perimeter.
+</ParamField>
+
+<ParamField body="fallbackDecimals" type="integer" default="0">
+  Decimals to assume if the collateral token's `decimals()` cannot be read on-chain. Integer between 0 and 36.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+</ParamField>
+
+## Rate offering
+
+The market's interest model is deployed with the market, and how it prices is fixed here. All four values are basis points.
+
+<ParamField body="rateMode" type="string" default="CURVE">
+  `CURVE`, `CLAMPED` or `FIXED`.
+
+  `CURVE` is the default utilization curve and takes no bounds. `CLAMPED` is that curve held between a floor and a cap. `FIXED` stamps one rate onto each loan when it opens, and that rate does not move for the life of the loan.
+</ParamField>
+
+<ParamField body="rateFloorBps" type="integer">
+  Lower bound for `CLAMPED`. Integer, 0 to 50000.
+</ParamField>
+
+<ParamField body="rateCapBps" type="integer">
+  Upper bound for `CLAMPED`, and required by it. Integer, 1 to 50000.
+</ParamField>
+
+<ParamField body="fixedRateBps" type="integer">
+  The stamped rate for `FIXED`, and required by it. Integer, 1 to 50000.
+</ParamField>
+
+<ParamField body="operatorShareBps" type="integer" default="0">
+  Share of post-infrastructure interest offered to whichever institution takes the lender-of-record role. Integer, 0 to 5000. The ceiling is half, so the liquidity providers always keep the larger part.
+</ParamField>
+
+The three modes do not mix. Sending `rateFloorBps` or `rateCapBps` with `FIXED`, or `fixedRateBps` with `CLAMPED`, is refused rather than silently ignored, and sending any bound without a `rateMode` is refused too. A `FIXED` market also needs a term, because the term clock replaces the rate curve as the pull toward repayment: without `maxLoanDurationDays` the deployment is refused.
+
+Rates are also bounded by the factory's own creator ceiling, read at build time.
+
+## Term offering
+
+A market with no term offering makes open-ended loans. Setting either a duration or a terminal date turns terms on, and [Open Loan](/endpoints/lending/open-loan) then returns the due date in its `offering` block before the borrower signs.
+
+<ParamField body="maxLoanDurationDays" type="integer">
+  How long a loan may run before it falls due. Integer number of days, 1 to 3650.
+</ParamField>
+
+<ParamField body="terminalDueDate" type="integer | string">
+  A hard date every loan on this market falls due by, whatever its own duration. A unix timestamp in seconds, or an ISO date. Must be in the future.
+</ParamField>
+
+<ParamField body="termGracePeriodDays" type="integer">
+  Days after the due date before the term penalty applies. Integer, 1 to 30. It needs a term to attach to, so sending it without `maxLoanDurationDays` or `terminalDueDate` is refused.
+</ParamField>
+
+## Response Fields
+
+Without `txHash`, the response is the unsigned factory transaction.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`.</ResponseField>
+    <ResponseField name="functionName" type="string">`deployMarket`.</ResponseField>
+    <ResponseField name="collateralTokenAddress" type="string">Collateral token, lowercased.</ResponseField>
+    <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`.</ResponseField>
+    <ResponseField name="priceSource" type="string">`NAV`, `MARKET` or `ORACLE`.</ResponseField>
+    <ResponseField name="externalOracle" type="object">The probed external feed. Present only for an `ORACLE` market.</ResponseField>
+    <ResponseField name="borrowAsset" type="object">`{ address, symbol, decimals }` for the settlement asset the market will use.</ResponseField>
+    <ResponseField name="signer" type="string">The instance's registered wallet, which is the address this transaction expects to be signed by.</ResponseField>
+    <ResponseField name="candidates" type="array">Nominated candidates, lowercased. Empty when none were named.</ResponseField>
+    <ResponseField name="openToAnyCurator" type="boolean">Whether the market will also be offered to every approved lender of record.</ResponseField>
+    <ResponseField name="seekingCurator" type="boolean">Always `true` on a new deployment.</ResponseField>
+    <ResponseField name="rateOffering" type="object">
+      <Expandable>
+        <ResponseField name="rateMode" type="string">`CURVE`, `CLAMPED` or `FIXED`.</ResponseField>
+        <ResponseField name="rateFloorBps" type="integer">Floor the model will hold to. `0` on `CURVE`.</ResponseField>
+        <ResponseField name="rateCapBps" type="integer">Cap the model will hold to. `0` on `CURVE`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="termOffering" type="object">
+      <Expandable>
+        <ResponseField name="maxLoanDurationSeconds" type="integer">The duration in seconds, as the contract will hold it. `0` when no duration was set.</ResponseField>
+        <ResponseField name="termGracePeriodSeconds" type="integer">The grace period in seconds. `0` when none was set.</ResponseField>
+        <ResponseField name="terminalDueDate" type="integer">Unix seconds, or `null` when no terminal date was set.</ResponseField>
+        <ResponseField name="graceDefaultApplies" type="boolean">`true` when terms are on and no grace period was named, so the contract's own default applies.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="operatorShareBps" type="integer">Share of post-infrastructure interest offered to the lender of record.</ResponseField>
+    <ResponseField name="alreadyExists" type="boolean">Always `false` on this branch. A market that would collide is refused with `MARKET_EXISTS` instead.</ResponseField>
+    <ResponseField name="supersedes" type="object">Present when this instance already holds a market for the same token, mode and borrow asset that came from an earlier factory generation. That market cannot acquire a lender of record, so it does not block this deployment. The block names it and how to archive it.</ResponseField>
+    <ResponseField name="confirmWith" type="object">Where to send the mined hash: `{ endpoint, field }`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+Confirming with `txHash` returns `201` with the recorded market and its readiness state.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="market" type="object">The persisted market record, including `id`, all contract addresses, `collateralMode`, `priceSource`, `collateralDecimals`, the borrow asset triple, and seeded default risk parameters.</ResponseField>
+    <ResponseField name="txHash" type="string">Deployment transaction hash.</ResponseField>
+    <ResponseField name="relayerAddress" type="string">The instance's registered wallet address, or null when no wallet is registered.</ResponseField>
+    <ResponseField name="liquidationRouterAddress" type="string">Router deployed for this market.</ResponseField>
+    <ResponseField name="configurationStatus" type="object">Contract wiring state, with `fullyConfigured`.</ResponseField>
+    <ResponseField name="collateralAuthStatus" type="object">Whether the adapter is authorized on the collateral token, and what is required. See [Get Configuration Status](/endpoints/lending/get-configuration-status).</ResponseField>
+    <ResponseField name="routerHolderAuthorized" type="boolean">Whether the market's liquidation router may receive the collateral token.</ResponseField>
+    <ResponseField name="oracleSignerAuthorized" type="boolean">Whether the registered wallet can sign prices for this market's oracle.</ResponseField>
+    <ResponseField name="liquidatorRoleGranted" type="boolean">Whether the registered wallet holds `LIQUIDATOR_ROLE` on the market.</ResponseField>
+    <ResponseField name="pendingCurator" type="boolean">`true` while the market still has no lender of record.</ResponseField>
+    <ResponseField name="configurationSteps" type="array">Outstanding steps, each with `step`, `description`, `requiredRole`, `requiredBy`.</ResponseField>
+    <ResponseField name="configurationCalldata" type="object">Ready-to-sign calldata keyed by step name, each `{ to, data, description }`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  The uniqueness check is skipped when the existing market came from an earlier factory generation. A market that predates the lender-of-record model does not block a redeployment onto the current factory.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/deploy" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "collateralTokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+    "initialPrice": "104.82",
+    "candidates": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+    "mode": "FREEZE",
+    "priceSource": "NAV",
+    "identityRegistry": "0x9e3c8a15f4d70b2681c5a3f9027d4be8115c7d21",
+    "rateMode": "CLAMPED",
+    "rateFloorBps": 200,
+    "rateCapBps": 1200,
+    "maxLoanDurationDays": 180,
+    "operatorShareBps": 1000
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/lending-external-securities/api/markets/deploy',
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      collateralTokenAddress: '0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f',
+      initialPrice: '104.82',
+      candidates: [custodianBankAddress, assetManagerAddress],
+      mode: 'CUSTODY',
+      identityRegistry: token.metadata.identityRegistry,
+      borrowAssetAddress: '0x6B175474E89094C44Da98b954EedeAC495271d0F'
+    })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x37712db30a7b4ffd9c445793089118b60e56d752",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "deployMarket",
+    "collateralTokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+    "mode": "FREEZE",
+    "priceSource": "NAV",
+    "borrowAsset": {
+      "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "symbol": "USDC",
+      "decimals": 6
+    },
+    "signer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "candidates": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+    "openToAnyCurator": false,
+    "seekingCurator": true,
+    "rateOffering": {
+      "rateMode": "CLAMPED",
+      "rateFloorBps": 200,
+      "rateCapBps": 1200
+    },
+    "termOffering": {
+      "maxLoanDurationSeconds": 15552000,
+      "termGracePeriodSeconds": 0,
+      "terminalDueDate": null,
+      "graceDefaultApplies": true
+    },
+    "operatorShareBps": 1000,
+    "alreadyExists": false,
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities/api/markets/deploy",
+      "field": "txHash"
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "market": {
+      "id": "clx_secmarket_001",
+      "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "oracleAddress": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+      "insuranceFundAddress": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+      "adapterAddress": "0x4d2b93f70e18c6a5d34b027fe95c81a6730d77ae",
+      "liquidationRouterAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+      "collateralTokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+      "collateralMode": "FREEZE",
+      "collateralDecimals": 18,
+      "borrowAssetAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "borrowAssetSymbol": "USDC",
+      "borrowAssetDecimals": 6,
+      "priceSource": "NAV",
+      "seekingCurator": true,
+      "curator": null,
+      "collateralFactor": "7500",
+      "liquidationThreshold": "8500",
+      "active": true
+    },
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "relayerAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "liquidationRouterAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+    "configurationStatus": { "fullyConfigured": false },
+    "collateralAuthStatus": {
+      "mode": "FREEZE",
+      "adapterAuthorized": false,
+      "interfaceSupported": true,
+      "requirement": "adapter_must_hold_agent_role"
+    },
+    "routerHolderAuthorized": false,
+    "oracleSignerAuthorized": false,
+    "liquidatorRoleGranted": false,
+    "pendingCurator": true,
+    "configurationSteps": [
+      {
+        "step": "grantAdapterAgentRole",
+        "description": "Grant agent role to freeze adapter on the security token",
+        "requiredRole": "TOKEN_AGENT_ADMIN",
+        "requiredBy": ""
+      }
+    ],
+    "configurationCalldata": {
+      "grantAdapterAgentRole": {
+        "to": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+        "data": "0x...",
+        "description": "Grant agent role to freeze adapter on the security token"
+      }
+    }
+  }
+}
+```
+```json Error - Rate Mode Conflict
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Input validation failed",
+    "details": [
+      {
+        "field": "rateCapBps",
+        "message": "A FIXED rate mode takes fixedRateBps only; rateFloorBps and rateCapBps belong to CLAMPED. Drop them or choose CLAMPED."
+      }
+    ]
+  }
+}
+```
+```json Error - Freeze Unsupported
+{
+  "success": false,
+  "error": {
+    "code": "FREEZE_MODE_UNSUPPORTED_TOKEN",
+    "message": "Collateral token does not implement the ERC-3643 freeze interface (isAgent/getFrozenTokens). FREEZE mode cannot be used with this token; deploy a CUSTODY mode market instead."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field failed schema validation. `error.details` names each offending field |
+| `TOKEN_NOT_IMPORTED` | `400` | `collateralTokenAddress` is not an imported security token in this instance |
+| `NOT_A_SECURITY_TOKEN` | `400` | The token exposes no identity registry, no contract allow-list and no freeze interface, so its adapter could never be authorized |
+| `BORROW_ASSET_IS_COLLATERAL` | `400` | `borrowAssetAddress` and `collateralTokenAddress` are the same token |
+| `COLLATERAL_TOKEN_NOT_CONTRACT` | `400` | No deployed bytecode at `collateralTokenAddress` on this network |
+| `FREEZE_MODE_UNSUPPORTED_TOKEN` | `400` | `mode` is `FREEZE` but the token lacks `isAgent` or `getFrozenTokens`. Deploy in `CUSTODY` mode instead |
+| `CUSTODY_MODE_EXCLUDED` | `400` | The register provider has excluded the fiduciary-transfer construction for this token. Deploy a `FREEZE` market instead |
+| `INVALID_INITIAL_PRICE` | `400` | `initialPrice` is missing on a `NAV` or `MARKET` deployment, carries more decimal places than the borrow asset supports, or rounds to zero at its scale |
+| `ORACLE_ADDRESS_REQUIRED` | `400` | `priceSource` is `ORACLE` and no `oracleAddress` was given |
+| `ORACLE_ADDRESS_NOT_APPLICABLE` | `400` | `oracleAddress` was sent for a price source other than `ORACLE` |
+| `INVALID_ORACLE_ADDRESS` | `400` | `oracleAddress` is not a valid address |
+| `INVALID_OPERATOR_SHARE` | `400` | `operatorShareBps` is not an integer between 0 and 5000 |
+| `INVALID_TERM_OFFERING` | `400` | A term value is out of range, or `terminalDueDate` is not a future timestamp or ISO date |
+| `FIXED_RATE_REQUIRES_TERMS` | `400` | `rateMode` is `FIXED` with no `maxLoanDurationDays` |
+| `RATE_ABOVE_CREATOR_CEILING` | `400` | The rate offering exceeds the factory's creator rate ceiling. The message names the ceiling |
+| `INVALID_BORROW_ASSET` | `400` | `borrowAssetAddress` is not a valid address |
+| `BORROW_ASSET_NOT_CONTRACT` | `400` | No deployed bytecode at `borrowAssetAddress` |
+| `BORROW_ASSET_NOT_ERC20` | `400` | `decimals()` or `balanceOf()` could not be read |
+| `BORROW_ASSET_DECIMALS_UNSUPPORTED` | `400` | Borrow asset decimals outside 6 to 18 |
+| `MARKET_EXISTS` | `409` | This instance already runs a market for this token, mode and borrow asset. The response carries `marketId` and an `archiveWith` endpoint |
+| `WALLET_NOT_CONFIGURED` | `412` | This instance has no verified issuer wallet to sign the deployment |
+| `PROVIDER_UNAVAILABLE` | `503` | The collateral token could not be read on-chain, so no transaction was prepared |
+| `FACTORY_READ_FAILED` | `503` | The factory could not be read to validate the rate offering, or to tell whether an existing market is still operable. Nothing was built. Retry shortly |
+| `FACTORY_UPGRADE_REQUIRED` | `503` | The factory has no liquidation router implementation configured, so a market deployed now would have no router |
+
+Confirming with `txHash` can also return:
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `TX_WRONG_ARGS` | `400` | The transaction deployed a market for a different collateral token or collateral mode |
+| `MARKET_EXISTS` | `409` | This market is already recorded in this instance |
+| `DEPLOYMENT_NOT_INSTANCE_BOUND` | `403` | Neither the signer nor any party of the deployment is a verified wallet of this instance |
+| `ADAPTER_PLEDGEE_UNSUPPORTED` | `422` | The collateral adapter does not record a pledgee per lock, so encumbrances would name no attributable beneficiary |
+
+Confirming can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

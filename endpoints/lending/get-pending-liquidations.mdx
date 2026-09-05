@@ -1,0 +1,131 @@
+---
+title: 'Get Pending Liquidations'
+api: 'GET /lending-external-securities/api/liquidations/{marketId}/pending-liquidations'
+description: 'List liquidations awaiting settlement'
+---
+
+Returns liquidations whose collateral sits at the router and has not yet been settled or written off. This is the operator work queue for the manual settlement workflow.
+
+Before reading, the endpoint reconciles against the chain and adopts any on-chain liquidation the backend has not recorded, so a liquidation triggered outside this API still appears here.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="totalCount" type="integer">Number of records returned. Capped at 100.</ResponseField>
+    <ResponseField name="liquidationRouterAddress" type="string">Router holding the collateral for this market.</ResponseField>
+    <ResponseField name="pendingLiquidations" type="array">
+      <Expandable>
+        <ResponseField name="liquidationId" type="string">Global router liquidation ID. Pass this to every settlement endpoint.</ResponseField>
+        <ResponseField name="marketLiquidationId" type="string">Market-local liquidation ID. Used by [Handle Liquidation Timeout](/endpoints/lending/handle-timeout).</ResponseField>
+        <ResponseField name="marketId" type="string">Market ID.</ResponseField>
+        <ResponseField name="loanId" type="string">Loan that was liquidated.</ResponseField>
+        <ResponseField name="marketAddress" type="string">Market contract.</ResponseField>
+        <ResponseField name="collateralAmount" type="string">Collateral seized at liquidation.</ResponseField>
+        <ResponseField name="debtOwed" type="string">Debt the proceeds must cover.</ResponseField>
+        <ResponseField name="tokenAddress" type="string">Collateral token.</ResponseField>
+        <ResponseField name="borrower" type="string">Borrower whose loan was liquidated.</ResponseField>
+        <ResponseField name="txHash" type="string">Liquidation transaction hash. Reads `chain-adopted` when the record was reconstructed from chain state and the original transaction could not be located.</ResponseField>
+        <ResponseField name="status" type="string">`PENDING` for every record in this list.</ResponseField>
+        <ResponseField name="createdAt" type="string">ISO 8601 timestamp. Backdated to the on-chain liquidation time for adopted records.</ResponseField>
+        <ResponseField name="onChainData" type="object">Live router state, or null if the read failed.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## On-Chain Data
+
+`onChainData` is the authoritative view of what the router still holds.
+
+<ResponseField name="onChainData" type="object">
+  <Expandable>
+    <ResponseField name="collateralAmount" type="string">Collateral originally received.</ResponseField>
+    <ResponseField name="collateralRemaining" type="string">Collateral still held. Decreases as it is withdrawn for sale.</ResponseField>
+    <ResponseField name="debtOwed" type="string">Debt to be covered, in borrow asset units.</ResponseField>
+    <ResponseField name="proceedsCollected" type="string">Proceeds deposited so far, in borrow asset units. Increases with each reported partial sale.</ResponseField>
+    <ResponseField name="borrower" type="string">Borrower address.</ResponseField>
+    <ResponseField name="lendingMarket" type="string">Market the liquidation came from.</ResponseField>
+    <ResponseField name="token" type="string">Collateral token.</ResponseField>
+    <ResponseField name="routerAddress" type="string">Router holding the position.</ResponseField>
+    <ResponseField name="timestamp" type="integer">Unix seconds the router received the collateral. This is when the 7 day write-off clock starts.</ResponseField>
+    <ResponseField name="settled" type="boolean">Whether the router considers the liquidation closed.</ResponseField>
+    <ResponseField name="marketLiquidationId" type="string">Market-local ID.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  A router query for a liquidation ID that does not exist returns a zero-filled object rather than null. Treat `onChainData.timestamp === 0` as "not found", not as a valid timestamp.
+</Warning>
+
+<Note>
+  Track progress with `collateralRemaining` and `proceedsCollected` rather than `status`. Withdrawing collateral for sale and reporting partial sales both leave `status` at `PENDING`. Only settlement or write-off changes it.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities/api/liquidations/{marketId}/pending-liquidations" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/liquidations/${marketId}/pending-liquidations`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+
+const overdue = data.pendingLiquidations.filter(l => {
+  const t = l.onChainData?.timestamp;
+  return t && Date.now() / 1000 - t > 7 * 86400;
+});
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "pendingLiquidations": [
+      {
+        "id": "secliq_004",
+        "liquidationId": "14",
+        "marketLiquidationId": "2",
+        "marketId": "clx_secmarket_001",
+        "loanId": "7",
+        "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "collateralAmount": "220.000000000000000000",
+        "debtOwed": "21159.200000",
+        "tokenAddress": "0xabc...def",
+        "borrower": "0xabc...def",
+        "txHash": "0xabc...def",
+        "status": "PENDING",
+        "usdcProceeds": null,
+        "settledTxHash": null,
+        "createdAt": "2025-06-14T09:12:00.000Z",
+        "settledAt": null,
+        "onChainData": {
+          "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+          "token": "0xabc...def",
+          "collateralAmount": "220.000000000000000000",
+          "collateralRemaining": "120.000000000000000000",
+          "debtOwed": "21159.200000",
+          "proceedsCollected": "9800.000000",
+          "borrower": "0xabc...def",
+          "lendingMarket": "0x70A0E25c7b768B87e658348B3b577678A173E038",
+          "timestamp": 1718355120,
+          "settled": false,
+          "marketLiquidationId": "2"
+        }
+      }
+    ],
+    "totalCount": 1,
+    "liquidationRouterAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf"
+  }
+}
+```
+</ResponseExample>

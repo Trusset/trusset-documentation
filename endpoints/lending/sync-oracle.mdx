@@ -1,0 +1,159 @@
+---
+title: 'Sync Oracle Price'
+api: 'POST /lending-external-securities/api/markets/{marketId}/sync-oracle'
+description: 'Push a NAV price on-chain'
+---
+
+Writes a new price to the market's oracle. This is how external securities markets are priced: the issuer publishes a net asset value and pushes it here.
+
+There is no automatic price feed for these markets. `price` is required on every call. If you omit it or send a non-positive value the request is rejected.
+
+Like every other write on this surface, nothing is submitted for you. The call returns the unsigned `updatePrice` transaction, you broadcast it from your own wallet, then confirm it with `txHash`.
+
+<Warning>
+  The wallet that signs must be an authorized signer on the oracle, which the oracle owner grants. The API checks the resolved signer before building the calldata and refuses with `SIGNER_NOT_AUTHORIZED` if it is not authorized. Check `signerAuthorized` and `priceSignerAuthorized` on [Get Oracle Status](/endpoints/lending/get-oracle-status) first.
+</Warning>
+
+Price authority does not have to be your instance's primary wallet. When the lender of record took the role it declared a `priceSigner`, and that address is what this endpoint resolves to when you name none. Pass `signerAddress` to check against a different key.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="price" type="number" required>
+  Net asset value per collateral token, denominated in the market's borrow asset. Must be greater than zero.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  Wallet the authorization check runs against. Omit it and the market's declared `priceSigner` is used; when the market declares none, the instance's registered wallet is. Ignored when confirming with `txHash`, where the signer is taken from the receipt.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the oracle. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`updatePrice`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet the authorization check was run against. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="success" type="boolean">Nested inside `data` on the calldata response.</ResponseField>
+    <ResponseField name="previousPrice" type="string">The on-chain price before this write. Null when confirming, because the prior value is no longer readable from the receipt.</ResponseField>
+    <ResponseField name="newPrice" type="string">The price written. Read from the mined transaction when confirming.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Circuit Breaker
+
+The oracle rejects a price that deviates from the current price by more than `maxDeviationBps`, defaulting to 5000 basis points, which is 50 percent. This guards against a fat-fingered NAV wiping out healthy loans in one transaction.
+
+The check is skipped when the oracle has never been priced, so the first push after deployment can be any positive value. When the breaker trips, the error carries `currentPrice`, `newPrice`, and `maxDeviationPercent` so you can present the comparison.
+
+A genuine repricing beyond the limit requires the oracle owner to widen `maxDeviationBps`, or a sequence of smaller steps. Do not retry a rejected push unchanged. Surface the deviation to an operator, because a retry sends the same price into the same breaker.
+
+<Note>
+  Successful pushes are recorded on the market as an `ORACLE_SYNC` transaction, visible through [List Transactions](/endpoints/lending/list-transactions), and update `lastOracleUpdate` on the market record.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/sync-oracle" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"price": 105.40}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/sync-oracle`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ price: 105.40 })
+  }
+);
+const { success, data, error } = await res.json();
+if (!success && error.code === 'PRICE_DEVIATION_TOO_LARGE') {
+  await notifyOperator(error.message);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "updatePrice",
+    "previousPrice": "104.820000",
+    "newPrice": "105.4",
+    "signer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52"
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "previousPrice": null,
+    "newPrice": "105.400000",
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b"
+  }
+}
+```
+```json Error - Signer Not Authorized
+{
+  "success": false,
+  "error": {
+    "code": "SIGNER_NOT_AUTHORIZED",
+    "message": "Wallet 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 is not authorized on oracle 0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423. The oracle owner must call setAuthorizedSigner."
+  }
+}
+```
+```json Error - Circuit Breaker
+{
+  "success": false,
+  "error": {
+    "code": "PRICE_DEVIATION_TOO_LARGE",
+    "message": "Price deviation exceeds circuit breaker. On-chain: $104.820000, new: $250. Max allowed: 50%"
+  }
+}
+```
+```json Error - Missing Price
+{
+  "success": false,
+  "error": {
+    "code": "MISSING_PRICE",
+    "message": "A positive NAV price is required"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_PRICE` | `400` | `price` absent, non-numeric, or not greater than zero |
+| `NO_ORACLE` | `400` | The market has no oracle recorded |
+| `SIGNER_NOT_AUTHORIZED` | `403` | The registered wallet is not an authorized signer on the oracle. Checked before the calldata is built, and skipped when confirming with `txHash` |
+| `WALLET_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance |
+| `PRICE_DEVIATION_TOO_LARGE` | `400` | The change exceeds the oracle circuit breaker. The error carries `currentPrice`, `newPrice` and `maxDeviationPercent` |
+| `SYNC_FAILED` | `400` | The update could not be prepared or confirmed and no more specific code applied |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

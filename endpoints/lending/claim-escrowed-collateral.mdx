@@ -1,0 +1,99 @@
+---
+title: 'Claim Escrowed Collateral'
+api: 'POST /lending-external-securities/api/positions/{marketId}/claim-escrowed-collateral'
+description: 'Reclaim collateral held in escrow after a blocked return transfer'
+---
+
+Withdraws collateral that the custody adapter could not return automatically. This applies to `CUSTODY` markets only.
+
+When a loan closes or collateral is withdrawn, the adapter attempts to transfer the tokens back to the holder. ERC-3643 tokens enforce compliance at transfer time, so that return can fail: an expired KYC record, a suspended identity, or a jurisdiction restriction will all block it. Rather than reverting the whole operation, the adapter records the amount as escrowed. Once the holder's compliance status is restored, this endpoint releases it.
+
+<Note>
+  The transaction targets the custody adapter, not the market contract. The claim is scoped to the caller, so the wallet that signs must be the holder whose collateral is escrowed. Signing with any other wallet claims nothing. `holderAddress` only decides whose escrow is checked before the calldata is handed back; it does not appear in the transaction and cannot redirect the claim.
+</Note>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID. Must be a `CUSTODY` market.</ParamField>
+
+## Body Parameters
+
+<ParamField body="holderAddress" type="string">
+  Address whose escrow you intend to claim. When supplied, the adapter's escrow is read first. An empty escrow is refused with `NO_ESCROWED_COLLATERAL`, rather than handing back a transaction that reverts once paid for. `escrowedCollateral` is populated only when this is given.
+</ParamField>
+
+## Response Fields
+
+This endpoint always returns calldata. There is nothing to confirm, because the claim is recorded on-chain against the adapter rather than in a Trusset position record. Read the resulting balance with [Get Escrowed Collateral](/endpoints/lending/get-escrowed-collateral).
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the custody adapter.</ResponseField>
+    <ResponseField name="functionName" type="string">`claimEscrowedCollateral`.</ResponseField>
+    <ResponseField name="adapterAddress" type="string">Custody adapter the transaction targets.</ResponseField>
+    <ResponseField name="escrowedCollateral" type="string">Amount currently escrowed for `holderAddress`, as a decimal string. Null when `holderAddress` was not supplied.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  Claiming fails while the underlying compliance block is still in force, because the transfer out of the adapter is subject to the same rules that blocked the original return. Resolve the holder's identity status first, then claim.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/claim-escrowed-collateral" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"holderAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"}'
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x4d2b93f70e18c6a5d34b027fe95c81a6730d77ae",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "claimEscrowedCollateral",
+    "adapterAddress": "0x4d2b93f70e18c6a5d34b027fe95c81a6730d77ae",
+    "escrowedCollateral": "250.000000000000000000"
+  }
+}
+```
+```json Error - Nothing Escrowed
+{
+  "success": false,
+  "error": {
+    "code": "NO_ESCROWED_COLLATERAL",
+    "message": "The custody adapter holds no escrowed collateral for 0xabc7f1093d5e26b804a1c3f78de025916b47c0d3."
+  }
+}
+```
+```json Error - Not Custody Mode
+{
+  "success": false,
+  "error": {
+    "code": "NOT_CUSTODY_MODE",
+    "message": "Escrow claims only apply to custody-mode markets"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `NOT_CUSTODY_MODE` | `400` | The market runs in `FREEZE` mode, where collateral never leaves the borrower's wallet |
+| `NO_ADAPTER` | `400` | The market records no custody adapter |
+| `NO_ESCROWED_COLLATERAL` | `400` | `holderAddress` was supplied and the adapter holds nothing for it. Claiming would revert |
+| `VALIDATION_ERROR` | `400` | `holderAddress` is not a valid address |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

@@ -1,0 +1,80 @@
+---
+title: 'Asset Register'
+description: 'Read the pledges standing against a security token so the register can record them'
+icon: 'book'
+---
+
+This page is for the register provider. After reading it you can pull every pledge standing against a token you keep the register for, in one call, with the facts a register entry needs.
+
+A borrower opens a loan against a security token. The market's collateral adapter locks the collateral and names the collateral agent as pledgee. On chain that lock restricts the balance. It is not the register entry, and on its own it does not create the security interest.
+
+The register entry is the operative act and it stays with the register provider. Trusset holds no register authority, and no endpoint on this surface writes to a register. What the API gives you is the fact pattern the entry needs: who pledged, to whom, how much, in which transaction, and whether the pledge still stands.
+
+## Base Path
+
+```
+https://api.trusset.org/lending-external-securities/api/pledges
+```
+
+Every request authenticates with an instance API key in the `X-API-Key` header. See [Authentication](/endpoints/authentication).
+
+[List Pledges](/endpoints/asset-register/list-pledges) is the only endpoint here. It takes a market address and returns every pledge that market's adapter has recorded, oldest first.
+
+## Record a pledge
+
+<Steps>
+  <Step title="Read the market">
+    Call [List Pledges](/endpoints/asset-register/list-pledges) with the market's contract address. Poll it on a schedule, or call it when a loan opens on a token you keep the register for.
+  </Step>
+  <Step title="Check the index">
+    `index.scannedToBlock` says how far the chain has been read. When it sits well behind the head, the pledges returned are real but the list may be short, so call again. `index.historyTruncatedBeforeBlock` is the one that means pledges are missing for good. `index.complete` folds both together, and one more thing besides: read [Reading the index](/endpoints/asset-register/list-pledges#reading-the-index) before you gate on it.
+  </Step>
+  <Step title="Take the standing pledges">
+    A pledge with `active: true` is still standing. Each one carries `holder`, `pledgee`, `currentAmount`, and the block, timestamp and transaction hash of the lock that created it.
+  </Step>
+  <Step title="Record it">
+    Convert the amount out of base units, then make the entry against the holder's position in your register. What the entry is called is yours to decide. A German Kryptowertpapierregister records a restriction on disposal, a Verfügungsbeschränkung, in favour of the pledgee.
+  </Step>
+  <Step title="Watch for the end">
+    `endedAt.kind` of `RELEASED` means the collateral went back to the holder and the entry can come off. `ENFORCED` means it was seized in a liquidation and moved to the address in `endedAt.to`.
+  </Step>
+</Steps>
+
+## Collateral mode changes what to record
+
+Every market is deployed in one of two collateral modes, fixed at deployment. `collateralMode` on every response says which one you are reading.
+
+In a `FREEZE` market the borrower stays the holder. The balance is restricted where it sits and the lock names a pledgee. That is the case a pledge entry describes.
+
+In a `CUSTODY` market the token moves to the market's collateral adapter. That is a transfer for security rather than a pledge, and the holder of record changes with it. A register that records pledges has nothing to record here, and the holder change is the event that matters.
+
+## Amounts are base units
+
+`amount` and `currentAmount` are integer strings in the collateral token's base units, exactly as the adapter emitted them. Every other lending endpoint returns decimal strings. Read [List Pledges](/endpoints/asset-register/list-pledges) before you convert anything.
+
+## Who can read a market
+
+Access is decided per market, not per key. A market opens to the instance that holds its record, and to an instance whose verified wallet is nominated on it. A market left open to any lender of record also opens to an approved bank issuer with a verified wallet. Every other caller is refused.
+
+## Response envelope
+
+```json
+{
+  "success": true,
+  "data": { },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-09-05T12:00:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+
+On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. Schema failures use `VALIDATION_ERROR` with `error.details` listing each offending field. `metadata.requestId` always equals the `X-Request-Id` response header, so you can quote it when reporting a problem. Always branch on `success` rather than on the HTTP status alone.
+
+## Rate limits and credits
+
+This endpoint carries a limit of 100 requests per minute, keyed by API key, inside the ceiling of 200 per minute that applies to the whole lending surface. Exceeding either returns `429` with code `RATE_LIMIT_EXCEEDED` and a `Retry-After` header in seconds. See [Rate Limits](/endpoints/rate-limits).
+
+Requests also draw on the instance's monthly API credit allowance, billed against the lending service. Every response carries `X-Credits-Limit`, `X-Credits-Remaining` and `X-Credits-Reset`. When the allowance is exhausted the request is refused with `402` and code `CREDIT_LIMIT_EXCEEDED`.

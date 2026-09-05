@@ -1,0 +1,122 @@
+---
+title: 'Get Loan'
+api: 'GET /lending-external-securities/api/positions/{marketId}/loan/{loanId}'
+description: 'Read a loan directly from the market contract'
+---
+
+Returns live loan state by numeric loan ID, read from the contract with no database involvement. Use this when you need authoritative figures for a payoff quote, a health check, or a liquidation decision.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="loanId" type="integer" required>On-chain loan ID. Must be a positive integer.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="loanId" type="string">Loan ID, echoed back.</ResponseField>
+    <ResponseField name="borrower" type="string">Borrower address.</ResponseField>
+    <ResponseField name="collateralAmount" type="string">Collateral pledged, in collateral token units.</ResponseField>
+    <ResponseField name="principal" type="string">Outstanding principal, in borrow asset units.</ResponseField>
+    <ResponseField name="accruedInterest" type="string">Interest accrued and unpaid, in borrow asset units.</ResponseField>
+    <ResponseField name="healthFactor" type="string">Health factor at 18 decimal places. `1.0` is the liquidation boundary. `null` on a loan that is no longer active, because a closed loan has no health.</ResponseField>
+    <ResponseField name="active" type="boolean">Whether the loan is open. `false` once it is repaid, closed, or fully liquidated.</ResponseField>
+    <ResponseField name="compliance" type="object">What the collateral token would currently permit for this borrower. See below. `null` when the market records no collateral token, or when the probe could not run.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Compliance
+
+The collateral is a third-party security token whose issuer can freeze an address, revoke an identity, or pause the token after the loan opened. This block is that state, probed at request time. It is the difference between a loan that looks healthy and one whose collateral can actually be released.
+
+<ResponseField name="compliance" type="object">
+  <Expandable>
+    <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`, the market's collateral mode.</ResponseField>
+    <ResponseField name="holder" type="string">The borrower this verdict is about, lowercased.</ResponseField>
+    <ResponseField name="restricted" type="boolean">`true` when something would block the collateral moving. `false` when every probe answered and none did. `null` when the token does not answer the probes at all, which is unknown rather than clear.</ResponseField>
+    <ResponseField name="code" type="string">Machine-readable reason, when there is one.</ResponseField>
+    <ResponseField name="reason" type="string">One sentence naming what is blocking, or why the state could not be established.</ResponseField>
+    <ResponseField name="collateralReturnable" type="boolean">Whether the token would accept a return of this collateral to the borrower right now. `null` when unchecked.</ResponseField>
+    <ResponseField name="willEscrowOnRelease" type="boolean">`true` when a release would be escrowed on the adapter rather than delivered, because the token would refuse the transfer. Custody markets only.</ResponseField>
+    <ResponseField name="escrowedCollateral" type="string">Collateral already sitting in escrow for this holder, in collateral units. Custody markets only. Claim it with [Claim Escrowed Collateral](/endpoints/lending/claim-escrowed-collateral).</ResponseField>
+    <ResponseField name="escrowedCollateralRaw" type="string">The same figure in base units.</ResponseField>
+    <ResponseField name="holderVerified" type="boolean">Whether the borrower is still a verified identity on the token's register. `null` when unreadable.</ResponseField>
+    <ResponseField name="holderAddressFrozen" type="boolean">Whether the token has frozen this address. `null` when unreadable.</ResponseField>
+    <ResponseField name="tokenPaused" type="boolean">Whether the collateral token is paused. `null` when unreadable.</ResponseField>
+    <ResponseField name="checkedAt" type="string">When this verdict was established. It does not move while the verdict is unchanged, so it reads as the age of the finding rather than the age of the request.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  Treat `restricted: null` as unknown, never as unrestricted. It means the collateral token answers neither the transfer probe nor the holder probes, so nothing about its compliance state has been established.
+</Warning>
+
+<Tip>
+  Total payoff is `principal` plus `accruedInterest`. Interest accrues per block, so add a small margin when quoting a full repayment. The contract caps repayment at the actual debt, so a slight overpayment is not transferred.
+</Tip>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/loan/5" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/loan/5`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const liquidatable = data.active && parseFloat(data.healthFactor) < 1;
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "loanId": "5",
+    "borrower": "0xabc...def",
+    "collateralAmount": "1000.000000000000000000",
+    "principal": "50000.000000",
+    "accruedInterest": "128.750000",
+    "healthFactor": "1.842000000000000000",
+    "active": true,
+    "compliance": {
+      "mode": "FREEZE",
+      "holder": "0xabc...def",
+      "restricted": false,
+      "code": null,
+      "reason": null,
+      "collateralReturnable": true,
+      "willEscrowOnRelease": false,
+      "escrowedCollateral": null,
+      "escrowedCollateralRaw": null,
+      "holderVerified": true,
+      "holderAddressFrozen": false,
+      "tokenPaused": false,
+      "checkedAt": "2026-09-05T11:58:12.000Z"
+    }
+  }
+}
+```
+```json Error - Not Found
+{
+  "success": false,
+  "error": {
+    "code": "LOAN_NOT_FOUND",
+    "message": "Loan not found"
+  }
+}
+```
+```json Error - Invalid ID
+{
+  "success": false,
+  "error": {
+    "code": "INVALID_LOAN_ID",
+    "message": "Valid loan ID required"
+  }
+}
+```
+</ResponseExample>

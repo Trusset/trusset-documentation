@@ -1,0 +1,100 @@
+---
+title: 'Get Oracle Status'
+api: 'GET /lending-external-securities/api/markets/{marketId}/oracle-status'
+description: 'Read the current price, staleness, and signer authorization'
+---
+
+Returns the market oracle's current state. Check this before any borrow or liquidation flow, since the contract rejects actions priced against a stale oracle.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="configured" type="boolean">Whether the oracle was readable. When `false`, the fields marked conditional below are absent and an `error` field is present instead.</ResponseField>
+    <ResponseField name="price" type="string">Current price as a decimal string, in borrow asset units.</ResponseField>
+    <ResponseField name="priceRaw" type="string">Same price in base units.</ResponseField>
+    <ResponseField name="timestamp" type="integer">Unix seconds of the last price write.</ResponseField>
+    <ResponseField name="lastUpdate" type="string">The same instant as an ISO 8601 string, or null.</ResponseField>
+    <ResponseField name="isStale" type="boolean">Whether the price is older than `maxPriceAge`. A stale price causes borrow, withdraw, and liquidation calls to revert unless a signed price is supplied.</ResponseField>
+    <ResponseField name="priceAge" type="integer">Seconds since the last update. Conditional on `configured`.</ResponseField>
+    <ResponseField name="maxPriceAge" type="integer">Staleness threshold in seconds, read from the oracle. It is an oracle setting and is not part of the market config struct. Conditional on `configured`.</ResponseField>
+    <ResponseField name="maxDeviationBps" type="integer">Circuit breaker limit in basis points. A price push differing from the current price by more than this is rejected. Reported as `5000` when the oracle does not expose the value. Conditional on `configured`.</ResponseField>
+    <ResponseField name="owner" type="string">Oracle owner address. The owner is implicitly an authorized signer. Conditional on `configured`.</ResponseField>
+    <ResponseField name="ownerIsInstanceWallet" type="boolean">Whether that owner is a verified wallet of your instance. When `false`, price authority sits with another party and no wallet of yours can authorize signers on this oracle. Conditional on `configured`.</ResponseField>
+    <ResponseField name="signerAddress" type="string">Registered wallet address, or null when no wallet is registered. Conditional on `configured`.</ResponseField>
+    <ResponseField name="signerAuthorized" type="boolean">Whether the registered wallet can push and sign prices for this oracle.</ResponseField>
+    <ResponseField name="priceSigner" type="string">The wallet the lender of record declared as this market's price authority when it took the role, or `null`. It is not necessarily your registered wallet. It is the address [Sync Oracle Price](/endpoints/lending/sync-oracle) and [Sign Price](/endpoints/lending/sign-price) resolve to when you name none.</ResponseField>
+    <ResponseField name="priceSignerAuthorized" type="boolean">Whether that declared signer is authorized on the oracle. `null` when no signer is declared.</ResponseField>
+    <ResponseField name="error" type="string">Present only when `configured` is `false`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  The failure response is a different shape, not an error status. When `configured` is `false` the endpoint still returns `200` with `price: "0"`, `isStale: true`, and no `priceAge`, `maxPriceAge`, `maxDeviationBps`, `owner`, `ownerIsInstanceWallet` or `signerAddress`. Guard on `configured` before reading those fields.
+</Warning>
+
+## Price Decimals
+
+Oracle prices carry the market's borrow asset decimals, not a fixed precision. A USDC market prices at 6 decimals, a DAI market at 18. Read `borrowAssetDecimals` from [Get Market](/endpoints/lending/get-market) rather than assuming.
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/oracle-status" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "price": "104.820000",
+    "priceRaw": "104820000",
+    "timestamp": 1718445600,
+    "lastUpdate": "2025-06-15T10:00:00.000Z",
+    "isStale": false,
+    "priceAge": 1200,
+    "maxPriceAge": 86400,
+    "maxDeviationBps": 5000,
+    "configured": true,
+    "owner": "0x333...444",
+    "ownerIsInstanceWallet": false,
+    "signerAddress": "0x123...456",
+    "signerAuthorized": false,
+    "priceSigner": "0x9c1e...4b70",
+    "priceSignerAuthorized": true
+  }
+}
+```
+```json Response - Unreadable
+{
+  "success": true,
+  "data": {
+    "price": "0",
+    "priceRaw": "0",
+    "timestamp": 0,
+    "lastUpdate": null,
+    "isStale": true,
+    "configured": false,
+    "signerAuthorized": false,
+    "priceSigner": null,
+    "priceSignerAuthorized": null,
+    "error": "call revert exception"
+  }
+}
+```
+```json Error - No Oracle
+{
+  "success": false,
+  "error": {
+    "code": "NO_ORACLE",
+    "message": "No oracle configured"
+  }
+}
+```
+</ResponseExample>

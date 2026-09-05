@@ -18,27 +18,54 @@ Redemptions cannot be paused. What bounds them is liquidity: idle funds pay imme
   Shares to redeem as a decimal string, parsed at the vault's `assetDecimals`.
 </ParamField>
 
+<ParamField body="holderAddress" type="string" required>
+  The wallet that will sign. `redeem` burns the caller's own shares, so the amount cannot be checked against a balance until the wallet is named. Omitting it returns `HOLDER_REQUIRED`.
+</ParamField>
+
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
     <ResponseField name="transaction" type="object">`to` and `data` for the `redeem` call.</ResponseField>
-    <ResponseField name="note" type="string">Explains the partial-fill behavior. Show it near your redeem control.</ResponseField>
+    <ResponseField name="functionName" type="string">`redeem`.</ResponseField>
+    <ResponseField name="maxPayableNow" type="string">The most the vault could pay any redemption at this moment, in the settlement asset. `null` when the chain read failed.</ResponseField>
+    <ResponseField name="willFillFully" type="boolean">Whether this redemption is expected to pay out in full. `false` means a partial fill, `null` means it could not be established.</ResponseField>
+    <ResponseField name="expectedPayout" type="string">What this redemption is expected to pay: the full value when `willFillFully` is `true`, otherwise `maxPayableNow`.</ResponseField>
+    <ResponseField name="note" type="string">The partial-fill position in words, sized to this redemption when a partial fill is expected. Show it near your redeem control.</ResponseField>
+    <ResponseField name="assetsFullyReadable" type="boolean">`false` when a market the vault funds would not answer, so the share price this redemption is quoted at leaves that position out.</ResponseField>
+    <ResponseField name="priceWarning" type="string">Set when `assetsFullyReadable` is `false`, stating that the quoted price understates the vault by an unknown amount. `null` otherwise.</ResponseField>
     <ResponseField name="confirmWith" type="object">Report the hash to `confirm-tx` with `txType: "REDEEM"`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Warning>
-  When market utilization blocks part of the value, the redemption fills partially: the investor is paid what liquidity allows and the unpaid shares stay in the wallet. The amount recorded on confirmation comes from the `Redeemed` event, meaning the assets actually paid, not the shares requested. Compare the two if you need to detect a partial fill.
+  When market utilization blocks part of the value, the redemption fills partially: the investor is paid what liquidity allows and the unpaid shares stay in the wallet. `willFillFully` and `expectedPayout` say so before the signature. The amount recorded on confirmation comes from the `Redeemed` event, meaning the assets actually paid, not the shares requested. Compare the two if you need to detect a partial fill.
 </Warning>
+
+<Note>
+  A redemption is quoted from totals read without their completeness flag, on purpose. An exit is the one thing a market that has gone dark must never be able to block. When `priceWarning` is set the shares still burn, at a price that understates the vault, and the difference stays with the holders who wait. Nothing blocks the redemption. Show the warning and let the holder decide.
+</Note>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `shares` is not a positive decimal string |
+| `HOLDER_REQUIRED` | `400` | `holderAddress` was omitted or is not an address |
+| `INVALID_AMOUNT` | `400` | `shares` carries more decimal places than the vault's asset supports |
+| `REDEEMER_NOT_VERIFIED` | `403` | The wallet is not verified on the vault's identity register, on a vault whose implementation still gates redemptions on it |
+| `VAULT_NOT_FOUND` | `404` | No such vault, or it is not visible to your instance |
+| `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address yet |
+| `INSUFFICIENT_SHARES` | `409` | The wallet holds no shares, or fewer than `shares` |
+| `NOTHING_REDEEMABLE` | `409` | The vault can pay nothing right now, or `shares` values to nothing at the current price. No shares would be burned |
 
 <RequestExample>
 ```bash cURL
 curl -X POST "https://api.trusset.org/lending-external-securities/api/vaults/{vaultId}/redeem" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"shares": "500"}'
+  -d '{"shares": "500", "holderAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab"}'
 ```
 ```typescript TypeScript
 const res = await fetch(
@@ -46,10 +73,15 @@ const res = await fetch(
   {
     method: 'POST',
     headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ shares: '500' })
+    body: JSON.stringify({ shares: '500', holderAddress: await signer.getAddress() })
   }
 );
 const { data } = await res.json();
+
+if (data.willFillFully === false) {
+  console.log(`Partial fill: about ${data.expectedPayout} paid, the rest stays in shares`);
+}
+
 const tx = await signer.sendTransaction({ to: data.transaction.to, data: data.transaction.data });
 await tx.wait();
 ```
@@ -67,7 +99,22 @@ await tx.wait();
     },
     "functionName": "redeem",
     "note": "When market utilization blocks part of the value, the redemption fills partially: unpaid shares stay in the wallet.",
+    "maxPayableNow": "618200.000000",
+    "willFillFully": true,
+    "expectedPayout": "510.450000",
+    "assetsFullyReadable": true,
+    "priceWarning": null,
     "confirmWith": { "endpoint": "confirm-tx", "txHash": true, "txType": "REDEEM" }
+  }
+}
+```
+```json Error - Nothing Redeemable
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "NOTHING_REDEEMABLE",
+    "message": "The vault can pay nothing right now: no funds sit idle and every allocated market is fully lent out, so redeem() would revert without burning any shares. Retry once borrowers repay or the operator frees liquidity."
   }
 }
 ```
