@@ -123,7 +123,7 @@ These are the regulatory argument. Do not soften and do not strengthen.
 | "There is no auto-sell for external securities, because these instruments have no on-platform venue." | `external-securities-lending/introduction.mdx` |
 | "There is no auto-sell for external securities." | `external-securities-lending/liquidate.mdx` |
 | "It is not automatically covered by the insurance fund, which only steps in on a timeout write-off." | `external-securities-lending/settle-liquidation.mdx` |
-| "The proofs themselves (`proofs/*.bin`) and the encrypted witness material (`secrets.enc`) are never uploaded." | `sdk/customers/kyc-proofs.mdx` |
+| ~~"The proofs themselves (`proofs/*.bin`) and the encrypted witness material (`secrets.enc`) are never uploaded."~~ Corrected: false for `proofs/*.bin`. See OPEN-QUESTIONS item 13. | `sdk/customers/kyc-proofs.mdx` |
 | "The IdentityRegistry is never called directly by StockCustody." | `licenses/stock-orderbook/contracts.mdx` |
 | "The IdentityRegistry is never called directly by CommodityCustody." | `licenses/commodity-orderbook/contracts.mdx` |
 | "The address is configuration only and receives no implicit on-chain privileges" | `licenses/commodities/contracts.mdx` |

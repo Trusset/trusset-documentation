@@ -1,36 +1,55 @@
 ---
 title: "KYC Proofs"
-description: "Generate zk-STARK KYC proofs locally and verify customers with the root hash"
+description: "Generate zk-STARK KYC proofs locally and back on-chain claims with them"
 icon: "fingerprint"
 ---
 
-This page is for the engineer running KYC in-house who needs verified customers on-chain. After reading it you will know which two artifacts leave your infrastructure, which never do, and which claims a proof can and cannot back.
+This page is for the engineer running KYC in-house who needs verified customers on-chain. After reading it you will know which artifacts leave your infrastructure, which never do, and which claims a proof can and cannot back.
 
-Trusset never sees or hashes your customers' KYC data. You run the [trusset-kyc-zk-proofs](https://github.com/Trusset/trusset-kyc-zk-proofs) tool on your own infrastructure, and only two artifacts from its output ever reach Trusset:
+You run the [trusset-kyc-zk-proofs](https://github.com/Trusset/trusset-kyc-zk-proofs) tool on your own machines. It reads your KYC records and writes, per subject, a Merkle root to publish on chain, one zk-STARK per proved field, and a manifest signed with your operator key.
 
-1. The **root hash** (`kycHash`) - a Rescue-Prime Merkle root over per-field commitments, stored on-chain by `identity.verify`.
-2. The **bundle manifest** (`manifest.json`) - hashes and public inputs only, used by `identity.addClaimsFromProof` to derive on-chain claims.
+## What leaves your infrastructure
 
-Names, birth dates, and document data stay on your machine. The proofs themselves (`proofs/*.bin`) and the encrypted witness material (`secrets.enc`) are never uploaded.
+Trusset never sees the underlying KYC data. Names, birth dates, nationalities and document numbers stay on your machine, and no endpoint accepts them.
+
+What does travel is the evidence that a predicate held:
+
+| Artifact | Sent | Why |
+|---|---|---|
+| `kycHash` (the root) | Yes | Published on chain by `identity.verify` |
+| `manifest.json` | Yes | Hashes, public inputs and claim descriptors |
+| `manifest.sig` | Yes | Checked against your registered operator key |
+| `proofs/*.bin` | Yes, on a production instance | The STARKs are verified server-side before a claim is filed |
+| `secrets.enc` | Never | Encrypted witness material. No endpoint accepts it |
+
+<Warning>
+  A production instance requires the STARK bytes and verifies each one before filing a claim. Sending only the manifest is refused with `PROOF_MISSING`.
+
+  A commitment carries no value and a STARK reveals nothing beyond the predicate, so uploading them discloses no personal data. `secrets.enc` is the file that would, and it is never accepted. Keep it and your `.trusset/keys.env` on your own machines.
+</Warning>
+
+## Enforcement depends on the instance
+
+Two settings decide how strict a submission is judged, and they are not the same field.
+
+A `PRODUCTION` instance requires proofs and rejects `stub` manifests, whatever the instance itself is set to. A `DEVELOPMENT` instance does neither by default, which is what makes a structural dry run possible without generating STARKs.
+
+An instance can also opt in on top of that. Read both from [Get Operator Key](/endpoints/customers/get-operator-key): `proofVerificationEnabled` is what you asked for, `proofVerificationEnforced` is what a submission is actually judged against. Gate on the enforced flag.
 
 ## Run the proof tool
-
-The tool is a separate repository you clone and run locally. It reads subject rows from `/input` (JSON or CSV) and writes one proof bundle per subject.
-
-Clone and configure it:
 
 ```bash
 git clone https://github.com/Trusset/trusset-kyc-zk-proofs
 cd trusset-kyc-zk-proofs
 npm install
-cp config.example.json config.json
-export TRUSSET_KYC_MASTER_KEY=$(openssl rand -hex 32)
-export TRUSSET_KYC_SIGNING_KEY=$(openssl rand -hex 32)
+npm run init
 ```
 
-Place your customer rows in `/input`, then run it:
+`init` asks four questions about your institution, generates both keys, pins the batch date, and prints your operator public key. Load the keys, drop records in `input/`, and run it:
 
 ```bash
+set -a && . ./.trusset/keys.env && set +a
+npm start -- --dry-run
 npm start
 ```
 
@@ -38,26 +57,34 @@ npm start
 output/
 ├── 0xAbCd.../                       # one bundle per subject wallet
 │   ├── kycHash.hex                  # the root hash (0x + 64 hex chars)
-│   ├── manifest.json                # signed manifest: root hash + proof leaves
-│   ├── manifest.sig                 # ed25519 signature
-│   ├── proofs/<field>.bin           # zk-STARK proofs - keep local
-│   └── secrets.enc                  # encrypted witnesses - keep local, never upload
+│   ├── manifest.json                # what was asserted, by whom, on what evidence
+│   ├── manifest.sig                 # ed25519 over a canonical view of the manifest
+│   ├── proofs/<field>.bin           # one STARK per proving leaf
+│   └── secrets.enc                  # encrypted witnesses - keep local
 └── kyc_hashes_<timestamp>.csv       # batch index: one row per subject
 ```
 
-The root hash appears in three places - they are the same value: `kycHash.hex`, the `kycHash` field of `manifest.json`, and the `kycHash` column of the batch CSV.
+The root hash appears in three places and they are the same value: `kycHash.hex`, the `kycHash` field of `manifest.json`, and the `kycHash` column of the batch CSV.
 
-<Warning>
-  `secrets.enc` and `proofs/*.bin` must never leave your infrastructure. Trusset endpoints only accept the manifest (hashes and public inputs) and the root hash.
-</Warning>
-
-### Stub vs production manifests
-
-Each manifest carries a `mode`. `production` manifests are accepted everywhere. `stub` manifests (CI smoke mode, `--skip-proofs`) are accepted by development instances only - a production instance rejects them with `STUB_NOT_ALLOWED`.
+<Note>
+  `init` pins the batch date into `config.json`. Leave it pinned. Every per-subject key and commitment derives from that number, so a bundle proved against a moving clock cannot be reproduced tomorrow, which is exactly what an auditor asks for.
+</Note>
 
 ## From bundle to verified customer
 
 <Steps>
+  <Step title="Register your operator key, once">
+    Every manifest signature is checked against this key. Take the value `npm run show` prints.
+
+    ```typescript
+    await trusset.customers.identity.setOperatorKey({
+      publicKey: 'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a',
+      maxStalenessDays: 365,
+    })
+    ```
+
+    Rotating it later does not re-verify anything already filed. Claims added under the old key stay on chain, and their manifests no longer verify against the new one. Keep the old key with the bundles it signed.
+  </Step>
   <Step title="Verify on-chain with the root hash">
     Load the bundle's `manifest.json` and call `verifyFromManifest`. The wallet address, root hash, country, investor type, and expiry days are read straight from the manifest; pass overrides for anything you want to change.
 
@@ -88,21 +115,26 @@ Each manifest carries a `mode`. `production` manifests are accepted everywhere. 
     ```
   </Step>
   <Step title="Add proof-backed claims">
-    With the root hash on-chain, the manifest can back on-chain claims. The backend re-checks that the manifest's `kycHash` matches the on-chain identity before adding anything.
+    With the root on chain, the bundle can back claims. Send the signature and the STARKs alongside the manifest.
 
     ```typescript
+    const bundle = 'output/0xAbCd...'
+
     const claims = await trusset.customers.identity.addClaimsFromProof({
       walletAddress: manifest.walletAddress,
       manifest,
+      manifestSig: readFileSync(`${bundle}/manifest.sig`, 'utf8').trim(),
+      proofs: {
+        country: readFileSync(`${bundle}/proofs/country.bin`).toString('base64'),
+        nationality: readFileSync(`${bundle}/proofs/nationality.bin`).toString('base64'),
+      },
     })
     ```
 
-    `claims.added` counts what landed, and `claims.claims` holds one entry per claim as `{ claimType, status, txHash }`.
-
-    One transaction is sent per claim. Use `selected: ['KYC']` to add a subset.
+    `claims.added` counts what landed, and `claims.claims` holds one entry per claim as `{ claimType, dataHash, status, txHash }`. One transaction is sent per claim. Use `selected: ['KYC']` to add a subset.
   </Step>
   <Step title="Check the result">
-    `status.onChain.isVerified` is now `true` and `status.onChain.kycHash` matches the manifest. `getClaims` returns the active claims with their data hashes and expiries.
+    `status.onChain.isVerified` is now `true` and `status.onChain.kycHash` matches the manifest.
 
     ```typescript
     const status = await trusset.customers.identity.getStatus(manifest.walletAddress)
@@ -123,7 +155,15 @@ The `KYC` claim always derives from the root hash. Field-level claims derive fro
 | `CITIZENSHIP` | `nationality` leaf | `set_membership` |
 | `ACCREDITATION` | `investorType` leaf | `tier_threshold` |
 
-`AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK`, and `PEP_CHECK` are not proof-backed - add them with [`addClaim`](/sdk/customers/identity#manual-claims).
+A canonical field proved with a different circuit is skipped rather than filed elsewhere. A `country` leaf proved with `preimage_knowledge` backs nothing, because filing it under another slot would let it read as an unrelated attestation.
+
+`AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK`, and `PEP_CHECK` are not proof-backed. Add them with [`addClaim`](/sdk/customers/identity#manual-claims). Those four are also the only slots a leaf with no canonical meaning may be filed under.
+
+## Re-proving a subject
+
+Re-running the tool always produces a new root, because the batch date is bound into every leaf hash. The bundle is legitimate and supersedes the registered one, but its root no longer matches what the registry holds.
+
+`addClaimsFromProof` refuses that with `HASH_MISMATCH`. Rotating the registered root to the new bundle is a separate, opt-in operation: see [Attest Proofs](/endpoints/customers/attest-proofs), which takes the rotation transaction alongside the claims.
 
 ## Onboard in batch
 
@@ -142,14 +182,31 @@ await trusset.customers.identity.batchVerify(rows.map(row => ({
 
 Addresses that are already actively verified are skipped on-chain (their existing root hash is kept); revoked identities are re-verified.
 
+Claims still go one bundle at a time, because each one carries its own proofs.
+
 ## Troubleshooting
 
 | Error code | Meaning | Fix |
 |---|---|---|
 | `NOT_VERIFIED` | The wallet has no on-chain identity yet | Run `verify` / `verifyFromManifest` first |
-| `HASH_MISMATCH` | Manifest root hash differs from the on-chain hash | Re-verify with this manifest's `kycHash`, or use the bundle that matches the chain |
 | `WALLET_MISMATCH` | Manifest belongs to a different wallet | Use the bundle generated for this wallet |
-| `STUB_NOT_ALLOWED` | Stub-mode manifest on a production instance | Re-run the tool without `--skip-proofs` |
+| `ROOT_MISMATCH` | The root recomputed from the leaves does not equal the one the manifest states | The bundle is inconsistent. Re-run the tool rather than editing the manifest |
+| `HASH_MISMATCH` | Manifest root differs from the on-chain root | A newer bundle. Rotate the root, or use the bundle that matches the chain |
+| `UNREGISTERED_OPERATOR_KEY` | No operator key on this instance | Register it with `setOperatorKey` |
+| `INVALID_SIGNATURE` | `manifest.sig` is malformed, or signed by a different key | Send the unmodified `manifest.sig` from the same bundle |
+| `PROOF_MISSING` | A claimed leaf has no STARK, or is commitment-only | Send its `proofs/<field>.bin`. A commitment-only leaf cannot be attested under enforcement |
+| `PROOF_INVALID` | A STARK failed verification | Re-run the tool. Do not hand-edit anything in the bundle |
+| `PROOF_STALE` | The batch date is older than `maxStalenessDays` | Re-prove the subject, or raise the bound deliberately |
+| `PROOF_TOO_LARGE` | One proof, or the payload, is over the size cap | Send fewer leaves per call |
+| `CIRCUIT_MISMATCH` | A canonical field was proved with the wrong circuit | Fix the predicate in `config.json` and re-prove |
+| `UNAPPROVED_PARAMS` | The threshold is outside the network's trust anchors | Use approved parameters |
+| `UNAPPROVED_LIST` | The allowlist the proof committed to is not accepted | Record an approved list version and re-prove |
+| `STUB_NOT_ALLOWED` | Stub-mode manifest where proofs are enforced | Re-run the tool without `--skip-proofs` |
 | `INVALID_MANIFEST` | Malformed or incomplete manifest | Pass the unmodified `manifest.json` object |
-| `INVALID_HASH` | `kycHash` is not a 32-byte hex string | Use the exact value from `kycHash.hex` |
 | `NO_SELECTED_CLAIMS` | `selected` names claim types this proof cannot back | See the claim derivation table above |
+| `VERIFY_BUSY` | Verification capacity is saturated | Retry shortly. Nothing was cached |
+| `VERIFY_TIMEOUT` | Verification did not finish in time | Retry shortly. Nothing was cached |
+
+<Note>
+  A verdict is stored against the bundle, so re-submitting the same bundle answers from the recorded report rather than re-running the STARK verification. `verification.cached` tells you which happened. A transient `VERIFY_BUSY` or `VERIFY_TIMEOUT` is never cached.
+</Note>

@@ -218,6 +218,24 @@ Same reasoning as item 10: the change is punctuation, not content. No word, URL,
 
 ---
 
+## 13. A locked negative capability claim was corrected, not softened
+
+`sdk/customers/kyc-proofs.mdx` carried this, registered as a locked sentence in `docs/INVENTORY.md`:
+
+> "The proofs themselves (`proofs/*.bin`) and the encrypted witness material (`secrets.enc`) are never uploaded."
+
+**It is false for `proofs/*.bin`.** `services/customers/proofVerificationService.js` takes the STARK bytes as a base64 map on `POST /customers/api/identity/claims/from-proof`, verifies each one in a worker pool (stage 8), and refuses a claimed leaf that arrives without its proof with `PROOF_MISSING` whenever proofs are enforced. `config/zkTrustAnchors.js` sets `requireProofsDefault: true` for every `PRODUCTION` instance, so on a production instance the upload is mandatory, not optional.
+
+The `secrets.enc` half is true and stays. No endpoint accepts it.
+
+**Why it was changed rather than logged.** The lock exists to stop a style pass drifting the regulatory argument, and to stop anyone strengthening a claim nobody verified. This claim was verified and found false. A false statement about what data leaves a client's infrastructure, in a privacy product, is the worst kind of error this repository can ship: a client could build a compliance story on it and then be contradicted by their own network traffic.
+
+The replacement states the same protection accurately. A commitment carries no value and a STARK reveals nothing beyond the predicate, so uploading them discloses no personal data; the file that would is `secrets.enc`, which is never accepted.
+
+**Needed:** confirmation from whoever owns the regulatory argument that the replacement wording is the one to stand behind. Until then the page is accurate and the lock entry in `INVENTORY.md` is stale.
+
+---
+
 ## Not open, for the record
 
 Two things flagged early that turned out to be non-issues, recorded so they do not get re-raised.
