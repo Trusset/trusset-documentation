@@ -1,0 +1,145 @@
+---
+title: 'Attest Proofs'
+api: 'POST /customers/api/identity/proofs'
+description: 'File proof-backed claims and rotate the on-chain root when the bundle is newer'
+---
+
+Files claims from a bundle and, unlike [Add Claims from Proof](/endpoints/customers/add-claims-from-proof), can rotate the identity's on-chain root to this bundle's root in the same flow. Use it when re-proving a subject against a new batch, where the root on the registry is the old one.
+
+It also records a ledger row per claim, so [List Proofs](/endpoints/customers/list-proofs) can later say which proof backs which slot.
+
+## Body Parameters
+
+<ParamField body="walletAddress" type="string" required>
+  The subject. Must already be verified on chain and not revoked.
+</ParamField>
+
+<ParamField body="manifest" type="object" required>
+  The bundle's `manifest.json`, parsed.
+</ParamField>
+
+<ParamField body="manifestSig" type="string">
+  The bundle's `manifest.sig`. Required under enforcement.
+</ParamField>
+
+<ParamField body="proofs" type="object">
+  A map of field name to base64 STARK bytes.
+</ParamField>
+
+<ParamField body="entries" type="array">
+  Which leaves to file and where. Each entry names a `fieldName`, optionally the `claimType` slot to use, and optionally `expiryDays` for that claim alone. Omit it to file every attestable leaf under its canonical slot.
+
+  A leaf with no canonical meaning has no default slot, so it needs an entry naming one of `AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK` or `PEP_CHECK`.
+</ParamField>
+
+<ParamField body="rootTxHash" type="string">
+  The hash of the transaction that registered this bundle's root on the identity. Required when the bundle's root differs from what the registry holds.
+</ParamField>
+
+<ParamField body="txResults" type="array">
+  Send this to confirm. An array of `{ fieldName, txHash }`.
+</ParamField>
+
+## Root rotation
+
+The registry holds one root per identity. A bundle proved in a later batch has a different root, and its leaves cannot be checked against the old one.
+
+When the bundle's root differs from the chain's, the calldata leg returns the root-rotation transaction as the first step and the claim transactions after it. Broadcast the rotation first, then pass its hash back as `rootTxHash` alongside `txResults`.
+
+Confirming without it is refused with `ROOT_ROTATION_REQUIRED`. The rotation receipt is checked to target this wallet and to register this bundle's root, so a hash from an unrelated transaction fails with `TX_ROOT_MISMATCH`.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` on the calldata leg, or `ON_CHAIN_VERIFIED` when the chain already holds everything asked for.</ResponseField>
+    <ResponseField name="steps" type="array">The rotation step when one is needed, then one step per claim, each with `fieldName`, `claimType`, `canonical`, `dataHash` and `expiry`.</ResponseField>
+    <ResponseField name="walletAddress" type="string">The subject, checksummed.</ResponseField>
+    <ResponseField name="kycHash" type="string">The root in effect after this operation.</ResponseField>
+    <ResponseField name="bundleRoot" type="string">The root recomputed from the bundle.</ResponseField>
+    <ResponseField name="rootRotation" type="object">What the rotation would do, when one is needed. Calldata leg only.</ResponseField>
+    <ResponseField name="rootRotated" type="object">`{ from, to, txHash }` when a rotation was confirmed, `null` otherwise. Confirm leg only.</ResponseField>
+    <ResponseField name="added" type="integer">Claims confirmed. Confirm leg only.</ResponseField>
+    <ResponseField name="total" type="integer">Claims in this payload.</ResponseField>
+    <ResponseField name="proofs" type="array">Per claim: `fieldName`, `claimType`, `dataHash` and a `status` of `confirmed`, `skipped` or `failed`. Confirm leg only.</ResponseField>
+    <ResponseField name="warnings" type="array">Leaves that were not filed and why. A blocked leaf warns rather than failing the batch.</ResponseField>
+    <ResponseField name="verification" type="object">`verified`, `mode`, `reportId`, `verifierVersion` and `cached`.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ field: "txResults", shape: "[{ fieldName, txHash }]", rootField: "rootTxHash" }`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  `success` is `false` with `NO_PROOFS_ADDED` when the confirm leg files nothing, on a `200`. Read `added` against `total`.
+</Note>
+
+## Error Codes
+
+Every verification failure from [Add Claims from Proof](/endpoints/customers/add-claims-from-proof#verification-failures) applies here too. On top of those:
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `walletAddress` is missing or malformed |
+| `MISSING_MANIFEST` | `400` | No manifest in the body |
+| `INVALID_PROOFS` | `400` | `proofs` is not a map of field name to base64 string |
+| `SLOT_REQUIRED` | `400` | A leaf with no canonical meaning was filed without naming a slot |
+| `INVALID_CLAIM_TYPE` | `400` | The named slot is not a registry claim type |
+| `NOT_VERIFIED` | `400` | The subject carries no root on the registry |
+| `IDENTITY_REVOKED` | `400` | The identity is revoked on chain. Re-verify before attaching proofs |
+| `ROOT_ROTATION_REQUIRED` | `400` | The bundle's root is not on chain and no `rootTxHash` was given |
+| `TX_ROOT_MISMATCH` | `400` | The rotation transaction does not register this bundle's root |
+| `TX_TARGET_MISMATCH` | `400` | A transaction targets a different wallet |
+| `NO_PROOFS_ADDED` | `200` | Confirm leg, nothing filed. `success` is `false` |
+| `CHAIN_UNAVAILABLE` | `503` | The registry could not be read |
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/identity/proofs" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "walletAddress": "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
+    "manifest": { "...": "manifest.json" },
+    "manifestSig": "base64-signature",
+    "entries": [{ "fieldName": "country" }]
+  }'
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response - Rotation Needed
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": { "to": "0xe9114c40934f6fb6bb317935156b731f7a86d006", "data": "0x..." },
+        "functionName": "updateIdentity",
+        "description": "Register the new bundle root"
+      },
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": { "to": "0xe9114c40934f6fb6bb317935156b731f7a86d006", "data": "0x..." },
+        "functionName": "addClaim",
+        "fieldName": "country",
+        "claimType": "RESIDENCY",
+        "canonical": true,
+        "dataHash": "0x41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b9f2c",
+        "expiry": 1820246400
+      }
+    ],
+    "walletAddress": "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
+    "kycHash": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
+    "bundleRoot": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
+    "warnings": [],
+    "total": 1,
+    "confirmWith": {
+      "field": "txResults",
+      "shape": "[{ fieldName, txHash }]",
+      "rootField": "rootTxHash"
+    }
+  }
+}
+```
+</ResponseExample>

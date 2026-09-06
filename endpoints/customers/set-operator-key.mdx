@@ -1,0 +1,83 @@
+---
+title: 'Set Operator Key'
+api: 'PUT /customers/api/identity/operator-key'
+description: 'Register the ed25519 key your proof manifests are signed with'
+---
+
+Records the public half of the key the [KYC zk-Proof Tool](https://github.com/Trusset/trusset-kyc-zk-proofs) signs manifests with, and sets how strictly proofs are enforced on this instance.
+
+The key is public by nature. No secret reaches this API, and the private half never leaves the machine that runs the tool. `npm run show` prints the value to send here.
+
+## Body Parameters
+
+Send any combination. Sending none is refused with `NOTHING_TO_UPDATE`.
+
+<ParamField body="publicKey" type="string">
+  32-byte ed25519 public key as 64 hex characters, with or without a `0x` prefix. It is stored lowercased and unprefixed. Send `null` to clear the key, which leaves this instance unable to verify any production bundle.
+</ParamField>
+
+<ParamField body="proofVerificationEnabled" type="boolean">
+  Whether this instance requires a real proof behind every claim. When `true`, a `stub` manifest is refused and a commitment-only leaf cannot be attested.
+</ParamField>
+
+<ParamField body="maxStalenessDays" type="integer">
+  How old a bundle's batch date may be before it is refused with `PROOF_STALE`. Integer between 1 and 36500.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="operatorKey" type="string">The stored key, lowercased and unprefixed, or `null`.</ResponseField>
+    <ResponseField name="operatorKeySetAt" type="string">When it was last set, ISO 8601, or `null`.</ResponseField>
+    <ResponseField name="proofVerificationEnabled" type="boolean">What this instance asked for.</ResponseField>
+    <ResponseField name="proofVerificationEnforced" type="boolean">What actually applies. It is `true` when the instance asked for it, and also when the network's own trust anchors require proofs regardless. Read this one, not the setting.</ResponseField>
+    <ResponseField name="maxStalenessDays" type="integer">The staleness bound in effect.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  Rotating the key does not re-verify anything already attested. Claims filed under the old key stay on the registry, and their manifests no longer verify against the new one. Rotate deliberately, and keep the old key with the bundles it signed.
+</Warning>
+
+<Note>
+  Every change is written to the customer audit log as `PROOF_OPERATOR_KEY_UPDATED`, recording whether the key changed, whether it was cleared, and which settings moved.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X PUT "https://api.trusset.org/customers/api/identity/operator-key" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "publicKey": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "proofVerificationEnabled": true,
+    "maxStalenessDays": 365
+  }'
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "operatorKey": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "operatorKeySetAt": "2026-09-06T12:00:00.000Z",
+    "proofVerificationEnabled": true,
+    "proofVerificationEnforced": true,
+    "maxStalenessDays": 365
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_KEY` | `400` | `publicKey` is not 64 hex characters |
+| `INVALID_STALENESS` | `400` | `maxStalenessDays` is not an integer between 1 and 36500 |
+| `NOTHING_TO_UPDATE` | `400` | None of the three fields was supplied |
+| `INSTANCE_NOT_FOUND` | `404` | The instance behind your key no longer exists |
+| `OPERATOR_KEY_FAILED` | `500` | The update could not be written |

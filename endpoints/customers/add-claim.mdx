@@ -1,0 +1,116 @@
+---
+title: 'Add Claim'
+api: 'POST /customers/api/identity/add-claim'
+description: 'File a claim into one of the four assignable slots'
+---
+
+Writes a claim to the registry from a hash you supply. It covers the four slots that are not backed by a proof.
+
+<Warning>
+  `KYC`, `ACCREDITATION`, `RESIDENCY` and `CITIZENSHIP` are refused here with `PROOF_REQUIRED`. Those four slots are reserved so that a residency attestation always means a proof was verified, rather than something anyone with an API key could write. File them with [Add Claims from Proof](/endpoints/customers/add-claims-from-proof).
+</Warning>
+
+## Body Parameters
+
+<ParamField body="walletAddress" type="string" required>The subject.</ParamField>
+
+<ParamField body="claimType" type="string | integer" required>
+  One of `AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK`, `PEP_CHECK`, by name or index.
+</ParamField>
+
+<ParamField body="dataHash" type="string">
+  The claim's payload as a 32-byte hex hash. What it commits to is your convention.
+</ParamField>
+
+<ParamField body="dataInput" type="string">
+  A string to derive the hash from instead. It is hashed together with the claim type and the wallet, so the same input under a different slot or subject gives a different hash.
+
+  Supply this or `dataHash`.
+</ParamField>
+
+<ParamField body="expiryDays" type="integer">
+  Days until the claim expires, between 0 and 36500. `0` or omitted means no expiry.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Send it to confirm. Omit it to receive the calldata.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Calldata leg only.</ResponseField>
+    <ResponseField name="transaction" type="object">The unsigned registry call. Calldata leg only.</ResponseField>
+    <ResponseField name="functionName" type="string">`addClaim`. Calldata leg only.</ResponseField>
+    <ResponseField name="walletAddress" type="string">The subject, checksummed.</ResponseField>
+    <ResponseField name="claimType" type="string">The slot, by name. On the confirm leg it is read back from the mined transaction, not echoed.</ResponseField>
+    <ResponseField name="dataHash" type="string">The hash written, lowercased.</ResponseField>
+    <ResponseField name="expiry" type="integer">Unix seconds, or `0`.</ResponseField>
+    <ResponseField name="txHash" type="string">The confirmed transaction. Confirm leg only.</ResponseField>
+    <ResponseField name="gasUsed" type="string">Gas used. Confirm leg only.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field: "txHash" }`. Calldata leg only.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  The confirm leg reads the claim type, hash and expiry back out of the mined transaction rather than trusting what you sent, and refuses a receipt that targets a different wallet.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/identity/add-claim" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "walletAddress": "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
+    "claimType": "SANCTIONS_CHECK",
+    "dataInput": "screened-2026-09-06-clear",
+    "expiryDays": 90
+  }'
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": { "to": "0xe9114c40934f6fb6bb317935156b731f7a86d006", "data": "0x..." },
+    "functionName": "addClaim",
+    "description": "Add SANCTIONS_CHECK claim for 0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
+    "walletAddress": "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
+    "claimType": "SANCTIONS_CHECK",
+    "dataHash": "0x5c1980fe3b47a2091d6e8fc0453b71a29d84e6f5027cab3819740de6b25fa3c1",
+    "expiry": 1796472000,
+    "confirmWith": {
+      "endpoint": "POST /customers/api/identity/add-claim",
+      "field": "txHash"
+    }
+  }
+}
+```
+```json Error - Reserved Slot
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "PROOF_REQUIRED",
+    "message": "This claim type must be added from a KYC proof; use /claims/from-proof"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `walletAddress` is missing or malformed |
+| `INVALID_CLAIM_TYPE` | `400` | `claimType` is not a slot between 0 and 7 |
+| `PROOF_REQUIRED` | `400` | One of the four reserved slots was named |
+| `INVALID_HASH` | `400` | Neither a valid `dataHash` nor a non-empty `dataInput` was supplied |
+| `INVALID_EXPIRY` | `400` | `expiryDays` is outside 0 to 36500 |
+| `TX_TARGET_MISMATCH` | `400` | The confirmed transaction targets a different wallet |
+| `ADD_CLAIM_FAILED` | `400` | The claim could not be prepared or confirmed |

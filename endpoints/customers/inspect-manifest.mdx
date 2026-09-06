@@ -1,0 +1,154 @@
+---
+title: 'Inspect Manifest'
+api: 'POST /customers/api/identity/manifest/inspect'
+description: 'Read a proof bundle and see which leaves can be attested'
+---
+
+Reads a manifest, checks its signature and recomputes its Merkle root, then reports every leaf and whether it can be filed as a claim. Nothing is written and no chain read happens.
+
+Call it before [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) to build a selection screen. A leaf that comes back with `attestable: false` will be refused there too, and `blockedReason` says why in words you can show.
+
+## Body Parameters
+
+<ParamField body="manifest" type="object" required>
+  The `manifest.json` from the bundle directory the proof tool wrote, parsed as JSON.
+</ParamField>
+
+<ParamField body="manifestSig" type="string" required>
+  The contents of `manifest.sig`, the ed25519 signature over a canonical view of the manifest. Verified against the key from [Set Operator Key](/endpoints/customers/set-operator-key).
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="ok" type="boolean">Always `true` on a `200`. A bundle that does not hold together is an error response, not `ok: false`.</ResponseField>
+    <ResponseField name="kycHash" type="string">The Merkle root recomputed from the leaves, not the one the manifest claims. This is the value that must match the identity's on-chain root.</ResponseField>
+    <ResponseField name="walletAddress" type="string">The subject the bundle is for, checksummed.</ResponseField>
+    <ResponseField name="epochDays" type="integer">The pinned batch date the bundle was proved against, in days. Every per-leaf commitment derives from it.</ResponseField>
+    <ResponseField name="mode" type="string">`production` or `stub`. A `stub` bundle carries no real STARKs and is refused outright when proof verification is enforced.</ResponseField>
+    <ResponseField name="signature" type="object">What the signature check found.</ResponseField>
+    <ResponseField name="verifierVersion" type="string">The verifier that produced this reading. It is recorded on every verification report so an old result stays interpretable.</ResponseField>
+    <ResponseField name="assignableClaimTypes" type="array">The four slots a non-canonical leaf may be filed under: `AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK`, `PEP_CHECK`.</ResponseField>
+    <ResponseField name="passthrough" type="object">`country`, `investorType`, `softExpiryDays` and `hardExpiryDays` as the tool carried them through. These are plain values, not proved facts, and each is `null` when absent.</ResponseField>
+    <ResponseField name="leaves" type="array">One entry per leaf. See below.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Leaves
+
+<ResponseField name="leaves" type="array">
+  <Expandable>
+    <ResponseField name="fieldName" type="string">The field this leaf commits to, for example `country` or `dateOfBirth@7665d`.</ResponseField>
+    <ResponseField name="circuit" type="string">`age_threshold`, `set_membership`, `tier_threshold`, `preimage_knowledge` or `commitment_only`.</ResponseField>
+    <ResponseField name="circuitId" type="integer">Its numeric id, which is bound into the leaf hash.</ResponseField>
+    <ResponseField name="leafHash" type="string">The leaf hash. This is what is written on chain as the claim's `dataHash`.</ResponseField>
+    <ResponseField name="commitment" type="string">The hiding commitment over the value.</ResponseField>
+    <ResponseField name="proofDigest" type="string">Digest of the STARK bytes, so the proof file can be tied to this leaf.</ResponseField>
+    <ResponseField name="publicDigest" type="string">Digest of the public inputs.</ResponseField>
+    <ResponseField name="proofPath" type="string">Where the proof file sits in the bundle, or `null`.</ResponseField>
+    <ResponseField name="canonicalClaimType" type="string">The reserved slot this field must occupy, or `null` when the field has no canonical meaning and you choose a slot.</ResponseField>
+    <ResponseField name="commitmentOnly" type="boolean">`true` when the leaf is a commitment with no STARK behind it.</ResponseField>
+    <ResponseField name="attestable" type="boolean">Whether this leaf can be filed as a claim right now.</ResponseField>
+    <ResponseField name="blockedReason" type="string">Why not, in one sentence. `null` when attestable.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Why a leaf is blocked
+
+Three things block a leaf, and each blocks only that leaf. The rest of the bundle stays usable.
+
+**The predicate parameters are outside policy.** A trust anchor decides which thresholds and which allowlists this network accepts. A leaf proving an age floor nobody approved is reported rather than failing the whole bundle.
+
+**A canonical field was proved with the wrong circuit.** `country` must be proved with `set_membership`, `nationality` likewise, `investorType` with `tier_threshold`. A `country` leaf proved with `preimage_knowledge` is not filed anywhere, because filing it elsewhere would let it pass as an unrelated attestation.
+
+**It is commitment-only and proofs are enforced.** There is no STARK to check, so under enforcement there is nothing to verify.
+
+<RequestExample>
+```typescript TypeScript
+const manifest = JSON.parse(await readFile(`${bundle}/manifest.json`, 'utf8'));
+const manifestSig = (await readFile(`${bundle}/manifest.sig`, 'utf8')).trim();
+
+const res = await fetch(
+  'https://api.trusset.org/customers/api/identity/manifest/inspect',
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ manifest, manifestSig })
+  }
+);
+const { data } = await res.json();
+
+for (const leaf of data.leaves.filter((l: any) => !l.attestable)) {
+  console.warn(`${leaf.fieldName}: ${leaf.blockedReason}`);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "ok": true,
+    "kycHash": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
+    "walletAddress": "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
+    "epochDays": 20689,
+    "mode": "production",
+    "verifierVersion": "3.0.0",
+    "assignableClaimTypes": ["AML", "TAX_RESIDENCY", "SANCTIONS_CHECK", "PEP_CHECK"],
+    "passthrough": {
+      "country": "DEU",
+      "investorType": "PROFESSIONAL",
+      "softExpiryDays": 365,
+      "hardExpiryDays": 730
+    },
+    "leaves": [
+      {
+        "fieldName": "country",
+        "circuit": "set_membership",
+        "circuitId": 2,
+        "leafHash": "0x41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b9f2c",
+        "commitment": "0x9c1e4b70a2d5f836c04e7b91d3a608f52c7e4091bd6a37f0e8c25419b7d3a6e2",
+        "proofDigest": "0x2f74c8a1b09d3e6754108bfa2c9d70e3b5148af6209c73de815b40a92c6ef31d",
+        "publicDigest": "0x5c1980fe3b47a2091d6e8fc0453b71a29d84e6f5027cab3819740de6b25fa3c1",
+        "proofPath": "proofs/country.bin",
+        "canonicalClaimType": "RESIDENCY",
+        "commitmentOnly": false,
+        "attestable": true,
+        "blockedReason": null
+      },
+      {
+        "fieldName": "lastName",
+        "circuit": "commitment_only",
+        "circuitId": 0,
+        "leafHash": "0xd402612bae9f7c3018d5a64b0f9e28c7135ad60897e4b2f150c3a8e6d7b409f1",
+        "commitment": "0x6b8c0a2d7f1b3c9e5a4d3f8b1c7e2a9d5f4b6c8e0a2d7f1b3c9e5a4d6b8c0a2d",
+        "proofDigest": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "publicDigest": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "proofPath": null,
+        "canonicalClaimType": null,
+        "commitmentOnly": true,
+        "attestable": false,
+        "blockedReason": "\"lastName\" is commitment-only, and the bundle carries no zk proof for it"
+      }
+    ]
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+Every failure below means the bundle did not hold together. See [Add Claims from Proof](/endpoints/customers/add-claims-from-proof#verification-failures) for the full list, which is the same set.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_MANIFEST` | `400` | The manifest is missing, malformed, or not canonicalizable |
+| `INVALID_SIGNATURE` | `400` | The signature is not 64 bytes, or does not verify under the registered key |
+| `UNREGISTERED_OPERATOR_KEY` | `400` | No operator key is registered. Set one first |
+| `UNSUPPORTED_VERSION` | `400` | The manifest version is not one this verifier reads |
+| `ROOT_MISMATCH` | `400` | The recomputed root does not match the one the manifest states |
+| `PROOF_STALE` | `400` | The batch date is older than `maxStalenessDays` |
+| `STUB_NOT_ALLOWED` | `400` | A `stub` bundle was sent while proof verification is enforced |
+| `INSPECT_FAILED` | `500` | The bundle could not be read |

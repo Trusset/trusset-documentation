@@ -1,0 +1,104 @@
+---
+title: 'Customers'
+description: 'Customer records, on-chain identity, and zk-proof backed KYC claims'
+icon: 'users'
+---
+
+A customer here is two things kept apart: a record your instance holds, and an identity on a registry contract. The record carries who they are to you. The registry carries what a token contract can check before it moves.
+
+Nothing links them automatically. You write the record, you verify the identity, and the wallet you name is what joins the two.
+
+## Base Path
+
+```
+https://api.trusset.org/customers/api
+```
+
+Every request authenticates with an instance API key in the `X-API-Key` header. See [Authentication](/endpoints/authentication).
+
+| Path | Covers |
+|---|---|
+| `/manage` | Customer records and the wallets attached to them |
+| `/identity` | On-chain verification, claims, and KYC proofs |
+| `/id-links` | Hosted verification links you send to a customer |
+| `/verification-profiles` | The verification levels configured for your instance |
+
+Customer records need the `customers` service. Everything under `/identity`, `/verification-profiles` and the ID link flows needs `identity`.
+
+## Which register you write to
+
+An instance writes to the Trusset ID Register by default, or to your own register when the instance is bound to one. Every identity call resolves that automatically, so the same request works either way and no endpoint takes a registry address.
+
+What changes with your own register is who holds the roles. A write your instance's wallet has no role for is refused before any calldata is handed out, rather than reverting after you paid for it.
+
+## Writes return calldata
+
+Every identity write follows the same two-call shape as the rest of the platform. Call it once without `txHash` to get the unsigned transaction, broadcast it from your own wallet, then call it again with `txHash` to have the receipt verified and the result recorded.
+
+Nothing is submitted on your behalf.
+
+## Claims
+
+The registry holds eight claim slots per identity. Four of them mean something fixed and four are yours to assign.
+
+| Slot | Index | How it is filled |
+|---|---|---|
+| `KYC` | 0 | From a proof |
+| `AML` | 1 | Manually |
+| `ACCREDITATION` | 2 | From a proof, over `investorType` |
+| `RESIDENCY` | 3 | From a proof, over `country` |
+| `CITIZENSHIP` | 4 | From a proof, over `nationality` |
+| `TAX_RESIDENCY` | 5 | Manually |
+| `SANCTIONS_CHECK` | 6 | Manually |
+| `PEP_CHECK` | 7 | Manually |
+
+The four canonical slots are reserved. [Add Claim](/endpoints/customers/add-claim) refuses them with `PROOF_REQUIRED`, because a residency attestation that anyone could write by hand would not be worth reading. They are filled by [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) and nothing else.
+
+The four assignable slots take a hash you supply. What they mean is your convention, and a proof for a field with no canonical meaning can be filed in one of them.
+
+## KYC proofs
+
+Claims backed by proofs come from the [Trusset KYC zk-Proof Tool](https://github.com/Trusset/trusset-kyc-zk-proofs), which runs entirely on your own machines.
+
+It takes your KYC records and produces three things per subject: a Merkle root to publish on chain, one zk-STARK per proved field, and a manifest signed with your operator key. The manifest says what was asserted, under which rule, on what evidence, and for how long.
+
+Trusset never sees the underlying data. What reaches this API is the manifest, the signature, and the proof bytes. The date of birth, the nationality and the documents stay with you.
+
+<Steps>
+  <Step title="Register your operator key">
+    [Set Operator Key](/endpoints/customers/set-operator-key) records the ed25519 public key the tool prints. Every manifest signature is checked against it.
+  </Step>
+  <Step title="Verify the identity">
+    [Verify Identity](/endpoints/customers/verify-identity) puts the subject on the registry with their `kycHash`, which is the bundle's Merkle root.
+  </Step>
+  <Step title="Read the bundle">
+    [Inspect Manifest](/endpoints/customers/inspect-manifest) reports what the bundle contains and which leaves can be attested, without writing anything.
+  </Step>
+  <Step title="File the claims">
+    [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) verifies the bundle and returns the calldata for each claim it backs.
+  </Step>
+</Steps>
+
+<Note>
+  A leaf can be a hiding commitment with no zk proof behind it, which the tool uses for fields like a surname where there is no predicate worth proving. Those leaves are marked `commitmentOnly` and are not attestable while proof verification is enforced.
+</Note>
+
+## Response envelope
+
+```json
+{
+  "success": true,
+  "data": { },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-06T12:00:00.000Z"
+  }
+}
+```
+
+On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. Always branch on `success` rather than on the HTTP status alone.
+
+<Warning>
+  A registry read that fails answers `503 CHAIN_UNAVAILABLE`, never "not verified". The two are different facts, and reporting an outage as a verification failure would send you to re-verify a customer who is already verified.
+</Warning>
