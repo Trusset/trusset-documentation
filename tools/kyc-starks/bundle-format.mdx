@@ -1,0 +1,327 @@
+---
+title: "Bundle format"
+description: "The per-subject bundle directory the KYC-STARKs tool writes, file by file: kycHash.hex, every field of manifest.json at the top level and per leaf, how manifest.sig is computed over a canonical view, the proofs directory and its zero-length sentinel, and the encrypted secrets.enc."
+icon: "folder-tree"
+---
+
+This page is for an integrator parsing bundles or a reviewer checking one by hand. After reading it you will know what each file contains and which fields the signature covers. You will also know which fields a version 2 bundle lacks, and which file must never leave the operator's machine.
+
+A bundle is one directory per subject, named by the EIP-55 checksummed wallet address:
+
+```
+output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01/
+├── kycHash.hex        the root, 0x + 64 hex, no trailing newline
+├── manifest.json      canonical JSON, sorted keys, two-space indent
+├── manifest.sig       raw 64-byte ed25519 signature
+├── proofs/
+│   └── <leafName>.bin one file per leaf; zero bytes for commitment_only
+└── secrets.enc        encrypted witness values and nonces; operator-private
+```
+
+The prover writes the directory under `output/.tmp/` and renames it into place after the manifest is signed, so a bundle that exists is complete.
+
+## kycHash.hex
+
+The subject's Merkle root as `0x` followed by 64 lowercase hex characters, 66 bytes, no newline. It equals `manifest.kycHash` and the `kycHash` column of the batch index; the verifier checks the first equality as `kyc_hash_file_matches`.
+
+## manifest.json
+
+Serialised with keys sorted at every depth, two-space indentation and Unix newlines. The verifier and the archive builder re-serialise the parsed document and compare bytes, so the file must not be reformatted.
+
+A version 3.0.0 manifest, with the leaves elided:
+
+```json
+{
+  "asOfDate": "2026-09-12",
+  "circuitsVersion": 3,
+  "configHash": "0x0f52478b84b2d894a27d0158e1a4095b6c74070654921423f112b340315f9c99",
+  "createdAt": "2026-09-12T17:33:32Z",
+  "deterministic": true,
+  "epochDays": 20708,
+  "epochDaysSource": "fixed:20708",
+  "issuer": {
+    "identifier": "529900T8BM49AURSDO55",
+    "identifierScheme": "LEI",
+    "jurisdiction": "DE",
+    "keyId": "issuing-2026-09",
+    "name": "Example Bank AG",
+    "publicKey": "0x5fead1a1c06ed570c7e7ba99675464ac418036a7f88e9fc412506aa1dfab2baa"
+  },
+  "kycHash": "0xbefab9f6fdaba8c1fdb740880fd7a7e6505f6a29b0c2fb2e4b089be395606168",
+  "leaves": [],
+  "lists": {
+    "country_allowlist": {
+      "root": "0x90785a7ea7ea20e096c8b18955971db0a3387dc522b42982d49041c65e3dc3a9",
+      "sourceSha256": "0x4f4012962f3a660050116dba1cd9e32f92896aa3a6b4dcf61711cfb102d8687c"
+    }
+  },
+  "merkleVersion": 2,
+  "mode": "production",
+  "passthrough": {
+    "country": "DEU",
+    "hardExpiryDays": 730,
+    "investorType": "PROFESSIONAL",
+    "softExpiryDays": 365
+  },
+  "secretsKdfVersion": 2,
+  "stark": {
+    "field": "goldilocks",
+    "hash": "rescue-prime",
+    "library": "winterfell-0.13",
+    "libraryVersion": "0.13",
+    "securityBits": 100
+  },
+  "toolchain": {
+    "proverSha256": "0xf47ffbcfe83232d3c233c663470a49627712986e6c49b6ea0a5fba3c59f47df3",
+    "proverVersion": "3.0.0"
+  },
+  "version": "3.0.0",
+  "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01"
+}
+```
+
+### Top-level fields
+
+Fields marked 2.1 or 3 are absent from older manifests; every one of them is optional-with-omission, which is what keeps older signatures valid under current tooling.
+
+<ResponseField name="version" type="string">
+  `3.0.0`, `2.1.0` or `2.0.0`. The verifier accepts all three.
+</ResponseField>
+
+<ResponseField name="mode" type="string">
+  `production`, or `stub` for a bundle built with `--skip-proofs`. Inside the signed payload, so relabelling a stub bundle invalidates its signature.
+</ResponseField>
+
+<ResponseField name="walletAddress" type="string">
+  The subject, checksummed.
+</ResponseField>
+
+<ResponseField name="kycHash" type="string">
+  The Merkle root over the leaves.
+</ResponseField>
+
+<ResponseField name="epochDays" type="integer">
+  The batch as-of date, in days since 1970-01-01.
+</ResponseField>
+
+<ResponseField name="createdAt" type="string">
+  Wall-clock UTC timestamp of the run, ISO 8601 at second precision. The only field that differs between two deterministic runs, and the only field the signature does not cover.
+</ResponseField>
+
+<ResponseField name="deterministic" type="boolean">
+  Whether the per-subject key was derived from the master key (`true`) or drawn from OS entropy (`false`).
+</ResponseField>
+
+<ResponseField name="circuitsVersion" type="integer">
+  The circuit set the proofs were made under. `3` since tool version 2.1; `2` bundles are verified against the frozen `set_membership` AIR.
+</ResponseField>
+
+<ResponseField name="stark" type="object">
+  `library`, `libraryVersion`, `field`, `hash`, and `securityBits`, the advertised floor of 100.
+</ResponseField>
+
+<ResponseField name="leaves" type="array">
+  One entry per leaf, in the order of the Merkle tree, which is the order of the leaf hashes as bytes. See below.
+</ResponseField>
+
+<ResponseField name="passthrough" type="object">
+  `country`, `investorType`, `softExpiryDays` and `hardExpiryDays` in cleartext, as the input carried them or as the configured defaults filled them. Covered by the signature, not by any proof.
+</ResponseField>
+
+<ResponseField name="lists" type="object">
+  For every list a `set_membership` leaf used: its Merkle `root` and the `sourceSha256` of the source file.
+</ResponseField>
+
+<ResponseField name="secretsKdfVersion" type="integer">
+  The layout of `secrets.enc`. `2` wraps an independent per-subject key under the master key; `1`, on bundles from tool version 2.0, derived the box key from the master key directly.
+</ResponseField>
+
+<ResponseField name="merkleVersion" type="integer">
+  2.1. The root construction. Absent means version 1.
+</ResponseField>
+
+<ResponseField name="configHash" type="string">
+  2.1. SHA-256 over the canonical projection of the config that entered the key derivation. Lets a bundle be decrypted or re-keyed without out-of-band knowledge of the config that produced it.
+</ResponseField>
+
+<ResponseField name="epochDaysSource" type="string">
+  3. The expression that produced `epochDays`, such as `fixed:20708` or `env:TRUSSET_KYC_EPOCH_DAYS`.
+</ResponseField>
+
+<ResponseField name="asOfDate" type="string">
+  3. `epochDays` rendered as `YYYY-MM-DD`.
+</ResponseField>
+
+<ResponseField name="unpinnedEpoch" type="boolean">
+  3. Present, and `true`, only on a bundle built with `--dev-unpinned-epoch`. Such a bundle cannot be reproduced and the verifier says so.
+</ResponseField>
+
+<ResponseField name="issuer" type="object">
+  3. The party responsible for every assertion: `name`, `identifierScheme`, `identifier`, `jurisdiction`, `keyId`, and `publicKey`, the ed25519 verifying key as `0x` + 64 hex. Recording the key does not make the signature self-authenticating. It tells a counterparty which key to obtain out of band, and the verifier reports when a supplied key disagrees with it.
+</ResponseField>
+
+<ResponseField name="toolchain" type="object">
+  3. `proverVersion` and `proverSha256`, the SHA-256 of the prover binary that ran, measured from the running executable. `sourceCommit` appears when the `TRUSSET_KYC_SOURCE_COMMIT` environment variable was set at build time and is advisory.
+</ResponseField>
+
+### Leaf fields
+
+A `set_membership` leaf from the same bundle:
+
+```json
+{
+  "binding": {
+    "descriptor": {
+      "evidenceClass": "DOCUMENTARY",
+      "issuingParty": {
+        "identifier": "529900T8BM49AURSDO55",
+        "identifierScheme": "LEI",
+        "jurisdiction": "DE",
+        "name": "Example Bank AG"
+      },
+      "legalBasis": {
+        "assertion": "Subject nationality is in a jurisdiction on the approved list",
+        "framework": "AMLD5",
+        "reference": "Art. 13(1)(a) - customer identification"
+      }
+    },
+    "listVersion": {
+      "contentHash": "0x595b37877781c60df28fc960f4c6b422e284c53d3e98bb7c593248e33ad947a5",
+      "listId": "country_allowlist",
+      "root": "0x90785a7ea7ea20e096c8b18955971db0a3387dc522b42982d49041c65e3dc3a9",
+      "version": 1
+    },
+    "validity": {
+      "basisAsOf": 20666,
+      "from": 20708,
+      "until": 21072
+    }
+  },
+  "bindingDigest": "0x47b3ff89dc5ca309982c92fff4ad097ae7273e5c93c8980ca5da8e4518d5fc6f",
+  "circuit": "set_membership",
+  "circuitId": 2,
+  "commitment": "0xf3581212fe4821a54a2f2efd6d42afeffe040f6a883b0bee9e7facb48fb13380",
+  "disclosure": "predicate",
+  "fieldName": "nationality",
+  "leafHash": "0xeb0e101fe584dc78e0d0b1e3bdd9d9ccfa9d2020d930eaf57710cf7826c21670",
+  "params": {
+    "listId": "country_allowlist",
+    "sourceSha256": "0x4f4012962f3a660050116dba1cd9e32f92896aa3a6b4dcf61711cfb102d8687c"
+  },
+  "paramsHash": "0x18df693b0584ab677ecba4efcb41fdf3969257b9c451a0d7404ab05303273d6e",
+  "proofDigest": "0x83a2bf01a88a86e8fc8c02d2815f1d6758330e2384643ff59e733247c84648ab",
+  "proofPath": "proofs/nationality.bin",
+  "publicDigest": "0x4fc9d08461449b283610771fcefc1eb912e4c02934f2ae36a562356e60b9352b",
+  "publicInputs": {
+    "commitment": "0xf3581212fe4821a54a2f2efd6d42afeffe040f6a883b0bee9e7facb48fb13380",
+    "listId": "country_allowlist",
+    "setDepth": 5,
+    "setRoot": "0x90785a7ea7ea20e096c8b18955971db0a3387dc522b42982d49041c65e3dc3a9"
+  }
+}
+```
+
+<ResponseField name="fieldName" type="string">
+  The leaf name: the source field for a single-instance predicate, or `field@suffix` for a later instance.
+</ResponseField>
+
+<ResponseField name="circuit" type="string">
+  `age_threshold`, `set_membership`, `tier_threshold` or `preimage_knowledge`. A `commitment_only` leaf records `preimage_knowledge` here and carries its mode in `disclosure`.
+</ResponseField>
+
+<ResponseField name="circuitId" type="integer">
+  1, 2, 3 or 4. Must agree with `circuit`; the verifier rejects a mismatch.
+</ResponseField>
+
+<ResponseField name="commitment" type="string">
+  The hiding commitment over the value and the leaf's nonce.
+</ResponseField>
+
+<ResponseField name="publicInputs" type="object">
+  What the proof was made about. `commitment` always; then `minAgeDays` and `currentEpochDays` for `age_threshold`, `listId`, `setRoot` and `setDepth` for `set_membership`, `minTier` for `tier_threshold`, nothing more for `preimage_knowledge`.
+</ResponseField>
+
+<ResponseField name="publicDigest" type="string">
+  `Rescue(PUBLIC_DIGEST_TAG ‖ canonical public bytes)`, with the byte layout given per circuit on [Circuits](/tools/kyc-starks/circuits).
+</ResponseField>
+
+<ResponseField name="proofPath" type="string">
+  Always `proofs/<fieldName>.bin`. The only manifest field that reaches the filesystem. Every reader requires a plain `proofs/<name>` entry with no separators, no parent references, no leading dot and at most 255 characters, and refuses anything else.
+</ResponseField>
+
+<ResponseField name="proofDigest" type="string">
+  `Rescue(PROOF_DIGEST_TAG ‖ proof bytes)`. Recomputed by the verifier from the file.
+</ResponseField>
+
+<ResponseField name="paramsHash" type="string">
+  SHA-256 over the circuit's canonical parameter encoding. Recomputed by the verifier from `params`, or for a version 2.0 leaf from `publicInputs`.
+</ResponseField>
+
+<ResponseField name="leafHash" type="string">
+  The leaf hash; see [Concepts](/tools/kyc-starks/concepts#digests-and-the-leaf-hash).
+</ResponseField>
+
+<ResponseField name="disclosure" type="string">
+  2.1. `plaintext`, `predicate` or `commitment_only`.
+</ResponseField>
+
+<ResponseField name="params" type="object">
+  2.1. The resolved predicate parameters: `minAgeDays`, `minTier` as a number, `listId` with `sourceSha256`, or `maxValueBytes`.
+</ResponseField>
+
+<ResponseField name="binding" type="object">
+  3. The claim `descriptor`, the `validity` interval, and for `set_membership` the `listVersion` reference. Every leaf of a 3.0.0 manifest carries one.
+</ResponseField>
+
+<ResponseField name="bindingDigest" type="string">
+  3. `Rescue(LEAF_BIND_TAG ‖ canonical_json(binding))`, present exactly when `binding` is. The verifier recomputes it and rejects a leaf whose descriptor does not reproduce the recorded digest, and a leaf that has one without the other.
+</ResponseField>
+
+## manifest.sig
+
+Sixty-four raw bytes: an ed25519 signature (RFC 8032, deterministic) over the signing view of the manifest. The signing view is the canonical serialisation with `createdAt` replaced by the sentinel `1970-01-01T00:00:00Z`; the file on disk carries the real timestamp and is otherwise identical. The verifier performs the same substitution before checking, so two runs at different times produce byte-identical signatures.
+
+Two consequences follow. A consumer with its own verifier must recompute the signing view by re-serialising the typed document. A verifier that does not know a field will drop it and compute the wrong bytes. Every schema addition therefore requires downstream verifiers to be rebuilt, including the WASM build. And `secrets.enc` sits outside the signing payload by design, which is what allows master-key rotation to rewrite it without touching the signature.
+
+## proofs/
+
+One file per leaf, named by the leaf name, containing the serialised Winterfell proof. Sizes for the shipped parameters run from about 16 KB for `tier_threshold` to about 50 KB for `set_membership`; [Performance](/tools/kyc-starks/performance) has the measurements.
+
+A `commitment_only` leaf has a zero-byte file, and so does every leaf of a stub bundle. The file exists so every consumer that enumerates `proofPath` finds one. The verifier accepts an empty proof only for a `commitment_only` leaf or under `--accept-stub`, and rejects it on any other leaf of a production bundle.
+
+## secrets.enc
+
+The only file that holds plaintext-equivalent material. It carries, for every leaf, the field value, the 32-byte commitment nonce and the circuit name, as a JSON map keyed by leaf name. It is what allows the operator to reopen a commitment or answer "show me the value behind this leaf" to a regulator.
+
+Layout under `secretsKdfVersion: 2`:
+
+```text
+version byte (0x02)
+‖ wrap_nonce (24) ‖ secretbox(wrap_key, subject_key)        48 bytes
+‖ data_nonce (24) ‖ secretbox(subject_key, secrets_json)
+```
+
+`secretbox` is XSalsa20-Poly1305, byte-compatible with libsodium's `crypto_secretbox_easy`. The wrapping key and its nonce derive from the master key through HKDF-SHA256, with the subject, batch date, config hash and KDF version as context. The data nonce derives from the subject key. Decrypting therefore needs the master key plus values that are all readable from `manifest.json`. [Security model](/tools/kyc-starks/security-model#key-hierarchy) has the full chain.
+
+<Warning>
+  `secrets.enc` never ships. It is excluded from archives unless `--include-secrets` is passed, no verification path reads it, and under `--no-deterministic` it holds the only copy of the subject key. Back it up as operator-private material.
+</Warning>
+
+## What changes between versions
+
+| Field | 2.0.0 | 2.1.0 | 3.0.0 |
+|---|---|---|---|
+| `merkleVersion`, `configHash` | absent | present | present |
+| Leaf `disclosure`, `params` | absent | present | present |
+| `epochDaysSource`, `asOfDate`, `issuer`, `toolchain` | absent | absent | present |
+| Leaf `binding`, `bindingDigest` | absent | absent | present |
+| `secretsKdfVersion` | 1 | 2 | 2 |
+| `circuitsVersion` | 2 | 3 | 3 |
+
+A 2.0.0 manifest parses into the same structure, re-serialises byte-identically and keeps its signature valid, which the test `v200_manifest_reserializes_byte_identically` enforces against a real 2.0.0 fixture. A 3.0.0 bundle's root differs from what 2.1.0 would have produced for the same input, because the binding digest is inside every leaf hash.
+
+## In the repository
+
+- [docs/ARCHITECTURE.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/ARCHITECTURE.md), the artifact contract
+- [bundle-format/src/manifest.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/bundle-format/src/manifest.rs), the schema
+- [prover/src/encrypt.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/prover/src/encrypt.rs), the `secrets.enc` layouts

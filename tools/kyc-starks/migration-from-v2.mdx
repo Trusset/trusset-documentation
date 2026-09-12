@@ -1,0 +1,99 @@
+---
+title: "Migrating from v2"
+description: "What changes when a KYC-STARKs deployment moves from tool version 2.x to 3.0.0: the new manifest fields, the refusal of an unpinned batch date, the list registry, required claim descriptors, validity and revocation, the extended verification report, archives, and the upgrade checklist."
+icon: "arrow-right-arrow-left"
+---
+
+This page is for an operator already issuing version 2.0 or 2.1 bundles. After reading it you will know which existing behaviour stops, what every bundle gains, and the order in which to upgrade a pipeline that has bundles in the field.
+
+Version 3 changes what a bundle says, not how it is proved. The circuits, the commitment scheme, the Merkle construction and `circuitsVersion` are all unchanged at 3. Every bundle already issued keeps verifying, unchanged, under version 3 tooling; the test `v200_manifest_reserializes_byte_identically` enforces that against a real 2.0.0 fixture.
+
+## What version 2 could not answer
+
+| Question a counterparty or regulator asks | Version 2 |
+|---|---|
+| Reproduce this bundle so I can check it | Impossible one day later under the shipped default `epochDaysSource: "utc_today"` |
+| What set was `setRoot: 0x9078...` a commitment to? | Unrecoverable once the list file was regenerated |
+| Which institution asserts this? | Not recorded anywhere in the bundle |
+| Under what rule is `minAgeDays: 6570` asserted? | Not recorded |
+| Was this subject entitled at block N? | No way to ask |
+| This claim turned out to be false; how do I say so? | No mechanism; editing the manifest breaks its signature |
+
+Each is a question about evidence rather than cryptography, which is why none needed a circuit change.
+
+## Manifest version 3.0.0
+
+`manifest.version` becomes `3.0.0` and the verifier accepts `2.0.0`, `2.1.0` and `3.0.0`. New top-level fields: `issuer`, `toolchain`, `epochDaysSource`, `asOfDate`, and `unpinnedEpoch` on development bundles only. New per-leaf fields: `binding` with `descriptor`, `validity` and `listVersion`, and `bindingDigest`. All are optional-with-omission, so a version 2 manifest re-serialises byte-identically. [Bundle format](/tools/kyc-starks/bundle-format#what-changes-between-versions) lists them.
+
+A version 3 bundle's `kycHash` differs from what version 2 would have produced for the same input, because the binding digest is inside every leaf hash.
+
+**Keeping the version 2 shape while you migrate.** Set `manifest.version` to `"2.1.0"` in `config.json`. The run then produces exactly the bundle it always did: no issuer, no descriptors, no validity, the version 2 leaf-hash preimage. Use this when downstream consumers must be updated first.
+
+## The unpinned batch date is refused
+
+This is the change most likely to stop an existing pipeline, and it is deliberate. `epochDays` is folded into every per-subject key, every nonce and every leaf hash. Under `utc_today` it is whatever day the batch ran, so the bundle cannot be regenerated tomorrow, and regenerating a bundle is what an audit tests.
+
+Pin it. `"epochDaysSource": "fixed:<n>"` fixes one date for every run of a batch, and `npm run init` writes today's value; `"env:TRUSSET_KYC_EPOCH_DAYS"` supplies it per run, which is what a scheduled pipeline usually wants. `--dev-unpinned-epoch` restores the old behaviour for development: the prover prints a banner and the bundle carries `unpinnedEpoch: true` permanently. The refusal is enforced in both the TypeScript config resolver and the prover, so a hand-built job cannot route around it.
+
+## Lists move into a registry
+
+Version 2's `trusset-list-commit` wrote its output over the previous file, so once a list was rotated, nothing mapped an old `setRoot` back to the values it committed to. Version 3 keeps every version of every list in `config/registry/lists/<listId>.json`, signed and append-only, and each `set_membership` leaf records the version it used.
+
+Migration: run `npm run list-version` once per list to record version 1 from the current source file. `npm run init` does this for every `config/list_commitments/*.source.txt` it finds. A 3.0.0 run that still resolves a list from a bare file warns and then refuses to build the leaf; under `manifest.version` `2.1.0` the bare file keeps working. [Registries and archives](/tools/kyc-starks/registries-and-archives) has the records.
+
+## Claim descriptors are required
+
+Every predicate needs a `descriptor` and a `validity` block under 3.0.0, or the run fails with the config path, the problem and the fix. `claims.defaults` supplies `issuingParty`, `evidenceClass` and `validity` for every predicate that does not override them. [Configuration](/tools/kyc-starks/configuration#descriptor) has every field, and `init` writes starting descriptors for the shipped predicates that name the common European instrument and provision; review them against your own permissions and evidence.
+
+Two notes on `investorType`. The tiers are the MiFID II categories, and version 3 says so in the descriptor rather than leaving `minTier: 2` as an anonymous integer. And `minTier: RETAIL`, the version 2 example default, asserts nothing, because the circuit already refuses `NONE`; `config.example.json` now uses `PROFESSIONAL`.
+
+## Validity, lapse and voidance
+
+Each leaf records `from`, an optional `until`, and `basisAsOf`, the day the evidence was examined. Set `basisAsOf` per subject with an `evidenceDate` column, or per predicate with `validity.basisAsOfOffsetDays`. `softExpiryDays` and `hardExpiryDays` are unchanged, still passthrough, and still covered by no proof; they were never an expiry model.
+
+Ending a claim is a signed record, never an edit to the bundle. `npm run revoke` takes `--effect lapsed --effective-date <day>` for a claim that was true and stopped being true, or `--effect void_ab_initio` for one that never was. The tool refuses to conflate them, and a voided bundle keeps verifying while `temporal.entitled` goes false.
+
+## Verification gains a second answer
+
+`VerifyReport` gains `issuer`, `temporal` and a per-leaf `claim`; existing fields are unchanged, so a consumer that reads `overall_pass` and `leaves[]` keeps working. `overall_pass` stays pure cryptography; `temporal.entitled` adds the root on chain at the queried instant, the validity windows and any revocation. New flags: `--as-of-block N --chain-id C`, `--as-of-date D`, `--now D`, `--archive FILE`. New exit code 3, verified but not entitled.
+
+As-of block queries resolve against `config/registry/root_history.json`, written by `npm run anchor` after each publication. The tool still has no chain access.
+
+Version 2 bundles under the version 3 verifier report `issuer: null`, every `claim: null`, and a note that what each predicate stands for and how long it was asserted are not recorded.
+
+**Counterparties running their own verifier must rebuild it.** A verifier that re-serialises the typed manifest to recompute the signing view drops the fields it does not know. It then computes the wrong bytes. That includes any vendored WASM build; `scripts/rebuild-wasm.sh` produces it.
+
+## Archives
+
+`npm run archive` produces one integrity-checked file with the bundles, every list version their proofs depend on, the root history, the revocation log and the issuer identity. It verifies with `trusset-verifier-cli --archive` on a machine with nothing else. `secrets.enc` is excluded unless `--include-secrets` is passed.
+
+## Workflow changes
+
+- `npm run init` replaces the manual setup. It writes keys from Node's CSPRNG into `.trusset/keys.env` at mode 0600 and a version 3 `config.json` with the epoch pinned and starting descriptors. It records version 1 of every list, reports on the environment, and prints the operator public key. Version 2 documented `--public-key <hex>` and emitted that hex nowhere; `init` and `show` now print it and the manifest records it.
+- `npm start -- --dry-run` validates a whole batch through every stage and reports every problem at once, needing no keys.
+- A present but unrecognised `investorType` or expiry value quarantines the row. Version 2 silently recorded the configured default and signed it. Check your inputs before upgrading: rows version 2 coerced will now be rejected.
+- Failure messages name the leaf and never echo the witness value. Version 2 wrote `value 'BRA' not in list` into `failures.csv`.
+- `--skip-proofs` skips proving instead of proving and discarding: 33.3 s to 0.77 s on the reference batch, with predicates still enforced.
+
+## New error codes
+
+`E_ISSUER_MISSING`, `E_DESCRIPTOR_MISSING`, `E_DESCRIPTOR_INVALID`, `E_VALIDITY_INVALID`, `E_LIST_VERSION_MISMATCH`, `E_UNPINNED_EPOCH`. Existing codes are unchanged. [Errors](/tools/kyc-starks/errors) has all of them.
+
+## Toolchain
+
+The declared minimum Rust version in `Cargo.toml` moves from 1.75 to 1.82, since version 3 uses `Option::is_none_or`; `rust-toolchain.toml` pins 1.91.0. Node stays at 18 or newer. Still no prebuilt binaries, which is why every bundle now records `manifest.toolchain.proverSha256`.
+
+## Upgrade checklist
+
+1. `npm run build`.
+2. `npm run init`, or on an existing tree add `manifest.issuer` and `claims.defaults` to `config.json` by hand and run `npm run list-version` once per list.
+3. Pin `security.epochDaysSource`.
+4. Add a `descriptor` and `validity` to every predicate.
+5. `npm start -- --dry-run`, and read what it says about rows version 2 used to coerce.
+6. Issue. `npm run anchor` after each publication.
+7. `npm run archive` per batch, and store the archive where you store everything else you may have to produce years later.
+8. Existing bundles: leave them alone. They verify. Re-issue only if you need the claims they assert to carry descriptors.
+
+## In the repository
+
+- [docs/MIGRATION_V2_TO_V3.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/MIGRATION_V2_TO_V3.md), the full migration guide with the version 2 failure examples

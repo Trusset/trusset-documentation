@@ -1,0 +1,92 @@
+---
+title: "Migrating from v1"
+description: "What an operator of the keccak-based version 1 KYC hashing tool needs to know before moving to version 2, and what changed again between 2.0 and 2.1: non-interoperable roots, preserved CLI verbs, new keys and config sections, the bundle output shape, stub mode, determinism, failure semantics, and the 2.1 root and key-derivation changes."
+icon: "clock-rotate-left"
+---
+
+This page is for an operator with version 1 hashes in production. After reading it you will know that version 1 roots cannot be re-derived and which commands and files change. You will also know what version 2.1 changed on top of 2.0. Moving on from 2.x is covered on [Migrating from v2](/tools/kyc-starks/migration-from-v2).
+
+Version 2.0.0 is breaking on internals but preserves the version 1 CLI surface and the batch index CSV. A version 1 deployment should switch with config and environment changes only.
+
+## Version 1 roots are not interoperable
+
+A version 1 `kycHash` is a keccak Merkle root over `keccak256(abiEncode(field, value))` leaves. It cannot be re-derived from version 2 output. Version 2 binds each leaf to a STARK proof and hashes with Rescue-Prime, so re-running a subject produces a fresh root unrelated to the version 1 one. Operators with version 1 hashes already published keep using version 1 of the tool to re-verify them; new subjects go through version 2. The column format of the index CSV is unchanged (`0x` plus 64 hex characters); what the value commits to is different.
+
+## Commands
+
+| Version 1 | Version 2 |
+|---|---|
+| `npm start` | `npm start`, unchanged |
+| `npm start -- --raw` | Unchanged |
+| `npm run show` | Unchanged, output extended |
+| `npm run decrypt` | Redefined as a self-audit round trip and not implemented in the TypeScript CLI; exits 70 |
+| `npm run decrypt` alias `verify` | Removed. `npm run verify -- <wallet>` is now the counterparty bundle verifier |
+| | `npm start -- --skip-proofs`, new |
+
+Any script that called `npm run verify` under version 1 meant the re-hash check; under version 2 it means verification against an anchor and fails without one.
+
+## Keys and toolchain
+
+Two 32-byte hex environment variables are required: `TRUSSET_KYC_MASTER_KEY` and `TRUSSET_KYC_SIGNING_KEY`, with the names configurable through `security.masterKeyEnv` and `manifest.signingKeyEnv`. Missing either is fatal before any I/O. Since version 3, `npm run init` generates them.
+
+Rust through rustup and Node.js 18 or newer are required, and `npm install` builds the Rust workspace, the WASM verifier and the TypeScript CLI.
+
+## Config sections
+
+| Section | Required | Behaviour when absent |
+|---|---|---|
+| `mapping`, `output`, `security` | Yes, as in version 1 | |
+| `predicates` | No | Built-in per-field defaults apply; a field with no default is fatal |
+| `tiers` | No | `NONE: 0, RETAIL: 1, PROFESSIONAL: 2, ELIGIBLE_COUNTERPARTY: 3` |
+| `lists` | When a `set_membership` predicate exists | Fatal otherwise |
+| `manifest` | No | `signingKeyEnv` defaults to `TRUSSET_KYC_SIGNING_KEY` |
+
+Version 1's `security.hashAlgorithm` is honoured for readability and otherwise ignored, with one warning per run: version 2 always uses Rescue-Prime over the Goldilocks field.
+
+## Output shape
+
+Version 1 emitted only `output/kyc_hashes_<timestamp>.csv`. Version 2 emits that file with identical columns and, per subject, a bundle directory with `manifest.json`, `manifest.sig`, `kycHash.hex`, `proofs/<field>.bin` and `secrets.enc`. `output.emitIndexCsv: false` suppresses the CSV for a consumer that walks bundles.
+
+## Stub mode
+
+`npm start -- --skip-proofs` emits zero-byte proof files and `mode: "stub"`. Verifiers reject stub bundles by default; `--accept-stub` opts in. Since version 3 this mode skips proving instead of proving and discarding, so it is also fast; predicates are still enforced.
+
+## Determinism
+
+With `security.deterministic: true`, the default, and a pinned `epochDaysSource`, two runs over the same input with the same keys produce byte-identical bundles for every artifact except `manifest.json`'s `createdAt`. The signing payload uses a sentinel timestamp, so `manifest.sig` is also identical. `tests/e2e/canary.sh` is the operational check.
+
+## Failure semantics
+
+Version 1 threw on the first invalid record and aborted the batch. Version 2 isolates failures into two stages, validation in TypeScript and per-subject prover failures, and records both in `output/failures.csv` with a `stage` column while the rest of the batch continues. Exit codes: 0 all succeeded, 2 partial, 1 no successes. Update CI checks accordingly.
+
+## `secrets.enc` and recovery
+
+There is no key escrow. Under deterministic issuance a lost `secrets.enc` can be regenerated from the original records and keys. Under `--no-deterministic` it holds the only copy of the subject key, and the subject must be re-run from the originating sources. Back it up like other operator-private data.
+
+## Commitment and circuit changes during version 2 development
+
+The commitment moved from a byte-level to a field-element-level Rescue construction (`CIRCUITS_VERSION` 1 to 2), and the `set_membership` leaf digest changed with it. List commitment files built before those changes are incompatible with version 2 binaries and had to be regenerated with `trusset-list-commit`. Bundles from before the production-mode flip carry `mode: "stub"` and are rejected by default verifiers; re-prove them or pass `--accept-stub`.
+
+## Version 2.0 to 2.1
+
+Version 2.1.0 changed how `kycHash` is computed, how per-subject key material is derived, and what the manifest records. Existing bundles keep verifying; new issuance produces different roots for the same input.
+
+**`merkleVersion: 2`.** The subject tree pads to a power of two with a domain-separated padding leaf and binds the leaf count and arity into a root wrap. This replaces version 1's last-node duplication. A manifest with no `merkleVersion` means version 1, and that computation is retained.
+
+**`circuitsVersion` 2 to 3.** The `set_membership` AIR gained the Merkle-walk carry binding that turns it into a real membership proof. A manifest with `circuitsVersion: 2` is verified against the frozen earlier AIR and carries the weaker property; re-issue the subject to upgrade it. Re-registering a root on chain is per subject and optional; there is no flag day.
+
+**`secretsKdfVersion` 1 to 2.** Nonces no longer derive from the master key. Each subject gets an independent key that the master key wraps inside `secrets.enc`; under deterministic mode that key is itself derived so runs stay byte-identical. Version 1 blobs still decrypt, selected by the manifest field. Master-key rotation without re-proving arrived with this: `trusset-prover --rekey-subject <bundle>`, for `secretsKdfVersion: 2` bundles only.
+
+**`configHash` now varies with the config.** Before 2.1 the canonical config hash was accidentally a constant, so the documented binding between config and key material never held. Editing `config.json` did not re-key anything. Since 2.1 it does, and the manifest records `configHash`. Bundles issued before 2.1 carry `secretsKdfVersion: 1` and the legacy constant, and decrypt unchanged.
+
+**Manifest additions**, all optional: `merkleVersion`, `configHash`, and per leaf `disclosure` and `params`. Counterparties running their own verifier must rebuild it, including any vendored WASM.
+
+**Explicit anchors.** `npm run verify` previously required `--public-key`. It accepts either `--root` or `--public-key` and requires at least one; the report gains `anchor`, `root_anchor_valid` and `manifest_version`.
+
+**Predicates.** A field may carry an array of predicate instances, each its own leaf with a params-derived suffix such as `dateOfBirth@7665d`. `commitment_only` produces a hiding commitment and a leaf hash with no STARK, and `config.example.json` uses it for the four identity fields; an existing config that names `preimage_knowledge` is unchanged.
+
+**Behaviour fixes.** `--no-deterministic` previously parsed and did nothing; it now flows into the job and the manifest. A record missing a configured predicate field used to abort the batch; it is quarantined. A prover that died before emitting any event used to exit 0; it now reports the failure. The `leaf_proved` event is now emitted with real `proof_bytes` and `ms`.
+
+## In the repository
+
+- [docs/MIGRATION_FROM_V1.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/MIGRATION_FROM_V1.md), the full version 1 to 2 and 2.0 to 2.1 guide

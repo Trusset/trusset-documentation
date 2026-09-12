@@ -1,0 +1,279 @@
+---
+title: "Quickstart"
+description: "From a fresh clone to a verified bundle in one sitting: build the tool, generate keys, prove a sample batch, and verify it against both anchors, with every command run against the real CLI."
+icon: "rocket"
+---
+
+This page is for a developer setting the KYC-STARKs tool (`trusset-kyc-zk-proofs`) up for the first time. After reading it you will have built the tool from source and produced a bundle for a sample subject. You will have verified it twice, once with your operator key and once with its root.
+
+Nothing here is skipped. Every command below was run in this order against a clean clone, and the output shown is what it printed. One substitution: where the tool prints an em dash, these excerpts show a hyphen.
+
+## Toolchain
+
+You need three things on the machine:
+
+| Requirement | Notes |
+|---|---|
+| Node.js 18 or newer | `npm install` drives the whole build. |
+| Rust via rustup | `rust-toolchain.toml` pins Rust 1.91.0 with the `wasm32-unknown-unknown` target, and rustup installs both on the first build. The declared minimum in `Cargo.toml` is 1.82. |
+| git | To clone the repository. |
+
+There are no prebuilt binaries. The first build compiles about 130 crates from the pinned `Cargo.lock`. On the machine used for this page it took just under four minutes; after that, builds are incremental and take seconds.
+
+Tested on macOS under Rosetta 2. Linux and Windows are untested. The key-loading step below assumes a POSIX shell.
+
+<Steps>
+  <Step title="Clone and build">
+    ```bash
+    git clone https://github.com/Trusset/trusset-kyc-zk-proofs
+    cd trusset-kyc-zk-proofs
+    npm install
+    ```
+
+    `npm install` runs `scripts/build.sh` as a postinstall step: a release build of the Rust workspace, the WASM verifier when the `wasm32` target is present, and the TypeScript CLI. The five native binaries land in `target/release/`: `trusset-prover`, `trusset-verifier-cli`, `trusset-registry`, `trusset-archive`, and `trusset-list-commit`.
+
+    Every `npm run` command from here on re-runs that build script first, so each one prints a few `[build]` lines before its own output. When nothing changed, that takes about a second.
+  </Step>
+
+  <Step title="Initialise the working tree">
+    `init` asks who is legally responsible for the assertions the tool will produce. Interactively it prompts for four values. To script it, pass them as flags:
+
+    ```bash
+    npm run init -- --issuer-name "Example Bank AG" --issuer-scheme LEI --issuer-identifier 529900T8BM49AURSDO55 --issuer-jurisdiction DE --non-interactive
+    ```
+
+    In one pass it does six things. It generates both keys and writes them to `.trusset/keys.env` at mode 0600, adding that path to `.gitignore`. It writes a `config.json` with the batch date pinned to today and starting claim descriptors. It records version 1 of the sample allowlist in the signed registry. It checks the environment, and it prints your operator public key:
+
+    ```
+    Environment
+      [ok]      Node.js                  v20.16.0
+      [ok]      Rust toolchain           cargo 1.91.0 (ea2d97820 2025-10-10)
+      [ok]      trusset-prover           /path/to/trusset-kyc-zk-proofs/target/release/trusset-prover
+      [ok]      trusset-verifier-cli     /path/to/trusset-kyc-zk-proofs/target/release/trusset-verifier-cli
+      [ok]      trusset-registry         /path/to/trusset-kyc-zk-proofs/target/release/trusset-registry
+      [ok]      trusset-archive          /path/to/trusset-kyc-zk-proofs/target/release/trusset-archive
+      [ok]      list registry: country_allowlist 1 version(s), current has 17 entries
+      [missing] input/                   empty
+                 ↳ place .json or .csv records in input/ - see the input format in README.md
+
+    Configuration
+      [written]  /path/to/trusset-kyc-zk-proofs/config.json
+      [written]  /path/to/trusset-kyc-zk-proofs/.trusset/keys.env (mode 0600)
+      [written]  list registry version 1 for: country_allowlist
+
+    Operator public key (give this to counterparties who verify offline)
+      5fead1a1c06ed570c7e7ba99675464ac418036a7f88e9fc412506aa1dfab2baa
+
+    Evidence classes available for `descriptor.evidenceClass`
+      SELF_ATTESTED  DOCUMENTARY  THIRD_PARTY_RELIANCE  AUTHORITATIVE_SOURCE  CRYPTOGRAPHIC  PHYSICAL_PRESENCE
+
+    Ready.
+    ```
+
+    Your key will differ. An empty `input/` is reported but does not block readiness.
+
+    <Note>
+      `init` pins the batch date into `config.json` as `"epochDaysSource": "fixed:<today>"`. Leave it pinned. Every per-subject key, nonce and leaf hash derives from that number, so a bundle proved against a moving clock cannot be reproduced tomorrow. Reproducing a bundle is exactly what an auditor asks for. The tool refuses to run unpinned unless you pass `--dev-unpinned-epoch`.
+    </Note>
+
+    Running `init` again on an existing tree leaves `config.json` and the key file untouched and says so. `--force` replaces both, which makes every existing bundle unreproducible.
+  </Step>
+
+  <Step title="Load the keys">
+    The prover reads both keys from the environment. Do this in every new shell:
+
+    ```bash
+    set -a && . ./.trusset/keys.env && set +a
+    ```
+
+    Back the file up where you keep other operator-private material and never commit it. Lose the master key and no existing `secrets.enc` can be decrypted and no bundle can be regenerated. Lose the signing key and no future bundle can be signed under the same identity.
+  </Step>
+
+  <Step title="Add records">
+    Create `input/records.json` with two subjects:
+
+    ```json
+    [
+      {
+        "walletAddress": "0xabcdef0123456789abcdef0123456789abcdef01",
+        "country": "DEU",
+        "investorType": "PROFESSIONAL",
+        "firstName": "Alice",
+        "lastName": "Anderson",
+        "dateOfBirth": "1985-04-12",
+        "nationality": "DEU",
+        "documentType": "PASSPORT",
+        "documentNumber": "P12345678",
+        "documentIssuingCountry": "DEU",
+        "softExpiryDays": 365,
+        "hardExpiryDays": 730,
+        "evidenceDate": "2026-08-01"
+      },
+      {
+        "walletAddress": "0xfedcba9876543210fedcba9876543210fedcba98",
+        "country": "FRA",
+        "investorType": "ELIGIBLE_COUNTERPARTY",
+        "firstName": "Bob",
+        "lastName": "Bertrand",
+        "dateOfBirth": "1992-09-30",
+        "nationality": "FRA",
+        "documentType": "PASSPORT",
+        "documentNumber": "F87654321",
+        "documentIssuingCountry": "FRA"
+      }
+    ]
+    ```
+
+    Both country codes are in the shipped sample allowlist of 17 ISO 3166-1 alpha-3 codes, and both tiers satisfy the generated config's `minTier: PROFESSIONAL`. A `RETAIL` record would fail that predicate and be reported, not silently downgraded. [Input records](/tools/kyc-starks/input-records) has every column.
+  </Step>
+
+  <Step title="Dry run">
+    A dry run validates the whole batch through every stage, including the prover's own predicate checks, reports every problem at once, and writes nothing. It needs no keys.
+
+    ```bash
+    npm start -- --dry-run
+    ```
+
+    ```
+    Dry run - nothing was written.
+    Batch as-of date 2026-09-12 (epoch day 20708), manifest version 3.0.0.
+
+    All 2 subject(s) would produce a bundle.
+    ```
+
+    The `--` is required: npm drops arguments that come before it. `npm run hash` is the same command as `npm start`.
+  </Step>
+
+  <Step title="Prove">
+    ```bash
+    npm start
+    ```
+
+    ```
+    Batch as-of date 2026-09-12 (epoch day 20708), manifest 3.0.0.
+    Processing 2 subject(s)…
+      ⏳ 0xabCDeF0123456789AbcdEf0123456789aBCDEF01
+      ✔  0xabCDeF0123456789AbcdEf0123456789aBCDEF01  →  /path/to/trusset-kyc-zk-proofs/output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01
+      ⏳ 0xfEdcBA9876543210FedCBa9876543210fEdCBa98
+      ✔  0xfEdcBA9876543210FedCBa9876543210fEdCBa98  →  /path/to/trusset-kyc-zk-proofs/output/0xfEdcBA9876543210FedCBa9876543210fEdCBa98
+    Index CSV: /path/to/trusset-kyc-zk-proofs/output/kyc_hashes_2026-09-12T17-33-45-658Z.csv
+
+    Next: record each published root so as-of checks resolve offline -
+      npm run anchor -- --bundle output/<wallet> --chain-id <id> --block <n> --block-time <unix>
+    Then archive the batch for long-term verification -
+      npm run archive -- --output <name>.tka --all output
+    ```
+
+    Each subject took about seven seconds on the machine used here, almost all of it in the three `set_membership` proofs. [Performance](/tools/kyc-starks/performance) has measured numbers.
+
+    The wallet is printed in its EIP-55 checksummed form, and that is the bundle directory name. Use that form in the commands below.
+
+    ```
+    output/
+    ├── 0xabCDeF0123456789AbcdEf0123456789aBCDEF01/
+    │   ├── kycHash.hex
+    │   ├── manifest.json
+    │   ├── manifest.sig
+    │   ├── proofs/
+    │   │   ├── country.bin
+    │   │   ├── dateOfBirth.bin
+    │   │   ├── documentIssuingCountry.bin
+    │   │   ├── documentNumber.bin
+    │   │   ├── documentType.bin
+    │   │   ├── firstName.bin
+    │   │   ├── investorType.bin
+    │   │   ├── lastName.bin
+    │   │   └── nationality.bin
+    │   └── secrets.enc
+    ├── 0xfEdcBA9876543210FedCBa9876543210fEdCBa98/
+    ├── audit.log
+    └── kyc_hashes_2026-09-12T17-33-45-658Z.csv
+    ```
+
+    Four of the nine proof files are zero bytes long: `firstName`, `lastName`, `documentType` and `documentNumber` are `commitment_only` leaves, which carry a hiding commitment and no STARK. [Bundle format](/tools/kyc-starks/bundle-format) describes every file.
+
+    <Warning>
+      The generated `config.json` sets `security.clearInputAfterProcessing` to `true`, so a real run deletes the files under `input/` when it finishes. A dry run does not. Keep your own copy of the records if you need to re-run the batch.
+    </Warning>
+  </Step>
+
+  <Step title="Verify against your key">
+    `show` prints the resolved configuration and, with the keys loaded, your operator public key. It is the key `init` printed.
+
+    ```bash
+    npm run show
+    ```
+
+    Verify Alice's bundle against it:
+
+    ```bash
+    npm run verify -- 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 --public-key 5fead1a1c06ed570c7e7ba99675464ac418036a7f88e9fc412506aa1dfab2baa
+    ```
+
+    ```
+    Wallet:    0xabCDeF0123456789AbcdEf0123456789aBCDEF01
+    kycHash:   0xbefab9f6fdaba8c1fdb740880fd7a7e6505f6a29b0c2fb2e4b089be395606168
+    Leaves:    9
+    Version:   3.0.0
+    Anchor:    public_key
+    Issuer:    Example Bank AG (LEI:529900T8BM49AURSDO55, DE)  key issuing-2026-09
+
+      layout_ok:              [ok]
+      mode_acceptable:        [ok]
+      kyc_hash_file_matches:  [ok]
+      signature_valid:        [ok]
+      root_anchor_valid:      [n/a]
+      merkle_root_valid:      [ok]
+
+    As of:     2026-09-12 (now)
+
+    Per-leaf:
+      [ok] investorType             tier_threshold
+            ...
+      [ok] nationality              set_membership
+            ...
+            list     country_allowlist v1 (resolved, 17 entries)
+            status   [ok] effective
+      ...
+
+    Notes:
+      - no revocation log was supplied, so claim statuses reflect only what this bundle asserts. A lapse or voidance declared elsewhere would not be visible here.
+
+    Verifies:  PASS
+    Entitled:  YES   (as of 2026-09-12)
+    ```
+
+    Exit code 0. Each leaf prints its claim descriptor, its validity window, and for `set_membership` leaves which list version the proof was made against.
+  </Step>
+
+  <Step title="Verify against the root">
+    A counterparty who can read the `kycHash` from the chain does not need your key at all. The root authenticates the bundle. Here the root is read from the bundle itself, which is what a chain read would return:
+
+    ```bash
+    npm run verify -- 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 --root $(cat output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01/kycHash.hex)
+    ```
+
+    ```
+    Anchor:    root
+    ...
+      signature_valid:        [n/a]
+      root_anchor_valid:      [ok]
+      merkle_root_valid:      [ok]
+    ...
+    Verifies:  PASS
+    Entitled:  YES   (as of 2026-09-12)
+    ```
+
+    Passing neither anchor is refused with exit code 1, because a bundle verified against nothing proves only its own internal consistency. Passing a wrong root fails with exit code 2. [Verification](/tools/kyc-starks/verification) explains what each anchor proves.
+  </Step>
+</Steps>
+
+## What to do next
+
+- Record where you published each root with `npm run anchor`, so a question about a past block can be answered without chain access. Then build an archive with `npm run archive`, one file that verifies on a bare machine. Both are on [Registries and archives](/tools/kyc-starks/registries-and-archives).
+- Review `config.json`. The claim descriptors `init` wrote are starting points that name a plausible instrument and provision. They are hashed into every leaf, so they are evidence, not comments. [Configuration](/tools/kyc-starks/configuration) documents every field.
+- Replace the sample allowlist. The 17 codes in `config/list_commitments/country_allowlist.source.txt` are a sample, and recording a new version is one command.
+
+## In the repository
+
+- [README.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/README.md), the quick start section

@@ -1,0 +1,144 @@
+---
+title: "Performance"
+description: "Measured proving and verification times, proof and bundle sizes, memory use and build time of the KYC-STARKs tool at version 3.0.0, with the exact machine they were measured on and the reproduction command for each figure."
+icon: "gauge"
+---
+
+This page is for the engineer planning capacity or deciding which predicates to keep. After reading it you will know what each circuit costs, where the time in a batch goes, and how big the artifacts are.
+
+Every number below is copied from the repository's `docs/PERFORMANCE.md` for version 3.0.0 as shipped. These are single-machine measurements, not a benchmark claim, and native builds on other hardware are expected to differ. The machine used to run the commands in this documentation, a different one, proved the two-subject quickstart batch at about seven seconds per subject.
+
+## Hardware
+
+| Component | Value |
+|---|---|
+| CPU | Apple M5 Pro, 18 cores |
+| Memory | 24 GB |
+| OS | macOS 26.6.1 (Darwin 25.6.0, arm64) |
+| Rust | 1.91.0, pinned in `rust-toolchain.toml` |
+| Node | v20.16.0 |
+| Build | `cargo build --release --workspace` |
+
+These are Rosetta 2 numbers, not native arm64 numbers. The host is arm64, but the installed Rust toolchain's host triple was `x86_64-apple-darwin`, so every binary measured is an x86_64 executable running under translation. A native `aarch64-apple-darwin` toolchain will be faster, likely substantially, so the figures are an upper bound on prove time for this hardware rather than a measurement of it. Check `rustc -vV | grep host` before comparing your own numbers. Tested on macOS only; Linux and Windows are untested.
+
+## Per-circuit proving and verification
+
+Method: `tests/perf_bench.rs` in each circuit crate, 5 iterations, median reported.
+
+| Circuit | Trace W x L | Prove p50 | Verify p50 | Proof size |
+|---|---|---|---|---|
+| `age_threshold` | 34 x 32 | 206 ms | 2.52 ms | 20.8 KB |
+| `preimage_knowledge` | 28 x 64 | 351 ms | 2.78 ms | 23.4 KB |
+| `tier_threshold` | 16 x 32 | 539 ms | 1.93 ms | 16.0 KB |
+| `set_membership` | 33 x 2048 | 1361 ms | 7.57 ms | 49.1 KB |
+
+```bash
+cargo test -p trusset-circuit-age-threshold --features prod-proofs-age --release --test perf_bench -- --ignored --nocapture
+```
+
+The same command with `trusset-circuit-preimage-knowledge` and `prod-proofs-preimage`, `trusset-circuit-tier-threshold` and `prod-proofs-tier`, or `trusset-circuit-set-membership` and `prod-proofs-set` reproduces the other rows. The benchmarks are gated behind `--ignored` so they stay out of the default test suite.
+
+`set_membership` is the most expensive circuit by a wide margin: its trace is 2048 rows because the Merkle walk runs in-AIR at 30 rows per level. `tier_threshold` is the outlier relative to its trace size: 539 ms for 16 x 32, against 206 ms for the larger `age_threshold`. The repository attributes it to the constraint composition degree rather than the trace shape, and tracks it in `docs/FUTURE_WORK.md`. Version 3.0.0 changed nothing inside the circuits, so these figures differ from the 2.1.0 table only by measurement noise.
+
+## Full pipeline
+
+Measured on the shipped `config.example.json`, which produces 9 leaves per subject: 5 proving leaves (1 `age_threshold`, 3 `set_membership`, 1 `tier_threshold`) and 4 `commitment_only` leaves.
+
+| Operation | Wall clock |
+|---|---|
+| `npm start`, 1 subject, 9 leaves | 4.16 s (p50 of 5; first run 4.41 s) |
+| `npm start -- --dry-run`, 1 subject | 0.12 s |
+| Verifier, 9 leaves, 5 STARKs | 0.04 s |
+| `trusset-archive build`, 1 subject | 0.01 s |
+| Verify from an archive, 1 subject | 0.05 s |
+| `tests/e2e/canary.sh` (build check, 2 runs, byte diff) | about 24 s |
+| `tests/e2e/v3_matrix.sh` (80 assertions, 5 full batches) | about 5 min |
+
+Per-leaf times from one run's `output/audit.log`:
+
+| Leaf | Circuit | Prove |
+|---|---|---|
+| `documentIssuingCountry` | `set_membership` | 1522 ms |
+| `country` | `set_membership` | 1118 ms |
+| `nationality` | `set_membership` | 1102 ms |
+| `investorType` | `tier_threshold` | 247 ms |
+| `dateOfBirth` | `age_threshold` | 37 ms |
+| `firstName`, `lastName`, `documentType`, `documentNumber` | `commitment_only` | 0 ms |
+
+The three `set_membership` leaves account for 3.74 of the 4.16 seconds. Per-leaf figures in a batch vary more than the isolated benchmarks because they share a warm process. Plan capacity against the isolated medians.
+
+Through version 2.1, `--skip-proofs` ran the full STARK and discarded the bytes. It now runs each circuit's `validate()` and skips proving, so predicates are still enforced and the run is fast:
+
+| | 2.1 | 3.0 |
+|---|---|---|
+| Dry run, 11-row batch, 7 provable subjects | 33.3 s | 0.77 s |
+| Dry run, 1 subject | not measured | 0.12 s |
+
+## Artifact sizes
+
+One 9-leaf subject under `config.example.json`:
+
+| Artifact | Size |
+|---|---|
+| Bundle on disk | 228 KB |
+| Proof bytes in that bundle | 196 KB |
+| `manifest.json`, version 3 with claim descriptors | 17.1 KB |
+| `manifest.json`, version 2.0, same 9 leaves | 7.9 KB |
+| `secrets.enc` | 1.4 KB |
+| `commitment_only` proof file | 0 bytes |
+| Archive, 1 subject | 269 KB (275,418 bytes) |
+| Archive, 3 subjects with 10 leaves each | 978 KB (1,001,058 bytes) |
+| `trusset-prover` (release) | 2.8 MB |
+| `trusset-verifier-cli` (release) | 2.9 MB |
+| `trusset-archive` (release) | 939 KB |
+| `trusset-registry` (release) | 934 KB |
+| `trusset-list-commit` (release) | 522 KB |
+| `trusset_verifier.wasm` (release, `--features wasm`) | 2.6 MB (2,761,619 bytes) |
+
+The version 3 manifest grew from 7.9 KB to 17.1 KB for the same nine leaves. That is roughly 1 KB per leaf of descriptor, validity interval, list-version reference and binding digest, plus the issuer and toolchain blocks. That is 7% of a bundle that is 92% proof bytes. An archive is modestly larger than the bundles it contains because proof bytes are base64 inside it, offset by `secrets.enc` being excluded. Choosing `commitment_only` for the four identity fields removes roughly 95 KB of proof bytes and 1.4 s of prove time per subject compared with proving them under `preimage_knowledge`.
+
+## Proof parameters
+
+Pinned once in `circuits/common/src/proof_options.rs` for all four circuits: blowup 16, 27 FRI queries, 16 grinding bits, quadratic extension over Goldilocks, FRI folding 4, FRI remainder max degree 7, linear batching. Unchanged in version 3.
+
+The conjectured security is the minimum of three terms, evaluated against the largest workspace trace:
+
+```text
+query soundness : 27 * log2(16) + 16          = 124 bits
+field soundness : 2 * 64 - log2(2048 * 16)    = 113 bits
+hash collision  : Rp64_256                    = 128 bits
+                                          min = 113 bits
+```
+
+113 bits clears the published floor of 100 that `manifest.stark.securityBits` advertises. The floor is checked at compile time and again at prover startup.
+
+## Memory
+
+| Operation | Peak RSS |
+|---|---|
+| `trusset-prover`, 1 subject, 9 leaves | 72 MB |
+| `trusset-verifier-cli`, 9 leaves | 8 MB |
+| Node CLI driver | about 72 MB |
+
+```bash
+/usr/bin/time -l target/release/trusset-verifier-cli --bundle output/<wallet> --public-key <hex>
+```
+
+Peak prover memory is driven by the `set_membership` trace and its low-degree extension, so it scales with the largest single leaf rather than with the leaf count. Subjects are processed one at a time, so a 10,000-subject batch has the same peak as a 1-subject batch. An earlier profile on x86_64 hardware reached 112.7 MB at 50 subjects, with a marginal cost of about 0.5 MB per subject. The design budget is 4 GB.
+
+## Build
+
+There are no prebuilt binaries. A cold `npm install` compiles 130 crates from `Cargo.lock`; on the machine used for the quickstart on these pages it took just under four minutes. Subsequent builds are incremental and take seconds. Every bundle records the SHA-256 of the prover binary that produced it. That is what lets a bundle be traced to a build rather than to "some version of the tool".
+
+## Where to look for slowdowns
+
+1. **`set_membership` count.** Each one costs about 1.1 to 1.5 s. A config with three of them spends 3.7 s of its 4.2 s there. Fields that do not need allowlist membership should not use it.
+2. **`commitment_only` versus `preimage_knowledge`.** The former is free; the latter costs 351 ms and 23 KB per leaf while proving only that the operator knows an opening of its own commitment.
+3. **Several predicates on one field.** Two age thresholds are two leaves and two proofs. Cheap for `age_threshold`, expensive for `set_membership`.
+4. **Startup dominates small batches.** A 1-subject run is mostly Node cold start plus the build check every npm command performs; a 100-subject batch amortises it.
+5. **Check before you prove.** `npm start -- --dry-run` costs about 0.1 s per subject and catches everything the prover would reject.
+
+## In the repository
+
+- [docs/PERFORMANCE.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/PERFORMANCE.md), the source of every figure above
+- [docs/RELEASE_GATE.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/RELEASE_GATE.md), the 3.0.0 gate with the 2.1.0 comparison

@@ -1,0 +1,77 @@
+---
+title: "Trusset platform integration"
+description: "How a bundle produced by the KYC-STARKs tool becomes a verified customer and proof-backed claims on the Trusset platform: which artifacts the platform accepts, operator key registration, the root on chain, the claim slots each leaf can back, why two fields travel in cleartext, and what changes when a subject is re-proved."
+icon: "plug"
+---
+
+This page is for the engineer running the tool in-house who wants its output on the Trusset platform. After reading it you will know which files leave your machine, which API calls consume them, and which leaves can back which claims. It is the one page in this section that assumes Trusset; every other page describes the tool on its own.
+
+The tool was built for this pipeline, which is why two of its defaults exist. `country` and `investorType` are always written in cleartext, and the batch index CSV keeps the column layout the platform's batch verification consumes. Neither is needed by a counterparty verifying with the standalone verifier.
+
+## What leaves your infrastructure
+
+Trusset never sees the underlying KYC data, and no endpoint accepts it. What travels is the evidence that a predicate held:
+
+| Artifact | Sent | Why |
+|---|---|---|
+| `kycHash` | Yes | Published on chain by identity verification |
+| `manifest.json` | Yes | Hashes, public inputs and claim descriptors |
+| `manifest.sig` | Yes | Checked against your registered operator key |
+| `proofs/*.bin` | Yes, on a production instance | Each STARK is verified server-side before a claim is filed |
+| `secrets.enc` | Never | Encrypted witness material. No endpoint accepts it |
+
+A commitment carries no value and a STARK reveals nothing beyond its predicate, so uploading them discloses no personal data. `secrets.enc` and `.trusset/keys.env` stay on your machines.
+
+## Why `country` and `investorType` are plaintext
+
+The platform stores the country on the customer record and uses it to evaluate transfer rules, and the investor type becomes an argument of the on-chain identity verification call. Both therefore travel in cleartext in the batch index CSV and in `manifest.passthrough`, and the tool marks their leaves `plaintext`. Their proofs still bind the disclosed value into `kycHash`, so a CSV row that disagrees with the bundle is detectable, but they add integrity rather than privacy. `country` is mandatory in every record and cannot be dropped from the mapping.
+
+## From bundle to verified customer
+
+The full walkthrough, with SDK calls, is on [KYC Proofs](/sdk/customers/kyc-proofs). The sequence:
+
+<Steps>
+  <Step title="Register the operator key, once">
+    [Set Operator Key](/endpoints/customers/set-operator-key) records the ed25519 public key that `npm run init` and `npm run show` print, and sets `proofVerificationEnabled` and `maxStalenessDays` for the instance. Every manifest signature is checked against this key. Rotating it does not re-verify claims already filed; keep the old key with the bundles it signed.
+  </Step>
+  <Step title="Put the root on chain">
+    `verifyFromManifest` in the SDK reads `walletAddress`, `kycHash`, `country`, `investorType` and the expiry days from the manifest and publishes the root. The index CSV maps row for row onto batch verification, up to 500 subjects per transaction.
+  </Step>
+  <Step title="File proof-backed claims">
+    [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) takes the manifest, the signature and the base64 proof bytes of the leaves you select. It verifies each STARK and files one claim per leaf. [Inspect Manifest](/endpoints/customers/inspect-manifest) reports beforehand which leaves are attestable and why the others are blocked.
+  </Step>
+</Steps>
+
+## Which claims a leaf can back
+
+| Claim type | Derived from | Circuit required |
+|---|---|---|
+| `KYC` | the root itself | |
+| `RESIDENCY` | the `country` leaf | `set_membership` |
+| `CITIZENSHIP` | the `nationality` leaf | `set_membership` |
+| `ACCREDITATION` | the `investorType` leaf | `tier_threshold` |
+
+A canonical field proved with a different circuit is skipped rather than filed elsewhere. A `commitment_only` leaf cannot be attested under enforcement, because there is no STARK to verify. `AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK` and `PEP_CHECK` are not proof-backed and are added manually; they are also the only slots a leaf with no canonical meaning may be filed under.
+
+## Enforcement, staleness and trust anchors
+
+A `PRODUCTION` instance requires the STARK bytes and rejects `stub` manifests whatever the instance setting says; a `DEVELOPMENT` instance does neither by default. Read `proofVerificationEnforced` from [Get Operator Key](/endpoints/customers/get-operator-key) and gate on it.
+
+`maxStalenessDays` bounds how old a bundle's `epochDays` may be before submission is refused with `PROOF_STALE`. The tool records the batch date and never compares it with today; this is where that comparison happens.
+
+The network's trust anchors decide which predicate parameters and which allowlist roots are accepted. A leaf outside them is refused with `UNAPPROVED_PARAMS` or `UNAPPROVED_LIST`. After you rotate an allowlist with `npm run list-version`, the new root must be added to the approved roots on the platform side before proofs made against it are accepted. Bundles proved against an earlier approved version keep verifying, since each leaf records the version it used.
+
+## Re-proving a subject
+
+Every re-run produces a new root, because the batch date is inside every leaf hash. The new bundle is legitimate, but its root no longer matches the one on the registry, and Add Claims from Proof refuses it with `HASH_MISMATCH`. [Attest Proofs](/endpoints/customers/attest-proofs) rotates the on-chain root to the new bundle in the same flow as filing its claims.
+
+The platform's own [Revoke Proof](/endpoints/customers/revoke-proof) revokes a claim slot on the registry. It is separate from the tool's `npm run revoke`, which writes to the operator's signed revocation registry.
+
+## The vendored verifier
+
+The platform does not shell out to the native verifier. It vendors a `wasm32` build of the tool's verifier crate and drives its own per-leaf check ladder through the granular exports listed on [Verification](/tools/kyc-starks/verification#the-wasm-build). `scripts/rebuild-wasm.sh` in the tool repository produces that artifact with a provenance record, and the artifact's commit and SHA-256 feed the verifier version stamped on every verification report. Any addition to the signed manifest schema requires re-vendoring, or the recomputed signing view drops the new field and every production signature fails.
+
+## Further reading
+
+- [KYC Proofs](/sdk/customers/kyc-proofs), the SDK walkthrough with the full error table
+- [Trusset Identity Compliance Architecture](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/whitepaper.pdf), the architecture whitepaper in the tool repository

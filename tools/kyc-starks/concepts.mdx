@@ -1,0 +1,146 @@
+---
+title: "Concepts"
+description: "The vocabulary the rest of the KYC-STARKs documentation relies on: the batch date, leaves, hiding commitments, the leaf hash and its binding digest, the Merkle root that becomes the kycHash, disclosure classes, and claim descriptors."
+icon: "lightbulb"
+---
+
+This page is for a developer who wants to read a bundle and understand what each value in it commits to. After reading it you will know how a field value becomes a leaf and how leaves become the root. You will also know which parts of that chain a proof covers and which parts a signature covers.
+
+The formulas below use `‖` for byte concatenation. `Rescue` is Rescue-Prime 64/256 over the Goldilocks field, the one hash used everywhere in the tool. Every call is prefixed with a distinct 32-byte domain tag; [Security model](/tools/kyc-starks/security-model#domain-separation) lists all ten.
+
+## The batch date
+
+The tool measures time in `epochDays`: whole days since 1970-01-01, UTC. A batch has one as-of date, chosen by `security.epochDaysSource` in `config.json` and recorded in every manifest as `epochDays`, `asOfDate` and `epochDaysSource`.
+
+That number is folded into every per-subject key, every commitment nonce and every leaf hash. It is also the `currentEpochDays` public input of every `age_threshold` proof and the `from` of every validity window. Pinning it with `fixed:<n>` or `env:<VAR>` is what makes a batch reproducible; `utc_today` is refused outside a development flag.
+
+## Leaves
+
+Every field that carries a predicate becomes a leaf. A field can carry several predicate instances, for example an age threshold at 18 and another at 21, and then it becomes several leaves.
+
+The first instance keeps the bare field name. Later instances get a suffix derived from their parameters, so the name is stable across runs and safe as a file name. Examples: `dateOfBirth@7665d` for a 21-year threshold, `investorType@PROFESSIONAL` for a tier floor, `nationality@country_allowlist` for a list, `firstName@max128` for a commitment-only instance. The leaf name is the proof file's basename, `proofs/<leafName>.bin`, and the name a revocation refers to.
+
+Each leaf carries a witness (the field value), a circuit, public inputs, resolved parameters, a commitment, a proof, and in version 3 a binding block. The circuits are on [Circuits](/tools/kyc-starks/circuits).
+
+## Hiding commitments
+
+The field value never appears in the bundle. What appears is a commitment to it:
+
+```text
+commitment = Rescue( bytes_to_field(COMMITMENT_TAG)
+                   ‖ Felt(circuit_id)
+                   ‖ Felt(len(witness_felts))
+                   ‖ witness_felts
+                   ‖ bytes_to_field(nonce) )
+```
+
+`witness_felts` is the circuit's canonical field-element encoding of the value: one element holding `dob_days` for `age_threshold`, and one holding the tier code for `tier_threshold`. The string circuits take the NFC-normalised UTF-8 bytes, append a `0x01` terminator, and chunk the result into 7-byte little-endian limbs. They then zero-pad to a fixed count: 12 elements for `set_membership`, 20 for `preimage_knowledge` and `commitment_only`. Unicode NFC normalisation happens first, so a composed and a decomposed spelling of the same name commit to the same value.
+
+The nonce is 32 bytes derived per leaf through HKDF from a per-subject key, never reused across leaves or subjects. It is what makes the commitment hiding. A date of birth has only a few tens of thousands of plausible values, and without the nonce none of them can be confirmed against the commitment. The nonce and the plaintext value are stored only in `secrets.enc`, encrypted, on the operator's machine.
+
+The circuit id and the length prefix are part of the preimage. A commitment minted under one circuit therefore cannot be re-read as a commitment under another. A two-element witness cannot be confused with a one-element witness followed by a longer nonce.
+
+## Digests and the leaf hash
+
+Two more digests summarise what the proof was made about and what the proof bytes are:
+
+```text
+public_digest = Rescue( PUBLIC_DIGEST_TAG ‖ canonical(public_inputs) )
+proof_digest  = Rescue( PROOF_DIGEST_TAG  ‖ proof_bytes )
+```
+
+For a `commitment_only` leaf, `proof_bytes` is empty and `proof_digest` is the digest of the empty string.
+
+The leaf hash binds everything a verifier needs to hold constant:
+
+```text
+leaf_hash = Rescue( LEAF_TAG
+                  ‖ u32_le(len(leaf_name)) ‖ leaf_name
+                  ‖ circuit_id (u8)
+                  ‖ u32_le(len(wallet_bytes)) ‖ wallet_bytes
+                  ‖ u64_le(epoch_days)
+                  ‖ commitment (32 bytes)
+                  ‖ public_digest (32 bytes)
+                  ‖ proof_digest (32 bytes)
+                  [‖ binding_digest (32 bytes)] )
+```
+
+The wallet, the batch date, the circuit id and the leaf name are inside the hash. A proof therefore cannot be presented for another subject, another date, another predicate or another field. Any such change moves the leaf hash, which moves the root, which breaks the signature and the on-chain anchor.
+
+The last component is present only on leaves that carry a binding block, which is every leaf a version 3 manifest produces. A leaf without one hashes over exactly the version 2 preimage, so bundles issued before version 3 keep their hashes and their signatures.
+
+## The binding digest
+
+A version 3 leaf records, in `binding`, what it asserts and for how long:
+
+| Block | Contents |
+|---|---|
+| `descriptor.legalBasis` | `framework`, `reference`, `assertion` |
+| `descriptor.issuingParty` | `name`, `identifierScheme`, `identifier`, `jurisdiction` |
+| `descriptor.evidenceClass` | one of `SELF_ATTESTED`, `DOCUMENTARY`, `THIRD_PARTY_RELIANCE`, `AUTHORITATIVE_SOURCE`, `CRYPTOGRAPHIC`, `PHYSICAL_PRESENCE` |
+| `descriptor.evidenceRef` | optional operator-side case reference |
+| `validity` | `from`, optional `until`, `basisAsOf`, all in `epochDays` |
+| `listVersion` | for `set_membership`: `listId`, `version`, `root`, `contentHash` |
+
+The whole block is hashed as compact JSON with keys sorted at every depth:
+
+```text
+binding_digest = Rescue( LEAF_BIND_TAG ‖ canonical_json(binding) )
+```
+
+Editing a descriptor after the fact therefore changes the leaf hash, the root and the signature. A descriptor that could be swapped freely would be decoration; this one is evidence.
+
+Nothing in a binding block is proved by a circuit. A validity window is a signed assertion by the issuer about the period it stands behind a claim. `basisAsOf` is the day the underlying evidence was examined, which is deliberately separate from `from`. A passport checked in January and used for a March issuance records January in `basisAsOf` and March in `from`. The gap is the staleness a reviewer wants to see.
+
+The evidence classes are a labelled taxonomy, not a scale. Nothing in the tool compares two of them and no predicate takes an evidence-class threshold.
+
+## The Merkle root and the kycHash
+
+The leaf hashes of one subject are folded into one root:
+
+1. Sort the leaf hashes by their 32-byte big-endian representation.
+2. Pad the sorted layer to the next power of two, minimum 2, with `Rescue(MERKLE_PAD_TAG ‖ u64_le(leaf_count))`.
+3. Pair adjacent nodes, smaller first, and merge each pair with `Rescue(NODE_TAG ‖ a ‖ b)`. No layer is ever odd.
+4. `root = Rescue(MERKLE_ROOT_TAG ‖ inner_root ‖ u64_le(leaf_count) ‖ arity_u8)`, with arity fixed at 2.
+
+That root is the `kycHash`. It is written to `kycHash.hex`, recorded as `manifest.kycHash`, and printed in the batch index CSV; the three values are the same. Because the tree is sorted by hash, its shape depends only on the set of leaves, not on the order of fields in the config. The prover reorders `manifest.leaves` to match the tree.
+
+This is the `merkleVersion: 2` construction. Bundles from before version 2.1 carry no `merkleVersion` and were built with a version 1 construction that the verifier still supports; [Circuits](/tools/kyc-starks/circuits#merkle-root-construction) has both.
+
+## Disclosure classes
+
+Every leaf records how much of its value a reader of the bundle can learn, in `manifest.leaves[].disclosure`:
+
+| Class | Meaning |
+|---|---|
+| `plaintext` | The value is also written outside the zk layer, in the batch index CSV and in `manifest.passthrough`. The proof adds integrity, not privacy. |
+| `predicate` | Only the predicate outcome is meaningful to a counterparty. The value is hidden. |
+| `commitment_only` | A hiding commitment and a leaf hash, no STARK. The value is hidden and nothing is proved about it. |
+
+The tool assigns `plaintext` to `country` and `investorType` whatever predicate they carry, because it always writes those two values to the index CSV and to the manifest's passthrough block. `country` is mandatory in every record; `investorType` is optional but takes a configured default when the column is absent. For the config that `init` writes, a counterparty learns:
+
+| Field | Circuit | Disclosure | What a counterparty learns |
+|---|---|---|---|
+| `country` | `set_membership` | `plaintext` | The exact value, from the CSV and `passthrough` |
+| `investorType` | `tier_threshold` | `plaintext` | The exact value, same sources |
+| `nationality` | `set_membership` | `predicate` | Only that it is in the committed allowlist |
+| `documentIssuingCountry` | `set_membership` | `predicate` | Only that it is in the committed allowlist |
+| `dateOfBirth` | `age_threshold` | `predicate` | Only that the age is at or above the recorded threshold |
+| `firstName`, `lastName`, `documentType`, `documentNumber` | `commitment_only` | `commitment_only` | Only that a commitment exists and is in the root |
+
+`softExpiryDays` and `hardExpiryDays` are passthrough integers. No circuit witnesses them and no verifier evaluates them; only the manifest signature covers them.
+
+## List versions
+
+An allowlist is committed as its own Rescue Merkle tree, with leaves `Rescue(SET_LEAF_TAG ‖ value)` and nodes under `SET_NODE_TAG`. Those tags are distinct from the subject tree's, so a list entry can never be mistaken for a subject leaf. A `set_membership` proof carries the list's root as a public input.
+
+Lists live in a signed, append-only registry that keeps every version that was ever authoritative, with its values. Each `set_membership` leaf records which version it was proved against, so a verifier holding the registry or an archive resolves the root back to the values it committed to. Rotating a list neither invalidates old bundles nor requires re-proving; [Registries and archives](/tools/kyc-starks/registries-and-archives) has the procedure.
+
+## Two questions, kept apart
+
+`overall_pass` says whether the bundle holds together cryptographically and is anchored to a key or a root. `temporal.entitled` says whether the subject could rely on it at a given instant, taking the root that was live then, each claim's validity window and any revocation into account. A voided bundle still passes the first and fails the second, because the proof is a true record of what was asserted. [Verification](/tools/kyc-starks/verification) covers both.
+
+## In the repository
+
+- [docs/CIRCUITS.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/CIRCUITS.md), the leaf hash, binding digest and Merkle constructions with their tests
+- [bundle-format/src/leaf.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/bundle-format/src/leaf.rs), [bundle-format/src/merkle.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/bundle-format/src/merkle.rs), [bundle-format/src/claims.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/bundle-format/src/claims.rs)

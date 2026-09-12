@@ -1,0 +1,348 @@
+---
+title: "Registries and archives"
+description: "The signed append-only registries the KYC-STARKs tool keeps under config/registry, the list version, root anchor and revocation records with their invariants, the difference between a lapse and a voidance, and the .tka archive that carries all of it in one verifiable file."
+icon: "book"
+---
+
+This page is for the operator who has issued bundles and must keep them interpretable, and for the counterparty handed an archive. After reading it you will know what each registry file records and what the writers refuse to do. You will also know why a lapse and a voidance are different records, and what an archive contains and leaves out.
+
+A bundle carries proofs but not everything a reader needs to interpret them. Three things live outside it. Which values a list root stood for. Which root was on chain at a given block. Whether the operator has since declared a claim ended or never valid. Version 3 keeps those in three registries that are signed and append-only, and packages them with the bundles in an archive.
+
+## The registry directory
+
+```
+config/registry/
+├── lists/
+│   ├── <listId>.json          every version of the list that was ever authoritative
+│   └── <listId>.json.sig
+├── root_history.json          which root was published at which block
+├── root_history.json.sig
+├── revocations.json           lapses and voidances
+└── revocations.json.sig
+```
+
+The location is `security.registryDir` in `config.json`, default `config/registry`; the native binaries take `--registry <DIR>`. Only `trusset-registry` writes here, and every write is signed with `TRUSSET_KYC_SIGNING_KEY`, the same key that signs manifests. A counterparty who trusts an operator's bundles therefore trusts the registries without pinning a second key.
+
+Each `.sig` is a detached 64-byte ed25519 signature over the document's canonical bytes: compact JSON with keys sorted at every depth. The readable file is pretty-printed; verifiers and the archive builder recompute the canonical bytes from the parsed document rather than from the file. Files are written atomically.
+
+Append-only holds by construction. A list version can only be added after the current one, an anchor cannot replace an anchor at the same height, and a revocation is only ever pushed. The alternative, letting an operator rewrite the file that establishes what was true when, would defeat the point of keeping it.
+
+<Note>
+  The verifier checks the registry signatures when it reads them from an archive and a `--public-key` was supplied. When it reads them from a `--registry` directory, it checks their structure only. The signatures exist for the archive path, where the registries leave the operator's machine.
+</Note>
+
+## List versions
+
+`lists/<listId>.json` holds every version of an allowlist, with its values, in order:
+
+```json
+{
+  "schemaVersion": 1,
+  "listId": "country_allowlist",
+  "versions": [
+    {
+      "version": 1,
+      "values": ["DEU", "FRA", "USA", "GBR", "JPN", "ESP", "ITA", "NLD", "CHE", "SGP", "HKG", "CAN", "AUS", "SWE", "NOR", "DNK", "FIN"],
+      "root": "0x90785a7ea7ea20e096c8b18955971db0a3387dc522b42982d49041c65e3dc3a9",
+      "depth": 5,
+      "contentHash": "0x595b37877781c60df28fc960f4c6b422e284c53d3e98bb7c593248e33ad947a5",
+      "sourceSha256": "0x4f4012962f3a660050116dba1cd9e32f92896aa3a6b4dcf61711cfb102d8687c",
+      "effectiveFrom": 20708,
+      "effectiveUntil": 20726,
+      "generator": "trusset-list-commit 2.1.0",
+      "recordedAt": "2026-09-12T17:32:03Z"
+    },
+    {
+      "version": 2,
+      "values": ["DEU", "FRA", "USA", "GBR", "JPN", "ESP", "ITA", "NLD", "CHE", "SGP", "HKG", "CAN", "AUS", "SWE", "NOR", "DNK", "FIN", "IRL"],
+      "root": "0xfdee6e97e4bb23371fc445e8ed98bb18d3526378bec67cddd5c2a8a0513367ea",
+      "depth": 5,
+      "contentHash": "0xf7054c2cb6f507167cc233a86043af06c740d84e298dfe111a0ee08afd5eaf85",
+      "sourceSha256": "0x9e4f0cdcc9818dd54c525f613a505e5571b0c0906c872294b11fcd3eb99074b9",
+      "effectiveFrom": 20727,
+      "generator": "trusset-list-commit 2.1.0",
+      "recordedAt": "2026-09-12T17:35:20Z",
+      "note": "Sanctions review 2026-Q4"
+    }
+  ]
+}
+```
+
+<ResponseField name="values" type="string[]">
+  The entries, NFC-normalised, in source order. This is the field that makes an old `setRoot` interpretable years later.
+</ResponseField>
+
+<ResponseField name="root" type="string">
+  The Rescue Merkle root of the list, padded to a power of two by duplicating the last leaf. This is the `setRoot` public input of every proof made against the version.
+</ResponseField>
+
+<ResponseField name="depth" type="integer">
+  The tree depth, which becomes the proof's `setDepth`. At most 32.
+</ResponseField>
+
+<ResponseField name="contentHash" type="string">
+  SHA-256 over the values joined by newlines. Changes only when the set changes.
+</ResponseField>
+
+<ResponseField name="sourceSha256" type="string">
+  SHA-256 over the source file's verbatim bytes, comments included. Changes when a comment is edited.
+</ResponseField>
+
+<ResponseField name="effectiveFrom" type="integer">
+  First `epochDays` on which the version was authoritative, inclusive.
+</ResponseField>
+
+<ResponseField name="effectiveUntil" type="integer">
+  Last day, inclusive. Absent on the current version only.
+</ResponseField>
+
+<ResponseField name="generator, recordedAt, note" type="string">
+  The tool that built the commitment, the wall-clock time of the record, and the operator's free-text reason for the rotation.
+</ResponseField>
+
+### Rotating a list
+
+1. Edit the source file, for example `config/list_commitments/country_allowlist.source.txt`.
+2. Record the new version with the day it becomes authoritative:
+
+```bash
+npm run list-version -- --list-id country_allowlist --source config/list_commitments/country_allowlist.source.txt --effective-date 2026-10-01 --note "Sanctions review 2026-Q4"
+```
+
+```
+country_allowlist: recorded version 2 effective 2026-10-01 (18 entries)
+  root         0xfdee6e97e4bb23371fc445e8ed98bb18d3526378bec67cddd5c2a8a0513367ea
+  contentHash  0xf7054c2cb6f507167cc233a86043af06c740d84e298dfe111a0ee08afd5eaf85
+  supersedes   version 1 (its window closed on 2026-09-30)
+  Bundles proved against earlier versions keep verifying: their leaves record the version they used.
+```
+
+The previous version's window closes on the day before the new one opens, so the windows abut with no gap and no overlap. Its values, root and hashes stay in the file forever.
+
+The writer refuses three things. Removing or reordering a version. Recording a version whose values are unchanged, because two versions sharing a root could not be told apart by a proof. An effective date on or before the current version's start. `--effective-date` defaults to today.
+
+A batch resolves the version authoritative on its as-of date, not the newest one. A batch dated before a rotation keeps using the older version, and a batch dated before the first version fails with a message naming the earliest effective date. Each `set_membership` leaf records the version it used in `binding.listVersion`, and verification resolves the list from the leaf, never from current config. Rotating a list neither invalidates any `kycHash` nor requires re-proving.
+
+## Root anchors
+
+`root_history.json` records where a subject's root was published. The tool has no chain access, so this is the operator stating, under signature, what they published and where.
+
+```json
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "subject": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
+      "kycHash": "0xbefab9f6fdaba8c1fdb740880fd7a7e6505f6a29b0c2fb2e4b089be395606168",
+      "epochDays": 20708,
+      "chainId": 1,
+      "blockHeight": 8000100,
+      "blockTimestamp": 1789174800,
+      "manifestSha256": "0x358b9a910c3d0dca8195cae5c7e020c28f2d2f3352ac9319898318b79de1f52b",
+      "recordedAt": "2026-09-12T17:34:45Z"
+    }
+  ]
+}
+```
+
+<ResponseField name="subject, kycHash, epochDays" type="string, string, integer">
+  Read from the bundle's manifest, so an anchor is tied to a specific issuance.
+</ResponseField>
+
+<ResponseField name="chainId, blockHeight, blockTimestamp" type="integer">
+  Where and when the root was published. The timestamp, in Unix seconds, is what lets an as-of query be phrased as a date. An as-of block check evaluates validity windows on the day of that timestamp.
+</ResponseField>
+
+<ResponseField name="txHash" type="string">
+  Optional, recorded verbatim from `--tx`.
+</ResponseField>
+
+<ResponseField name="manifestSha256" type="string">
+  SHA-256 of the `manifest.json` the root came from.
+</ResponseField>
+
+Record an anchor whenever you publish a root:
+
+```bash
+npm run anchor -- --bundle output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01 --chain-id 1 --block 8000100 --block-time 1789174800
+```
+
+```
+anchored 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 at block 8000100 on chain 1 (2026-09-12)
+  kycHash  0xbefab9f6fdaba8c1fdb740880fd7a7e6505f6a29b0c2fb2e4b089be395606168
+  An as-of check at or after this block now resolves to this root without chain access.
+```
+
+Recording the same publication twice is a no-op. Recording a different root for the same subject at the same height on the same chain is refused. A correction is a new anchor at the block where the correct root was published. An as-of block query resolves to the latest anchor for that subject at or below the requested height. If there is none, the subject had no root on chain then, and the verifier reports it as not entitled and says why.
+
+## Revocations
+
+A signed manifest cannot be edited, so ending a claim is a separate record in `revocations.json`. The tool refuses to blur the two legally distinct ways a claim stops being usable:
+
+| | `lapsed` | `void_ab_initio` |
+|---|---|---|
+| Means | The claim was true and stopped being true | The claim was never true |
+| `--effective-date` | Required; it is the whole content of the record | Rejected; naming a date would imply the claim held before it |
+| Reliance before the date | Stands | In question |
+| Reliance at any other instant | Stands before the date, fails from it | Fails at every instant, including before the declaration |
+| Bundle still verifies | Yes | Yes |
+
+The last row is deliberate. A voided bundle keeps verifying because the proof is a true record of what the operator asserted. Destroying it to express that the assertion was wrong would destroy the evidence of the misstatement. `overall_pass` stays true and `temporal.entitled` goes false.
+
+```bash
+npm run revoke -- --bundle output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01 --leaf investorType --effect lapsed --effective-date 2026-10-01 --reason PERIODIC_REVIEW_OVERDUE
+```
+
+```bash
+npm run revoke -- --bundle output/0xfEdcBA9876543210FedCBa9876543210fEdCBa98 --effect void_ab_initio --reason FRAUDULENT_ONBOARDING
+```
+
+Without `--leaf`, the record applies to every leaf of the bundle. The leaf name must exist in the manifest.
+
+```json
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "subject": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
+      "kycHash": "0xbefab9f6fdaba8c1fdb740880fd7a7e6505f6a29b0c2fb2e4b089be395606168",
+      "leafName": "investorType",
+      "effect": "lapsed",
+      "effectiveFrom": 20727,
+      "declaredAt": 20708,
+      "reasonCode": "PERIODIC_REVIEW_OVERDUE",
+      "issuerKeyId": "issuing-2026-09",
+      "recordedAt": "2026-09-12T17:35:39Z"
+    },
+    {
+      "subject": "0xfEdcBA9876543210FedCBa9876543210fEdCBa98",
+      "kycHash": "0x9ee10301aa7a741038d21bc0511c53bd0a94cea0a2e18c99fa4ab3b1f20d5b4d",
+      "effect": "void_ab_initio",
+      "declaredAt": 20708,
+      "reasonCode": "FRAUDULENT_ONBOARDING",
+      "issuerKeyId": "issuing-2026-09",
+      "recordedAt": "2026-09-12T17:35:43Z"
+    }
+  ]
+}
+```
+
+<ResponseField name="subject, kycHash" type="string">
+  A revocation is always about one specific issuance, identified by its root, never about a subject in the abstract.
+</ResponseField>
+
+<ResponseField name="leafName" type="string">
+  The leaf it applies to. Absent means every leaf.
+</ResponseField>
+
+<ResponseField name="effect, effectiveFrom" type="string, integer">
+  `lapsed` with the first day the claim no longer holds, or `void_ab_initio` with no date.
+</ResponseField>
+
+<ResponseField name="declaredAt" type="integer">
+  The day the operator made the declaration, which is not the day the claim ended. A lapse discovered late has `declaredAt` well after `effectiveFrom`, and that gap is itself audit-relevant.
+</ResponseField>
+
+<ResponseField name="reasonCode, note, issuerKeyId, recordedAt" type="string">
+  A short machine-readable reason, optional free text, the key id from the bundle's manifest, and the wall-clock time of the record.
+</ResponseField>
+
+When a verifier evaluates a leaf, a voidance wins over everything, then the earliest applicable lapse, then the leaf's own validity window. [Verification](/tools/kyc-starks/verification#claim-status) has the resulting statuses.
+
+## Archives
+
+An archive is one JSON file, by convention with the `.tka` extension, that verifies on a bare machine: no config, no registry, no output tree, no network, no chain. It carries the bundles, every version of every list their proofs depend on, the root history, the revocation log with all their signatures, the issuer identity, and the toolchain block.
+
+```bash
+npm run archive -- --output 2026Q3.tka --all output --archive-id example-2026Q3
+```
+
+```
+Archive:   2026Q3.tka
+  id             example-2026Q3
+  digest         0x61a62927f44ce26b8332ccac72132f26310279f6d026dcd74131f76b0f699f69
+  size           547859 bytes
+  issuer         Example Bank AG (LEI:529900T8BM49AURSDO55, DE)
+  subjects       2
+  list versions  2
+  root anchors   2
+  revocations    2
+
+Verify from this file alone with:
+  trusset-verifier-cli --archive 2026Q3.tka --public-key 5fead1a1c06ed570c7e7ba99675464ac418036a7f88e9fc412506aa1dfab2baa
+```
+
+`--all <dir>` takes every directory under `<dir>` that contains a `manifest.json`; `--bundle <dir>` names directories one by one and can be repeated. Building needs no key material: the registries carry their own detached signatures and the manifests carry theirs. The builder refuses three things. A manifest whose bytes do not match their own canonical serialisation. Bundles that name different issuers in one archive. A batch that depends on a list with no registry.
+
+### Contents
+
+| Field | Contents |
+|---|---|
+| `archiveVersion` | `3.0.0` |
+| `archiveId` | The `--archive-id` label, or the output file's stem |
+| `createdAt` | Wall-clock time of the build |
+| `issuer` | The issuer block from the manifests, including the public key |
+| `toolchain` | The prover version and binary digest from the first bundle |
+| `subjects[]` | Per subject: `subjectId`, the `manifest` as structured JSON, `manifestSha256` of the on-disk bytes, `manifestSig` and every proof under `proofs`, both base64, and `kycHashHex` |
+| `listRegistries`, `listRegistrySignatures` | Every list registry the bundles depend on, in full, with its signature |
+| `rootHistory`, `rootHistorySignature` | The root history and its signature |
+| `revocations`, `revocationsSignature` | The revocation log and its signature |
+| `digest` | SHA-256 over the canonical JSON of every field except `createdAt` and `digest` |
+
+Two archives of the same content compare equal on `digest` regardless of when they were built. Any modification is refused at parse time with `archive integrity check failed`, exit code 66, before any of the contents are believed.
+
+`secrets.enc` is excluded unless `--include-secrets` is passed. An archive is usually handed to a counterparty, and the witness blob is operator-private even though it is encrypted.
+
+### Reading one back
+
+```bash
+npm run archive -- --inspect 2026Q3.tka
+```
+
+```
+Archive:   2026Q3.tka
+  format         3.0.0
+  id             example-2026Q3
+  created        2026-09-12T17:36:04Z
+  digest         0x61a62927f44ce26b8332ccac72132f26310279f6d026dcd74131f76b0f699f69  [ok] recomputed
+  size           547859 bytes
+
+Issuer:    Example Bank AG (LEI:529900T8BM49AURSDO55, DE)
+  key issuing-2026-09  0x5fead1a1c06ed570c7e7ba99675464ac418036a7f88e9fc412506aa1dfab2baa
+
+Built by:  trusset-prover 3.0.0
+  sha256         0xf47ffbcfe83232d3c233c663470a49627712986e6c49b6ea0a5fba3c59f47df3
+
+Subjects: 2
+  0xabCDeF0123456789AbcdEf0123456789aBCDEF01  9 leaves  0xbefab9f6fdab  as of 2026-09-12
+  0xfEdcBA9876543210FedCBa9876543210fEdCBa98  9 leaves  0x9ee10301aa7a  as of 2026-09-12
+
+List registries:
+  country_allowlist
+    v1  from epoch day 20708 to 20726  17 entries  root 0x90785a7ea7ea
+    v2  from epoch day 20727 (current)  18 entries  root 0xfdee6e97e4bb
+
+Root anchors: 2
+  0xabCDeF0123456789AbcdEf0123456789aBCDEF01  chain 1 block 8000100  0xbefab9f6fdab
+  0xfEdcBA9876543210FedCBa9876543210fEdCBa98  chain 1 block 8000200  0x9ee10301aa7a
+
+Revocations: 2
+  0xabCDeF0123456789AbcdEf0123456789aBCDEF01  investorType  lapsed  (PERIODIC_REVIEW_OVERDUE)
+  0xfEdcBA9876543210FedCBa9876543210fEdCBa98  <all leaves>  void_ab_initio  (FRAUDULENT_ONBOARDING)
+```
+
+Verifying from an archive is on [Verification](/tools/kyc-starks/verification#verifying-from-an-archive). Store the file wherever you keep things you may have to produce in five years.
+
+## Inspecting the registries
+
+```bash
+./target/release/trusset-registry show
+```
+
+prints every list version with its window, every anchor, and every revocation in the working tree. `npm run show` prints the same summary after the resolved configuration.
+
+## In the repository
+
+- [docs/SECURITY.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/SECURITY.md), the sections on allowlist rotation, validity, lapse and voidance, and archives
+- [bundle-format/src/registry.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/bundle-format/src/registry.rs) and [bundle-format/src/archive.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/bundle-format/src/archive.rs)
+- [prover/src/registry_io.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/prover/src/registry_io.rs), the writers and their refusals

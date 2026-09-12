@@ -1,0 +1,161 @@
+---
+title: "Input records"
+description: "The JSON and CSV record format the KYC-STARKs tool reads from input/, the rule for every column, how a bad row is quarantined, and every file a run writes to output/ besides the bundles."
+icon: "table"
+---
+
+This page is for the engineer feeding records into the tool. After reading it you will know which columns a record needs, what a blank or a wrong value does, and where a failed row ends up. You will also know what the index CSV, `failures.csv` and `audit.log` contain.
+
+## Files
+
+`npm start` reads every `.json` and `.csv` file directly under `input/`, in file-name order, and treats all their rows as one batch. Other extensions are ignored.
+
+A JSON file holds an array of records, or one record as a bare object. A CSV file has a header row; values are trimmed and a UTF-8 byte-order mark is tolerated. Both shapes carry the same fields.
+
+```json
+[
+  {
+    "walletAddress": "0xabcdef0123456789abcdef0123456789abcdef01",
+    "country": "DEU",
+    "investorType": "PROFESSIONAL",
+    "firstName": "Alice",
+    "lastName": "Anderson",
+    "dateOfBirth": "1985-04-12",
+    "nationality": "DEU",
+    "documentType": "PASSPORT",
+    "documentNumber": "P12345678",
+    "documentIssuingCountry": "DEU",
+    "softExpiryDays": 365,
+    "hardExpiryDays": 730,
+    "evidenceDate": "2026-08-01"
+  }
+]
+```
+
+```csv
+walletAddress,country,investorType,firstName,lastName,dateOfBirth,nationality,documentType,documentNumber,documentIssuingCountry
+0xabcdef0123456789abcdef0123456789abcdef01,DEU,PROFESSIONAL,Alice,Anderson,1985-04-12,DEU,PASSPORT,P12345678,DEU
+```
+
+Column names come from `config.mapping`. The names below are the defaults `init` writes. Values must be strings, numbers or booleans; an object or array in any column fails the row.
+
+<Warning>
+  With the generated `config.json`, a real run deletes every file under `input/` when it finishes (`security.clearInputAfterProcessing: true`). A dry run does not. Keep your own copy of the records.
+</Warning>
+
+## Columns
+
+### Passthrough columns
+
+These are validated in TypeScript before the prover starts. Two of them, `country` and `investorType`, are also written in cleartext to the index CSV and to `manifest.passthrough`, which is why their leaves carry the `plaintext` disclosure class.
+
+<ResponseField name="walletAddress" type="string" required>
+  The subject identifier: `0x` followed by 40 hex characters. A mixed-case address must carry a correct EIP-55 checksum; all-lowercase and all-uppercase forms are accepted. The bundle directory and every manifest field use the checksummed form, whatever case the input used.
+</ResponseField>
+
+<ResponseField name="country" type="string" required>
+  At least two characters. The value is upper-cased and cut to its first three characters, so supply an ISO 3166-1 alpha-3 code. Under the default predicate it must be a member of `country_allowlist`. A row without it is quarantined; the tool cannot run without a country column.
+</ResponseField>
+
+<ResponseField name="investorType" type="string">
+  One of `NONE`, `RETAIL`, `PROFESSIONAL`, `ELIGIBLE_COUNTERPARTY`, matched case-insensitively. A blank column takes `output.defaults.investorType` (`RETAIL` in the generated config). A value that is present and not one of the four fails the row. A `NONE` subject fails the `tier_threshold` predicate with `E_TIER_NONE`, so a subject with no tier claim should have the predicate removed from the config rather than a tier of `NONE`.
+</ResponseField>
+
+<ResponseField name="softExpiryDays" type="integer">
+  Whole days between 0 and 36500. Blank takes `output.defaults.softExpiryDays` (365). Passthrough only: no circuit witnesses it and no verifier evaluates it. When both expiries are above zero, `softExpiryDays` must not exceed `hardExpiryDays`.
+</ResponseField>
+
+<ResponseField name="hardExpiryDays" type="integer">
+  Same rules; the default is 730. Passthrough only.
+</ResponseField>
+
+<ResponseField name="evidenceDate" type="string">
+  The day this subject's evidence was examined, as `YYYY-MM-DD` or a days-since-1970 integer. When present it becomes `validity.basisAsOf` on every leaf of the row; when absent, each predicate's `validity.basisAsOfOffsetDays` applies. It must not be after the batch date. A malformed value fails the row.
+</ResponseField>
+
+### Hashed fields
+
+Every name listed in `config.mapping.fields` is a hashed field: its value is committed and, depending on the predicate, proved. The generated config lists seven.
+
+| Field | Default predicate | Value rules |
+|---|---|---|
+| `dateOfBirth` | `age_threshold`, at least 18 years | `YYYY-MM-DD`, or a days-since-1970 integer. Must be a real calendar date on or after 1970-01-01 and not after the batch date. |
+| `nationality` | `set_membership` on `country_allowlist` | Must be a member of the list version authoritative on the batch date. Compared after NFC normalisation. |
+| `documentIssuingCountry` | `set_membership` on `country_allowlist` | Same. |
+| `firstName`, `lastName` | `commitment_only` | Any non-empty string. |
+| `documentType`, `documentNumber` | `commitment_only` | Any non-empty string. |
+
+A row that lacks a value for any hashed field is quarantined with `Record N: missing value for predicate field "<name>"`. Leaves cannot be skipped per row.
+
+Value lengths depend on the circuit. `set_membership` encodes values into 12 field elements, which fits 64 bytes. `preimage_knowledge` rejects values over 128 bytes, whatever `maxValueBytes` says in the config. `commitment_only` enforces no length at all. [Circuits](/tools/kyc-starks/circuits) has the encodings and [Configuration](/tools/kyc-starks/configuration#predicates) the parameter.
+
+## Where a bad row goes
+
+A batch fails in two stages, and one bad row never stops the others.
+
+**Validation** runs in TypeScript before the prover is spawned. Bad wallets, unrecognised investor types, expiry values out of range, malformed evidence dates and missing hashed fields are caught here. Every such row goes to `output/failures.csv` with `stage=validation`.
+
+**Prover** failures are per subject. An under-age date of birth, a value missing from the allowlist, a tier below the floor: the subject fails and the rest of the batch continues. The row goes to `failures.csv` with `stage=prover`. A real run stops at the first failing leaf of a subject; `--dry-run` reports every failing leaf of every subject in one pass.
+
+Failure messages name the leaf and the asserted threshold and never echo the subject's value. `failures.csv` travels, and a nationality is exactly what the `nationality` predicate exists to keep private.
+
+```csv
+walletAddress,stage,errorCode,message
+0x8888888888888888888888888888888888888888,prover,E_AGE_BELOW_MIN,"leaf ""dateOfBirth@7665d"" (age_threshold): the subject does not meet the asserted age threshold of 7665 days as of 2026-09-12 (epoch day 20708). Fix: correct this subject's dateOfBirth in the input row, lower `minAgeYears` for this predicate in config.json, or exclude the subject from the batch."
+```
+
+`failures.csv` is removed at the start of a run that produces no failures, so its presence always refers to the last run. [Errors](/tools/kyc-starks/errors) lists every code.
+
+## What a run writes
+
+```
+output/
+├── <walletAddress>/                 one bundle directory per successful subject
+├── kyc_hashes_<timestamp>.csv       the batch index
+├── failures.csv                     only when a row failed
+└── audit.log                        one NDJSON event per line, rewritten each run
+```
+
+Bundles are written to `output/.tmp/<wallet>/` and renamed into place only after the manifest is signed, so an interrupted run leaves nothing half-written under `output/`. [Bundle format](/tools/kyc-starks/bundle-format) describes the directory.
+
+### The index CSV
+
+One row per successful subject, in input order, with the cleartext passthrough values and the root:
+
+```csv
+walletAddress,country,investorType,softExpiryDays,hardExpiryDays,kycHash,index
+0xabCDeF0123456789AbcdEf0123456789aBCDEF01,DEU,PROFESSIONAL,365,730,0xbefab9f6fdaba8c1fdb740880fd7a7e6505f6a29b0c2fb2e4b089be395606168,1
+0xfEdcBA9876543210FedCBa9876543210fEdCBa98,FRA,ELIGIBLE_COUNTERPARTY,365,730,0x9ee10301aa7a741038d21bc0511c53bd0a94cea0a2e18c99fa4ab3b1f20d5b4d,2
+```
+
+The file name carries the run's UTC timestamp. `npm start -- --raw` drops the `index` column and appends `_raw` to the file name. `output.format: "json"` writes the same rows as a JSON array with a `.json` extension, and `output.emitIndexCsv: false` suppresses the file in either format. The `kycHash` column equals `kycHash.hex` and `manifest.kycHash` for that subject.
+
+### audit.log
+
+The prover writes `output/audit.log` on every real run and truncates it first, so the file describes the last run only. Each line is one JSON event:
+
+| Event | Fields |
+|---|---|
+| `run_start` | `timestamp`, `library_versions` (prover and the pinned Winterfell crates), `config_hash`, `list_commitments` (list id to source SHA-256), `skip_proofs`, `subject_count` |
+| `subject_start` | `timestamp`, `subject_id` |
+| `leaf_proved` | `timestamp`, `subject_id`, `field`, `proof_bytes`, `ms` |
+| `subject_done` | `timestamp`, `subject_id` |
+| `subject_failed` | `timestamp`, `subject_id`, `error_code` |
+| `run_done` | `timestamp`, `ok`, `failed` |
+
+No field value ever appears in it, and a failed subject is recorded by error code only, without the message, because messages carry numeric context. The wallet address is recorded; it is a public identifier. Timestamps are wall-clock, so the file differs between two otherwise identical runs, and the determinism canary ignores it by design.
+
+## Exit codes of `npm start`
+
+| Code | Meaning |
+|---|---|
+| 0 | Every row produced a bundle |
+| 2 | At least one bundle and at least one failed row |
+| 1 | Every row failed, or the run aborted before proving: a configuration error, missing keys, or an unpinned epoch |
+
+An empty `input/`, or input files with no records, prints a message and exits 0. `--dry-run` exits 0 when every row would produce a bundle and 2 when it found problems.
+
+## In the repository
+
+- [cli/src/recordValidation.ts](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/cli/src/recordValidation.ts), the per-row rules
+- [prover/src/audit.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/prover/src/audit.rs), the audit log schema

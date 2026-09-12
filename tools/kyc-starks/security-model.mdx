@@ -1,0 +1,162 @@
+---
+title: "Security model"
+description: "What the KYC-STARKs tool protects against and what it assumes: the threat model, the key hierarchy from master key to per-leaf nonce, the ten domain separation tags, how determinism is enforced and what it costs, which files hold secrets, and the guarantees the tool does not make."
+icon: "key"
+---
+
+This page is for the security reviewer or compliance officer assessing the tool, and for the operator deciding what to back up and what to hand out. After reading it you will know which attacks the design answers, how every secret derives from two 32-byte keys, and which claims the tool deliberately does not make.
+
+Everything runs locally. The tool makes no outbound network call at any point, including verification. The Rust workspace pins 130 crates in `Cargo.lock`, forbids `unsafe` code at the workspace level, and links no networking library. The TypeScript CLI has four runtime dependencies and `npm audit` reports no advisories at the 3.0.0 release.
+
+## Threat model
+
+### In scope
+
+| Threat | Mitigation |
+|---|---|
+| Recovering a low-entropy field such as a date of birth or a country by brute force from its commitment | Every leaf commits with a 32-byte nonce derived from a per-subject key, so no candidate value can be confirmed without it |
+| One master-key compromise recovering every nonce ever issued | Nonces derive from an independent per-subject key that the master key only wraps (`secretsKdfVersion: 2`). Recovery needs the master key and that subject's `secrets.enc`. Under deterministic mode the subject key is itself master-derived; see below |
+| A counterparty inferring undisclosed fields from what was disclosed | Domain-separated leaf and node tags plus the circuit id in every leaf hash; sibling hashes reveal nothing about a field |
+| Replaying a proof for another subject, another batch date, another circuit or another field | The wallet, `epochDays`, circuit id and leaf name are inside every leaf hash, and the circuit id is inside the commitment |
+| Two different leaf sets producing one root | The version 2 Merkle construction pads with a tagged leaf and binds the leaf count and arity into the root |
+| Proving a non-member as an allowlist member | The `set_membership` AIR binds the Merkle-walk carry chain to the committed value's leaf digest since `circuitsVersion` 3 |
+| A leaf's stated parameters differing from what was proved | Every leaf records `params`; the verifier recomputes `paramsHash` and rejects a mismatch |
+| A tampered list file | The prover recomputes each list's root, depth and content hash from its values and refuses to start on drift |
+| A tampered proof or manifest | The ed25519 signature over the canonical manifest, and independently the published root, both break |
+| A stub bundle relabelled as production | `mode` is inside the signed payload, and a production bundle with an empty proof on a proving leaf is rejected outright |
+| Decrypting a stolen `secrets.enc` | XSalsa20-Poly1305 under a wrapped payload key; offline brute force needs the 256-bit master key |
+| A bundle that cannot be reproduced for an audit | Deterministic derivation from the master key, an entropy guard that aborts any OS randomness draw, and a refusal to run against an unpinned wall-clock date |
+| A bundle nobody is accountable for | Version 3 manifests record the issuer's name, identifier, jurisdiction, key id and public key |
+| A threshold with no stated meaning | Every version 3 leaf carries a claim descriptor hashed into the leaf and therefore into the root |
+| A list root whose contents nobody retained | The signed append-only registry keeps every version with its values, and each leaf records the version it used |
+| A claim that stopped being true, or never was | Signed revocation records, with `lapsed` and `void_ab_initio` kept distinct |
+| Silent substitution of a compliance-relevant input | A present but unrecognised `investorType` or expiry quarantines the row instead of taking the default |
+| A witness value leaking through a failure report | Failure messages name the leaf and the threshold, never the value |
+| A manifest whose `proofPath` escapes the bundle directory | Every reader requires a plain `proofs/<name>` entry with no separators, parent references or leading dot |
+| Proof parameters weakened below the advertised level | The conjectured security is asserted against the 100-bit floor at compile time and again at prover startup |
+
+### Out of scope
+
+| Threat | Why |
+|---|---|
+| Compromise of the operator's machine while the keys are loaded | `Zeroize` on secret buffers narrows the window; a kernel-level adversary defeats any user-space defence. Use OS-level secret loading |
+| Side channels in the field arithmetic | Winterfell's implementation is not constant-time. Proving is an offline batch operation on a private machine, not a real-time secret-handling protocol |
+| Quantum attacks on the manifest signature | ed25519 is pre-quantum. The STARK layer is post-quantum-friendly; root-anchored verification avoids the signature entirely |
+| Formal zero knowledge of the proof bytes | See below |
+| Deletion under `output/` after proving | The verifier catches tampered bytes, not absent ones. Filesystem controls apply |
+| False KYC data | `input/` is trusted. A false record produces a valid proof of a false statement |
+
+## Key hierarchy
+
+Two keys exist, both 32 random bytes generated by `npm run init` with Node's CSPRNG and stored in `.trusset/keys.env` at mode 0600. Everything else derives from them.
+
+```text
+TRUSSET_KYC_MASTER_KEY                          a key-wrapping key; derives no nonce itself
+│
+├─ deterministic: true
+│    subject_key = HKDF-SHA256( ikm = master_key,
+│                               salt = "trusset-kyc-v2/subject-key",
+│                               info = subject_id ‖ u64_le(epoch_days) ‖ config_hash ‖ u32_le(circuits_version) )
+├─ deterministic: false
+│    subject_key = 32 bytes of OS entropy, existing nowhere except inside secrets.enc
+│
+├─ wrap_key   = HKDF-SHA256( master_key, salt = "trusset-kyc-v2/wrap-key",   info = ctx )
+├─ wrap_nonce = HKDF-SHA256( master_key, salt = "trusset-kyc-v2/wrap-nonce", info = ctx )
+│    secrets.enc = 0x02 ‖ wrap_nonce ‖ secretbox(wrap_key, subject_key)
+│                       ‖ data_nonce ‖ secretbox(subject_key, secrets_json)
+│
+subject_key
+├─ subject_seed = HKDF-SHA256( subject_key, salt = "trusset-kyc-v2/subject",
+│                              info = subject_id ‖ u64_le(epoch_days) ‖ config_hash ‖ u32_le(circuits_version) )
+│    └─ leaf_seed = HKDF-SHA256( subject_seed, salt = "trusset-kyc-v2/leaf",
+│                                info = leaf_name ‖ circuit_id ‖ params_hash )
+│         used verbatim as the 32-byte commitment nonce of that leaf
+└─ data_nonce = HKDF-SHA256( subject_key, salt = "trusset-kyc-v2/data-nonce", info = ctx )
+
+ctx = subject_id ‖ u64_le(epoch_days) ‖ config_hash ‖ u32_le(kdf_version)
+
+TRUSSET_KYC_SIGNING_KEY                         ed25519 seed; signs manifests and registries
+```
+
+`subject_id` is the checksummed wallet address as ASCII bytes. `config_hash` is the SHA-256 of the canonical config projection described on [Configuration](/tools/kyc-starks/configuration), so editing the predicates re-keys every subject. `circuits_version` is 3, so a circuit-set bump re-keys every subject at once.
+
+The nonce for a leaf depends on the leaf name, the circuit id and the parameters. An 18-year and a 21-year assertion over the same date of birth are therefore distinct leaves with distinct nonces and commitments.
+
+### Determinism
+
+Under `security.deterministic: true`, the default, two runs over the same records with the same keys, the same config and a pinned batch date produce byte-identical bundles. `kycHash.hex`, `manifest.sig`, `secrets.enc` and every proof file compare equal, and `manifest.json` differs only in `createdAt`. That is what lets an operator regenerate a bundle for an auditor, and it is what the repository's canary test asserts.
+
+The tool enforces it rather than assuming it. `prover/src/entropy.rs` is the only path to OS randomness in the prover, and it refuses to draw while `TRUSSET_KYC_DETERMINISTIC=1` is set, returning `E_DETERMINISM_VIOLATION`. The CLI exports that variable for every deterministic run. A batch date taken from the wall clock is the other way a bundle becomes unreproducible, so `utc_today` is refused outside `--dev-unpinned-epoch`. A bundle built that way says so in its manifest for the rest of its life.
+
+The cost is honest to state. Under deterministic mode the subject key is derived from the master key, so an adversary holding only the master key can reconstruct it without the bundle. The wrapping still keeps the nonce chain out of anything that leaks without `secrets.enc`, but it does not by itself defeat a master-key compromise. The wrapping benefit fully materialises only under `--no-deterministic`, where the subject key comes from OS entropy and exists nowhere except inside that subject's wrapped blob. An operator who does not need reproducibility as an audit property can run that way and back up `secrets.enc`. A lost blob then means the subject must be re-run from the originating sources.
+
+Determinism also means the proof bytes are a stable fingerprint of the witness and nonce. Two deterministic bundles for the same subject and batch date carry identical proofs, so a holder of both can tell whether a field changed without learning it.
+
+### Signing
+
+The signing key produces deterministic RFC 8032 ed25519 signatures over the canonical manifest with `createdAt` set to the sentinel `1970-01-01T00:00:00Z`, so two runs at different times produce identical `manifest.sig` files. The same key signs the three registries, so a counterparty who trusts the bundles trusts the registries without pinning a second key. The public key is printed by `init` and `show` and recorded in `manifest.issuer.publicKey`. `manifest.issuer.keyId` labels it, so a later rotation reads as a new key rather than a new issuer.
+
+### Master key rotation
+
+Rotating the master key does not require re-proving:
+
+```bash
+TRUSSET_KYC_MASTER_KEY=<old hex> TRUSSET_KYC_NEW_MASTER_KEY=<new hex> ./target/release/trusset-prover --rekey-subject output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01
+```
+
+This unwraps the subject key under the old master key and re-wraps it under the new one, rewriting `secrets.enc` in place. The manifest, its signature, `kycHash.hex` and every proof are untouched, because `secrets.enc` sits outside the signing payload by design. Only `secretsKdfVersion: 2` bundles support it. Under deterministic mode a re-keyed bundle can no longer be regenerated from the new master key alone, since its subject key was derived from the old one.
+
+## Domain separation
+
+Every Rescue call is prefixed with one of ten 32-byte ASCII tags, padded with `-`, and pairwise distinctness is asserted at compile time for all 45 pairs. Adding a tag requires extending that matrix, and the workspace refuses to build if any two tags are equal.
+
+| Tag | Used for |
+|---|---|
+| `TRUSSET-KYC-V2:LEAF` | The subject leaf hash |
+| `TRUSSET-KYC-V2:NODE` | Inner nodes of the subject tree |
+| `TRUSSET-KYC-V2:PUB-DIGEST` | The digest of a leaf's canonical public inputs |
+| `TRUSSET-KYC-V2:PRF-DIGEST` | The digest of a leaf's proof bytes |
+| `TRUSSET-KYC-V2:SET-LEAF` | Allowlist leaves |
+| `TRUSSET-KYC-V2:SET-NODE` | Inner nodes of an allowlist tree |
+| `TRUSSET-KYC-V2:COMMIT` | The hiding commitment |
+| `TRUSSET-KYC-V2:MERKLE-PAD` | The padding leaf of the subject tree |
+| `TRUSSET-KYC-V2:MERKLE-ROOT` | The root wrap of the subject tree |
+| `TRUSSET-KYC-V3:LEAF-BIND` | The binding digest over a leaf's descriptor, validity and list version |
+
+The two allowlist tags differ from the two subject-tree tags, so a list entry can never be presented as a subject leaf. A padding leaf can never be presented as a member.
+
+## What lives on disk
+
+| Path | Contents | Handling |
+|---|---|---|
+| `.trusset/keys.env` | Both keys, hex | Mode 0600, ignored by git. Back it up as operator-private material. Lose the master key and no `secrets.enc` can be decrypted and no bundle regenerated; lose the signing key and nothing further can be signed under the same identity |
+| `output/<wallet>/secrets.enc` | Every field value and nonce of the subject, encrypted | Operator-private. Never ships; excluded from archives by default; under `--no-deterministic` the only copy of the subject key |
+| `output/<wallet>/`, the rest | The root, the signed manifest, the proofs | The bundle. Safe to hand to a counterparty |
+| `output/kyc_hashes_*.csv` | Wallet, `country`, `investorType`, expiries and root per subject, in cleartext | Two KYC attributes in the clear, by design |
+| `output/failures.csv`, `output/audit.log` | Error codes and timings | No field values, by design |
+| `config.json` | Predicates, descriptors, issuer, key variable names | Hashed into every bundle. Contains no key material |
+| `config/registry/` | List values, roots, anchors, revocations, all signed | Public data plus the operator's signed statements. An archive carries a copy |
+| `input/` | Plaintext KYC records | Deleted after a real run by the generated config |
+
+Decrypting `secrets.enc` needs the master key plus `walletAddress`, `epochDays` and `configHash`, all of which the manifest records. If a manifest or `secrets.enc` is lost but the records and keys remain, a deterministic run regenerates them byte for byte.
+
+## What the tool does not protect
+
+**Formal zero knowledge.** Winterfell 0.13 adds no blinding columns and every circuit proves from a zero seed, so proof bytes are deterministic in the witness and the nonce. Hiding rests on the commitment nonce. The repository tracks this in `docs/FUTURE_WORK.md` as a proving-stack question.
+
+**Post-quantum signatures.** ed25519 is pre-quantum. Root-anchored verification does not use it.
+
+**Key custody.** Keys arrive through environment variables from a file at mode 0600. There is no HSM integration; the spec that the repository follows leaves it to a separate workstream.
+
+**`preimage_knowledge` semantics.** That circuit establishes that the operator knows an opening of a commitment the operator generated, which is not a claim about the subject. [Circuits](/tools/kyc-starks/circuits#preimage_knowledge) states exactly what it does and does not establish, and `commitment_only` exists as the truthful alternative.
+
+**Two plaintext fields.** `country` and `investorType` travel in the clear in the index CSV and `manifest.passthrough`. For those two, the proof binds the value and does not hide it.
+
+**Registry signatures read from a directory.** The verifier checks the structure of registries under `--registry` and their signatures only inside an archive with `--public-key`.
+
+## In the repository
+
+- [docs/SECURITY.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/SECURITY.md), the full threat model and the disclosure table
+- [docs/AUDIT_PREP.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/AUDIT_PREP.md), the traceability matrix from each security requirement to code and test
+- [docs/RELEASE_GATE.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/RELEASE_GATE.md), the 3.0.0 gate results and the three findings of the launch security review
+- [circuits/common/src/seed.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/circuits/common/src/seed.rs), [circuits/common/src/domain.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/circuits/common/src/domain.rs), [prover/src/entropy.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/prover/src/entropy.rs)

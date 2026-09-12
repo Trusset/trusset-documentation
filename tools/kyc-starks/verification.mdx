@@ -1,0 +1,237 @@
+---
+title: "Verification"
+description: "How a KYC-STARKs bundle is verified: the root anchor and the public-key anchor, what each one proves and what neither proves, the full check ladder, every field of the verification report, the difference between verifying and being entitled, as-of queries, exit codes, and verifying from an archive."
+icon: "shield-check"
+---
+
+This page is for the counterparty, auditor or integrator who has been handed a bundle or an archive and needs to know what a `PASS` means. After reading it you will know which anchor to use, what each check establishes, and how to ask what was true at a past block.
+
+The verifier is `trusset-verifier-cli`, wrapped by `npm run verify`. It reads a bundle directory or an archive, runs every check even after one fails, and prints a report. It needs no keys, no config and no network.
+
+## Two anchors
+
+A bundle verified against nothing proves only its own internal consistency, which anyone who rewrote the whole bundle could also produce. The verifier therefore requires at least one anchor, and checks both when both are given.
+
+```bash
+npm run verify -- 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 --root 0xbefab9f6fdaba8c1fdb740880fd7a7e6505f6a29b0c2fb2e4b089be395606168
+```
+
+```bash
+npm run verify -- 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 --public-key 5fead1a1c06ed570c7e7ba99675464ac418036a7f88e9fc412506aa1dfab2baa
+```
+
+| | `--root <0x + 64 hex>` | `--public-key <64 hex>` |
+|---|---|---|
+| What you supply | The `kycHash` you read from the chain, or from wherever the operator published it | The operator's ed25519 public key, obtained out of band |
+| What passes | `manifest.kycHash` equals your root, the leaves recompute to it, and every STARK verifies | The signature verifies under your key over the canonical manifest, the leaves recompute to `manifest.kycHash`, and every STARK verifies |
+| What it establishes | This bundle is the one the published root commits to. Nobody needs to be trusted about who signed it | The holder of that key signed exactly this manifest. Whether the root was ever published is not established |
+| When to use it | Whenever the root is independently known. This is the right anchor for anyone who can read the chain | Offline bundles whose root cannot be looked up |
+| Report | `anchor: "root"`, `signature_valid` shown as `[n/a]` | `anchor: "public_key"`, `root_anchor_valid` shown as `[n/a]` |
+
+With both flags, `anchor` is `public_key+root` and both must hold. The operator's key is printed by `npm run init` and `npm run show`, and recorded in `manifest.issuer.publicKey`. Recording it there does not make the signature self-authenticating: an adversary who rewrites the manifest rewrites that field too. The verifier reports when a supplied key disagrees with the recorded one, and the signature check governs.
+
+### What neither anchor proves
+
+- **That the input was true.** A valid proof of a false record is a valid proof. The tool trusts what was under `input/`.
+- **That the root is on chain.** The verifier has no chain access. `--root` is a string you supply; its authority comes from wherever you read it.
+- **That the key is the operator's.** A public key pins whoever holds the private key. Obtaining the right key is out of band.
+- **Anything about `country` or `investorType`.** Those two values travel in cleartext in `manifest.passthrough`; their proofs bind them, they do not hide them. See [Concepts](/tools/kyc-starks/concepts#disclosure-classes).
+- **That the claims are current.** `overall_pass` is cryptography only. Whether the subject could rely on the bundle at a given instant is the second question, below.
+- **Recency.** `epochDays` is the operator's chosen batch date, and the verifier does not compare it with today. A counterparty enforces its own staleness window.
+- **Formal zero knowledge.** Proof bytes are deterministic in the witness and the nonce; hiding rests on the commitment nonce. [Overview](/tools/kyc-starks/overview#what-it-is-not) states this in full.
+- **The registry signatures, when read from a directory.** Registries under `--registry` are validated for structure only. Their signatures are checked when they arrive inside an archive and a `--public-key` was supplied.
+
+## The check ladder
+
+Every check runs regardless of earlier results, so the report is complete.
+
+1. `layout_ok`: `manifest.json`, `manifest.sig`, `kycHash.hex` and every `proofs/*.bin` named in the manifest are present, each `proofPath` is a plain `proofs/<name>` entry, and `version` is `2.0.0`, `2.1.0` or `3.0.0`.
+2. `mode_acceptable`: `mode` is `production`, or `stub` with `--accept-stub`.
+3. `kyc_hash_file_matches`: `kycHash.hex` equals `manifest.kycHash`.
+4. `signature_valid`: with a key, the ed25519 signature verifies over the canonical signing view, `createdAt` replaced by the sentinel.
+5. `root_anchor_valid`: with a root, it equals `manifest.kycHash`, case-insensitively.
+6. Per leaf, in order:
+   - `bindingDigest` recomputes from `binding`, and neither is present without the other.
+   - A declared `listVersion.root` equals the proof's `setRoot`.
+   - The validity interval is well formed.
+   - `commitment` and `publicDigest` decode.
+   - The proof file exists and `proofDigest` recomputes from it.
+   - `circuit` and `circuitId` agree.
+   - `paramsHash` recomputes from `params`.
+   - An empty proof is allowed only for `commitment_only` or a stub bundle.
+   - The circuit's `verify()` accepts the proof against the public inputs, with the AIR selected by `circuitsVersion`.
+   - `leafHash` recomputes from all of the above.
+7. `merkle_root_valid`: the leaf hashes recompute to `manifest.kycHash` under `merkleVersion`.
+8. `overall_pass`: every check above, every leaf passed, and every supplied anchor held.
+
+A leaf that fails records a `reason`, such as `proof digest mismatch`, `leaf hash mismatch`, `paramsHash mismatch: ...` or `empty proof on a proving leaf in a non-stub bundle`.
+
+## Verifying and being entitled
+
+`overall_pass` answers whether the bundle holds together. `temporal.entitled` answers whether the subject could rely on it at the instant asked about. It is true only when four things hold. The bundle passes. The instant could be resolved. The root live at that instant is this bundle's root, where that was checkable. Every leaf's claim is `effective` then.
+
+```
+Verifies:  PASS
+Entitled:  NO   (as of 2026-10-01)
+```
+
+That pairing is what a lapsed, voided or expired claim looks like. The proof is a true record of what was asserted; the entitlement is what has changed.
+
+### The instant
+
+| Flags | Instant | How it resolves |
+|---|---|---|
+| none | Now, from the system clock | Validity windows and revocations are evaluated on today's date |
+| `--now YYYY-MM-DD` | That day, treated as today | Lets a reviewer ask what a bundle is worth on a future or past day without moving the machine clock |
+| `--as-of-date YYYY-MM-DD` | That day | Same evaluation, labelled `date` in the report |
+| `--as-of-block N --chain-id C` | The block | The operator's signed root history is searched for the latest anchor of this subject on chain `C` at or below height `N`. Its root is compared with the bundle's, and windows are evaluated on the day of its block timestamp |
+
+`--as-of-block` requires `--chain-id` and is exclusive with `--as-of-date`. The root history and the revocation log are read from `--registry <DIR>`, default `config/registry`, or from the archive.
+
+An as-of block question has three possible answers, and only one may be reported as entitlement. When no history was supplied, or the subject had nothing published at or before that height, `entitled` is `false` and a note says the answer is unknown rather than false:
+
+```
+Notes:
+  - the root history records no publication for 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 at or before block 7999999 on chain 1: this subject had no root on chain then, so nothing was entitled at that moment.
+```
+
+When the history resolves to a different root, the note says this bundle was not the live issuance then, and `entitled` is `false`.
+
+### Claim status
+
+Each leaf of a version 3 bundle reports a `status` at the instant:
+
+| Status | Meaning |
+|---|---|
+| `effective` | Asserted, not revoked, and the instant is inside the validity window |
+| `lapsed` | A `lapsed` revocation took effect at or before the instant. Reliance strictly before its date stands |
+| `void_ab_initio` | The operator declared the claim never true. Applies at every instant, including before the declaration |
+| `outside_validity` | Not revoked, but the instant is outside the leaf's own window. Nothing went wrong; the claim was not asserted for that date |
+
+A voidance wins over everything, then the earliest applicable lapse, then the window. Without a revocation log the statuses reflect only what the bundle asserts, and the report says so in `notes`.
+
+## The report
+
+`--json` prints the report as one JSON object, or an array when an archive holds several subjects.
+
+```json
+{
+  "wallet_address": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
+  "kyc_hash": "0xbefab9f6fdaba8c1fdb740880fd7a7e6505f6a29b0c2fb2e4b089be395606168",
+  "leaf_count": 9,
+  "layout_ok": true,
+  "mode_acceptable": true,
+  "kyc_hash_file_matches": true,
+  "signature_valid": true,
+  "merkle_root_valid": true,
+  "leaves": [],
+  "anchor": "public_key",
+  "root_anchor_valid": false,
+  "manifest_version": "3.0.0",
+  "overall_pass": true,
+  "issuer": {
+    "name": "Example Bank AG",
+    "identifier_scheme": "LEI",
+    "identifier": "529900T8BM49AURSDO55",
+    "jurisdiction": "DE",
+    "key_id": "issuing-2026-09",
+    "public_key": "0x5fead1a1c06ed570c7e7ba99675464ac418036a7f88e9fc412506aa1dfab2baa",
+    "public_key_disagrees_with_anchor": false
+  },
+  "temporal": {
+    "as_of": "now",
+    "as_of_epoch_days": 20708,
+    "as_of_date": "2026-09-12",
+    "as_of_chain_id": null,
+    "as_of_block": null,
+    "resolved_root": null,
+    "resolved_root_matches": null,
+    "root_history_available": false,
+    "revocations_available": false,
+    "entitled": true,
+    "notes": [
+      "no revocation log was supplied, so claim statuses reflect only what this bundle asserts. A lapse or voidance declared elsewhere would not be visible here."
+    ],
+    "unpinned_epoch": false,
+    "manifest_as_of_date": "2026-09-12",
+    "epoch_days_source": "fixed:20708"
+  }
+}
+```
+
+<ResponseField name="anchor" type="string">
+  `public_key`, `root`, `public_key+root`, or `none`. A report with `none` never passes.
+</ResponseField>
+
+<ResponseField name="signature_valid, root_anchor_valid" type="boolean">
+  `false` whenever the corresponding anchor was not supplied; the human report prints those as `[n/a]`.
+</ResponseField>
+
+<ResponseField name="manifest_version" type="string">
+  As read from the bundle, for callers that branch on it.
+</ResponseField>
+
+<ResponseField name="issuer" type="object | null">
+  From the manifest: `name`, `identifier_scheme`, `identifier`, `jurisdiction`, `key_id`, `public_key`, and `public_key_disagrees_with_anchor`, `true` when a supplied `--public-key` differs from the recorded one. `null` on a version 2 bundle.
+</ResponseField>
+
+<ResponseField name="temporal" type="object">
+  The instant and its outcome. `as_of` is `now`, `date` or `block`, with `as_of_epoch_days` and `as_of_date`. A block query adds `as_of_chain_id` and `as_of_block`, and `resolved_root` with `resolved_root_matches` when a history was searched. `root_history_available` and `revocations_available` say what was supplied. `entitled` is the answer. `notes` lists everything the verifier could not establish, stated rather than omitted. `unpinned_epoch`, `manifest_as_of_date` and `epoch_days_source` come from the manifest.
+</ResponseField>
+
+<ResponseField name="leaves[]" type="object">
+  Per leaf: `field`, `circuit`, `pass`, `reason` (`null` on success), and `claim`.
+</ResponseField>
+
+<ResponseField name="leaves[].claim" type="object | null">
+  The descriptor as recorded, resolved at the instant. `status` and `detail` give the outcome. `legal_basis`, `legal_reference`, `assertion` and `evidence_class` repeat the descriptor. `issuing_party` and `issuing_party_identifier` name the warranting party as `scheme:identifier`. `validity_from`, `validity_until` and `basis_as_of` each come with a `_date` rendering. For `set_membership`, `list_id`, `list_version`, `list_resolved` and `list_entry_count` say whether the registry or archive could resolve the proof's root back to the list's values. `null` on a leaf with no binding block.
+</ResponseField>
+
+The human report prints the same content, with each leaf's claim descriptor, window, list resolution and status under the leaf line, then the notes, then `Verifies` and `Entitled`. In the claim line the tool separates the reference from the assertion with an em dash, which these pages render as a hyphen.
+
+## Exit codes
+
+| Code | Meaning | Produced by |
+|---|---|---|
+| 0 | Verified, and entitled at the instant asked about | the verifier binary |
+| 2 | Verification failed: a cryptographic mismatch or a policy rejection such as a stub bundle without `--accept-stub` | the verifier binary |
+| 3 | Verified, but not entitled: lapsed, void, outside its window, or a different root at that block | the verifier binary |
+| 64 | Usage error detected by the binary, such as `--as-of-block` without `--chain-id`, or an unknown flag | the verifier binary, passed through by `npm run verify` |
+| 66 | Bundle or archive unreadable, including a failed archive integrity check | the verifier binary |
+| 1 | Neither anchor was given, or another error in the TypeScript wrapper | `npm run verify` only |
+
+`npm run verify` checks for a missing anchor itself and exits 1 with an explanation before the binary runs; the binary called directly exits 64 for the same mistake. An archive with several subjects exits 2 if any fails and 3 if any is not entitled.
+
+## Verifying from an archive
+
+An archive carries the bundles, the list registries their proofs depend on, the root history and the revocation log, so it verifies on a machine that has nothing else:
+
+```bash
+./target/release/trusset-verifier-cli --archive 2026Q3.tka --public-key 5fead1a1c06ed570c7e7ba99675464ac418036a7f88e9fc412506aa1dfab2baa
+```
+
+Every subject in the archive is verified and reported in turn; `--subject <0xADDR>` selects one. With a public key, the archived registry signatures are verified under it before anything else is believed. The npm wrapper takes the same path with `npm run verify -- <wallet> --archive 2026Q3.tka --public-key <hex>`, mapping the wallet to `--subject`.
+
+An archive whose contents no longer hash to its recorded digest is refused before parsing continues:
+
+```
+trusset-verifier-cli: archive integrity check failed: recorded digest 0x61a6... but the contents hash to 0x6ea1.... The file has been modified since it was written.
+```
+
+## Older and development bundles
+
+A version 2 bundle verifies exactly as before. `issuer` is `null`, every leaf's `claim` is `null`, and `entitled` depends only on `overall_pass`. A note says that what each predicate stands for and how long it was asserted are not recorded. A manifest with `circuitsVersion: 2` is checked against the frozen `set_membership` AIR of that version.
+
+A bundle built with `--skip-proofs` carries `mode: "stub"` and zero-byte proofs. It fails `mode_acceptable` unless `--accept-stub` is passed, and `--strict` is accepted as a no-op for older scripts. A production bundle with an empty proof on a proving leaf is rejected outright, so the two cannot be confused.
+
+A bundle built with `--dev-unpinned-epoch` verifies, and the report adds `reproducible: [FAIL] built with an unpinned epoch` with a note that it is a development artifact, not evidence.
+
+## The WASM build
+
+`scripts/build.sh` also compiles the verifier to `target/wasm32-unknown-unknown/release/trusset_verifier.wasm` when the target is installed. The `wasm` feature exposes the whole-bundle entry points `verify_strict`, `verify_permissive`, `verify_with_anchors` and `verify_as_of`. It also exposes granular ones for a consumer that drives its own check ladder: `proof_digest_hex`, `public_digest_hex`, `leaf_hash_hex`, `leaf_hash_hex_bound`, `binding_digest_hex`, `merkle_root_hex`, `merkle_root_hex_v`, `manifest_signing_bytes`, `verify_manifest_signature`, `verify_leaf_stark` and `verify_leaf_stark_v`. `scripts/rebuild-wasm.sh` produces a reproducible Node.js binding with a provenance record, and `tests/e2e/wasm_parity.sh` asserts the native and WASM verifiers produce byte-identical reports. A consumer that vendors the WASM must rebuild it whenever the manifest schema gains a field, or its recomputed signing view will drop the field and every signature will fail.
+
+## In the repository
+
+- [docs/ARCHITECTURE.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/ARCHITECTURE.md), the verify data flow
+- [verifier/src/lib.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/verifier/src/lib.rs), the check ladder and the report types
+- [verifier/src/bin/cli.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/verifier/src/bin/cli.rs)

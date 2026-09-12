@@ -1,0 +1,180 @@
+---
+title: "Circuits"
+description: "The four zk-STARK circuits in the KYC-STARKs tool and the commitment-only leaf mode: the exact statement each one proves, its witness, public inputs and parameters, what it deliberately does not establish, and the pinned proof parameters shared by all of them."
+icon: "microchip"
+---
+
+This page is for a developer or reviewer who needs to know what a proof in a bundle actually establishes. After reading it you will be able to read a leaf's `circuit`, `publicInputs` and `params` and state the exact claim its STARK backs, and the limits of that claim.
+
+Four circuits ship, each as its own crate under `circuits/`, plus one leaf mode that produces no proof. Every circuit exposes the same Rust API (`Witness`, `PublicInputs`, `Params`, `commit`, `validate`, `prove`, `verify`), so the prover dispatches a leaf by circuit id alone.
+
+| Circuit | Id | Trace | Proves in-AIR |
+|---|---|---|---|
+| `age_threshold` | 1 | 34 columns x 32 rows | Commitment opening and the age predicate |
+| `set_membership` | 2 | 33 x 2048 | Commitment opening, the set leaf hash, and the Merkle walk to the list root (circuitsVersion 3) |
+| `tier_threshold` | 3 | 16 x 32 | Commitment opening and the tier predicate |
+| `preimage_knowledge` | 4 | 28 x 64 | Commitment opening only |
+| `commitment_only` (mode) | 4, recorded as `preimage_knowledge` | none | Nothing in-circuit |
+
+The circuit id is bound into the commitment, the leaf hash and the per-leaf nonce derivation. It is a public contract: ids are never renumbered.
+
+All four proofs establish, at minimum, that the prover knows an opening of the leaf's commitment under the tag, the circuit id and the length prefix described on [Concepts](/tools/kyc-starks/concepts#hiding-commitments). The rows below state what each circuit adds on top of that.
+
+The statements use `‖` for concatenation and `Felt(x)` for a Goldilocks field element. `bytes_to_field` chunks bytes into 7-byte little-endian limbs.
+
+## age_threshold
+
+**Statement.** I know `(dob_days, nonce)` such that
+
+```text
+Rescue( bytes_to_field(COMMITMENT_TAG) ‖ Felt(1) ‖ Felt(1) ‖ [Felt(dob_days)] ‖ bytes_to_field(nonce) ) == commitment
+current_epoch_days >= dob_days
+current_epoch_days - dob_days >= min_age_days
+```
+
+| | |
+|---|---|
+| Private witness | `dob_days`, days since 1970-01-01; `nonce`, 32 bytes |
+| Public inputs | `commitment`; `min_age_days`; `current_epoch_days`, the batch date |
+| Canonical public bytes | `commitment (32) ‖ u64_le(min_age_days) ‖ u64_le(current_epoch_days)` |
+| Params | `min_age_days`, which must equal the public input |
+| `paramsHash` | `SHA-256("trusset-kyc-v2:age_threshold:params" ‖ u64_le(min_age_days))` |
+| Manifest `params` | `{ "minAgeDays": 6570 }` |
+
+The AIR opens the commitment over a 32-row, two-block Rescue trace. At row 0 it asserts that `slack = current_epoch_days - dob_days - min_age_days` equals a sum of 22 boolean columns weighted by powers of two. A date of birth after the batch date, or an age below the threshold, wraps the field subtraction far past `2^22`, and no boolean decomposition satisfies the linear constraint. Both `dob_days` and `current_epoch_days` are bounded off-AIR at 3,652,500 days, roughly the year 9999. That fits inside the 22-bit window with room to spare.
+
+**Not established.** The circuit proves an age as of `current_epoch_days`, which the operator supplies and the manifest records. Whether that day is recent enough is the counterparty's decision; the verifier does not compare it to today. Working in days rather than seconds keeps the range check at 22 bits instead of about 37.
+
+## set_membership
+
+**Statement.** I know `(value, nonce, merkle_path)` such that
+
+```text
+Rescue( bytes_to_field(COMMITMENT_TAG) ‖ Felt(2) ‖ Felt(12) ‖ w ‖ bytes_to_field(nonce) ) == commitment
+set_leaf = Rescue( SET_LEAF_TAG ‖ w )
+walking the path from set_leaf through the witnessed siblings under SET_NODE_TAG yields set_root
+```
+
+where `w = witness_to_felts(value)`: the NFC-normalised bytes, a `0x01` terminator, chunked and zero-padded to 12 elements.
+
+| | |
+|---|---|
+| Private witness | `value`, UTF-8; `nonce`, 32 bytes; `merkle_path`, sibling digests with side bits, length `set_depth` |
+| Public inputs | `commitment`; `set_root`; `set_depth`, at most 32 |
+| Canonical public bytes | `commitment (32) ‖ set_root (32) ‖ set_depth (1)` |
+| Params | `list_id` |
+| `paramsHash` | `SHA-256("trusset-kyc-v2:set_membership:params" ‖ u64_le(len(list_id)) ‖ list_id)` |
+| Manifest `params` | `{ "listId": "country_allowlist", "sourceSha256": "0x..." }` |
+
+The trace runs the commitment opening in rows 0 to 44 and hashes the same witness columns into `set_leaf` in rows 45 to 89. It then spends 30 rows per level walking the Merkle path, with a conditional swap on each side bit. The carry entering each level is constrained to equal the previous level's output, starting from `set_leaf`, and the root boundary sits at row `90 + 30 * set_depth - 1`.
+
+That carry binding is what makes this a membership proof, and it is the change behind `circuitsVersion: 3`. Before it, the carry and sibling columns were unconstrained, so a prover could commit to a non-member and replay any real member's path. The circuit proved that some valid path existed in a public tree, not that the committed value was in it. The regression test `v3_rejects_nonmember_grafted_onto_member_walk_while_v2_accepts` builds that forgery and asserts the frozen version 2 AIR accepts it while version 3 rejects it.
+
+**Older bundles.** A manifest with `circuitsVersion: 2` is verified against the frozen copy in `circuits/set_membership/src/air_v2.rs`, selected automatically. Those proofs carry the weaker property above; re-issuing the subject upgrades it.
+
+**Not established.** `paramsHash` covers the list id only, not the root, so it is identical across every version a list has ever had. The root is bound through the public digest and the leaf hash. What set a root stands for is answered by the list registry, not by the proof; a `set_membership` proof alone says "member of the set with root `0x9078...`". See [Registries and archives](/tools/kyc-starks/registries-and-archives).
+
+## tier_threshold
+
+**Statement.** I know `(tier, nonce)` such that
+
+```text
+Rescue( bytes_to_field(COMMITMENT_TAG) ‖ Felt(3) ‖ Felt(1) ‖ [Felt(tier)] ‖ bytes_to_field(nonce) ) == commitment
+tier in {1, 2, 3}
+tier - min_tier in {0, 1, 2}
+```
+
+| | |
+|---|---|
+| Private witness | `tier`, one of `RETAIL = 1`, `PROFESSIONAL = 2`, `ELIGIBLE_COUNTERPARTY = 3`; `nonce` |
+| Public inputs | `commitment`; `min_tier` |
+| Canonical public bytes | `commitment (32) ‖ min_tier (1)` |
+| Params | `min_tier`, which must equal the public input |
+| `paramsHash` | `SHA-256("trusset-kyc-v2:tier_threshold:params" ‖ min_tier as one byte)` |
+| Manifest `params` | `{ "minTier": 2 }` |
+
+The predicate runs as two accumulator walks over three transitions: one multiplies out `(tier - 1)(tier - 2)(tier - 3)` and must reach zero, the other does the same for `slack = tier - min_tier` against `{0, 1, 2}`. All four predicate columns are bound to the commitment's witness element at row 0, so the tier the walk checks is the tier the commitment opens to.
+
+`NONE = 0` is rejected at witness construction with `E_TIER_NONE`. A subject with no tier claim should have the predicate removed from the config, not a tier of `NONE`.
+
+**The ordering, and its limits.** The tiers are the MiFID II client categories, and the ordering `RETAIL < PROFESSIONAL < ELIGIBLE_COUNTERPARTY` is compiled into the circuit, not configurable. It is sound for the predicate the circuit proves, a sophistication floor. Three things it does not capture. A per-se professional and one who opted up under Annex II Section II.1 are both `2` and carry materially different protections. Elective ECP status is instrument- and service-specific rather than a global property of a client. On a protection-owed axis the ordering inverts, since `RETAIL` carries the most. Record the per-se or elective distinction in `descriptor.legalBasis.reference` where it matters.
+
+`minTier: RETAIL` asserts nothing: the circuit already refuses `NONE`, so "at least RETAIL" holds for every provable tier. The generated config asserts `PROFESSIONAL`.
+
+## preimage_knowledge
+
+**Statement.** I know `(value, nonce)` such that
+
+```text
+Rescue( bytes_to_field(COMMITMENT_TAG) ‖ Felt(4) ‖ Felt(20) ‖ w ‖ bytes_to_field(nonce) ) == commitment
+```
+
+where `w = witness_to_felts(value)`: the NFC-normalised bytes, a `0x01` terminator, chunked and zero-padded to 20 elements.
+
+| | |
+|---|---|
+| Private witness | `value`, UTF-8, at most 128 bytes; `nonce` |
+| Public inputs | `commitment` |
+| Canonical public bytes | `commitment (32)` |
+| Params | `max_value_bytes`, default 128 |
+| `paramsHash` | `SHA-256("trusset-kyc-v2:preimage_knowledge:params" ‖ u64_le(max_value_bytes))` |
+| Manifest `params` | `{ "maxValueBytes": 128 }` |
+
+The AIR opens the commitment over a 64-row, four-block trace. It also carries 16 boolean columns whose weighted sums are constrained to add up to 128 at row 0, but nothing ties those columns to the witness. `len_bits = 0, slack_bits = 128` satisfies the constraint for any value whatsoever. The 128-byte bound is enforced off-AIR by `validate()` before proving, at a fixed 128 regardless of the configured `maxValueBytes`, and a longer value fails with `E_CIRCUIT_INTERNAL`.
+
+**What that does and does not establish.** A verifier learns that the operator knows an opening of a commitment the operator itself generated. That is not a claim about the subject. The residual value is non-malleability of the commitment within the bundle, which `commitment_only` provides at no proving cost and with no proof bytes. The generated config therefore uses `commitment_only` for `firstName`, `lastName`, `documentType` and `documentNumber`; a config that already names `preimage_knowledge` keeps working unchanged.
+
+## commitment_only
+
+**Statement.** None. No STARK is produced.
+
+The leaf computes the same commitment and public digest as `preimage_knowledge` (circuit id 4, 20 padded elements) and the same leaf hash. It takes its place in the Merkle tree indistinguishably from a proving leaf. `proofs/<leaf>.bin` exists and is zero bytes long; `proofDigest` is the digest of the empty string. The manifest records `circuit: "preimage_knowledge"`, `circuitId: 4` and `disclosure: "commitment_only"`, so a consumer that validates circuit names against a fixed set still accepts the bundle and reads the mode from `disclosure`.
+
+The verifier accepts an empty proof only for this mode and for a `mode: "stub"` bundle under `--accept-stub`. A production bundle with an empty proof on any other leaf is rejected outright, so a stripped proof cannot pass as a commitment-only leaf.
+
+No value length is enforced for this mode. `maxValueBytes` is recorded in `params` and `paramsHash` and nothing checks it.
+
+## Leaf hash and Merkle root
+
+Every leaf, with or without a proof, is folded into the leaf hash on [Concepts](/tools/kyc-starks/concepts#digests-and-the-leaf-hash), and the leaf hashes into the root with the `merkleVersion: 2` construction described there.
+
+### Merkle root construction
+
+Bundles issued before version 2.1 carry no `merkleVersion` field, which means version 1, and the verifier selects the matching construction from the manifest. Version 1 is identical to version 2 through the pairing step, with three differences. An odd layer duplicated its last node instead of padding. There was no root wrap. A single-leaf tree returned the leaf itself as the root.
+
+Version 2 removed three ambiguities those differences allowed. A leaf set and the same set plus a copy of its largest leaf produced the same root. The root committed to neither leaf count nor arity. A one-leaf root was a bare `LEAF_TAG` digest, so a leaf was directly interpretable as a root. Padding leaves are domain-separated from real leaves, so a padding node can never be presented as a member. The test `v1_duplicate_last_leaf_ambiguity_exists_and_v2_removes_it` reproduces the collision on version 1 and asserts its absence on version 2.
+
+## Proof parameters
+
+One set of Winterfell `ProofOptions` is pinned in `circuits/common/src/proof_options.rs` and shared by all four circuits:
+
+| Parameter | Value |
+|---|---|
+| Field extension | Quadratic over Goldilocks |
+| Blowup factor | 16 |
+| FRI queries | 27 |
+| Grinding | 16 bits |
+| FRI folding factor | 4 |
+| FRI remainder max degree | 7 |
+| Constraint batching | Linear |
+
+Winterfell's conjectured security estimate is the minimum of three terms, evaluated against the largest trace in the workspace (`set_membership`, 2048 rows, LDE domain `2^15`):
+
+```text
+query soundness : 27 * log2(16) + 16          = 124 bits
+field soundness : 2 * 64 - log2(2048 * 16)    = 113 bits
+hash collision  : Rescue-Prime 64/256         = 128 bits
+                                          min = 113 bits
+```
+
+113 bits clears the published floor of 100 that `manifest.stark.securityBits` advertises and that every circuit's verifier enforces through Winterfell's `MinConjecturedSecurity`. The floor is checked twice: as a `const` assertion at compile time, and at prover startup, which exits with `E_WEAK_PROOF_OPTIONS` before any proving begins. Changing any of these constants invalidates every existing bundle and requires bumping `CIRCUITS_VERSION`.
+
+## circuitsVersion
+
+`CIRCUITS_VERSION` is 3. It is recorded in every manifest and folded into every per-subject key derivation, so a bump re-keys every subject at once. It was bumped from 1 to 2 with the field-element commitment scheme and from 2 to 3 with the `set_membership` carry binding. Version 3.0.0 of the tool changed nothing inside any circuit. The AIRs, the commitment scheme, the leaf hash for a version 2 leaf and the Merkle construction are all as they were at 2.1.0.
+
+## In the repository
+
+- [docs/CIRCUITS.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/CIRCUITS.md), the full specification with the constraint listings and test counts
+- [circuits/common/src/proof_options.rs](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/circuits/common/src/proof_options.rs)
+- [docs/STEP_2B_COMMITMENT_DESIGN.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/STEP_2B_COMMITMENT_DESIGN.md), why the commitment moved from bytes to field elements

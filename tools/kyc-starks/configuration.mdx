@@ -1,0 +1,329 @@
+---
+title: "Configuration"
+description: "Every field of the KYC-STARKs config.json with its default and its effect on the bundle: field mapping, predicates and their parameters, claim descriptors, validity windows, tiers, allowlists, output, security settings, and the issuer block."
+icon: "sliders"
+---
+
+This page is for the operator editing `config.json`. After reading it you will know what every field does, which ones are hashed into the bundle, and which changes re-key every subject.
+
+`config.json` lives in the repository root and is read from the current directory. `npm run init` writes a complete one; `config.example.json` is the same template with a placeholder issuer. The file is ignored by git.
+
+Most of the file is folded into the bundle. The predicates, tiers, lists, manifest block and the three security settings that affect key derivation are hashed into `configHash`, which enters every per-subject key. Editing any of them changes every nonce, every commitment and every root a later run produces. Cosmetic fields (`output.format`, `output.includeIndex`, `security.clearInputAfterProcessing`) are excluded from the hash.
+
+## mapping
+
+Names the input columns. Required.
+
+<ResponseField name="mapping.fields" type="string[]" required>
+  The hashed fields. Each becomes at least one leaf. Names must be unique and non-empty. The generated config lists `firstName`, `lastName`, `dateOfBirth`, `nationality`, `documentType`, `documentNumber`, `documentIssuingCountry`.
+</ResponseField>
+
+<ResponseField name="mapping.walletAddressField" type="string" required>
+  The column holding the subject's address. Default `walletAddress`.
+</ResponseField>
+
+<ResponseField name="mapping.countryField" type="string" required>
+  The column holding the country of residence. Required by the config validator, so `country` is always a leaf and always carries the `plaintext` disclosure class. Default `country`.
+</ResponseField>
+
+<ResponseField name="mapping.investorTypeField" type="string">
+  The column holding the MiFID II client category. When set, `investorType` becomes a leaf with the `plaintext` disclosure class. When omitted there is no `investorType` leaf, and the passthrough block and index CSV carry the configured default. Default `investorType`.
+</ResponseField>
+
+<ResponseField name="mapping.softExpiryDaysField" type="string">
+  Passthrough column; default `softExpiryDays`. Omit it to take the configured default for every row.
+</ResponseField>
+
+<ResponseField name="mapping.hardExpiryDaysField" type="string">
+  Passthrough column; default `hardExpiryDays`.
+</ResponseField>
+
+<ResponseField name="mapping.evidenceDateField" type="string">
+  The column holding the day the subject's evidence was examined. Sets `validity.basisAsOf` for every leaf of that row. Default `evidenceDate`.
+</ResponseField>
+
+## claims.defaults
+
+Values applied to every predicate that does not set its own. Optional, but without it every predicate must carry a full descriptor and validity block.
+
+```json
+"claims": {
+  "defaults": {
+    "issuingParty": "self",
+    "evidenceClass": "DOCUMENTARY",
+    "validity": { "days": 365, "basisAsOfOffsetDays": 0 }
+  }
+}
+```
+
+<ResponseField name="claims.defaults.issuingParty" type="string | object">
+  `"self"` means the bundle issuer warrants the claim. A party object (`name`, `identifierScheme`, `identifier`, `jurisdiction`) names another regulated firm under a reliance arrangement. Default `"self"`.
+</ResponseField>
+
+<ResponseField name="claims.defaults.evidenceClass" type="string">
+  Used when a predicate's descriptor has no `evidenceClass`. One of the six classes listed under [descriptor](#descriptor).
+</ResponseField>
+
+<ResponseField name="claims.defaults.validity" type="object">
+  Used when a predicate has no `validity` block. Same shape as the per-predicate block.
+</ResponseField>
+
+## predicates
+
+One entry per field, keyed by the field name. Every hashed field, plus `country` and `investorType` when mapped, needs a predicate. A field with no entry falls back to a built-in default, and a field with neither is a configuration error. An entry for a field that is neither in `mapping.fields` nor one of the two special fields is rejected as a typo.
+
+```json
+"predicates": {
+  "investorType": {
+    "circuit": "tier_threshold",
+    "params": { "minTier": "PROFESSIONAL" },
+    "descriptor": {
+      "legalBasis": {
+        "framework": "MiFID_II",
+        "reference": "Annex II Section I - professional clients",
+        "assertion": "Subject is categorised at or above professional client"
+      },
+      "evidenceClass": "DOCUMENTARY"
+    },
+    "validity": { "days": 730 }
+  }
+}
+```
+
+The built-in defaults, used only when a field has no entry:
+
+| Field | Default predicate |
+|---|---|
+| `dateOfBirth` | `age_threshold`, `minAgeYears: 18` |
+| `country`, `nationality`, `documentIssuingCountry` | `set_membership`, `list: country_allowlist` |
+| `documentType` | `set_membership`, `list: document_types` |
+| `investorType` | `tier_threshold`, `minTier: RETAIL` |
+| `firstName`, `lastName`, `documentNumber` | `preimage_knowledge`, `maxValueBytes: 128` |
+
+Two of those defaults are worth overriding, and the generated config does. `minTier: RETAIL` asserts nothing, because the circuit already refuses to prove `NONE`. `preimage_knowledge` proves only that the operator knows an opening of its own commitment. `commitment_only` gives the same binding at no proving cost, which is why the generated config uses it for the four identity fields. There is no `document_types` list in the repository, so the `documentType` default fails unless you record one.
+
+### circuit and params
+
+<ResponseField name="circuit" type="string" required>
+  One of `age_threshold`, `set_membership`, `tier_threshold`, `preimage_knowledge`, `commitment_only`. The last is a leaf mode rather than a circuit. It produces the commitment and the leaf hash with no STARK, and the manifest records it as `circuit: "preimage_knowledge"` with `disclosure: "commitment_only"`.
+</ResponseField>
+
+<ResponseField name="params" type="object">
+  Depends on the circuit. The resolved values are recorded in `manifest.leaves[].params` and hashed into `paramsHash`, which the verifier recomputes.
+
+  | Circuit | Parameters |
+  |---|---|
+  | `age_threshold` | `minAgeYears` or `minAgeDays`, one required. Years are converted as `years * 365`; when both are given, `minAgeDays` wins. |
+  | `set_membership` | `list`, required: the id of an allowlist under [lists](#lists). |
+  | `tier_threshold` | `minTier`, required: a tier name from [tiers](#tiers) or its number. |
+  | `preimage_knowledge`, `commitment_only` | `maxValueBytes`, optional, default 128. Recorded in `params` and `paramsHash` only. The prover enforces a fixed 128-byte limit for `preimage_knowledge` whatever this says, and no limit for `commitment_only`. |
+</ResponseField>
+
+### descriptor
+
+Required for every predicate when `manifest.version` is `3.0.0`. It is hashed into the leaf, so it is evidence, not a comment; editing it changes the root. See [Concepts](/tools/kyc-starks/concepts#the-binding-digest).
+
+<ResponseField name="descriptor.legalBasis" type="object" required>
+  Three non-empty strings: `framework` (for example `MiFID_II`, `AMLD5`, `REG_D`, `NATIONAL`), `reference` (the provision), and `assertion` (one line, in your own words). None is validated against a list; they are recorded as written.
+</ResponseField>
+
+<ResponseField name="descriptor.evidenceClass" type="string">
+  How the value was verified. One of `SELF_ATTESTED`, `DOCUMENTARY`, `THIRD_PARTY_RELIANCE`, `AUTHORITATIVE_SOURCE`, `CRYPTOGRAPHIC`, `PHYSICAL_PRESENCE`. Falls back to `claims.defaults.evidenceClass`; required through one of the two.
+</ResponseField>
+
+<ResponseField name="descriptor.issuingParty" type="string | object">
+  `"self"`, or a party object. Falls back to `claims.defaults.issuingParty`, then to `"self"`. A party object needs `name`, `identifierScheme` (one of `LEI`, `BIC`, `FCA_FRN`, `BAFIN_ID`, `CRD_ID`, `INTERNAL`), `identifier`, and a two-letter upper-case `jurisdiction`.
+</ResponseField>
+
+<ResponseField name="descriptor.evidenceRef" type="string">
+  Optional operator-side case or file reference. It travels in cleartext inside the signed manifest, so it must never contain subject data.
+</ResponseField>
+
+### validity
+
+Required for every predicate when `manifest.version` is `3.0.0`, either here or through `claims.defaults.validity`. Exactly one of the three window forms must be given.
+
+<ResponseField name="validity.days" type="integer">
+  A window of this many days starting on the batch date, inclusive of the first day: `until = from + days - 1`. Must be a positive whole number.
+</ResponseField>
+
+<ResponseField name="validity.until" type="string">
+  A fixed last day, `YYYY-MM-DD`, on or after the batch date.
+</ResponseField>
+
+<ResponseField name="validity.openEnded" type="boolean">
+  `true` for a claim with no self-imposed end. Only a revocation record can end it.
+</ResponseField>
+
+<ResponseField name="validity.basisAsOfOffsetDays" type="integer">
+  How many days before the batch date the evidence was examined. Non-negative, default 0. Overridden per subject by the `evidenceDate` column when present. The resulting `basisAsOf` must not be after the batch date.
+</ResponseField>
+
+### Several predicates on one field
+
+A field may carry an array of predicate objects. Each becomes its own leaf, with its own nonce, commitment, proof and descriptor.
+
+```json
+"dateOfBirth": [
+  {
+    "circuit": "age_threshold",
+    "params": { "minAgeYears": 18 },
+    "descriptor": {
+      "legalBasis": {
+        "framework": "NATIONAL",
+        "reference": "contractual capacity - age of majority",
+        "assertion": "Subject is at or above the age of majority"
+      },
+      "evidenceClass": "DOCUMENTARY"
+    },
+    "validity": { "days": 3650 }
+  },
+  {
+    "circuit": "age_threshold",
+    "params": { "minAgeYears": 21 },
+    "descriptor": {
+      "legalBasis": {
+        "framework": "REG_D",
+        "reference": "Rule 501(a)",
+        "assertion": "Subject is at or above 21 years of age"
+      },
+      "evidenceClass": "AUTHORITATIVE_SOURCE"
+    },
+    "validity": { "days": 3650 }
+  }
+]
+```
+
+The first instance keeps the bare field name. Each later instance gets a suffix derived from its parameters, so the name is stable across runs and safe as a file name:
+
+| Circuit | Suffix | Example |
+|---|---|---|
+| `age_threshold` | the threshold in days | `dateOfBirth@7665d` |
+| `tier_threshold` | the tier name, or `tier<n>` for a number | `investorType@ELIGIBLE_COUNTERPARTY` |
+| `set_membership` | the list id | `nationality@sanctions_list` |
+| `preimage_knowledge`, `commitment_only` | `max<maxValueBytes>` | `documentNumber@max64` |
+
+Two instances that resolve to the same parameters are rejected, since they would produce the same leaf name. Leaf names may contain only letters, digits, `_`, `.`, `@` and `-`. The proof file is `proofs/<leafName>.bin`, and a revocation names the leaf by this name.
+
+## tiers
+
+The integer code behind each investor type name. Optional; missing keys take the defaults.
+
+```json
+"tiers": { "NONE": 0, "RETAIL": 1, "PROFESSIONAL": 2, "ELIGIBLE_COUNTERPARTY": 3 }
+```
+
+The ordering is a property of the `tier_threshold` circuit, which accepts witness tiers 1 to 3 only and proves `tier - minTier` is in `{0, 1, 2}`. Leave the numbers as they are; a remapped code outside 1 to 3 cannot be proved. `NONE` is rejected at proving time with `E_TIER_NONE`.
+
+## lists
+
+One entry per allowlist id that a `set_membership` predicate references. Under `manifest.version` `3.0.0` the entry may be empty: the list resolves from the signed registry under `security.registryDir`, which is the only source that also keeps superseded versions.
+
+```json
+"lists": { "country_allowlist": {} }
+```
+
+<ResponseField name="lists.<id>.path" type="string">
+  A bare list-commitment JSON produced by `trusset-list-commit`, relative to the repository root. Read only when no registry exists for the id. A version 3.0.0 run warns about it and then refuses to build the leaf, because the leaf could not record which list version it was proved against. It works under `manifest.version` `2.1.0` and `2.0.0`.
+</ResponseField>
+
+<ResponseField name="lists.<id>.sha256" type="string">
+  Optional pinned SHA-256 of that file. The run refuses to start when the file's hash has drifted.
+</ResponseField>
+
+### Allowlist source files
+
+A list starts as a plain text file, by convention `config/list_commitments/<id>.source.txt`: one entry per line, `#` starts a comment, blank lines are ignored. Whitespace-only lines and duplicate entries are rejected, the latter unless `--allow-duplicates` is passed. A list needs at least two entries. Every entry is NFC-normalised before it is hashed.
+
+Record it in the registry:
+
+```bash
+npm run list-version -- --list-id country_allowlist --source config/list_commitments/country_allowlist.source.txt --effective-date 2026-10-01 --note "Sanctions review 2026-Q4"
+```
+
+`init` records version 1 for every `*.source.txt` it finds in that directory. Every later change to the set is a new version with a new effective date; a version whose values are unchanged is refused. The registry keeps two hashes per version: `sourceSha256` over the file's verbatim bytes, comments included, and `contentHash` over the values alone. [Registries and archives](/tools/kyc-starks/registries-and-archives) has the records and the rotation rules.
+
+The shipped `country_allowlist.source.txt` holds 17 ISO 3166-1 alpha-3 codes and is a sample.
+
+## output
+
+Required.
+
+<ResponseField name="output.format" type="string" required>
+  `csv` or `json`. The format of the batch index file.
+</ResponseField>
+
+<ResponseField name="output.includeIndex" type="boolean" required>
+  Whether the index file carries a running `index` column. `npm start -- --raw` drops it for one run.
+</ResponseField>
+
+<ResponseField name="output.emitIndexCsv" type="boolean">
+  `false` suppresses the index file in either format. Default `true`.
+</ResponseField>
+
+<ResponseField name="output.bundleDir" type="string">
+  Written by `init` as `output`, and not read by this version: bundles are always written under `output/` in the repository root.
+</ResponseField>
+
+<ResponseField name="output.defaults" type="object">
+  Values taken when a passthrough column is blank: `investorType` (default `RETAIL`), `softExpiryDays` (365), `hardExpiryDays` (730). Expiry values are clamped to 0 to 36500.
+</ResponseField>
+
+## security
+
+Required.
+
+<ResponseField name="security.clearInputAfterProcessing" type="boolean" required>
+  `true` deletes every file under `input/` after a real run. A dry run never deletes.
+</ResponseField>
+
+<ResponseField name="security.epochDaysSource" type="string">
+  How the batch as-of date is chosen. `fixed:<n>` pins one epoch day for every run; `init` writes today's. `env:<VAR>` reads it from that environment variable per run, which suits a scheduled pipeline. `utc_today` is the implicit default when the field is absent, and it is refused, because a bundle proved against the wall clock cannot be reproduced later. `npm start -- --dev-unpinned-epoch` overrides the refusal for development and stamps `unpinnedEpoch: true` into the manifest.
+</ResponseField>
+
+<ResponseField name="security.deterministic" type="boolean">
+  `true` derives the per-subject key from the master key so reruns are byte-identical. `false` draws it from OS entropy and stores it only inside `secrets.enc`. Default `true`. `npm start -- --no-deterministic` overrides it for one run. [Security model](/tools/kyc-starks/security-model#determinism) explains the trade.
+</ResponseField>
+
+<ResponseField name="security.masterKeyEnv" type="string">
+  The environment variable holding the 32-byte hex master key. Default `TRUSSET_KYC_MASTER_KEY`. Whatever name you choose, the CLI forwards the value to the prover under the canonical name.
+</ResponseField>
+
+<ResponseField name="security.registryDir" type="string">
+  Root of the append-only registries. Default `config/registry`.
+</ResponseField>
+
+<ResponseField name="security.hashAlgorithm" type="string">
+  A version 1 field. Any value other than `rescue_prime` prints one deprecation warning per run and is otherwise ignored.
+</ResponseField>
+
+## manifest
+
+<ResponseField name="manifest.version" type="string">
+  The wire version to emit. `3.0.0` is the default, and `2.1.0` and `2.0.0` are accepted. Pinning `2.1.0` produces the previous bundle shape with no issuer, descriptors or validity, which is the path for migrating downstream consumers first. See [Migrating from v2](/tools/kyc-starks/migration-from-v2).
+</ResponseField>
+
+<ResponseField name="manifest.signingKeyEnv" type="string">
+  The environment variable holding the 32-byte hex ed25519 signing seed. Default `TRUSSET_KYC_SIGNING_KEY`.
+</ResponseField>
+
+<ResponseField name="manifest.issuer" type="object">
+  The party legally responsible for every assertion in the bundle. Required for `3.0.0`. Recorded in every manifest together with the public key derived from the signing key.
+
+  | Field | Rule |
+  |---|---|
+  | `name` | Non-empty legal name |
+  | `identifierScheme` | `LEI`, `BIC`, `FCA_FRN`, `BAFIN_ID`, `CRD_ID` or `INTERNAL` |
+  | `identifier` | Non-empty identifier under that scheme |
+  | `jurisdiction` | ISO 3166-1 alpha-2, upper case |
+  | `keyId` | A stable label for the signing key, such as `issuing-2026-09`, so a later rotation reads as a new key rather than a new issuer |
+</ResponseField>
+
+## Keys and environment
+
+The prover needs two 32-byte hex values in the environment. The master key wraps per-subject keys and derives every nonce under deterministic mode. The signing key signs manifests and registries. `init` writes both to `.trusset/keys.env`; load them with `set -a && . ./.trusset/keys.env && set +a` in every shell. A dry run needs neither. The full list of variables the tool reads is on the [CLI reference](/tools/kyc-starks/cli-reference#environment-variables).
+
+## In the repository
+
+- [config.example.json](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/config.example.json)
+- [cli/src/config.ts](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/cli/src/config.ts) and [cli/src/descriptors.ts](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/cli/src/descriptors.ts), the validator

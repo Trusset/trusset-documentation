@@ -1,0 +1,249 @@
+---
+title: "CLI reference"
+description: "Every command and flag of the KYC-STARKs tool: the npm commands operators use day to day, the five native binaries behind them and their own flags, the environment variables the tool reads, how binaries are located, and the exit code of each command."
+icon: "terminal"
+---
+
+This page is for the operator or integrator scripting the tool. After reading it you will know every verb, every flag, every environment variable, and what each exit code means.
+
+All npm commands run from the repository root, where `config.json`, `input/` and `output/` live. Each one first runs `scripts/build.sh`, an incremental Rust and TypeScript build that takes about a second when nothing changed, then runs the TypeScript CLI (`cli/dist/index.js`). Flags go after `--`, otherwise npm swallows them.
+
+## npm commands
+
+### init
+
+```bash
+npm run init -- [flags]
+```
+
+Generates keys, writes `config.json`, records version 1 of every allowlist source it finds, checks the environment, and prints the operator public key. Without flags and with a terminal attached it prompts for the four issuer values. Nothing is destructive: an existing `config.json` or key file is kept and reported unless `--force` is given.
+
+| Flag | Meaning |
+|---|---|
+| `--issuer-name <name>` | Institution legal name recorded in every manifest |
+| `--issuer-scheme <scheme>` | `LEI`, `BIC`, `FCA_FRN`, `BAFIN_ID`, `CRD_ID` or `INTERNAL` |
+| `--issuer-identifier <id>` | Identifier under that scheme |
+| `--issuer-jurisdiction <cc>` | Supervising jurisdiction, ISO 3166-1 alpha-2 |
+| `--key-id <label>` | Stable label for the signing key; default `issuing-YYYY-MM` for the current month |
+| `--force` | Replace an existing `config.json` and key file. Every existing bundle becomes unreproducible |
+| `--non-interactive` | Never prompt; fail if a required value is missing |
+| `--json` | Emit the report as JSON |
+
+Exit 0 when the tree is ready, 1 when a blocking check failed or a required value was missing. An empty `input/` is reported and does not block.
+
+### start, hash
+
+```bash
+npm start -- [flags]
+```
+
+`npm run hash` is the same command. Reads `input/`, validates every row, proves every valid subject, writes bundles and the index file to `output/`. Needs both keys loaded, except under `--dry-run`.
+
+| Flag | Meaning |
+|---|---|
+| `--dry-run` | Validate the whole batch through every stage, including the prover's predicate checks, report every problem at once, write nothing. Needs no keys. About 0.1 s per subject |
+| `--skip-proofs` | Development mode. Each circuit's `validate()` still runs, so predicates are enforced, but no STARK is generated. Proof files are zero bytes and the manifest carries `mode: "stub"` |
+| `--no-deterministic` | Draw the per-subject key from OS entropy instead of deriving it from the master key. The manifest records `deterministic: false` |
+| `--dev-unpinned-epoch` | Development only. Allow `epochDaysSource: "utc_today"`. The prover prints a banner and the manifest carries `unpinnedEpoch: true` permanently |
+| `--raw` | Omit the `index` column from the batch index and add `_raw` to its file name |
+| `--json` | Print one JSON object with `ok`, `failed`, `validationFailed`, `proverFailed`, `epochDays`, `asOfDate`, `manifestVersion`, `indexPath`, `failuresPath` and `successes[]` instead of progress lines. Under `--dry-run`, the dry-run report instead |
+
+Exit 0 when every row produced a bundle, 2 when some did and some failed, 1 when none did or the run aborted before proving. `--dry-run` exits 0 when clean and 2 when it found problems. An empty `input/` prints a message and exits 0. [Input records](/tools/kyc-starks/input-records) has the outputs.
+
+### verify
+
+```bash
+npm run verify -- <wallet> [flags]
+```
+
+Verifies `output/<wallet>`, or one subject of an archive. `<wallet>` is the checksummed address printed by `npm start`, which is the bundle directory name. At least one anchor is required.
+
+| Flag | Meaning |
+|---|---|
+| `--public-key <hex>` | The operator's ed25519 public key, 64 hex characters, with or without `0x` |
+| `--root <hex>` | The `kycHash` read from the chain, `0x` plus 64 hex characters |
+| `--as-of-block <n>` | Evaluate entitlement at this block height. Requires `--chain-id` |
+| `--chain-id <n>` | The chain the block is on |
+| `--as-of-date <YYYY-MM-DD>` | Evaluate entitlement on that day. Exclusive with `--as-of-block` |
+| `--now <YYYY-MM-DD>` | Treat that day as today when evaluating validity windows. Default: the system clock |
+| `--archive <file>` | Verify from an archive instead of `output/<wallet>`; the wallet selects the subject |
+| `--accept-stub` | Accept a bundle with `mode: "stub"` |
+| `--strict` | No-op. Strict mode has been the default since tool version 2.0 |
+| `--json` | Print the report as JSON |
+
+The registry directory from `config.json` is passed to the binary automatically, so as-of block queries resolve against `config/registry` without a flag. Exit codes: 0 verified and entitled, 2 failed, 3 verified but not entitled, 64 usage error from the binary, 66 unreadable, and 1 when no anchor was given. [Verification](/tools/kyc-starks/verification) explains each.
+
+### show
+
+```bash
+npm run show -- [--json]
+```
+
+Prints the resolved configuration:
+
+- the hashed fields and their circuits, and the passthrough columns,
+- the tier map,
+- each list's root, depth and size,
+- the key environment variable names, the epoch source and the config hash,
+- the operator public key, when the signing key is loaded,
+- every leaf's claim descriptor,
+- the registry summary. It works with an unpinned epoch and without keys, in which case it says the key is unavailable. `--json` emits the same as one object, including `configHash`, `epochDays`, `asOfDate` and `unpinnedEpoch`.
+
+### list-version
+
+```bash
+npm run list-version -- --list-id <id> --source <file> [--effective-date <YYYY-MM-DD>] [--note <text>] [--allow-duplicates]
+```
+
+Records a new authoritative version of an allowlist in `config/registry/lists/<id>.json`, signed with the signing key. `--effective-date` defaults to today and also accepts a days-since-1970 integer. `--allow-duplicates` dedupes repeated entries instead of failing. Refuses unchanged values and a start date on or before the current version's. Exit 0 recorded, 1 refused, 64 usage. Details on [Registries and archives](/tools/kyc-starks/registries-and-archives#list-versions).
+
+### anchor
+
+```bash
+npm run anchor -- --bundle <dir> --chain-id <n> --block <n> --block-time <unix seconds> [--tx <hash>]
+```
+
+Records that the bundle's `kycHash` was published at that block, in `config/registry/root_history.json`. Recording the same publication twice is a no-op; a different root at the same height is refused. Exit 0, 1 or 64.
+
+### revoke
+
+```bash
+npm run revoke -- --bundle <dir> --effect <lapsed | void_ab_initio> --reason <code> [--leaf <name>] [--effective-date <YYYY-MM-DD>] [--note <text>]
+```
+
+Appends a revocation record. `lapsed` requires `--effective-date`; `void_ab_initio` rejects it. `--leaf` names one leaf, otherwise every leaf. `--reason` is a short machine-readable code of your choosing, recorded verbatim. Exit 0, 1 or 64.
+
+### archive
+
+```bash
+npm run archive -- --output <file> (--all <dir> | --bundle <dir> [--bundle <dir> ...]) [--archive-id <label>] [--include-secrets]
+```
+
+```bash
+npm run archive -- --inspect <file>
+```
+
+Builds one self-contained archive, or reads one back and re-checks its integrity. `--all` takes every bundle directory under `<dir>`; `--bundle` names them. `--include-secrets` embeds each `secrets.enc`, off by default. Exit 0, 1 or 64.
+
+### decrypt
+
+```bash
+npm run decrypt
+```
+
+Reserved, not implemented. It prints that the self-audit round trip it would perform is exercised by `prover/tests/end_to_end.rs`, and exits 70. The suggested alternative is to re-run `npm start` over the original records with the same pinned date and master key, and compare byte for byte.
+
+### build
+
+```bash
+npm run build
+```
+
+Runs `scripts/build.sh` on its own: `cargo build --release --workspace`, the WASM verifier when the `wasm32-unknown-unknown` target is installed, and `tsc` for the CLI. `npm install` runs the same script as its postinstall step.
+
+`--json` is accepted by `init`, `hash`, `verify` and `show` only. The registry and archive commands pass their output straight through from the native binary.
+
+## Native binaries
+
+The npm commands wrap five binaries under `target/release/`. They can be called directly, which is how a counterparty verifies on a machine without the repository. Each prints usage with `--help`.
+
+### trusset-prover
+
+The proving engine. It reads one JSON job from stdin, emits newline-delimited JSON events on stdout, and writes bundles. `npm start` builds the job from `config.json` and the input records; the job schema is in `docs/ARCHITECTURE.md` and `prover/src/job.rs`.
+
+Events: `start`, `subject_start`, `leaf_proved` (with `proof_bytes` and `ms`), `leaf_failed` (dry run only), `subject_done`, `subject_failed` (with `error_code` and `message`), `done`. Stderr carries unstructured logs, which the CLI prefixes with `[prover]`.
+
+At startup it checks that the pinned proof parameters meet the published security floor and exits 1 with `E_WEAK_PROOF_OPTIONS` otherwise. It refuses `utc_today` unless the job carries the development flag. Exit 0 all subjects done, 2 some failed, 1 batch-aborting.
+
+One flag exists:
+
+```bash
+TRUSSET_KYC_MASTER_KEY=<old hex> TRUSSET_KYC_NEW_MASTER_KEY=<new hex> ./target/release/trusset-prover --rekey-subject output/<wallet>
+```
+
+`--rekey-subject <dir>` unwraps the bundle's per-subject key under the old master key and re-wraps it under the new one, rewriting `secrets.enc` in place. The manifest, its signature, `kycHash.hex` and every proof are untouched, so the signature stays valid and the published root still matches. Only bundles with `secretsKdfVersion: 2` support it; a version 2.0 bundle must be re-proved to move to a new master key.
+
+### trusset-verifier-cli
+
+```text
+trusset-verifier-cli (--bundle <DIR> | --archive <FILE> [--subject <0xADDR>])
+                     [--public-key <HEX>] [--root <HEX>]
+                     [--as-of-block <N> --chain-id <N>] [--as-of-date <D>] [--now <D>]
+                     [--registry <DIR>] [--accept-stub] [--strict] [--json]
+```
+
+Exactly one source, at least one anchor. `--subject` selects one subject of an archive; without it every subject is verified. `--registry` names the signed registry root for as-of resolution, default `config/registry` relative to the working directory, and is ignored when reading an archive. Dates accept `YYYY-MM-DD` or a days-since-1970 integer. Exit codes 0, 2, 3, 64 and 66 as on [Verification](/tools/kyc-starks/verification#exit-codes).
+
+### trusset-registry
+
+```text
+trusset-registry list-version --list-id <ID> --source <FILE> [--effective-date <D>] [--note <TEXT>] [--allow-duplicates]
+trusset-registry anchor --bundle <DIR> --chain-id <N> --block <N> --block-time <UNIX> [--tx <HASH>]
+trusset-registry revoke --bundle <DIR> --effect lapsed|void_ab_initio --reason <CODE> [--leaf <NAME>] [--effective-date <D>] [--note <TEXT>]
+trusset-registry show
+```
+
+All four take `--registry <DIR>`, default `config/registry`. Every write needs `TRUSSET_KYC_SIGNING_KEY` in the environment. `show`, which has no npm wrapper, prints every list version with its window, every anchor and every revocation. Exit 0 recorded, 1 failed, 64 usage.
+
+### trusset-archive
+
+```text
+trusset-archive build --output <FILE> [--bundle <DIR>]... [--all <DIR>] [--archive-id <LABEL>] [--registry <DIR>] [--include-secrets]
+trusset-archive inspect --archive <FILE>
+```
+
+Building needs no keys. Exit 0, 1 or 64.
+
+### trusset-list-commit
+
+```text
+trusset-list-commit --list-id <ID> --source <FILE> --output <FILE> [--allow-duplicates]
+```
+
+The version 2 way of committing a list: it writes a bare JSON file with the values, the root, the depth, the source SHA-256, and no version history. `list-version` runs the same code and records the result in the registry instead, which is what a version 3.0.0 run requires. Exit 0, 64 usage, 65 bad data, 66 unreadable source, 73 cannot write.
+
+## Environment variables
+
+| Variable | Read by | Meaning |
+|---|---|---|
+| `TRUSSET_KYC_MASTER_KEY` | prover, `npm start` | 32-byte hex master key. Wraps per-subject keys, derives every nonce under deterministic mode. The name is configurable through `security.masterKeyEnv`; the CLI forwards the value under this canonical name |
+| `TRUSSET_KYC_SIGNING_KEY` | prover, registry, `npm start`, `show` | 32-byte hex ed25519 seed. Signs manifests and registries. Configurable through `manifest.signingKeyEnv` |
+| `TRUSSET_KYC_NEW_MASTER_KEY` | prover | The new master key for `--rekey-subject` |
+| `TRUSSET_KYC_EPOCH_DAYS` | `npm start` | The batch date when `security.epochDaysSource` is `env:TRUSSET_KYC_EPOCH_DAYS`. Any variable name can be used in the config |
+| `TRUSSET_KYC_DETERMINISTIC` | prover | Set to `1` by the CLI whenever the run is deterministic. Any OS entropy draw while it is set aborts with `E_DETERMINISM_VIOLATION` |
+| `TRUSSET_KYC_SOURCE_COMMIT` | prover | Advisory. Recorded as `manifest.toolchain.sourceCommit` when set |
+| `RUST_BACKTRACE` | prover | Pinned to `0` by the CLI to keep stderr short |
+
+### Binary discovery
+
+The CLI looks for each binary in `target/release/` then `target/debug/`, walking up to five directories from the working directory, and falls back to the name on `PATH`. An environment variable overrides the search:
+
+| Variable | Binary |
+|---|---|
+| `TRUSSET_PROVER_BIN` | `trusset-prover` |
+| `TRUSSET_VERIFIER_BIN` | `trusset-verifier-cli` |
+| `TRUSSET_TRUSSET_REGISTRY` | `trusset-registry` |
+| `TRUSSET_TRUSSET_ARCHIVE` | `trusset-archive` |
+
+<Note>
+  The last two names are derived mechanically from the binary name (`TRUSSET_` plus the upper-cased name), which is why `TRUSSET` appears twice. They are what the current code reads and may change in a later version.
+</Note>
+
+## Test and build scripts
+
+| Command | What it runs |
+|---|---|
+| `bash scripts/ci_smoke.sh` | Formatting, clippy, the workspace tests in debug and release, the per-circuit feature permutations, and all four end-to-end suites. Needs `jq` |
+| `bash scripts/ci_smoke.sh --quick` | Formatting, clippy and the default-feature tests only |
+| `cargo test --workspace --release` | The Rust suites |
+| `cd cli && npm test` | The TypeScript unit tests |
+| `bash tests/e2e/canary.sh` | Two full runs in clean directories, asserting byte-identical bundles |
+| `bash tests/e2e/v3_matrix.sh` | The version 3 end-to-end matrix. It covers init, dry run, a batch with failures, both anchors, list rotation, validity, as-of, lapse and voidance, archive, determinism, and the unpinned-epoch refusal |
+| `bash tests/e2e/v21_matrix.sh` | The version 2.1 wire-compatibility matrix |
+| `bash tests/e2e/wasm_parity.sh` | Native versus WASM verifier report equality |
+| `bash scripts/rebuild-wasm.sh [dir]` | A reproducible WASM verifier build for vendoring, with a provenance record. Needs `wasm-bindgen-cli` 0.2.121 |
+
+## In the repository
+
+- [README.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/README.md), the commands section
+- [cli/src/index.ts](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/cli/src/index.ts), the command definitions

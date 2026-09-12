@@ -1,0 +1,88 @@
+---
+title: "Overview"
+description: "What the KYC-STARKs tool produces from a batch of KYC records, who runs it, who verifies its output, and the four things it deliberately does not do."
+icon: "circle-info"
+---
+
+This page is for a developer who has found the repository and needs to decide whether the tool fits. After reading it you will know what one run produces, which two questions its output answers, and where its guarantees stop.
+
+The KYC-STARKs tool (`trusset-kyc-zk-proofs`) reads a batch of KYC records on your own machine and writes, per subject:
+
+- a `kycHash`, one 32-byte Rescue-Prime Merkle root that you can publish on chain or anywhere else public,
+- a bundle of zk-STARK proofs backing that root, one per proved field,
+- a manifest signed with your ed25519 key that records who asserted what, under which rule, on what evidence, and for how long.
+
+A counterparty holding the bundle can check that a subject is over 18, resident in an approved jurisdiction, or categorised as a professional client. The counterparty never sees the date of birth, the nationality, or the document.
+
+Everything runs locally. The tool makes no network calls at any point, including during verification, and there is no service to operate. Keys are generated on your machine and never leave it.
+
+## Who it is for
+
+| Role | What they do with the tool |
+|---|---|
+| Operator | An institution that performs KYC and wants to publish verifiable claims without disclosing the underlying data. Runs `npm start`, keeps the keys and the encrypted witnesses. |
+| Counterparty or auditor | Anyone handed a bundle or an archive. Runs the verifier against a root read from the chain, or against the operator's public key obtained out of band. Needs no keys, no config, and no network. |
+| Integrator | A platform that consumes bundles. Reads `manifest.json`, recomputes the root, and verifies the STARKs with the native or WASM verifier. |
+
+## The two questions a bundle answers
+
+The verifier keeps two questions apart on purpose, because they have different answers over time.
+
+| Question | Field | What it takes into account |
+|---|---|---|
+| Does this bundle hold together, and did the named operator sign it? | `overall_pass`, printed as `Verifies: PASS` or `FAIL` | Cryptography only: layout, signature or root anchor, every STARK, every leaf hash, the Merkle root. |
+| Could this subject rely on it at a given instant? | `temporal.entitled`, printed as `Entitled: YES` or `NO` | The root that was live at that instant, each claim's validity window, and any lapse or voidance the operator has since signed. |
+
+A bundle whose claims were later declared void still verifies. The proof is a true record of what the operator asserted; the second question is where the voidance shows. [Verification](/tools/kyc-starks/verification) covers both in detail.
+
+## On chain and off chain
+
+The chain carries the root. Everything else is verified off chain against that root: a verifier reads the `kycHash` from the chain, then checks the bundle's signature, STARKs and Merkle tree with `--root`. No STARK is verified on chain, and the tool itself never talks to a chain. Which root was published at which block is something the operator records in a signed local registry, so as-of questions can be answered offline years later.
+
+## What it is not
+
+<Warning>
+  **The proofs are not zero-knowledge in the formal sense.** Winterfell 0.13 adds no blinding to the trace, and every circuit's prover runs from a zero seed. Proof bytes are therefore a deterministic function of the witness and the nonce. What hides a field value is the hiding commitment: a 32-byte nonce derived from a per-subject key. Under the default deterministic mode, two bundles for the same subject on the same batch date carry byte-identical proofs. A counterparty holding both can tell whether a field changed without learning its value. Running with `--no-deterministic` draws a fresh per-subject key and removes that linkability. The repository documents this in [FUTURE_WORK.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/FUTURE_WORK.md).
+</Warning>
+
+**It has no chain access.** `--root` is a hex string you supply. As-of checks resolve against `config/registry/root_history.json`, which you write with `npm run anchor` after publishing. An anchor that misstates the block is a signed misstatement by the operator, not something the tool can detect.
+
+**It is not a KYC data source.** Records under `input/` are trusted. Malformed input produces a quarantined row; false input produces a valid proof of a false statement.
+
+**It is not a service.** It is a batch command line tool. There are no prebuilt binaries: `npm install` compiles about 130 Rust crates from a pinned `Cargo.lock`, which takes a few minutes the first time. The release gate ran on macOS under Rosetta 2; Linux and Windows are untested.
+
+**Two fields are not hidden by design.** `country` and `investorType` are written in cleartext to the batch index CSV and to `manifest.passthrough`. The pipeline the tool was built for consumes them. Their proofs add integrity, not privacy. `country` is mandatory in every record; `investorType` is optional. [Concepts](/tools/kyc-starks/concepts#disclosure-classes) explains the disclosure classes.
+
+## Primitives
+
+| Layer | Choice |
+|---|---|
+| STARK library | Winterfell 0.13, no trusted setup |
+| Field | Goldilocks, `p = 2^64 - 2^32 + 1` |
+| Hash, inside and outside the circuits | Rescue-Prime 64/256 |
+| Manifest and registry signatures | ed25519 (RFC 8032, deterministic) |
+| Witness encryption at rest | XSalsa20-Poly1305, libsodium `secretbox` compatible |
+| Key derivation | HKDF-SHA256 |
+| Conjectured STARK security | 113 bits against a published floor of 100 |
+
+Version 3.0.0. MIT license. Rust 1.91.0 pinned through `rust-toolchain.toml`, Node.js 18 or newer.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/tools/kyc-starks/quickstart">
+    Clone to first verified bundle, every step run against the real CLI
+  </Card>
+  <Card title="Concepts" icon="lightbulb" href="/tools/kyc-starks/concepts">
+    Leaves, commitments, the root, and what a claim descriptor binds
+  </Card>
+  <Card title="Verification" icon="shield-check" href="/tools/kyc-starks/verification">
+    Root-anchored versus key-pinned, and what neither proves
+  </Card>
+  <Card title="Security model" icon="key" href="/tools/kyc-starks/security-model">
+    Threat model, key hierarchy, determinism, what lives on disk
+  </Card>
+</CardGroup>
+
+## In the repository
+
+- [README.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/README.md)
+- [docs/ARCHITECTURE.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/ARCHITECTURE.md), the crate map and data flow
