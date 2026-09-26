@@ -1,0 +1,89 @@
+---
+title: 'Get Auction Module'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/auction-module'
+description: 'Check whether a market has a Dutch auction venue wired and whether it can take collateral'
+---
+
+Reports the market's Dutch auction venue: whether one is wired, whether the liquidation router and the collateral token accept it, and whether `useDutchAuction` is on. Read it before enabling auctions, and before an auction expires.
+
+Dutch auctions do not run on the market contract. They run on a per-market auction venue, a `SecurityAuctionModule` contract that any wallet can deploy and that the market admin binds after adoption, through [Wire Auction Module](/endpoints/lending/wire-auction-module). A market that never enables auctions never needs one. Everything here is read live from the chain on each request.
+
+<Warning>
+  `realizationReady` also requires `fundAuthorized`, but the venue never draws the insurance fund, and [Wire Auction Module](/endpoints/lending/wire-auction-module) offers no leg to authorize it there. A venue wired only through this API therefore reads `realizationReady: false` even when bids and expiry settlements work. Judge readiness from `tokenAdmitted` and `routerAuthorized`.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="auctionModule" type="string">The venue the market names, lowercased. `null` when none is wired or the read failed.</ResponseField>
+    <ResponseField name="wired" type="boolean">`true` when the market names a venue, `false` when it names none, `null` when the market could not be read.</ResponseField>
+    <ResponseField name="readFailed" type="boolean">`true` when the market's venue could not be read. `wired` is then `null` and says nothing about the market.</ResponseField>
+    <ResponseField name="useDutchAuction" type="boolean">The market's current switch. While it is on, liquidation seizes into the venue and opens an auction instead of delivering to the liquidation router. `null` when the risk configuration could not be read.</ResponseField>
+    <ResponseField name="routerAuthorized" type="boolean">Whether the market's liquidation router accepts the venue. Without it, [Settle Expired Auction](/endpoints/lending/settle-expired-auction) reverts and unsold collateral stays in the venue. `null` when unread.</ResponseField>
+    <ResponseField name="fundAuthorized" type="boolean">Whether the market's insurance fund lists the venue as an authorized caller. The venue never calls the fund, so this has no effect on auctions. `null` when unread.</ResponseField>
+    <ResponseField name="tokenAdmitted" type="boolean">Whether the collateral token admits the venue as a holder. While `useDutchAuction` is on, a venue the token refuses makes every liquidation revert, because the seized collateral cannot be delivered to it. `null` when it could not be established. Present only when `wired` is `true`.</ResponseField>
+    <ResponseField name="tokenAdmissionRequirement" type="string">How the token decides: `adapter_must_be_verified_holder` for an identity registry, `adapter_must_be_authorized_contract` for the token's own contract allow-list, `none_required` when the token exposes neither. `holder_status_unreadable` or `unknown` when the answer could not be read. Present only when `wired` is `true`.</ResponseField>
+    <ResponseField name="tokenAdmissionRegistry" type="string">The identity registry the token checks holders against, when it has one. Present only when `wired` is `true`.</ResponseField>
+    <ResponseField name="realizationReady" type="boolean">`true` only when `tokenAdmitted`, `fundAuthorized` and `routerAuthorized` are all `true`. See the warning above. Present only when `wired` is `true`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/auction-module" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/auction-module`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const canAuction = data.wired === true && data.tokenAdmitted === true && data.routerAuthorized === true;
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - Wired
+{
+  "success": true,
+  "data": {
+    "auctionModule": "0x5c3e8a91d2f04b7e6a1c9d38f0b2e47a6d15c8e3",
+    "wired": true,
+    "readFailed": false,
+    "useDutchAuction": true,
+    "fundAuthorized": false,
+    "routerAuthorized": true,
+    "tokenAdmitted": true,
+    "tokenAdmissionRequirement": "adapter_must_be_verified_holder",
+    "tokenAdmissionRegistry": "0x2b6f9E3A7c1d84e05f3A9b2C6D8E1f47a0b3C5d9",
+    "realizationReady": false
+  }
+}
+```
+```json Response - No Venue
+{
+  "success": true,
+  "data": {
+    "auctionModule": null,
+    "wired": false,
+    "readFailed": false,
+    "useDutchAuction": false,
+    "fundAuthorized": null,
+    "routerAuthorized": null
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

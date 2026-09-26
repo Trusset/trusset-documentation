@@ -1,0 +1,146 @@
+---
+title: 'Get Handover'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/handover'
+description: 'Track the ownership handover of the oracle, rate model and insurance fund after adoption'
+---
+
+Reports whether the market's three owned satellites have passed to the owners the lender of record named, and returns any transactions still needed to complete the handover. Taking the lender-of-record role grants the market and router roles outright.
+
+On a market deployed through the current factory, the market owns the price oracle, the interest rate model and the insurance fund from deployment. It hands each one to its named owner inside the adoption transaction, so `stage` reads `COMPLETE` from adoption on and `acceptOwnershipCalldata` is empty.
+
+A market from an earlier generation hands them over in two steps. Adoption nominates each owner, and each nominee must accept by calling `acceptOwnership()` on that contract. Until a nominee accepts, the market itself stays the owner of record, or the deploying factory on the oldest markets. The lender of record cannot set price signers, tune the rate model, or authorize a market on the insurance fund until then. Neither satellite upgrade can be built either. On such a market, completing the handover is a deployment step, not an option.
+
+| Satellite | Nominee named at adoption |
+|---|---|
+| Price oracle | `oracleOwner` |
+| Interest rate model | `issuer` |
+| Insurance fund | `admin` |
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="readable" type="boolean">Whether the factory's handover record could be read. When `false`, no other field is present.</ResponseField>
+    <ResponseField name="stage" type="string">Where the handover stands. `NOT_STARTED` means no lender of record has taken the market yet. `PENDING` means at least one nominee has not accepted, and `COMPLETE` that all three have. `UNKNOWN` means the adoption flag could not be read.</ResponseField>
+    <ResponseField name="complete" type="boolean">`true` when the market was adopted and nothing is pending.</ResponseField>
+    <ResponseField name="surrendered" type="boolean">Whether the factory has recorded the adoption, after which the satellites can only pass to the lender of record's owners. `null` when unreadable.</ResponseField>
+    <ResponseField name="oraclePending" type="boolean">The oracle is still held by the market or the factory, not by an owner the lender of record named.</ResponseField>
+    <ResponseField name="interestModelPending" type="boolean">The same for the interest rate model.</ResponseField>
+    <ResponseField name="insuranceFundPending" type="boolean">The same for the insurance fund.</ResponseField>
+    <ResponseField name="nothingPending" type="boolean">`true` when none of the three is pending.</ResponseField>
+    <ResponseField name="satellites" type="object">
+      One entry per satellite the market records, keyed `oracle`, `interestModel` and `insuranceFund`.
+      <Expandable>
+        <ResponseField name="address" type="string">The satellite contract, lowercased.</ResponseField>
+        <ResponseField name="owner" type="string">Its current owner, lowercased, or `null` when unreadable.</ResponseField>
+        <ResponseField name="pendingOwner" type="string">The nominee that has not accepted yet, or `null`.</ResponseField>
+        <ResponseField name="heldBy" type="string">`market` when the market owns it, `factory` when the deploying factory does, `owner` when anyone else does, `null` when unreadable.</ResponseField>
+        <ResponseField name="pending" type="boolean">The factory's pending flag for this satellite.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="acceptOwnershipCalldata" type="array">
+      One transaction per pending satellite that has a nominee. Empty when there is nothing to accept.
+      <Expandable>
+        <ResponseField name="key" type="string">`acceptOracleOwnership`, `acceptInterestModelOwnership` or `acceptInsuranceFundOwnership`.</ResponseField>
+        <ResponseField name="to" type="string">The satellite contract.</ResponseField>
+        <ResponseField name="data" type="string">Encoded `acceptOwnership()`.</ResponseField>
+        <ResponseField name="value" type="string">Always `"0"`.</ResponseField>
+        <ResponseField name="chainId" type="integer">The chain your instance resolves to.</ResponseField>
+        <ResponseField name="signer" type="string">The nominee, the only address that can send it.</ResponseField>
+        <ResponseField name="description" type="string">What accepting changes, in words.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+Each nominee signs and broadcasts its own transaction. This endpoint has no confirm call: read it again once the transactions have mined, and `stage` moves to `COMPLETE` when the last one lands.
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/handover" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/handover`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+
+for (const leg of data.acceptOwnershipCalldata ?? []) {
+  console.log(`${leg.key} must be sent by ${leg.signer}`, { to: leg.to, data: leg.data });
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - Pending
+{
+  "success": true,
+  "data": {
+    "readable": true,
+    "surrendered": true,
+    "oraclePending": true,
+    "interestModelPending": false,
+    "insuranceFundPending": false,
+    "nothingPending": false,
+    "stage": "PENDING",
+    "complete": false,
+    "satellites": {
+      "oracle": {
+        "address": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+        "owner": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "pendingOwner": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "heldBy": "market",
+        "pending": true
+      },
+      "interestModel": {
+        "address": "0x2c7e91d4a3b05f68e1c2a4b7d9f03e5a6c8b1d42",
+        "owner": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "pendingOwner": null,
+        "heldBy": "owner",
+        "pending": false
+      },
+      "insuranceFund": {
+        "address": "0x8f1a4c2e9b7d3056a1e8c4f29d0b7a3e5c619c22",
+        "owner": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "pendingOwner": null,
+        "heldBy": "owner",
+        "pending": false
+      }
+    },
+    "acceptOwnershipCalldata": [
+      {
+        "key": "acceptOracleOwnership",
+        "to": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+        "data": "0x79ba5097",
+        "signer": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "description": "Accept oracle ownership...",
+        "value": "0",
+        "chainId": 11155111
+      }
+    ]
+  }
+}
+```
+```json Response - Unreadable
+{
+  "success": true,
+  "data": {
+    "readable": false
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `SECURITY_LENDING_V2_NOT_CONFIGURED` | `503` | Lending is not configured for your instance's network |

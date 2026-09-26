@@ -1,0 +1,133 @@
+---
+title: 'Confirm Bot Deployment'
+api: 'POST /lending-external-securities-v2/api/liquidation-bots/confirm-deploy'
+description: 'Record a liquidation bot from its mined deployment transaction'
+---
+
+Records a bot from its mined deployment. The API reads the receipt and checks that the transaction succeeded and called `deployShim` on this network's bot factory. It takes the bot's address and owner from the factory's `ShimDeployed` event, never from the request.
+
+<Warning>
+  Confirm each deployment once. The call does not look for an existing record, so confirming the same hash again records a second bot for the same contract. It also accepts any successful `deployShim` call on the factory, whichever wallet sent it. The recorded `ownerWallet` is the wallet that sent it, and only that wallet can sign the bot's owner actions. Trusset holds no key to it.
+</Warning>
+
+## Body Parameters
+
+<ParamField body="txHash" type="string" required>
+  Hash of the mined deployment transaction built by [Deploy Liquidation Bot](/endpoints/lending/deploy-bot).
+</ParamField>
+
+<ParamField body="label" type="string">
+  Display label, at most 64 characters. Surrounding whitespace is trimmed, and an empty label is stored as `null`. Change it later with [Update Bot](/endpoints/lending/update-bot).
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="success" type="boolean">Always `true`.</ResponseField>
+    <ResponseField name="bot" type="object">
+      The new record. On-chain state is not included; read it with [Get Liquidation Bot](/endpoints/lending/get-bot).
+      <Expandable>
+        <ResponseField name="id" type="string">Bot ID, used in every other bot path.</ResponseField>
+        <ResponseField name="instanceId" type="string">Your instance.</ResponseField>
+        <ResponseField name="botAddress" type="string">The bot contract's address, from `ShimDeployed`.</ResponseField>
+        <ResponseField name="ownerWallet" type="string">The wallet that deployed the bot, from `ShimDeployed`.</ResponseField>
+        <ResponseField name="label" type="string | null">Display label.</ResponseField>
+        <ResponseField name="archived" type="boolean">`false`.</ResponseField>
+        <ResponseField name="deployTxHash" type="string">The confirmed hash.</ResponseField>
+        <ResponseField name="createdAt" type="string">When the record was written.</ResponseField>
+        <ResponseField name="updatedAt" type="string">Same as `createdAt` on a new record.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="txHash" type="string">The confirmed hash.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidation-bots/confirm-deploy" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "txHash": "0x1a2531f9e02d8b3660364d25a982585f822fbe8689e811e7b967cbd1d670ba7b",
+    "label": "Primary keeper"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/lending-external-securities-v2/api/liquidation-bots/confirm-deploy',
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ txHash: tx.hash, label: 'Primary keeper' })
+  }
+);
+const { data } = await res.json();
+const botId = data.bot.id;
+```
+</RequestExample>
+
+<ResponseExample>
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "bot": {
+      "id": "clx_bot_001",
+      "instanceId": "inst_abc123",
+      "botAddress": "0xc40dea7387a290e7ce71784a65ae0ed6bb1ae555",
+      "ownerWallet": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "label": "Primary keeper",
+      "archived": false,
+      "deployTxHash": "0x1a2531f9e02d8b3660364d25a982585f822fbe8689e811e7b967cbd1d670ba7b",
+      "createdAt": "2026-09-20T10:00:00.000Z",
+      "updatedAt": "2026-09-20T10:00:00.000Z"
+    },
+    "txHash": "0x1a2531f9e02d8b3660364d25a982585f822fbe8689e811e7b967cbd1d670ba7b"
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-09-20T10:00:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Not Mined Yet
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_NOT_FOUND",
+    "message": "Transaction not found or not yet mined"
+  }
+}
+```
+```json Error - No Deployment
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_NOT_VERIFIED",
+    "message": "The transaction did not deploy a liquidation bot on the factory"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `txHash` is not a `0x`-prefixed 64-hex hash, or `label` is longer than 64 characters |
+| `TX_REVERTED` | `400` | The transaction was mined but reverted |
+| `TX_WRONG_TARGET` | `400` | The transaction was not sent to this network's bot factory |
+| `TX_WRONG_FUNCTION` | `400` | The transaction does not call `deployShim` |
+| `TX_NOT_VERIFIED` | `400` | The receipt carries no `ShimDeployed` event from the factory |
+| `TX_NOT_FOUND` | `404` | No receipt yet. The transaction is unmined, dropped, or on another network |
+| `SHIM_NOT_CONFIGURED` | `503` | No liquidation bot factory is configured for the instance's network |
+| `BOT_DEPLOY_CONFIRM_FAILED` | `500` | An unexpected failure, such as the chain or the database not answering. The message is generic; retry |

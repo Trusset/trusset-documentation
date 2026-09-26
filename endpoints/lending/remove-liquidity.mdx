@@ -1,13 +1,15 @@
 ---
 title: 'Remove Liquidity'
-api: 'POST /lending-external-securities/api/positions/{marketId}/remove-liquidity'
+api: 'POST /lending-external-securities-v2/api/positions/{marketId}/remove-liquidity'
 description: 'Burn LP shares and withdraw the borrow asset'
 ---
 
-Redeems LP shares for the borrow asset at the current share price, which includes accrued interest. No approval is needed, so this is a single transaction.
+Redeems LP shares for the borrow asset at the current share price, which includes accrued interest. No approval is needed, so this is a single transaction signed by the provider.
+
+Any provider holding shares can redeem, including one that deposited before its market limited direct deposits to the operator wallet and registered vaults. A paused market does not block redemption.
 
 <Warning>
-  `shares` is always parsed at 18 decimals, regardless of the market's borrow asset. This is the one amount in the API that does not follow the borrow asset's precision. Read a provider's share balance from [Get Provider Balance](/endpoints/lending/get-provider-balance) and pass it through unchanged.
+  `shares` is always parsed at 18 decimals, regardless of the market's borrow asset. Unlike `amount` on [Add Liquidity](/endpoints/lending/add-liquidity), it does not follow the borrow asset's precision. Read a provider's share balance from [Get Provider Balance](/endpoints/lending/get-provider-balance) and pass it through unchanged.
 </Warning>
 
 ## Path Parameters
@@ -17,13 +19,13 @@ Redeems LP shares for the borrow asset at the current share price, which include
 ## Body Parameters
 
 <ParamField body="shares" type="string" required>
-  LP shares to redeem as a decimal string with up to 18 decimal places, for example `"250000"`. Must be greater than zero.
+  LP shares to redeem as a positive decimal string with up to 18 decimal places, for example `"50000"`. Required on the confirm call too, where it is validated but not used: the redeemed figure comes from the mined transaction.
 </ParamField>
 
-<ParamField body="provider" type="string" required>
-  Wallet holding the shares, and the wallet that will sign. Two checks run against it: the provider's own share balance, and whether the pool can pay what those shares are worth. Neither can be asked without the address, so it is required rather than merely honoured. Omitting it returns `PROVIDER_REQUIRED`.
+<ParamField body="provider" type="string">
+  Wallet holding the shares, and the wallet that will sign. Required when building calldata. Two checks run against it: the provider's own share balance, and whether the pool can pay what those shares are worth. Neither can be asked without the address, so omitting it returns `PROVIDER_REQUIRED`.
 
-  A redemption that fails either check is refused with `INSUFFICIENT_SHARES` or `INSUFFICIENT_LIQUIDITY`, instead of handing back calldata that reverts. Not required when confirming with `txHash`, where the provider is taken from the mined transaction.
+  A redemption that fails either check is refused with `INSUFFICIENT_SHARES` or `INSUFFICIENT_LIQUIDITY`, instead of handing back calldata that reverts. Not needed on the confirm call, where the provider is taken from the mined transaction.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -37,23 +39,46 @@ Redeems LP shares for the borrow asset at the current share price, which include
     <ResponseField name="action" type="string">`SIGN_TRANSACTION` when `txHash` is omitted.</ResponseField>
     <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, for the `removeLiquidity` call. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="functionName" type="string">`removeLiquidity`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="quoteValidForSeconds" type="integer">How long the liquidity check behind this payload holds, in seconds. The check reserves the interest that accrues over that window, so a payload broadcast inside it will not be refused for liquidity that accrual consumed. Present only when the check actually ran.</ResponseField>
+    <ResponseField name="quoteValidForSeconds" type="integer">`120`, how long the liquidity check behind this payload holds. The check reserves the interest the book accrues over that window, so a payload broadcast inside it is not refused for liquidity that accrual consumed. Absent when the market metrics could not be read and the check did not run.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="sharesRedeemed" type="string">Shares actually burned, read from the `LiquidityRemoved` event, at 18 decimals. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="amount" type="string">Settlement amount that actually left the pool, in borrow asset units. Null when the event could not be read from the receipt. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="amount" type="string">Settlement amount that actually left the pool, in borrow asset units. `null` when the event could not be read from the receipt. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  Withdrawal is bounded by available liquidity, not by share balance. A provider holding shares worth more than the pool's idle balance cannot exit fully while borrowers hold the difference, and the contract reverts rather than partially filling. Supply `provider` to have that refused before you sign, or check `availableLiquidity` on [Get Market Metrics](/endpoints/lending/get-metrics) before redeeming a large position.
+  Withdrawal is bounded by uncommitted liquidity, not by share balance. A provider holding shares worth more than the pool's idle balance cannot exit fully while borrowers hold the difference, and the contract reverts rather than partially filling. The market's reserve ratio holds liquidity back from borrowing only, so a redemption can draw on the reserved slice. Check `availableLiquidity` on [Get Market Metrics](/endpoints/lending/get-metrics) before redeeming a large position.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/remove-liquidity" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/remove-liquidity" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"shares": "50000"}'
+  -d '{"shares": "50000", "provider": "0x2b6ed29a95753c3ad948348e3e7b1a251080ffb9"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/remove-liquidity`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ shares: '50000', provider: await wallet.getAddress() })
+});
+const { data } = await res.json();
+
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ shares: '50000', txHash: tx.hash })
+});
 ```
 </RequestExample>
 
@@ -69,7 +94,8 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
       "value": "0",
       "chainId": 11155111
     },
-    "functionName": "removeLiquidity"
+    "functionName": "removeLiquidity",
+    "quoteValidForSeconds": 120
   }
 }
 ```
@@ -78,8 +104,8 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
   "success": true,
   "data": {
     "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
-    "sharesRedeemed": "50000.000000000000000000",
-    "amount": "50082.576000"
+    "sharesRedeemed": "50000.0",
+    "amount": "50082.576"
   }
 }
 ```
@@ -88,7 +114,7 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
   "success": false,
   "error": {
     "code": "INSUFFICIENT_LIQUIDITY",
-    "message": "The market has 12500.000000 USDC of uncommitted liquidity, which is less than this redemption is worth. Wait for borrowers to repay, or redeem fewer shares."
+    "message": "The market has 0.0 USDC of uncommitted liquidity, which is less than the 50082.576 USDC this redemption is worth once the interest accruing over the next 120 seconds is reserved. Wait for borrowers to repay, then retry."
   }
 }
 ```
@@ -99,9 +125,12 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
 | Code | HTTP | Cause |
 |---|---|---|
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
-| `VALIDATION_ERROR` | `400` | `shares` is not a positive decimal string, or carries more than 18 decimal places |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `VALIDATION_ERROR` | `400` | `shares` is missing, not a positive decimal string, or carries more than 18 decimal places, or `provider` or `txHash` is malformed |
 | `PROVIDER_REQUIRED` | `400` | `provider` was omitted while building calldata |
 | `INSUFFICIENT_SHARES` | `400` | `shares` exceeds the market's outstanding shares, or the balance held by `provider` |
-| `INSUFFICIENT_LIQUIDITY` | `400` | The redemption is worth more than the pool can pay once accruing interest is reserved. The message names the largest share count that would still fill |
+| `INSUFFICIENT_LIQUIDITY` | `400` | The redemption is worth more than the pool can pay once accruing interest is reserved. When a smaller redemption would fill, the message names the largest share count that would |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
-| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to check shares or liquidity. Retry shortly |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to check its outstanding shares or the provider's balance. Retry shortly |
+
+A redemption that reached the market through another contract confirms from the market's `LiquidityRemoved` event in the receipt. Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

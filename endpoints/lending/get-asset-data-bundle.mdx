@@ -1,0 +1,168 @@
+---
+title: 'Get Asset Data Bundle'
+api: 'GET /lending-external-securities-v2/api/markets/{market}/asset-data/bundle'
+description: 'Read the exact bytes behind an asset data hash, re-hashed before they are served'
+---
+
+Returns the stored bundle behind an asset data hash: the exact canonical bytes the hash commits to, and the same bundle as an object. This is what a lender of record reads before it acknowledges a version. It can recompute the hash from the bytes and compare it with the factory's record, without trusting this response.
+
+The bytes are re-hashed before they leave. A stored row whose bytes no longer hash to their own key is refused with `SNAPSHOT_CORRUPT` rather than served as evidence. The hash on the factory still stands in that case, and the issuer is the party to ask for the bytes.
+
+Only bundles prepared through this platform are stored. A hash attested with bytes built elsewhere has nothing behind it here, and the call answers `SNAPSHOT_NOT_FOUND`. [Get Asset Data](/endpoints/lending/get-asset-data) says ahead of time whether bytes exist, as `bundleAvailable`.
+
+This endpoint takes the market's **contract address**, not its market ID. The same audience as Get Asset Data can call it: see [Who can read it](/endpoints/lending/get-asset-data#who-can-read-it).
+
+## Path Parameters
+
+<ParamField path="market" type="string" required>
+  The market contract address, as 40 hex characters with a `0x` prefix.
+</ParamField>
+
+## Query Parameters
+
+<ParamField query="hash" type="string">
+  The hash to read, as `0x` and 64 hex characters. Omit it to read the attestation that stands on the factory now.
+</ParamField>
+
+A `hash` can name any bundle stored for this market, including one stored by an [Attest Asset Data](/endpoints/lending/attest-asset-data) build that was never signed. `standing` and `version` tell such a bundle apart from one that was attested.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="marketAddress" type="string">The market, lowercased.</ResponseField>
+    <ResponseField name="contentHash" type="string">The hash read, lowercased.</ResponseField>
+    <ResponseField name="schemaVersion" type="string">Bundle schema the bytes were written under.</ResponseField>
+    <ResponseField name="canonicalJson" type="string">The exact bytes the hash commits to.</ResponseField>
+    <ResponseField name="bundle" type="object">`canonicalJson` parsed, so its members arrive in canonical order.</ResponseField>
+    <ResponseField name="version" type="integer">Attestation version this bundle stood as. `null` when no attestation of it was confirmed through this API.</ResponseField>
+    <ResponseField name="attestor" type="string">Wallet that attested it. `null` when no attestation of it was confirmed through this API.</ResponseField>
+    <ResponseField name="storedAt" type="string">When the bytes were stored.</ResponseField>
+    <ResponseField name="standing" type="boolean">`true` when this hash is the attestation on the factory now.</ResponseField>
+    <ResponseField name="acknowledged" type="boolean">`true` when this hash is the version the lender of record acknowledged.</ResponseField>
+    <ResponseField name="hashing" type="string">The rule, `keccak256(utf8(canonicalJson))`.</ResponseField>
+    <ResponseField name="verification" type="object">`rehash`, the hash recomputed from the stored bytes, and `matches`, which is always `true` on a successful answer.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+`standing` and `acknowledged` both read `false` when the factory record could not be read. Check `status` on Get Asset Data before reading a `false` as a verdict.
+
+## Verify the bytes yourself
+
+The check needs one hash function. Compare the result with `attested` on the factory record, which Get Asset Data returns as `record.attested`, or read `assetData(market)` on the factory directly.
+
+```typescript TypeScript
+import { keccak256, toUtf8Bytes } from 'ethers';
+
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketAddress}/asset-data/bundle`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+
+const recomputed = keccak256(toUtf8Bytes(data.canonicalJson));
+if (recomputed !== data.contentHash) throw new Error('The bytes do not match the hash');
+```
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/0x70a0e25c7b768b87e658348b3b577678a173e038/asset-data/bundle?hash=0xba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const hash = '0xba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a';
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketAddress}/asset-data/bundle?hash=${hash}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+console.log(data.bundle.profile, data.standing, data.acknowledged);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "contentHash": "0xba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a",
+    "schemaVersion": "1.0.0",
+    "canonicalJson": "{\"market\":{\"borrowAsset\":\"0x98ad0ca091552e23c564b41c74282e5343d03e8a\",\"chainId\":11155111,\"collateralMode\":\"FREEZE\",\"factory\":\"0xf1ad12f5698f58badd8a662acffccb067a2ddb8a\",\"family\":\"FUNGIBLE\",\"priceSource\":\"NAV\"},\"profile\":{\"documents\":[{\"name\":\"Annual report 2025\",\"uri\":\"https://acme-capital.example/nyf1/annual-report-2025.pdf\"},{\"name\":\"Valuation report Q2 2026\",\"uri\":\"https://acme-capital.example/nyf1/valuation-2026-q2.pdf\"}],\"isin\":\"DE000A0F5UF5\",\"issuerName\":\"ACME Capital AG\",\"jurisdiction\":\"DE\",\"prospectusURI\":\"https://acme-capital.example/nyf1/prospectus.pdf\",\"sector\":\"Real estate\",\"website\":\"https://acme-capital.example\"},\"schemaVersion\":\"1.0.0\",\"token\":{\"assetType\":\"REAL_ESTATE\",\"decimals\":18,\"framework\":\"erc3643\",\"name\":\"Nyala Fund I\",\"symbol\":\"NYF1\",\"tokenAddress\":\"0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9\",\"totalSupply\":\"250000.0\"}}",
+    "bundle": {
+      "market": {
+        "borrowAsset": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+        "chainId": 11155111,
+        "collateralMode": "FREEZE",
+        "factory": "0xf1ad12f5698f58badd8a662acffccb067a2ddb8a",
+        "family": "FUNGIBLE",
+        "priceSource": "NAV"
+      },
+      "profile": {
+        "documents": [
+          {
+            "name": "Annual report 2025",
+            "uri": "https://acme-capital.example/nyf1/annual-report-2025.pdf"
+          },
+          {
+            "name": "Valuation report Q2 2026",
+            "uri": "https://acme-capital.example/nyf1/valuation-2026-q2.pdf"
+          }
+        ],
+        "isin": "DE000A0F5UF5",
+        "issuerName": "ACME Capital AG",
+        "jurisdiction": "DE",
+        "prospectusURI": "https://acme-capital.example/nyf1/prospectus.pdf",
+        "sector": "Real estate",
+        "website": "https://acme-capital.example"
+      },
+      "schemaVersion": "1.0.0",
+      "token": {
+        "assetType": "REAL_ESTATE",
+        "decimals": 18,
+        "framework": "erc3643",
+        "name": "Nyala Fund I",
+        "symbol": "NYF1",
+        "tokenAddress": "0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9",
+        "totalSupply": "250000.0"
+      }
+    },
+    "version": 2,
+    "attestor": "0x511f527bcee080ac9b88afbf24386baedf393948",
+    "storedAt": "2026-09-20T10:14:02.000Z",
+    "standing": true,
+    "acknowledged": false,
+    "hashing": "keccak256(utf8(canonicalJson))",
+    "verification": {
+      "rehash": "0xba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a",
+      "matches": true
+    }
+  }
+}
+```
+```json Error - Not Stored Here
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "SNAPSHOT_NOT_FOUND",
+    "message": "No stored bundle carries the hash 0xba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a for this market. The hash may have been attested outside this platform; only bundles prepared here can be re-derived."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+The asset data routes report a validation failure with the first failing rule as `message` and no `details` list. Every access code from [Get Asset Data](/endpoints/lending/get-asset-data#error-codes) applies here too.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `market` is not a 40-character hex address, or `hash` is not `0x` and 64 hex characters |
+| `ASSET_DATA_NONE` | `404` | No `hash` was given and nothing has been attested on the market |
+| `SNAPSHOT_NOT_FOUND` | `404` | No bundle with this hash is stored for this market |
+| `FACTORY_UPGRADE_REQUIRED` | `409` | No `hash` was given, and the factory implementation predates asset data attestation |
+| `SNAPSHOT_CORRUPT` | `409` | The stored bytes no longer hash to their key and are not served |
+| `ASSET_DATA_BUNDLE_FAILED` | `500` | The bundle could not be read for a reason the service did not classify |
+| `FACTORY_READ_FAILED` | `503` | No `hash` was given and the factory record could not be read. Retry shortly |

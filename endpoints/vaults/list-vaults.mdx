@@ -1,36 +1,47 @@
 ---
 title: 'List Vaults'
-api: 'GET /lending-external-securities/api/vaults'
-description: 'Your instance''s vault first, then every published vault on your network'
+api: 'GET /lending-external-securities-v2/api/vaults'
+description: 'Your instance''s vaults first, then every vault published on your network'
 ---
 
-Returns every vault visible to your instance: your own vault (if your instance operates one) marked `own: true`, then every vault a bank issuer has published on your network and environment. A vault that exists but was never published is visible only to the instance operating it.
+Returns every vault visible to the instance behind the API key, in three groups:
 
-Every row carries an `onChain` block read from the vault contract, so a directory can show share price and size without a call per vault. What it does not carry is the per-holder position and the operator-only blocks, which are on [Get Vault](/endpoints/vaults/get-vault).
+1. Vaults this instance operates, marked `own: true`, newest first. An instance runs at most three live vaults.
+2. Vaults other operators published, on the same network and in the same environment (production or not), newest first.
+3. Unpublished vaults of other operators in which this instance is a distributor of record. One of its verified wallets still has attributed shares or unpaid distributor fees there. These rows carry `distributorView: true`, no risk disclosure, and take no deposit from this instance.
+
+Any other unpublished vault is visible only to its operator. Archived vaults are left out.
+
+Every row carries an `onChain` block read from the vault contract, so a directory can show share price and size without a call per vault. It carries no per-holder position and none of the operator-only blocks. Those are on [Get Vault](/endpoints/vaults/get-vault).
 
 ## Response Fields
 
 <ResponseField name="data.vaults" type="array">
   <Expandable>
     <ResponseField name="id" type="string">Vault ID. Every other vault endpoint takes this.</ResponseField>
+    <ResponseField name="instanceId" type="string">The operating instance.</ResponseField>
     <ResponseField name="own" type="boolean">True when your instance operates this vault.</ResponseField>
-    <ResponseField name="vaultAddress" type="string">The vault contract. `null` until the creation transaction is confirmed.</ResponseField>
-    <ResponseField name="operatorWallet" type="string">The operator's signing wallet, which owns the vault on-chain.</ResponseField>
-    <ResponseField name="assetAddress" type="string">Settlement token address. Deposits, redemptions, and the share price are denominated in it.</ResponseField>
-    <ResponseField name="assetSymbol" type="string">Settlement token symbol, for example `USDC`.</ResponseField>
-    <ResponseField name="assetDecimals" type="integer">Settlement token decimals. Every amount you send is parsed at this precision, and every amount returned is formatted with it.</ResponseField>
-    <ResponseField name="identityRegistryAddress" type="string">The register that admits depositors. Fixed for the life of the vault.</ResponseField>
+    <ResponseField name="distributorView" type="boolean">Present and `true` only on an unpublished vault you see as a distributor of record. You can read it, redeem from it and collect your earnings in it. [Deposit](/endpoints/vaults/deposit) refuses it with `VAULT_NOT_PUBLISHED`.</ResponseField>
+    <ResponseField name="vaultAddress" type="string">The vault contract.</ResponseField>
+    <ResponseField name="operatorWallet" type="string">The wallet that created the vault and was recorded as its operator. The live on-chain owner is `onChain.owner` on [Get Vault](/endpoints/vaults/get-vault).</ResponseField>
+    <ResponseField name="assetAddress" type="string">The vault's asset, a settlement token (stablecoin). Deposits, redemptions and the share price are denominated in it.</ResponseField>
+    <ResponseField name="assetSymbol" type="string">Asset symbol, for example `USDC`.</ResponseField>
+    <ResponseField name="assetDecimals" type="integer">Asset decimals. Every amount you send is parsed at this precision, shares included, and every amount returned is formatted with it.</ResponseField>
+    <ResponseField name="identityRegistryAddress" type="string">The vault's own identity register, or `null` when the vault names none. Fixed for the life of the vault.</ResponseField>
+    <ResponseField name="depositorGate" type="object">`kind` is `REGISTER` when the vault names an identity register and `NONE` when it names none. Carries `register` and a display `statement`. A `NONE` vault still examines each depositor against the provider register of every market it funds, so it is not open to every wallet.</ResponseField>
     <ResponseField name="name" type="string">Vault name.</ResponseField>
     <ResponseField name="symbol" type="string">Share token symbol.</ResponseField>
-    <ResponseField name="performanceFeeBps" type="integer">Operator's cut of the yield in basis points. The contract only accepts decreases.</ResponseField>
+    <ResponseField name="performanceFeeBps" type="integer">The vault operator's cut of share-price growth above the high-water mark, in basis points. The contract only accepts decreases.</ResponseField>
     <ResponseField name="active" type="boolean">True once the operator published the vault.</ResponseField>
-    <ResponseField name="archived" type="boolean">True when the operator retired the vault. Archived vaults are excluded from this list.</ResponseField>
+    <ResponseField name="archived" type="boolean">Always `false` here, because archived vaults are excluded.</ResponseField>
     <ResponseField name="network" type="string">The chain the vault lives on, taken from the operating instance.</ResponseField>
-    <ResponseField name="settlementCurrency" type="string">The fiat currency the vault's asset settles in, resolved from the asset address rather than guessed from its symbol.</ResponseField>
-    <ResponseField name="riskDisclosure" type="string">The operator's risk statement. Show it before any deposit control.</ResponseField>
-    <ResponseField name="riskDisclosureUrl" type="string">Link to the operator's full risk disclosure. Always `https`.</ResponseField>
+    <ResponseField name="settlementCurrency" type="string">The fiat currency the vault's asset settles in, resolved from the asset address rather than guessed from its symbol. `null` when the address is not a known settlement asset.</ResponseField>
+    <ResponseField name="riskDisclosure" type="string">The operator's risk statement. Show it before any deposit control. `null` on a `distributorView` row.</ResponseField>
+    <ResponseField name="riskDisclosureUrl" type="string">Link to the operator's full risk disclosure. Always `https`. `null` on a `distributorView` row.</ResponseField>
     <ResponseField name="operatedBy" type="object">`instanceName`, `issuerName`, `isBank`, plus `image` and `profileImage`. Display the operator next to the vault name.</ResponseField>
-    <ResponseField name="onChain" type="object">Live vault state, identical in shape to the block on [Get Vault](/endpoints/vaults/get-vault#response-fields), where every field is described. It is `null` when the vault has no address yet. It carries `readFailed: true` when the chain could not be read for that vault alone, and one vault failing does not empty the others.</ResponseField>
+    <ResponseField name="onChain" type="object">Live vault state, identical in shape to the block on [Get Vault](/endpoints/vaults/get-vault#response-fields), where every field is described. It is `null` for a vault with no recorded address. It carries `readFailed: true` when the chain could not be read for that vault alone, and one vault failing does not empty the others.</ResponseField>
+    <ResponseField name="createdAt" type="string">When the vault was registered, ISO 8601.</ResponseField>
+    <ResponseField name="updatedAt" type="string">Last change to the record, ISO 8601.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -39,17 +50,17 @@ Every row carries an `onChain` block read from the vault contract, so a director
 </Warning>
 
 <Note>
-  Your own vault comes first, then published vaults newest-first. Pin on `own` if you re-sort client-side.
+  The groups come in the order above. Pin on `own` and `distributorView` if you re-sort client-side.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/vaults" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/vaults" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  'https://api.trusset.org/lending-external-securities/api/vaults',
+  'https://api.trusset.org/lending-external-securities-v2/api/vaults',
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
@@ -75,15 +86,20 @@ for (const vault of data.vaults) {
         "assetSymbol": "USDC",
         "assetDecimals": 6,
         "identityRegistryAddress": "0xe9114c40934f6fb6bb317935156b731f7a86d006",
+        "depositorGate": {
+          "kind": "REGISTER",
+          "register": "0xe9114c40934f6fb6bb317935156b731f7a86d006",
+          "statement": "Deposits and share transfers are examined against this register."
+        },
         "name": "Trusset Prime Demo Vault",
         "symbol": "TPV",
         "performanceFeeBps": 500,
         "active": true,
         "archived": false,
+        "riskDisclosure": "Deposits fund overcollateralized lending markets. Redemptions can fill partially under high utilization.",
+        "riskDisclosureUrl": "https://bank.example/vault-risk",
         "network": "ETHEREUM",
         "settlementCurrency": "USD",
-        "riskDisclosure": "Deposits fund overcollateralized security-token lending markets. Value can fall as well as rise, and redemptions can fill partially under high utilization.",
-        "riskDisclosureUrl": "https://bank.example/vault-risk",
         "operatedBy": {
           "instanceName": "Trusset Client Demo",
           "issuerName": "Trusset UG",
@@ -91,21 +107,21 @@ for (const vault of data.vaults) {
           "profileImage": null,
           "isBank": true
         },
+        "createdAt": "2026-08-13T21:10:00.000Z",
+        "updatedAt": "2026-08-14T06:40:00.000Z",
         "onChain": {
           "isOnChain": true,
           "readFailed": false,
-          "totalAssets": "1250000.000000",
+          "totalAssets": "1250000.0",
           "totalShares": "1224489.795918",
-          "sharePrice": "1.020900000000000000",
-          "idleAssets": "312500.000000",
-          "allocatedAssets": "937500.000000",
-          "redeemableNow": "618200.000000",
+          "sharePrice": "1.0209",
+          "idleAssets": "312500.0",
+          "allocatedAssets": "937500.0",
+          "redeemableNow": "618200.0",
           "depositsPaused": false,
           "performanceFeeBps": 500,
           "assetsFullyReadable": true
-        },
-        "createdAt": "2026-08-13T21:10:00.000Z",
-        "updatedAt": "2026-08-14T06:40:00.000Z"
+        }
       }
     ]
   },
@@ -118,3 +134,10 @@ for (const vault of data.vaults) {
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `SERVICE_UNAVAILABLE` | `503` | The vault records could not be reached. Retry shortly |
+| `VAULT_READ_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |

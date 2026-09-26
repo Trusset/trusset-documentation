@@ -1,0 +1,160 @@
+---
+title: 'Bot Owner Action'
+api: 'POST /lending-external-securities-v2/api/liquidation-bots/{botId}/action'
+description: 'Build a pause, resume, refund policy or withdrawal transaction for the bot owner'
+---
+
+Builds one owner transaction on the bot: pause or resume every trigger, set the refund policy, or withdraw float. Only the bot's owner wallet can sign it, and Trusset holds no key to the bot. The same transaction from any other wallet reverts.
+
+<Warning>
+  Refunds pay out the float to whoever triggers a successful liquidation, up to `maxRefundPerCallerPerBlockWei` per caller per block. Each calling address has its own cap, so several callers in one block can each draw it. With `maxRefundGasPriceWei` at `0` there is no gas price ceiling, and a caller is refunded at whatever gas price it chose, up to the cap. A withdrawal amount is settled when the transaction executes: `0`, or more than the balance at that moment, pays out the whole balance.
+</Warning>
+
+## Actions
+
+**`pause`** and **`resume`** call `setPaused(true)` or `setPaused(false)`. A paused bot refuses every trigger on every market, and the markets enabled on it stay enabled.
+
+**`setRefundPolicy`** calls `setRefundPolicy` with both limits, sending `0` for either one omitted. A per-caller cap of `0` disables refunds, and callers then pay their own gas. A refund is the gas the call used plus 40,000 for the refund itself, priced at the lower of the transaction's gas price and the ceiling. It is limited to what remains of the caller's cap in that block and to the bot's balance. A reverted liquidation is never refunded.
+
+**`withdraw`** calls `withdraw(to, amountWei)`. The API reads the balance first and refuses with `NOTHING_TO_WITHDRAW` when it is zero, because the contract would revert. The response discloses the balance and what the transaction will pay at that balance.
+
+## Path Parameters
+
+<ParamField path="botId" type="string" required>Bot ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="action" type="string" required>
+  One of `pause`, `resume`, `setRefundPolicy` or `withdraw`. Fields that do not belong to the action are ignored.
+</ParamField>
+
+<ParamField body="maxRefundPerCallerPerBlockWei" type="string">
+  `setRefundPolicy`. Most wei refunded to one caller within one block, as a string of digits. Defaults to `"0"`, which disables refunds.
+</ParamField>
+
+<ParamField body="maxRefundGasPriceWei" type="string">
+  `setRefundPolicy`. Gas price ceiling for refunds in wei, as a string of digits. Defaults to `"0"`, which means no ceiling.
+</ParamField>
+
+<ParamField body="amountWei" type="string">
+  `withdraw`. Wei to withdraw, as a string of digits. Defaults to `"0"`, which withdraws the whole float.
+</ParamField>
+
+<ParamField body="to" type="string">
+  `withdraw`. Recipient address. Defaults to the bot's recorded `ownerWallet`.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned call on the bot: `to`, `data`, `value` and `chainId`.</ResponseField>
+    <ResponseField name="functionName" type="string">`setPaused`, `setRefundPolicy` or `withdraw`.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ "endpoint": "confirm-tx", "txHash": true }`. See [Confirm Bot Transaction](/endpoints/lending/confirm-bot-transaction).</ResponseField>
+    <ResponseField name="to" type="string">`withdraw`. Recipient, lowercased.</ResponseField>
+    <ResponseField name="balanceWei" type="string">`withdraw`. The bot's balance when the transaction was built, in wei.</ResponseField>
+    <ResponseField name="balance" type="string">`withdraw`. The same balance in the native coin.</ResponseField>
+    <ResponseField name="amountWei" type="string">`withdraw`. What the transaction pays at that balance, in wei.</ResponseField>
+    <ResponseField name="withdrawsAll" type="boolean">`withdraw`. `true` when the request pays the whole balance.</ResponseField>
+    <ResponseField name="note" type="string">`withdraw`. The payout in words.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidation-bots/{botId}/action" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "setRefundPolicy",
+    "maxRefundPerCallerPerBlockWei": "2000000000000000",
+    "maxRefundGasPriceWei": "30000000000"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/liquidation-bots/${botId}/action`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ action: 'withdraw', amountWei: '100000000000000000' })
+  }
+);
+const { data } = await res.json();
+
+const tx = await ownerWallet.sendTransaction(data.transaction);
+await tx.wait();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0xc40dea7387a290e7ce71784a65ae0ed6bb1ae555",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "setRefundPolicy",
+    "confirmWith": { "endpoint": "confirm-tx", "txHash": true }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-09-20T10:20:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Withdraw Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0xc40dea7387a290e7ce71784a65ae0ed6bb1ae555",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "withdraw",
+    "to": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "balanceWei": "250000000000000000",
+    "balance": "0.25",
+    "amountWei": "100000000000000000",
+    "withdrawsAll": false,
+    "note": "The bot pays 0.1 of its 0.25 float to 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52.",
+    "confirmWith": { "endpoint": "confirm-tx", "txHash": true }
+  }
+}
+```
+```json Error - Empty Float
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "NOTHING_TO_WITHDRAW",
+    "message": "This bot holds no float: its balance is 0, and withdraw() reverts NothingToWithdraw. Nothing to sign until the bot is funded."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `action` is not one of the four, a wei value is not a string of digits, or `to` is not an address |
+| `BOT_NOT_FOUND` | `404` | No bot with this ID belongs to your instance |
+| `BOT_NOT_DEPLOYED` | `409` | The bot record has no contract address |
+| `NOTHING_TO_WITHDRAW` | `409` | `withdraw` on a bot whose balance is zero |
+| `CHAIN_READ_FAILED` | `503` | `withdraw` could not read the bot's balance, so nothing is offered. Retry |
+| `BOT_ACTION_FAILED` | `500` | An unexpected failure, including a wei value too large for 256 bits. The message is generic |

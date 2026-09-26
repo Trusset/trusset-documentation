@@ -1,22 +1,22 @@
 ---
 title: 'Execute Hook'
-api: 'POST /lending-external-securities/api/hooks/{marketId}/{hookId}/execute'
-description: 'Run a hook immediately, outside its schedule'
+api: 'POST /lending-external-securities-v2/api/hooks/{marketId}/{hookId}/execute'
+description: 'Run a hook now and return its outcome'
 ---
 
-Triggers one run of a hook and returns the result synchronously. Useful for validating a new hook before enabling it. The run is recorded in the execution log exactly like a scheduled run.
-
-What the request body must carry depends on the hook type:
-
-| `hookType` | Required body | Behaviour |
-|---|---|---|
-| `monitorRisk` | None | Fetches `riskUri` and evaluates every entry in `riskFields` |
-| `beforeLiquidation` | `loanData` | Evaluates `parameterChecks` against the supplied loan state |
-| `afterLiquidation` | `liquidationData` | Runs the configured `buy` or `inform` action |
+Runs one hook immediately and returns the outcome synchronously. It runs whether or not the hook is active, which makes it the way to test a new hook. The response is HTTP `200` whenever the hook ran, including when the hook itself failed: read the outcome from `data.success` and `data.result`.
 
 <Warning>
-  A hook with `actionType` set to `buy` never submits a bid. When the conditions pass it returns `requiresUserAction: true` with the unsigned `approve` and `bidOnAuction` steps for you to sign, and records the execution as unfulfilled with `reason: "requires_wallet_signature"`.
+  A `buy` hook never bids. It returns an approval and a `bidOnAuction` step for a wallet to sign, priced when they were built. The auction module charges its price at the moment the bid lands. It reverts if the auction has ended, the market is paused, the price is stale, or the signer is the loan's borrower. Delivery is a compliance-gated token transfer, so a wallet the collateral token does not admit reverts too. The balance check before the steps reads only the instance's registered wallet, whichever wallet signs.
 </Warning>
+
+What the body must carry depends on the hook type:
+
+| `hookType` | Required body | What the run does |
+|---|---|---|
+| `monitorRisk` | None | Fetches `riskUri` and evaluates `riskFields` |
+| `beforeLiquidation` | `loanData` | Evaluates `parameterChecks` against `loanData` |
+| `afterLiquidation` | `liquidationData` | Checks its triggers, then runs its `buy` or `inform` action |
 
 ## Path Parameters
 
@@ -26,32 +26,87 @@ What the request body must carry depends on the hook type:
 ## Body Parameters
 
 <ParamField body="loanData" type="object">
-  Required for `beforeLiquidation` hooks. Supply the parameters your `parameterChecks` reference, for example `healthFactor`, `collateralValue`, `debtValue`, `collateralRatio`, `interestAccrued`.
+  Required for `beforeLiquidation` hooks. Carries the values the hook's `parameterChecks` name, such as `healthFactor`, `collateralValue`, `debtValue`, `collateralRatio` or `interestAccrued`, as numbers or decimal strings. An optional `loanId` is written to the execution log. Nothing is read from chain.
 </ParamField>
 
 <ParamField body="liquidationData" type="object">
-  Required for `afterLiquidation` hooks.
+  Required for `afterLiquidation` hooks. Its values are passed through as sent.
   <Expandable>
-    <ParamField body="loanId" type="string">On-chain loan ID.</ParamField>
-    <ParamField body="auctionId" type="string">Auction ID, when the liquidation produced a Dutch auction.</ParamField>
-    <ParamField body="collateralAmount" type="string">Collateral seized.</ParamField>
-    <ParamField body="debtOwed" type="string">Debt outstanding at liquidation.</ParamField>
-    <ParamField body="borrower" type="string">Borrower address.</ParamField>
+    <ParamField body="loanId" type="string">On-chain loan ID, written to the log and to an `inform` body.</ParamField>
+    <ParamField body="auctionId" type="string">Auction ID on the market's auction module. Required for a `buy` action to have anything to price.</ParamField>
+    <ParamField body="collateralAmount" type="string">Collateral seized, forwarded in an `inform` body.</ParamField>
+    <ParamField body="debtOwed" type="string">Debt outstanding at liquidation, forwarded in an `inform` body.</ParamField>
+    <ParamField body="borrower" type="string">Borrower address, forwarded in an `inform` body.</ParamField>
   </Expandable>
 </ParamField>
 
+## What each type does
+
+**`monitorRisk`** sends a `GET` to `riskUri` with `Accept: application/json`, a 10-second timeout and a 5 MB cap on the body. A non-2xx status, a body that is not JSON, a refused host or a timeout returns `success: false` with the reason in `error`, and sets the hook's `lastResult` to `null`. A completed evaluation lists each field in `fields`, up to the first that fails. When it evaluates to `false`, the run also executes every active `afterLiquidation` hook that lists this monitor in `triggerHookIds`. Their outcomes go to their own logs, not into this response.
+
+**`beforeLiquidation`** evaluates every check, and `result` is `true` only when all pass. `checkResults` lists `{ parameter, value, pass }` per check, with `value` as sent. A hook with no `parameterChecks` returns `result: true` without logging a run.
+
+**`afterLiquidation`** first checks `triggerHookIds`. If it lists any, it acts only when every listed hook is active and its last counted run returned `false`. Otherwise it returns `result: false` with `reason: "Trigger condition not met"`.
+
+An `inform` action sends a `POST` to `webhookUrl` with a 15-second timeout. The JSON body holds the `webhookPayload` fields plus `hookId`, `marketId`, `loanId`, `auctionId`, `collateralAmount`, `debtOwed`, `borrower` and an ISO `timestamp`. The headers include `X-Hook-Id` and `X-Hook-Type: afterLiquidation`. `result` is `true` for any 2xx answer, and `status` carries the code. The request carries no signature, so verify anything it reports against the chain before acting on it.
+
+A `buy` action reads `liquidationData.auctionId` on the market's auction module. It returns `success: false` when the market has no auction module wired or the auction is not active. Above `maxBuyPrice` it returns `result: false` with `reason: "Price exceeds max buy price"`. When the registered wallet holds less of the borrow asset than the bid needs, it returns `success: false` and an `error` naming the asset. Otherwise it returns two steps. The first approves the auction module to pull the borrow asset for the remaining collateral at the current price. The second is `bidOnAuction` for all remaining collateral. The run records `result: false` with `reason: "requires_wallet_signature"`, because nothing has been bought. The hook does not record the bid; confirm the mined bid with [Bid on Auction](/endpoints/lending/bid-on-auction).
+
+A run started by a monitor's `false` evaluation carries no loan or auction: `loanId` and `auctionId` are `null`, `collateralAmount` and `debtOwed` are `"0"`, and `borrower` is `"0x0"`. An `inform` hook posts those values. A `buy` hook has no auction to read and fails.
+
+Counted runs, unmet triggers, skipped bids, a short wallet balance and runs that raised an error are written to [Get Hook Executions](/endpoints/lending/get-hook-executions). A refusal before anything is evaluated is returned but not logged. That covers a missing risk config, no parameter checks, no webhook URL, no auction module and an inactive auction.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="success" type="boolean">Whether the hook ran without an error.</ResponseField>
+    <ResponseField name="result" type="boolean">Outcome of the evaluation or action.</ResponseField>
+    <ResponseField name="fields" type="array">`monitorRisk`. One `{ path, operator, threshold, value, pass }` per field evaluated.</ResponseField>
+    <ResponseField name="checkResults" type="array">`beforeLiquidation`. One `{ parameter, value, pass }` per check.</ResponseField>
+    <ResponseField name="status" type="integer">`inform`. HTTP status the webhook answered with.</ResponseField>
+    <ResponseField name="reason" type="string">Why a run that did not error returned `result: false`: `Trigger condition not met`, `Price exceeds max buy price` or `requires_wallet_signature`.</ResponseField>
+    <ResponseField name="error" type="string">Why the run failed, when `success` is `false`.</ResponseField>
+    <ResponseField name="requiresUserAction" type="boolean">`buy`. `true` when steps are returned.</ResponseField>
+    <ResponseField name="action" type="string">`buy`. `SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="steps" type="array">`buy`. The `approve` step, then `bidOnAuction`. Each carries `action`, `transaction` (`to`, `data`, `value`, `chainId`) and `functionName`.</ResponseField>
+    <ResponseField name="currentPrice" type="string">`buy`. Auction price per whole collateral token, in the borrow asset, when the steps were built.</ResponseField>
+  </Expandable>
+</ResponseField>
+
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/hooks/{marketId}/{hookId}/execute" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/hooks/{marketId}/{hookId}/execute" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
 ```bash cURL (beforeLiquidation)
-curl -X POST "https://api.trusset.org/lending-external-securities/api/hooks/{marketId}/{hookId}/execute" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/hooks/{marketId}/{hookId}/execute" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"loanData": {"healthFactor": "0.92", "debtValue": "4272.50"}}'
+  -d '{"loanData": {"loanId": "5", "healthFactor": "0.92", "debtValue": "4272.50"}}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/hooks/${marketId}/${hookId}/execute`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ liquidationData: { loanId: '5', auctionId: '3' } })
+  }
+);
+const { data } = await res.json();
+
+if (data.requiresUserAction) {
+  for (const step of data.steps) {
+    const tx = await wallet.sendTransaction(step.transaction);
+    await tx.wait();
+  }
+}
 ```
 </RequestExample>
 
@@ -63,7 +118,7 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/hooks/{mar
     "success": true,
     "result": true,
     "fields": [
-      { "path": "ageHours", "value": 12, "operator": "<", "threshold": 36, "pass": true }
+      { "path": "ageHours", "operator": "<", "threshold": 36, "value": 12, "pass": true }
     ]
   }
 }
@@ -73,9 +128,9 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/hooks/{mar
   "success": true,
   "data": {
     "success": true,
-    "result": false,
+    "result": true,
     "checkResults": [
-      { "parameter": "healthFactor", "value": "0.92", "operator": "<", "threshold": "0.95", "pass": true }
+      { "parameter": "healthFactor", "value": "0.92", "pass": true }
     ]
   }
 }
@@ -95,14 +150,61 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/hooks/{mar
   "success": true,
   "data": {
     "success": true,
-    "result": true,
-    "txHash": "0xabc...def"
+    "result": false,
+    "reason": "requires_wallet_signature",
+    "requiresUserAction": true,
+    "action": "SIGN_TRANSACTIONS",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "approve",
+        "description": "Approve the auction venue to pull USDC"
+      },
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x5c1e8f2a9b7d34c06e4f8a1b29d7c3e5f0a6b84d",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "bidOnAuction"
+      }
+    ],
+    "currentPrice": "97.412"
+  }
+}
+```
+```json afterLiquidation (skipped)
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "result": false,
+    "reason": "Price exceeds max buy price"
+  }
+}
+```
+```json afterLiquidation (failed)
+{
+  "success": true,
+  "data": {
+    "success": false,
+    "result": false,
+    "error": "Auction not active"
   }
 }
 ```
 ```json Error - Missing Loan Data
 {
   "success": false,
+  "data": null,
   "error": {
     "code": "MISSING_LOAN_DATA",
     "message": "Loan data required"
@@ -111,8 +213,16 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/hooks/{mar
 ```
 </ResponseExample>
 
-## Result Semantics
+## Error Codes
 
-`data.success` reports whether the hook ran without error. `data.result` reports the outcome of the evaluation. A hook that runs cleanly and evaluates to false returns `success: true` with `result: false`, which is not an API error.
+These refuse the call before the hook runs. A hook that runs and fails answers `200` with `data.success: false`.
 
-Skipped `buy` actions return `result: false` with a `reason` field, for example `Price exceeds max buy price` or `Auction not active`. An insufficient balance on the bidding wallet returns `success: false` with an `error` describing the shortfall in the market's borrow asset.
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_LOAN_DATA` | `400` | The hook is `beforeLiquidation` and `loanData` is missing |
+| `MISSING_LIQUIDATION_DATA` | `400` | The hook is `afterLiquidation` and `liquidationData` is missing |
+| `KEY_MATERIAL_REJECTED` | `400` | A key in the body is named for key material |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MISSING_HOOK_ID` | `400` | `hookId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID belongs to your instance |
+| `HOOK_NOT_FOUND` | `404` | No hook with this ID exists on this market |

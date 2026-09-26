@@ -1,0 +1,139 @@
+---
+title: 'Record Insurance Top-Up'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/insurance/record-topup'
+description: 'Record a mined top-up of the market insurance fund from its receipt'
+---
+
+Records a top-up of the market's insurance fund once its transaction has mined. This is the confirm step for [Top Up Insurance Fund](/endpoints/lending/top-up-insurance), which has no confirm call of its own. The record then appears in `recentTopUps` on [Get Insurance Status](/endpoints/lending/get-insurance-status) and in [List Transactions](/endpoints/lending/list-transactions).
+
+The API reads the receipt and matches its logs, not the calldata, so a top-up signed outside this API can be recorded too. It accepts either of two shapes, and `booked` says which one it found.
+
+| Receipt carries | `booked` | Recorded as |
+|---|---|---|
+| A `FundsAdded` booking by the fund from `fromAddress` for exactly `amount`, which is what `topUp` produces | `true` | `INSURANCE_TOPUP_BOOKED` |
+| A transfer of the borrow asset from `fromAddress` to the fund for exactly `amount` | `false` | `INSURANCE_TOPUP` |
+
+A plain transfer raises the fund's balance, so the reserve can pay it out, but the fund does not count it in its lifetime deposits. On an earlier fund implementation that cannot book a top-up, a plain transfer is the only way to add capital.
+
+A protocol-fee sweep is not a top-up and is refused here. Record it through [Sweep Protocol Fees](/endpoints/lending/sweep-protocol-fees) instead.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="txHash" type="string" required>
+  Hash of the mined top-up. For a top-up built by this API, that is the `topUp` step's hash, not the approval's.
+</ParamField>
+
+<ParamField body="amount" type="string" required>
+  The amount the transaction moved, as a positive decimal string in the borrow asset. It must match the receipt to the smallest unit.
+</ParamField>
+
+<ParamField body="fromAddress" type="string" required>
+  The wallet the top-up came from, as a 0x-prefixed 20-byte address. It must be the source the receipt records.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="recorded" type="boolean">Always `true` on a successful response.</ResponseField>
+    <ResponseField name="duplicate" type="boolean">`true` when this hash was already recorded as a top-up of the same amount. Nothing new is written, so the call is safe to repeat.</ResponseField>
+    <ResponseField name="booked" type="boolean">`true` when the fund booked the top-up as a deposit, `false` for a plain transfer.</ResponseField>
+    <ResponseField name="note" type="string">States in words how this fund treats the top-up.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Tip>
+  `TX_NOT_FOUND` is the expected answer when the transaction has not mined yet. Wait for a confirmation and retry. A booked top-up nobody records is still picked up by [Get Insurance Status](/endpoints/lending/get-insurance-status) if it falls within the last 50,000 blocks.
+</Tip>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/insurance/record-topup" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "txHash": "0x4a8e2c6f1b3d57e09a2c4f6e8b1d3a5c7e9f0b2d4a6c8e1f3b5d7a9c0e2f4b68",
+    "amount": "5000",
+    "fromAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/insurance/record-topup`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHash, amount: '5000', fromAddress })
+  }
+);
+const { success, data, error } = await res.json();
+if (!success && error.code === 'TX_NOT_FOUND') {
+  await retryAfterNextBlock();
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Recorded Response
+{
+  "success": true,
+  "data": {
+    "recorded": true,
+    "duplicate": false,
+    "booked": true,
+    "note": "A top-up pulls the settlement asset through topUp(amount) and the fund books it as a deposit with the source recorded, so Lifetime Deposits counts protocol-fee sweeps and top-ups alike, and the balance is what it can pay."
+  }
+}
+```
+```json Recorded Response (Plain Transfer)
+{
+  "success": true,
+  "data": {
+    "recorded": true,
+    "duplicate": false,
+    "booked": false,
+    "note": "A top-up on this fund implementation is a direct transfer of the settlement asset made outside the product; the fund does not book it as a deposit: its lifetime-deposit figure counts only the protocol fees the market sweeps into it, and the balance is what it can pay."
+  }
+}
+```
+```json Error - Protocol-Fee Sweep
+{
+  "success": false,
+  "error": {
+    "code": "NOT_A_TOP_UP",
+    "message": "This transaction books the market's own protocol-fee sweep into the reserve (FundsAdded from the market), which the sweep confirm records, not a top-up."
+  }
+}
+```
+```json Error - Wrong Amount
+{
+  "success": false,
+  "error": {
+    "code": "AMOUNT_MISMATCH",
+    "message": "The receipt carries a top-up of 4000.0 USDC from 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52, not 5000; confirm with the amount the transaction moved."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A body field is missing or malformed. `amount` must be a positive decimal string |
+| `MISSING_MARKET_ID` | `400` | The market ID in the path is longer than 100 characters |
+| `NO_INSURANCE_FUND` | `400` | The market records no insurance fund |
+| `INVALID_AMOUNT` | `400` | `amount` carries more decimal places than the borrow asset supports |
+| `TX_REVERTED` | `400` | The transaction reverted on chain |
+| `AMOUNT_MISMATCH` | `400` | The receipt carries a top-up from `fromAddress` of a different amount. The message states it |
+| `TX_NOT_VERIFIED` | `400` | The receipt carries neither a `FundsAdded` booking by the fund nor a matching transfer to it from `fromAddress` |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `TX_NOT_FOUND` | `404` | No receipt yet. The transaction is unmined, dropped, or on another network |
+| `NOT_A_TOP_UP` | `409` | `fromAddress` is the market, or the transaction is a protocol-fee sweep or a deposit from another market the fund authorizes |
+| `AMOUNT_MISMATCH` | `409` | This hash is already recorded as a top-up of a different amount |
+| `CHAIN_UNAVAILABLE` | `503` | The receipt could not be read. Retry shortly |
+| `LEDGER_WRITE_FAILED` | `503` | The top-up is confirmed on chain but its record could not be written. Retry the recording |

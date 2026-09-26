@@ -120,9 +120,9 @@ These are the regulatory argument. Do not soften and do not strengthen.
 | "Trusset cannot update global contracts (e.g. the Identity Register) as a single party." | `security/overview.mdx` |
 | "Trusset holds no role." | `external-securities-lending/introduction.mdx` |
 | "Trusset is not involved." | `external-securities-lending/introduction.mdx` |
-| "There is no auto-sell for external securities, because these instruments have no on-platform venue." | `external-securities-lending/introduction.mdx` |
+| ~~"There is no auto-sell for external securities, because these instruments have no on-platform venue."~~ Corrected: the first clause stands; the reason clause is false on v2, where a market can wire its own auction venue. See OPEN-QUESTIONS item 15. | `lending/introduction.mdx` |
 | "There is no auto-sell for external securities." | `external-securities-lending/liquidate.mdx` |
-| "It is not automatically covered by the insurance fund, which only steps in on a timeout write-off." | `external-securities-lending/settle-liquidation.mdx` |
+| ~~"It is not automatically covered by the insurance fund, which only steps in on a timeout write-off."~~ Corrected: false on v2, which draws the fund at every short first settlement. See OPEN-QUESTIONS item 16. | `lending/settle-liquidation.mdx` |
 | ~~"The proofs themselves (`proofs/*.bin`) and the encrypted witness material (`secrets.enc`) are never uploaded."~~ Corrected: false for `proofs/*.bin`. See OPEN-QUESTIONS item 13. | `sdk/customers/kyc-proofs.mdx` |
 | "The IdentityRegistry is never called directly by StockCustody." | `licenses/stock-orderbook/contracts.mdx` |
 | "The IdentityRegistry is never called directly by CommodityCustody." | `licenses/commodity-orderbook/contracts.mdx` |
@@ -136,9 +136,9 @@ One conflict to resolve before the Tier 1 pass, logged in `docs/OPEN-QUESTIONS.m
 |---|---|
 | Close factor `1000 to 5000` basis points | `external-securities-lending/update-config.mdx`, `stock-lending/update-config.mdx` |
 | Auction duration `600` to `86400` seconds | `external-securities-lending/update-config.mdx`, `stock-lending/update-config.mdx` |
-| 7 day liquidation write-off window | `external-securities-lending/`: `introduction`, `handle-timeout`, `get-pending-liquidations`, `get-liquidation-stats`, `settle-expired-auction` |
+| 7 day liquidation write-off window | `external-securities-lending/`: `introduction`, `handle-timeout`, `get-pending-liquidations`, `get-liquidation-stats`, `settle-expired-auction`. The number stands; the starting point on `settle-expired-auction` was corrected, see OPEN-QUESTIONS item 17 |
 | Oracle deviation bound, `5000` basis points, 50 percent | `external-securities-lending/sync-oracle.mdx`, `stock-lending/sync-oracle.mdx` |
-| `maxPriceAge` staleness, `86400` seconds for daily NAV | `external-securities-lending/update-config.mdx`, `get-config`, `get-oracle-status` |
+| `maxPriceAge` staleness, `86400` seconds for daily NAV | `external-securities-lending/update-config.mdx`, `get-config`, `get-oracle-status`. The number stands; the overstated consequence on `update-config` was narrowed, see OPEN-QUESTIONS item 18 |
 | Collateral factor below liquidation threshold | `external-securities-lending/get-config.mdx`, `stock-lending/get-config.mdx` |
 
 One deliberate exclusion: `endpoints/authentication.mdx` states that a rotated API key "remains valid for 7 days". That is a key rotation overlap, not the liquidation write-off window. The page stays Tier 3. The number stays locked as a fact, like every number in the docs.

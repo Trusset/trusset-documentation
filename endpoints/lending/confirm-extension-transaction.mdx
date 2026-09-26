@@ -1,0 +1,123 @@
+---
+title: 'Confirm Extension Transaction'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/extensions/confirm-tx'
+description: 'Record a mined extension transaction and read what it changed'
+---
+
+Records any mined transaction of the extension flow: a proposal, a confirmation, an applied batch page, a cancellation, or the switch itself. The API verifies the receipt against the market, reads the extension events it carries, and brings each proposal it touched up to date from the chain.
+
+The market assigns a proposal its ID only when the proposal mines, so confirming the proposing transaction here is how to learn it. [List Extensions](/endpoints/lending/list-extensions) shows it too from then on.
+
+<Warning>
+  An applied batch page can mine without extending anything. When every loan in the page was outside the batch, closed, or already at or past the proposed date, the response carries `noOp: true` and `outcome: "NO_LOAN_EXTENDED"`. The transaction still cost gas, and no maturity moved.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="txHash" type="string" required>
+  Hash of the mined transaction. It must call `proposeExtension`, `confirmExtension`, `applyExtension`, `cancelExtension` or `setAllowExtension` on this market.
+</ParamField>
+
+Confirming the same hash again is safe. The records converge on the same state, and an applied page is counted once.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
+    <ResponseField name="functionName" type="string">The function the transaction called.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that sent it.</ResponseField>
+    <ResponseField name="activity" type="array">
+      The extension events the market emitted in this transaction, in log order. Empty for `setAllowExtension`.
+      <Expandable>
+        <ResponseField name="proposalId" type="string">The proposal the event concerns.</ResponseField>
+        <ResponseField name="event" type="string">`ExtensionProposed`, `ExtensionConfirmed`, `ExtensionApplied` or `ExtensionCancelled`.</ResponseField>
+        <ResponseField name="loanId" type="string">The loan whose maturity moved. `ExtensionApplied` only.</ResponseField>
+        <ResponseField name="newDueAt" type="string">Its new maturity, in unix seconds. `ExtensionApplied` only.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="appliedLoans" type="array">IDs of the loans this transaction extended. A confirmed `LOAN` proposal lists its loan here, and a `FLOOR` confirmation lists none.</ResponseField>
+    <ResponseField name="noOp" type="boolean">`true` only for an `applyExtension` that extended no loan.</ResponseField>
+    <ResponseField name="outcome" type="string">`NO_LOAN_EXTENDED`. Present only when `noOp` is `true`.</ResponseField>
+    <ResponseField name="notice" type="string">Why nothing moved, and what to do about the loans that still need an extension. Present only when `noOp` is `true`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/extensions/confirm-tx" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "txHash": "0xe9eb82dcbafb24c0eda225c2b18201928847ee7d37b9baeda3361c250432168d" }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/extensions/confirm-tx`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHash: tx.hash })
+  }
+);
+const { data } = await res.json();
+if (data.noOp) console.warn(data.notice);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Applied Page
+{
+  "success": true,
+  "data": {
+    "txHash": "0xe9eb82dcbafb24c0eda225c2b18201928847ee7d37b9baeda3361c250432168d",
+    "functionName": "applyExtension",
+    "signedBy": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "activity": [
+      { "proposalId": "2", "event": "ExtensionApplied", "loanId": "1", "newDueAt": "1797292800" },
+      { "proposalId": "2", "event": "ExtensionApplied", "loanId": "3", "newDueAt": "1797292800" }
+    ],
+    "appliedLoans": ["1", "3"],
+    "noOp": false
+  }
+}
+```
+```json Page Extended Nothing
+{
+  "success": true,
+  "data": {
+    "txHash": "0x0ddbfbd173cec02dcd335720336ec72ced1e967714c36ae2bbf89e0871996267",
+    "functionName": "applyExtension",
+    "signedBy": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "activity": [],
+    "appliedLoans": [],
+    "noOp": true,
+    "outcome": "NO_LOAN_EXTENDED",
+    "notice": "The transaction mined but extended no loan: the market emitted no ExtensionApplied. Every loan in the page was either outside the batch (opened after the proposal was made), closed, or already at or past the proposal date, so no maturity moved. Propose a new extension for the loans that still need one."
+  }
+}
+```
+```json Error - Wrong Function
+{
+  "success": false,
+  "error": {
+    "code": "TX_WRONG_FUNCTION",
+    "message": "Transaction calls setConfig; expected proposeExtension or confirmExtension or applyExtension or cancelExtension or setAllowExtension"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The `marketId` path segment is longer than 100 characters |
+| `VALIDATION_ERROR` | `400` | `txHash` is missing or is not a 32-byte hex hash |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `INTERNAL_ERROR` | `500` | The chain could not be read. Retry shortly |
+
+The transaction checks answer with the standard [transaction verification errors](/endpoints/introduction#confirm-a-transaction): `TX_NOT_FOUND`, `TX_REVERTED`, `TX_WRONG_TARGET` and `TX_WRONG_FUNCTION`.

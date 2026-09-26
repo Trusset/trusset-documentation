@@ -1,0 +1,196 @@
+---
+title: 'Get Fee Split'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/fee-split'
+description: 'Read how the market divides repaid interest between its fee legs and liquidity providers'
+---
+
+Returns how the market divides every unit of repaid interest, read from the contracts on each call rather than from stored configuration. Four named legs come off in a fixed order, and liquidity providers keep what is left.
+
+The order never changes. Trusset's infrastructure fee takes 15 percent of repaid interest first. Of the remainder, the operator takes a fixed 8 percent and the distributors a fixed 5 percent. The market's insurance-fund rate then takes its share of what is left, and the liquidity providers receive the rest. Each leg rounds down, so the liquidity providers absorb the rounding. Interest recovered through a liquidation is split the same way.
+
+Only one of these figures can move. The infrastructure rate is hardcoded, and the operator and distributor shares are constants on the factory that no party can set, raise, lower or redirect. The insurance-fund rate is the market's `protocolFeeRate`, zero by default, which the issuer sets through [Update Market Config](/endpoints/lending/update-config).
+
+Nothing is paid out inline. Each leg is booked as a liability on the market and leaves through its own permissionless sweep. [Get Cashflows](/endpoints/lending/get-cashflows) shows what each leg has accrued, what has been swept and what is still pending.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="marketAddress" type="string">Market contract, lowercased.</ResponseField>
+    <ResponseField name="generation" type="string">`FIXED_SHARES` on the current market implementation, where the operator and distributor shares are the factory constants. `OFFERED_SHARE` on a market still running the earlier implementation, where the operator share is what the market offered at deployment and there is no distributor leg.</ResponseField>
+    <ResponseField name="fixedShares" type="boolean">`true` on `FIXED_SHARES`.</ResponseField>
+    <ResponseField name="basis" type="string">Always `REPAID_INTEREST`. Every `effectiveBps` and `perHundred` is a share of one unit of repaid interest.</ResponseField>
+    <ResponseField name="legs" type="array">
+      Five entries in the order the market applies them: `INFRASTRUCTURE`, `OPERATOR`, `DISTRIBUTOR`, `INSURANCE_FUND`, `LIQUIDITY_PROVIDERS`.
+      <Expandable>
+        <ResponseField name="key" type="string">Which leg this is.</ResponseField>
+        <ResponseField name="recipient" type="string">Where the leg is paid: the Trusset wallet fixed in the contract, the operator wallet, or the market's insurance fund. `null` on `DISTRIBUTOR`, which is credited per provider (see `distributorRecipients`), and on `LIQUIDITY_PROVIDERS`, which stays in the pool.</ResponseField>
+        <ResponseField name="rateE18" type="string">The leg's own rate against its base, at 18 decimals. `null` on `LIQUIDITY_PROVIDERS`.</ResponseField>
+        <ResponseField name="rateBps" type="integer">The same rate in basis points. `null` on `LIQUIDITY_PROVIDERS`.</ResponseField>
+        <ResponseField name="ofBase" type="string">What the rate applies to. `REPAID_INTEREST` for the infrastructure fee, `AFTER_INFRASTRUCTURE` for the operator and distributor shares, `AFTER_SHARES` for the insurance-fund rate, and `REMAINDER` for the liquidity providers.</ResponseField>
+        <ResponseField name="effectiveBps" type="integer">The leg's share of repaid interest in basis points, rounded down. `LIQUIDITY_PROVIDERS` carries 10000 less the other four, so the five always sum to 10000.</ResponseField>
+        <ResponseField name="perHundred" type="string">The same share as a percentage at full precision, for example `"6.8"`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="operatorWallet" type="string">The wallet the operator share is paid to. On `FIXED_SHARES` this is the market's `operatorFeeRecipient`, the wallet that took the lender-of-record role unless it has rotated itself since. On `OFFERED_SHARE` it is the lender of record the factory recorded. `null` while no lender of record has taken the market.</ResponseField>
+    <ResponseField name="operatorWalletRecorded" type="boolean">Whether the market records an operator wallet. `null` on `OFFERED_SHARE`.</ResponseField>
+    <ResponseField name="seekingCurator" type="boolean">`true` while the market is still seeking a lender of record, from the factory's deployment record. `null` when that record could not be read.</ResponseField>
+    <ResponseField name="distributorRecipients" type="string">`VAULT_DISTRIBUTORS` on `FIXED_SHARES`: the distributor leg is credited to liquidity providers in proportion to the liquidity each supplied. A registered vault passes its slice to the distributors behind its holders. `NONE` on `OFFERED_SHARE`.</ResponseField>
+    <ResponseField name="transactionFees" type="object">
+      The fixed open and repay fees stamped on the market at deployment. `null` on `OFFERED_SHARE`, or when they could not be read.
+      <Expandable>
+        <ResponseField name="openFeeRaw" type="string">Flat fee on every disbursement, in the borrow asset's smallest unit.</ResponseField>
+        <ResponseField name="repayFeeRaw" type="string">Flat fee on every repayment, in the borrow asset's smallest unit.</ResponseField>
+        <ResponseField name="openFee" type="string">`openFeeRaw` as a decimal string. `null` when the borrow asset could not be read.</ResponseField>
+        <ResponseField name="repayFee" type="string">`repayFeeRaw` as a decimal string. `null` when the borrow asset could not be read.</ResponseField>
+        <ResponseField name="capBps" type="integer">Always `50`. Each charge is at most 0.5 percent of the amount borrowed or of the debt discharged.</ResponseField>
+        <ResponseField name="enabled" type="boolean">`true` when either fee is above zero.</ResponseField>
+        <ResponseField name="shares" type="object">How each charge is shared: `operatorBps`, `distributorBps` and `infrastructureBps`. On the fixed shares that is 800, 500 and 8700.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="sources" type="object">Where each rate was read, for audit: `infrastructure`, `operator`, `distributor` and `insuranceFund`, each a short description of the contract call.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Read the split
+
+`rateBps` and `effectiveBps` answer different questions. `rateBps` is the leg's rate against its own base, which is what the contracts store. `effectiveBps` is what the leg takes out of repaid interest once the legs before it have come off.
+
+On a `FIXED_SHARES` market at the default insurance-fund rate of zero, 100 units of repaid interest split as follows.
+
+| Leg | `rateBps` | `ofBase` | `effectiveBps` | Of 100 units |
+|---|---|---|---|---|
+| `INFRASTRUCTURE` | `1500` | `REPAID_INTEREST` | `1500` | 15 |
+| `OPERATOR` | `800` | `AFTER_INFRASTRUCTURE` | `680` | 6.8 |
+| `DISTRIBUTOR` | `500` | `AFTER_INFRASTRUCTURE` | `425` | 4.25 |
+| `INSURANCE_FUND` | `0` | `AFTER_SHARES` | `0` | 0 |
+| `LIQUIDITY_PROVIDERS` | `null` | `REMAINDER` | `7395` | 73.95 |
+
+The fixed transaction fee is not part of this split. It is a flat charge on disbursement and repayment, shared 8 percent to the operator, 5 percent to the distributor leg and 87 percent to Trusset's infrastructure liability. `transactionFees.shares` states those rates.
+
+<Note>
+  The split is cached for up to 60 seconds, so a change made on chain can take that long to appear here.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/fee-split" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/fee-split`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const lp = data.legs.find((leg: { key: string }) => leg.key === 'LIQUIDITY_PROVIDERS');
+console.log(`Liquidity providers keep ${lp.perHundred} percent of repaid interest`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "readFailed": false,
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "generation": "FIXED_SHARES",
+    "fixedShares": true,
+    "basis": "REPAID_INTEREST",
+    "legs": [
+      {
+        "key": "INFRASTRUCTURE",
+        "recipient": "0x65ff3a731366472d40cf458332457403168c2bea",
+        "rateE18": "150000000000000000",
+        "rateBps": 1500,
+        "ofBase": "REPAID_INTEREST",
+        "perHundred": "15",
+        "effectiveBps": 1500
+      },
+      {
+        "key": "OPERATOR",
+        "recipient": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+        "rateE18": "80000000000000000",
+        "rateBps": 800,
+        "ofBase": "AFTER_INFRASTRUCTURE",
+        "perHundred": "6.8",
+        "effectiveBps": 680
+      },
+      {
+        "key": "DISTRIBUTOR",
+        "recipient": null,
+        "rateE18": "50000000000000000",
+        "rateBps": 500,
+        "ofBase": "AFTER_INFRASTRUCTURE",
+        "perHundred": "4.25",
+        "effectiveBps": 425
+      },
+      {
+        "key": "INSURANCE_FUND",
+        "recipient": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+        "rateE18": "0",
+        "rateBps": 0,
+        "ofBase": "AFTER_SHARES",
+        "perHundred": "0",
+        "effectiveBps": 0
+      },
+      {
+        "key": "LIQUIDITY_PROVIDERS",
+        "recipient": null,
+        "rateE18": null,
+        "rateBps": null,
+        "ofBase": "REMAINDER",
+        "perHundred": "73.95",
+        "effectiveBps": 7395
+      }
+    ],
+    "operatorWallet": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "operatorWalletRecorded": true,
+    "seekingCurator": false,
+    "distributorRecipients": "VAULT_DISTRIBUTORS",
+    "transactionFees": {
+      "openFeeRaw": "0",
+      "repayFeeRaw": "0",
+      "openFee": "0.0",
+      "repayFee": "0.0",
+      "capBps": 50,
+      "enabled": false,
+      "shares": {
+        "operatorBps": 800,
+        "distributorBps": 500,
+        "infrastructureBps": 8700
+      }
+    },
+    "sources": {
+      "infrastructure": "interest model getSupplyRate(1e18, 1e18, 0)",
+      "operator": "factory OPERATOR_SHARE()",
+      "distributor": "factory DISTRIBUTOR_SHARE()",
+      "insuranceFund": "market config().protocolFeeRate"
+    }
+  }
+}
+```
+```json Error - Unreadable
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_STATE_UNAVAILABLE",
+    "message": "The split of repaid interest could not be read from the market. Retry shortly."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The market ID in the path is longer than 100 characters |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_STATE_UNAVAILABLE` | `503` | One of the rates could not be read from the chain, so no split is shown. Retry shortly |

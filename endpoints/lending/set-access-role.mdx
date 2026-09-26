@@ -1,0 +1,174 @@
+---
+title: 'Set Access Role'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/access-role'
+description: 'Grant or revoke a role on the market, its liquidation router or its price oracle'
+---
+
+Builds the transaction that grants or revokes one of six roles across the market's three contracts: the market itself, its liquidation router and its price oracle. The endpoint never submits it. The wallet that administers the role signs, and the same POST with `txHash` verifies the mined transaction.
+
+<Warning>
+  Revoking `MARKET_ADMIN` or `ROUTER_ADMIN` from its last holder leaves that contract with no admin, and neither the contracts nor this endpoint stop it. Nobody could then grant its roles or upgrade it. On the market, nobody could pause it or write off a timed-out liquidation either.
+</Warning>
+
+## Roles
+
+| `role` | Contract | On-chain role | Signed by | What the role controls |
+|---|---|---|---|---|
+| `MARKET_ADMIN` | Market | `DEFAULT_ADMIN_ROLE` | Market admin | Market roles, pause, identity registers, vault registration, timeout write-offs, upgrades |
+| `MARKET_ISSUER` | Market | `ISSUER_ROLE` | Market admin | Risk configuration, loan terms, reserve ratio, extension proposals |
+| `MARKET_LIQUIDATOR` | Market | `LIQUIDATOR_ROLE` | Market admin | `liquidate`, and settling an expired auction while the market is paused |
+| `ROUTER_ADMIN` | Liquidation router | `DEFAULT_ADMIN_ROLE` | Router admin | Router roles, market authorization, write-off and reopen, returning collateral to the recorded borrower, upgrades |
+| `ROUTER_OPERATOR` | Liquidation router | `OPERATOR_ROLE` | Router admin | Withdrawing seized collateral to the recorded sale recipient, reporting sales, settling liquidations |
+| `ORACLE_SIGNER` | Price oracle | Authorized signer | Oracle owner | Pushing prices and signing EIP-712 price quotes |
+
+An authorized price signer can move the price every loan in the market is valued at, within the oracle's deviation bound. The oracle owner can sign prices without a grant, so revoking `ORACLE_SIGNER` from the owner is refused with `ORACLE_OWNER_SIGNS`; transferring oracle ownership is the only way to remove that authority. On an `ORACLE`-priced market the oracle reads an external feed and refuses every attested price, so a signer grant changes nothing there.
+
+<Note>
+  When the address is already in the requested state, the response returns `unchanged: true` and no calldata. For `ORACLE_SIGNER`, the oracle owner counts as already granted. A role the chain read cannot answer counts as a change, so the calldata comes back.
+</Note>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="role" type="string" required>
+  One of `MARKET_ADMIN`, `MARKET_ISSUER`, `MARKET_LIQUIDATOR`, `ROUTER_ADMIN`, `ROUTER_OPERATOR` or `ORACLE_SIGNER`.
+</ParamField>
+
+<ParamField body="address" type="string" required>
+  Address to grant or revoke. Must be a 0x-prefixed 40-character hex address other than the zero address.
+</ParamField>
+
+<ParamField body="action" type="string" required>
+  `grant` or `revoke`.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined transaction, as a 0x-prefixed 64-character hex string. Send it with the same `role`, `address` and `action` to verify the change. Omit it to receive the calldata.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="requiresUserAction" type="boolean">`true` when the role needs changing and the wallet that administers it has to sign. Absent otherwise.</ResponseField>
+    <ResponseField name="action" type="string">The action requested, echoed back.</ResponseField>
+    <ResponseField name="address" type="string">The address affected, echoed back.</ResponseField>
+    <ResponseField name="role" type="string">The role key requested, echoed back.</ResponseField>
+    <ResponseField name="roleName" type="string">The on-chain role: `DEFAULT_ADMIN_ROLE`, `ISSUER_ROLE`, `LIQUIDATOR_ROLE`, `OPERATOR_ROLE`, or `Price signing` for `ORACLE_SIGNER`.</ResponseField>
+    <ResponseField name="contract" type="string">The contract the role lives on: the market, its liquidation router or its oracle.</ResponseField>
+    <ResponseField name="configurationCalldata" type="object">Present only alongside `requiresUserAction`. Carries `accessRole`, the unsigned transaction `{ to, data, description, chainId, value }`. For `MARKET_LIQUIDATOR` the same transaction is repeated as `liquidatorRole`.</ResponseField>
+    <ResponseField name="message" type="string">Present only alongside `requiresUserAction`. Names the wallet that must sign, for example `The role change must be executed from the oracle owner wallet`.</ResponseField>
+    <ResponseField name="txHash" type="string">The verified transaction hash when confirming, or `null` when the address was already in the requested state. Absent on the calldata response.</ResponseField>
+    <ResponseField name="unchanged" type="boolean">`true` when no transaction was needed, `false` on a confirmed change. Absent on the calldata response.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+The confirm call reads the receipt and checks the function, the contract, the role and the address against the request. It records nothing.
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/access-role" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"role": "ORACLE_SIGNER", "address": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52", "action": "grant"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/access-role`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+const body = { role: 'ORACLE_SIGNER', address: signerAddress, action: 'grant' };
+const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+const { data } = await res.json();
+if (data.requiresUserAction) {
+  const { to, data: calldata, value, chainId } = data.configurationCalldata.accessRole;
+  const tx = await oracleOwnerWallet.sendTransaction({ to, data: calldata, value, chainId });
+  await tx.wait();
+  await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...body, txHash: tx.hash })
+  });
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "requiresUserAction": true,
+    "action": "grant",
+    "address": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "role": "ORACLE_SIGNER",
+    "roleName": "Price signing",
+    "contract": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+    "configurationCalldata": {
+      "accessRole": {
+        "to": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+        "data": "0x...",
+        "description": "Authorize wallet 0x1234f9...4a7e52 as oracle signer (requires oracle owner)",
+        "chainId": 11155111,
+        "value": "0"
+      }
+    },
+    "message": "The role change must be executed from the oracle owner wallet"
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "action": "grant",
+    "address": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "role": "ORACLE_SIGNER",
+    "roleName": "Price signing",
+    "contract": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "unchanged": false
+  }
+}
+```
+```json Error - Oracle Owner
+{
+  "success": false,
+  "error": {
+    "code": "ORACLE_OWNER_SIGNS",
+    "message": "The oracle owner can sign prices without an authorized-signer grant. Transfer oracle ownership to drop that authority."
+  }
+}
+```
+```json Error - Pending Lender of Record
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_PENDING_CURATOR",
+    "message": "This market has no lender of record yet, so changing who may sign its prices is not possible. A nominated candidate must take the role before the oracle has an owner that can sign this."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `role` is not one of the six keys, `address` is malformed, `action` is not `grant` or `revoke`, or `txHash` is malformed |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `INVALID_ADDRESS` | `400` | `address` is the zero address |
+| `NO_ROUTER` | `400` | A router role was requested and no liquidation router address could be resolved for the market |
+| `NO_ORACLE` | `400` | `ORACLE_SIGNER` was requested and the market records no oracle |
+| `ORACLE_OWNER_SIGNS` | `400` | A revoke of `ORACLE_SIGNER` names the oracle owner, who signs without a grant |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction changes a different role or signer, or names a different address |
+| `ACCESS_ROLE_UPDATE_FAILED` | `400` | The change could not be prepared or confirmed and no more specific code applied |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds the admin role or oracle ownership this change requires. Skipped when confirming with `txHash` |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction). On this endpoint every one of them answers `400`, including `TX_NOT_FOUND`.

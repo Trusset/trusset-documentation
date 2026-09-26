@@ -1,0 +1,234 @@
+---
+title: 'Get Permit Quote'
+api: 'POST /lending-external-securities-v2/api/positions/{marketId}/permit-quote'
+description: 'The EIP-2612 permit a borrower signs to repay a loan in one transaction'
+---
+
+Returns the EIP-2612 permit the borrower signs to repay a loan through [Repay Loan](/endpoints/lending/repay) in a single transaction. A wallet cannot read the figures the permit has to carry, so the quote supplies all of them. That is the value, the token's current nonce for the borrower, a bounded deadline and the token's EIP-712 domain. The permit names the market as spender.
+
+The quote exists only where the settlement asset provably implements EIP-2612, and only the loan's borrower can use it. A third party repaying someone else's loan uses the approve-then-repay steps on [Repay Loan](/endpoints/lending/repay). Signing the permit moves nothing by itself: the repayment transaction redeems it.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="loanId" type="integer" required>
+  On-chain loan ID. A positive integer. Accepted as a JSON number or as a numeric string.
+</ParamField>
+
+<ParamField body="amount" type="string">
+  Amount to repay, as a positive decimal string in borrow asset units. The permit is quoted over exactly this amount. Required unless `all` is `true`.
+</ParamField>
+
+<ParamField body="all" type="boolean">
+  Quote a full repayment. The value is the live debt plus a 20 basis point accrual buffer, plus the repayment fee on that figure.
+</ParamField>
+
+<ParamField body="deadlineSeconds" type="integer">
+  How long the permit stays valid, in seconds from now. An integer from `60` to `86400`. Defaults to `1800`.
+</ParamField>
+
+## Sign and repay
+
+<Steps>
+  <Step title="Quote">
+    Request the quote with the loan and either `amount` or `all: true`.
+  </Step>
+  <Step title="Sign">
+    Sign `typedData` from the wallet named in `signer`, which is the loan's borrower, and split the signature into `v`, `r` and `s`.
+  </Step>
+  <Step title="Build the repayment">
+    Call [Repay Loan](/endpoints/lending/repay) with the fields in `repay`, plus a `permit` holding `permit.value`, `permit.deadline`, `v`, `r` and `s`.
+  </Step>
+  <Step title="Broadcast and confirm">
+    Send the returned steps from the borrower's wallet, then confirm with the hash of the step at `confirmStepIndex`.
+  </Step>
+</Steps>
+
+A partial quote is exact: the repayment must carry the same amount. A full-repayment quote covers the debt at quote time plus the buffer, and interest keeps accruing. If the live debt plus the fee has outgrown the value by the time Repay Loan is called, it refuses with `INVALID_PERMIT`. If the growth only eats into the buffer, the repayment builds with a `warning`.
+
+The repay call also checks the signature against the borrower's current nonce. If another permit from the borrower is redeemed on the token in between, the nonce moves and the repay call refuses this signature with `INVALID_PERMIT`. Request a fresh quote.
+
+## Domain resolution
+
+A token does not expose its EIP-712 domain as a readable struct, so the API rebuilds it from `name()` and `version()`. It tries the token's own `version()` first, then `1` and `2`, and accepts a candidate only when it reproduces the token's `DOMAIN_SEPARATOR`. The wallet therefore signs a digest the token will recover.
+
+When no candidate matches, the call returns `PERMIT_DOMAIN_UNRESOLVED`. Sign with tooling that knows the token's domain, or use the approve-then-repay steps.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="success" type="boolean">`true`, nested inside `data`.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TYPED_DATA`.</ResponseField>
+    <ResponseField name="typedData" type="object">
+      The EIP-712 payload to sign. Pass `domain`, `types` and `message` straight to the wallet's typed-data signer.
+      <Expandable>
+        <ResponseField name="domain" type="object">`name`, `version`, `chainId` and `verifyingContract`, the settlement asset's address.</ResponseField>
+        <ResponseField name="types" type="object">The EIP-2612 `Permit` type: `owner`, `spender`, `value`, `nonce`, `deadline`.</ResponseField>
+        <ResponseField name="primaryType" type="string">`Permit`.</ResponseField>
+        <ResponseField name="message" type="object">`owner` (the borrower), `spender` (the market), `value` in the smallest unit, `nonce` and `deadline` in unix seconds.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="permit" type="object">`value` as a decimal string in borrow asset units, and `deadline` in unix seconds. Carry both into the `permit` of the repayment.</ResponseField>
+    <ResponseField name="repay" type="object">The body fields for [Repay Loan](/endpoints/lending/repay): `loanId` as a string, plus `all: true` or the `amount`.</ResponseField>
+    <ResponseField name="fullRepayment" type="boolean">Whether the quote covers the whole debt.</ResponseField>
+    <ResponseField name="outstandingDebt" type="string">Principal plus accrued interest at quote time, without the repayment fee.</ResponseField>
+    <ResponseField name="borrowAssetSymbol" type="string">Symbol of the settlement asset.</ResponseField>
+    <ResponseField name="borrowAssetAddress" type="string">Address of the settlement asset, the token the permit is signed for.</ResponseField>
+    <ResponseField name="signer" type="string">The loan's borrower, the only wallet whose signature the repayment accepts.</ResponseField>
+    <ResponseField name="nonce" type="string">The borrower's current permit nonce on the token.</ResponseField>
+    <ResponseField name="transactionFee" type="object">The repayment fee, present only when it is not zero. Same shape as on [Repay Loan](/endpoints/lending/repay).</ResponseField>
+    <ResponseField name="warning" type="string">The fee message, present alongside `transactionFee`.</ResponseField>
+    <ResponseField name="description" type="string">Plain-language instruction for the borrower.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/permit-quote" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"loanId": 5, "all": true}'
+```
+```typescript TypeScript
+import { ethers } from 'ethers';
+
+const base = `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+
+const quoteRes = await fetch(`${base}/permit-quote`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ loanId: 5, all: true })
+});
+const { data: quote } = await quoteRes.json();
+
+const { domain, types, message } = quote.typedData;
+const signature = await borrowerWallet._signTypedData(domain, types, message);
+const { v, r, s } = ethers.utils.splitSignature(signature);
+
+const repayRes = await fetch(`${base}/repay`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({
+    ...quote.repay,
+    permit: { value: quote.permit.value, deadline: quote.permit.deadline, v, r, s }
+  })
+});
+const { data: repayment } = await repayRes.json();
+
+const hashes: string[] = [];
+for (const step of repayment.steps) {
+  const tx = await borrowerWallet.sendTransaction(step.transaction);
+  await tx.wait();
+  hashes.push(tx.hash);
+}
+
+await fetch(`${base}/repay`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ loanId: 5, txHash: hashes[repayment.confirmStepIndex] })
+});
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - Full Repayment
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "action": "SIGN_TYPED_DATA",
+    "typedData": {
+      "domain": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 11155111,
+        "verifyingContract": "0x98ad0ca091552e23c564b41c74282e5343d03e8a"
+      },
+      "types": {
+        "Permit": [
+          { "name": "owner", "type": "address" },
+          { "name": "spender", "type": "address" },
+          { "name": "value", "type": "uint256" },
+          { "name": "nonce", "type": "uint256" },
+          { "name": "deadline", "type": "uint256" }
+        ]
+      },
+      "primaryType": "Permit",
+      "message": {
+        "owner": "0xaBc7f1093D5E26B804a1C3f78dE025916B47C0d3",
+        "spender": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "value": "50515706763",
+        "nonce": "0",
+        "deadline": 1790418600
+      }
+    },
+    "permit": {
+      "value": "50515.706763",
+      "deadline": 1790418600
+    },
+    "repay": {
+      "loanId": "5",
+      "all": true
+    },
+    "fullRepayment": true,
+    "outstandingDebt": "50412.881",
+    "borrowAssetSymbol": "USDC",
+    "borrowAssetAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+    "signer": "0xaBc7f1093D5E26B804a1C3f78dE025916B47C0d3",
+    "nonce": "0",
+    "transactionFee": {
+      "kind": "REPAY",
+      "fee": "2.0",
+      "feeRaw": "2000000",
+      "message": "This market charges a repayment fee of about 2.0 USDC on top of the debt, taken from the payment before it reduces the loan. The amount approved and offered covers the debt, the accrual buffer and the fee, and the market pulls only what closes the loan."
+    },
+    "warning": "This market charges a repayment fee of about 2.0 USDC on top of the debt, taken from the payment before it reduces the loan. The amount approved and offered covers the debt, the accrual buffer and the fee, and the market pulls only what closes the loan.",
+    "description": "Sign this EIP-2612 permit from the borrower wallet 0xaBc7f1093D5E26B804a1C3f78dE025916B47C0d3 over 50515.706763 USDC (the outstanding debt plus a 20 bps accrual buffer and the repayment fee), then send the repayment with all:true and the permit; the market pulls exactly the true debt and the fee and the second step clears the leftover allowance"
+  }
+}
+```
+```json Error - Permit Unsupported
+{
+  "success": false,
+  "error": {
+    "code": "PERMIT_UNSUPPORTED",
+    "message": "The settlement asset USDT does not implement EIP-2612, so single-signature repayment is not available on this market. Use the approve-then-repay steps instead."
+  }
+}
+```
+```json Error - Domain Unresolved
+{
+  "success": false,
+  "error": {
+    "code": "PERMIT_DOMAIN_UNRESOLVED",
+    "message": "The EIP-712 domain of USDC could not be rebuilt from its name() and version(): no candidate reproduces the token's DOMAIN_SEPARATOR, so a permit quoted here could not be verified. Sign the permit with tooling that knows the token's domain, or use the approve-then-repay steps."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `VALIDATION_ERROR` | `400` | `loanId` is not a positive integer, neither `amount` nor `all: true` was supplied, `amount` is malformed or carries more decimal places than the borrow asset supports, or `deadlineSeconds` is not an integer from `60` to `86400` |
+| `LOAN_NOT_ACTIVE` | `400` | The loan is closed and can no longer be repaid |
+| `NO_OUTSTANDING_DEBT` | `400` | `all` was set on a loan that owes nothing |
+| `PERMIT_QUOTE_FAILED` | `400` | The quote could not be prepared and no more specific code applied |
+| `LOAN_NOT_FOUND` | `404` | No such loan on this market |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `PERMIT_UNSUPPORTED` | `409` | The settlement asset does not implement EIP-2612, or its support could not be verified. Use the approve-then-repay steps |
+| `PERMIT_DOMAIN_UNRESOLVED` | `409` | No domain rebuilt from the token's `name()` and `version()` reproduces its `DOMAIN_SEPARATOR` |
+| `LOAN_STATE_UNAVAILABLE` | `503` | The loan could not be read from the network right now. Retry shortly |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market's transaction fees could not be read. Retry shortly |
+| `PERMIT_UNVERIFIABLE` | `503` | The token's permit domain or the borrower's nonce could not be read or decoded. Retry, or use the approve-then-repay steps |

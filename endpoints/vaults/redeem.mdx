@@ -1,12 +1,12 @@
 ---
 title: 'Redeem'
-api: 'POST /lending-external-securities/api/vaults/{vaultId}/redeem'
-description: 'Redemption calldata'
+api: 'POST /lending-external-securities-v2/api/vaults/{vaultId}/redeem'
+description: 'Redemption calldata with a fill quote'
 ---
 
-Builds the transaction that redeems vault shares for the settlement asset at the current share price. One signature, no approval step, since the vault burns its own shares.
+Builds the transaction that redeems vault shares for the vault's asset at the current share price. The holder signs one transaction, with no approval step, because the vault burns its own shares. The payout goes to the signing wallet.
 
-Redemptions cannot be paused. What bounds them is liquidity: idle funds pay immediately, and beyond that the vault pulls from its market allocations as far as each market's free liquidity allows.
+Redemptions cannot be paused, and on the current vault implementation no register examines them. What bounds them is liquidity: idle funds pay first, and beyond that the vault draws on its market positions as far as each market's free liquidity allows. An instance that sees an unpublished vault as a distributor of record can redeem from it too.
 
 ## Path Parameters
 
@@ -15,61 +15,48 @@ Redemptions cannot be paused. What bounds them is liquidity: idle funds pay imme
 ## Body Parameters
 
 <ParamField body="shares" type="string" required>
-  Shares to redeem as a decimal string, parsed at the vault's `assetDecimals`.
+  Shares to redeem as a decimal string, parsed at the vault's `assetDecimals`. Digits with an optional fraction, greater than zero.
 </ParamField>
 
 <ParamField body="holderAddress" type="string" required>
-  The wallet that will sign. `redeem` burns the caller's own shares, so the amount cannot be checked against a balance until the wallet is named. Omitting it returns `HOLDER_REQUIRED`.
+  The wallet that will sign. `redeem` burns the caller's own shares, so the amount cannot be checked against a balance until the wallet is named. Omitting it, or sending something other than a `0x` address, returns `HOLDER_REQUIRED`.
 </ParamField>
+
+## Before the holder signs
+
+When market utilization blocks part of the value, the redemption fills partially. The holder is paid what liquidity allows and the unpaid shares stay in the wallet. `willFillFully` and `expectedPayout` say so before the signature. The amount recorded on confirmation comes from the `Redeemed` event, meaning the assets actually paid, not the shares requested. Compare the two to detect a partial fill.
+
+<Warning>
+  A redemption is quoted from totals read without their completeness flag, on purpose. An exit is the one thing a market that has gone dark must never be able to block. When `priceWarning` is set, the shares still burn, at a price that understates the vault, and the difference stays with the holders who wait. Nothing blocks the redemption. Show the warning and let the holder decide.
+</Warning>
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
-    <ResponseField name="transaction" type="object">`to` and `data` for the `redeem` call.</ResponseField>
+    <ResponseField name="transaction" type="object">`to`, `data`, `value` (`"0"`) and `chainId` for the `redeem` call.</ResponseField>
     <ResponseField name="functionName" type="string">`redeem`.</ResponseField>
-    <ResponseField name="maxPayableNow" type="string">The most the vault could pay any redemption at this moment, in the settlement asset. `null` when the chain read failed.</ResponseField>
+    <ResponseField name="maxPayableNow" type="string">The most the vault could pay any redemption at this moment, in its asset. The same figure as `redeemableNow` on [Get Vault](/endpoints/vaults/get-vault). `null` when the chain read failed.</ResponseField>
     <ResponseField name="willFillFully" type="boolean">Whether this redemption is expected to pay out in full. `false` means a partial fill, `null` means it could not be established.</ResponseField>
-    <ResponseField name="expectedPayout" type="string">What this redemption is expected to pay: the full value when `willFillFully` is `true`, otherwise `maxPayableNow`.</ResponseField>
+    <ResponseField name="expectedPayout" type="string">What this redemption is expected to pay: the full value when `willFillFully` is `true`, otherwise `maxPayableNow`. `null` when it could not be established.</ResponseField>
     <ResponseField name="note" type="string">The partial-fill position in words, sized to this redemption when a partial fill is expected. Show it near your redeem control.</ResponseField>
-    <ResponseField name="assetsFullyReadable" type="boolean">`false` when a market the vault funds would not answer, so the share price this redemption is quoted at leaves that position out.</ResponseField>
+    <ResponseField name="assetsFullyReadable" type="boolean">`false` when a market the vault funds would not answer, so the share price this redemption is quoted at leaves that position out. `null` when the chain read failed.</ResponseField>
     <ResponseField name="priceWarning" type="string">Set when `assetsFullyReadable` is `false`, stating that the quoted price understates the vault by an unknown amount. `null` otherwise.</ResponseField>
-    <ResponseField name="confirmWith" type="object">Report the hash to `confirm-tx` with `txType: "REDEEM"`.</ResponseField>
+    <ResponseField name="confirmWith" type="object">Report the hash to [Confirm Transaction](/endpoints/vaults/confirm-transaction) with `txType: "REDEEM"`.</ResponseField>
   </Expandable>
 </ResponseField>
 
-<Warning>
-  When market utilization blocks part of the value, the redemption fills partially: the investor is paid what liquidity allows and the unpaid shares stay in the wallet. `willFillFully` and `expectedPayout` say so before the signature. The amount recorded on confirmation comes from the `Redeemed` event, meaning the assets actually paid, not the shares requested. Compare the two if you need to detect a partial fill.
-</Warning>
-
-<Note>
-  A redemption is quoted from totals read without their completeness flag, on purpose. An exit is the one thing a market that has gone dark must never be able to block. When `priceWarning` is set the shares still burn, at a price that understates the vault, and the difference stays with the holders who wait. Nothing blocks the redemption. Show the warning and let the holder decide.
-</Note>
-
-## Error Codes
-
-| Code | HTTP | Cause |
-|---|---|---|
-| `VALIDATION_ERROR` | `400` | `shares` is not a positive decimal string |
-| `HOLDER_REQUIRED` | `400` | `holderAddress` was omitted or is not an address |
-| `INVALID_AMOUNT` | `400` | `shares` carries more decimal places than the vault's asset supports |
-| `REDEEMER_NOT_VERIFIED` | `403` | The wallet is not verified on the vault's identity register, on a vault whose implementation still gates redemptions on it |
-| `VAULT_NOT_FOUND` | `404` | No such vault, or it is not visible to your instance |
-| `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address yet |
-| `INSUFFICIENT_SHARES` | `409` | The wallet holds no shares, or fewer than `shares` |
-| `NOTHING_REDEEMABLE` | `409` | The vault can pay nothing right now, or `shares` values to nothing at the current price. No shares would be burned |
-
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/vaults/{vaultId}/redeem" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd/redeem" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"shares": "500", "holderAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab"}'
+  -d '{"shares": "500", "holderAddress": "0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b"}'
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/vaults/${vaultId}/redeem`,
+  `https://api.trusset.org/lending-external-securities-v2/api/vaults/${vaultId}/redeem`,
   {
     method: 'POST',
     headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
@@ -78,30 +65,33 @@ const res = await fetch(
 );
 const { data } = await res.json();
 
+if (data.priceWarning) console.warn(data.priceWarning);
 if (data.willFillFully === false) {
   console.log(`Partial fill: about ${data.expectedPayout} paid, the rest stays in shares`);
 }
 
-const tx = await signer.sendTransaction({ to: data.transaction.to, data: data.transaction.data });
+const tx = await signer.sendTransaction(data.transaction);
 await tx.wait();
 ```
 </RequestExample>
 
 <ResponseExample>
-```json Response
+```json Calldata Response
 {
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTION",
     "transaction": {
       "to": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
-      "data": "0xdb006a75..."
+      "data": "0xdb006a75...",
+      "value": "0",
+      "chainId": 11155111
     },
     "functionName": "redeem",
     "note": "When market utilization blocks part of the value, the redemption fills partially: unpaid shares stay in the wallet.",
-    "maxPayableNow": "618200.000000",
+    "maxPayableNow": "87500.0",
     "willFillFully": true,
-    "expectedPayout": "510.450000",
+    "expectedPayout": "506.25",
     "assetsFullyReadable": true,
     "priceWarning": null,
     "confirmWith": { "endpoint": "confirm-tx", "txHash": true, "txType": "REDEEM" }
@@ -119,3 +109,18 @@ await tx.wait();
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `shares` is missing, not a positive decimal string, finer than the asset's decimals, or too large. `error.details` names the field |
+| `HOLDER_REQUIRED` | `400` | `holderAddress` was omitted or is not an address |
+| `REDEEMER_NOT_VERIFIED` | `403` | The wallet is not verified on the vault's identity register, on a vault whose earlier implementation still gates redemptions on it |
+| `VAULT_NOT_FOUND` | `404` | No such vault, or it is not visible to your instance |
+| `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address on record |
+| `INSUFFICIENT_SHARES` | `409` | The wallet holds no shares, or fewer than `shares` |
+| `NOTHING_REDEEMABLE` | `409` | The vault can pay nothing right now, or `shares` values to nothing at the current price. No shares would be burned |
+| `VAULT_STATE_UNAVAILABLE` | `503` | Whether your instance is a distributor of record in an unpublished vault could not be read from the chain. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | The vault records or your instance's verified wallets could not be read. Retry shortly |
+| `VAULT_REDEEM_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |

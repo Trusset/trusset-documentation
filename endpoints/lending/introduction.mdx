@@ -4,7 +4,7 @@ description: 'Overcollateralized lending against imported security tokens'
 icon: 'building-columns'
 ---
 
-Lending markets let you lend against security tokens that were issued outside Trusset and imported into your instance. A borrower pledges tokens, receives a settlement asset such as USDC, and repays with interest. Liquidity providers fund the pool and earn the supply rate.
+Lending markets let you lend against security tokens that were issued outside Trusset and imported into your instance. A borrower pledges tokens, receives a settlement asset such as USDC, and repays with interest. The market's lender of record funds the pool from its operator wallet, and every other liquidity provider funds it through the lender of record's vaults.
 
 The collateral is a third-party token you do not control. The API therefore exposes the compliance plumbing that makes such a token usable as collateral: adapter authorization, identity registry checks, and a named collateral agent recorded on every lock.
 
@@ -12,30 +12,35 @@ The collateral is a third-party token you do not control. The API therefore expo
 
 The market itself is standard-agnostic. It tracks references and amounts and never touches the token, which is the collateral adapter's job. What a market accepts is therefore decided by the adapter its collateral mode uses.
 
-A `CUSTODY` market holds collateral through the ERC-20 interface and nothing else. ERC-20, ERC-1400 and ERC-3643 all work there, and so does a token with custom compliance that happens to present an ERC-20 surface.
+A `CUSTODY` market holds collateral through the ERC-20 interface and nothing else. ERC-20, ERC-1400 and ERC-3643 all work there, and so does a token with custom compliance that happens to present an ERC-20 surface. A token that does not answer `balanceOf` and `decimals` is refused with `COLLATERAL_TOKEN_NOT_ERC20`. Rebasing tokens and ERC-1400 partitions are not supported.
 
-A `FREEZE` market is the narrow one. Freezing a balance where it sits needs `isAgent`, `getFrozenTokens`, `freezePartialTokens` and `unfreezePartialTokens`, which is the ERC-3643 agent surface. A token without it is refused at deployment with `FREEZE_MODE_UNSUPPORTED_TOKEN`, and `CUSTODY` is the answer.
+A `FREEZE` market is the narrow one. Freezing a balance where it sits needs the ERC-3643 agent surface: `getFrozenTokens`, `freezePartialTokens`, `unfreezePartialTokens` and `forcedTransfer`. The API refuses the deployment with `FREEZE_MODE_UNSUPPORTED_TOKEN` when neither `isAgent` nor `getFrozenTokens` answers, and `CUSTODY` is the answer for such a token.
 
-What the API does require of every collateral token, in either mode, is a surface its adapter can be authorized on. One of three satisfies it: an identity registry, a contract allow-list, or the ERC-3643 freeze interface. A token exposing none of the three is refused with `NOT_A_SECURITY_TOKEN`, because an adapter that can never be authorized could never take collateral.
+Whatever the mode, the token must be imported into your instance with a published profile. The deployment attests the asset data built from that profile, so a token without one is refused with `TOKEN_PROFILE_REQUIRED`. See [Deploy Market](/endpoints/lending/deploy-market) for the full list of refusals.
 
 ## Base Path
 
 ```
-https://api.trusset.org/lending-external-securities/api
+https://api.trusset.org/lending-external-securities-v2/api
 ```
 
-Six resource groups sit under that path:
+Seven resource groups sit under that path:
 
 | Group | Path | Covers |
 |---|---|---|
-| Markets | `/markets` | Deployment, configuration, oracle pricing, readiness |
-| Positions | `/positions` | Liquidity provision, borrowing, position queries |
-| Liquidations | `/liquidations` | Liquidation execution, settlement, Dutch auctions |
-| Hooks | `/hooks` | Risk monitors and automated liquidation reactions |
-| [Vaults](/endpoints/vaults/introduction) | `/vaults` | Investor deposits and redemptions on an operator's earning vault |
+| Markets | `/markets` | Deployment, the lender-of-record role, asset data, terms of use, setup and configuration, rate and term offering, oracle pricing, fees, the insurance fund, vault liquidity, the auction venue, readiness |
+| Positions | `/positions` | Liquidity provision, borrowing, repayment, escrow and surplus claims, position queries and statements |
+| Liquidations | `/liquidations` | Liquidation execution, Dutch auction bids and expiry, router settlement, write-off |
+| Hooks | `/hooks` | Risk monitors on a schedule, and checks and notifications run on demand |
+| Liquidation Bots | `/liquidation-bots` | Liquidation contracts an operator deploys, funds and connects to its markets |
+| [Vaults](/endpoints/vaults/introduction) | `/vaults` | Investor deposits and redemptions on an operator's earning vault, and its distributor fees |
 | [Pledges](/endpoints/asset-register/introduction) | `/pledges` | The pledge record a register provider enters against a token |
 
-Every request authenticates with an instance API key in the `X-API-Key` header. See [Authentication](/endpoints/authentication). The instance bound to your key determines both the network and the data you can reach. Markets belonging to another instance return `MARKET_NOT_FOUND`.
+Every request authenticates with an instance API key in the `X-API-Key` header. See [Authentication](/endpoints/authentication). The instance bound to your key determines both the network and the data you can reach. Routes keyed by a market ID refuse a market belonging to another instance with `MARKET_NOT_FOUND`.
+
+Routes keyed by a market contract address work differently: the queue and adoption routes, the asset data routes, and Pledges. They first prove the address against the current lending factory and refuse any other with `MARKET_NOT_V2`, including a market deployed through an earlier factory generation. Each then applies its own per-market access rule.
+
+A network the lending factory is not deployed on answers `503 SECURITY_LENDING_V2_NOT_CONFIGURED`.
 
 ## Response envelope
 
@@ -52,11 +57,13 @@ Every request authenticates with an instance API key in the `X-API-Key` header. 
 }
 ```
 
-On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. Schema failures use `VALIDATION_ERROR` with `error.details` listing each offending field. Always branch on `success` rather than on the HTTP status alone.
+On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. Schema failures use `VALIDATION_ERROR` with `error.details` listing each offending field. Two exceptions answer with a single message and no `details`: the asset data routes and [Upgrade Market](/endpoints/lending/upgrade-market). Always branch on `success` rather than on the HTTP status alone.
+
+A request refused before it reaches a route answers without `data` and `instanceId`. That covers an invalid key, a service not enabled on the instance, an exhausted credit allowance, a rate limit, and key material in the body.
 
 ## Writes
 
-Every write endpoint returns unsigned transaction data for a wallet you control to sign and broadcast. Nothing is submitted on your behalf.
+Every write that changes chain state returns unsigned transaction data for a wallet you control to sign and broadcast. Nothing is submitted on your behalf.
 
 ```json
 {
@@ -66,7 +73,7 @@ Every write endpoint returns unsigned transaction data for a wallet you control 
 }
 ```
 
-Every `transaction` object carries the `chainId` your instance resolves to and `value: "0"`, so a payload can never be broadcast against the wrong network by accident.
+The API stamps each unsigned transaction it returns with the `chainId` your instance resolves to and `value: "0"`, so a payload is bound to one network. Two exceptions carry their own `value`: [Fund Bot](/endpoints/lending/fund-bot) sends the network's native coin, and a contract creation has no `to` and is not stamped. Where a response also carries `to` and `data` at its top level, the stamp sits there, beside them. Each page shows where its fields sit.
 
 Some operations need more than one transaction. Those return `SIGN_TRANSACTIONS` with an ordered `steps` array that must be broadcast in sequence.
 
@@ -76,73 +83,107 @@ Some operations need more than one transaction. Those return `SIGN_TRANSACTIONS`
   "steps": [
     { "action": "SIGN_TRANSACTION", "transaction": { "to": "0xUSDC...", "data": "0x..." }, "functionName": "approve", "description": "Approve the market to pull USDC" },
     { "action": "SIGN_TRANSACTION", "transaction": { "to": "0x70A0...", "data": "0x..." }, "functionName": "addLiquidity" }
-  ]
+  ],
+  "confirmStepIndex": 1,
+  "confirmWith": "addLiquidity"
 }
 ```
 
-A multi-step payload also names the step that carries the confirmable action, as `confirmStepIndex` and `confirmWith`. Confirm with that step's hash, which is not always the last one.
+Where a multi-step builder names the step that carries the confirmable action, it does so as `confirmStepIndex` and `confirmWith`. Confirm with that step's hash, which is not always the last one. Two operations return a signature request instead of a transaction, as `SIGN_TYPED_DATA`: [Sign Price](/endpoints/lending/sign-price) and [Get Permit Quote](/endpoints/lending/get-permit-quote).
 
-Once you have broadcast a transaction, call the same endpoint again with its hash in the body:
+A few writes change nothing on-chain and return their result directly. They save or unpublish terms of use, record a price attestation, configure hooks, and update a bot's record.
+
+Once you have broadcast a transaction, most endpoints confirm it when you call them again with its hash in the body:
 
 ```json
 { "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b" }
 ```
 
-The API verifies the mined receipt, records the result against the market, and returns the values that only exist after execution, such as `loanId`, `positionId`, `liquidationId`, and `auctionId`. Verification checks that the transaction succeeded, targeted the market this endpoint operates on, and called the expected function on the entity you named. See [Confirming a Transaction](/endpoints/introduction#confirm-a-transaction).
+Some confirm on a dedicated route instead, which the response names in its `confirmWith` object. [Confirm Lender Role](/endpoints/lending/confirm-lender-role), [Confirm Configuration](/endpoints/lending/confirm-configuration) and [Confirm Extension Transaction](/endpoints/lending/confirm-extension-transaction) work that way. The asset data and bot confirms do too. [Set Vault Liquidity](/endpoints/lending/set-vault-liquidity) and [Register Vault](/endpoints/lending/register-vault) have no confirm call on this API.
+
+The API verifies the mined receipt, records the result against the market, and returns the values that only exist after execution, such as `loanId`, `positionId`, `liquidationId`, and `auctionId`. Verification checks that the transaction succeeded, targeted the contract this endpoint operates on, and called the expected function on the entity you named. Some confirm calls also accept a transaction sent through a smart account or another contract, proven by the target contract's own event, and mark it with `verifiedBy: "receipt-log"`. See [Confirming a Transaction](/endpoints/introduction#confirm-a-transaction).
 
 <Warning>
-  Positions, liquidity providers, and the transaction ledger are written on the confirm call. Broadcast without confirming and the loan is still live on-chain, but Trusset will not see it until the next reconciliation pass.
+  Positions, liquidity providers, and the transaction ledger are written on the confirm call. Broadcast without confirming and the loan is still live on-chain. Trusset will not see it until the market's loans are next read from the chain, when positions are listed or the market is read. The ledger rows the confirm call writes are not recreated.
 </Warning>
 
-Trusset never holds, fetches or uses a private key, and no endpoint signs on your behalf. This is enforced rather than assumed. A write whose body carries a field named for key material, or for signing on behalf of someone else, is rejected with `400 KEY_MATERIAL_REJECTED` at any nesting depth. The refused names include `privateKey`, `mnemonic`, `seedPhrase`, `keystore`, `signerKey`, `secretKey`, `useRelayer`, `signOnBehalf`, `onBehalfOf` and `autoSubmit`.
+No endpoint signs on your behalf, and Trusset never asks for, holds or uses a private key of yours. This is enforced rather than assumed. A write whose body carries a field named for key material, or for signing on behalf of someone else, is rejected with `400 KEY_MATERIAL_REJECTED`. The check reaches six levels deep and ignores case. The refused names are `privateKey`, `private_key`, `mnemonic`, `seedPhrase`, `seed_phrase`, `keystore`, `keystoreJson`, `signerKey`, `signer_key`, `secretKey`, `secret_key`, `walletPassword`, `useRelayer`, `signOnBehalf`, `onBehalfOf` and `autoSubmit`.
 
 ## Collateral modes
 
-Every market is deployed in one of two modes, fixed at deployment. A single collateral token can back several markets, as long as they differ in collateral mode or in settlement asset.
+Every market is deployed in one of two modes, fixed at deployment. Your instance can run one active market per collateral token, collateral mode and settlement asset. A second request for the same combination is refused with `MARKET_EXISTS`.
 
-**`FREEZE`** is the default. The adapter freezes the borrower's tokens where they sit. The borrower keeps custody and no ERC-20 approval is needed to open a loan. This requires the market's adapter to hold the agent role on the collateral token, granted by whoever controls that token's agent administration. The token must implement the ERC-3643 freeze interface (`isAgent` and `getFrozenTokens`), which is checked at deployment and rejected with `FREEZE_MODE_UNSUPPORTED_TOKEN` if absent.
+**`FREEZE`** is the default. The adapter freezes the borrower's tokens where they sit. The borrower keeps custody and no ERC-20 approval is needed to open a loan. This requires the market's adapter to hold the agent role on the collateral token, granted by whoever controls that token's agent administration.
 
-**`CUSTODY`** escrows the tokens in the adapter. Borrowers must call `approve` on the collateral token before posting collateral, and the API returns that approval as an explicit step. This requires the adapter to be a verified holder on the token's identity registry. If a return transfer is ever blocked by compliance, the borrower reclaims through [Claim Escrowed Collateral](/endpoints/lending/claim-escrowed-collateral).
+**`CUSTODY`** escrows the tokens in the adapter. Borrowers must call `approve` on the collateral token for the adapter before posting collateral, and the API returns that approval as an explicit step. When the token gates holders, the adapter must be allow-listed on it or verified on its identity registry. A token that gates nothing needs no token-side step. If a return transfer is ever blocked by compliance, the borrower reclaims through [Claim Escrowed Collateral](/endpoints/lending/claim-escrowed-collateral).
 
-Both modes require the market's liquidation router to be an eligible recipient of the collateral token, because a liquidation transfers seized tokens to it.
+A liquidation delivers seized tokens to the market's liquidation router, or to its auction venue while Dutch auctions are on. Every recipient the token gates must be admitted on it: the router, the auction venue when auctions are on, and the sale recipient the router later delivers to.
+
+## Identity gates
+
+A market examines two optional registers, both read as the first word of `isVerified(address)`. ERC-3643 identity registries, ONCHAINID-based registers and the Trusset register are all admitted.
+
+The borrower register examines every loan the market opens and every further draw on it. With none installed, the collateral token's own compliance alone governs who may borrow. A `MARKET`-priced market must carry one by the time it is adopted. The provider register is read by the vaults that fund the market, before each admits a depositor. The market itself takes direct deposits only from the operator wallet and registered vaults, and consults no register for them.
+
+The market admin replaces or clears either register with [Set Identity Gates](/endpoints/lending/set-identity-gates). Read the current pair with [Get Identity Gates](/endpoints/lending/get-identity-gates).
 
 ## Pricing
 
-There is no automatic price feed. Prices come from the issuer, as a net asset value the issuer publishes.
+Prices come from one of three sources, fixed at deployment as `priceSource`.
 
-[Sync Oracle Price](/endpoints/lending/sync-oracle) pushes a NAV on-chain. [Sign Price](/endpoints/lending/sign-price) returns the EIP-712 payload for a price update, which you sign in your own environment. A borrower then submits that signature alongside their own transaction, updating the price atomically without a separate oracle write. Both endpoints require an explicit positive `price`. Both also require the signing wallet to be an authorized signer on the market's oracle.
+`NAV` is the default: a net asset value the market's price signer publishes. `MARKET` is an observable market price the price signer attests. On a `MARKET` market the contract refuses Dutch auctions and holds the auction floor premium at 98 percent or more. The lender of record may declare `EXCHANGE_SALE` or `ISSUER_REDEMPTION` as its realization mode there, never `AUCTION`. The API also requires a borrower register at deployment.
 
-`priceSource` records how the market's price is meant to be interpreted. `NAV` is the default. `MARKET` signals an observable market price and the contract responds by disallowing Dutch auctions and raising the auction floor premium. The backend applies no branching of its own on this field.
+The price signer is the wallet the lender of record declared when it took the role. A `NAV` or `MARKET` market opens with the `initialPrice` stated at deployment. [Sync Oracle Price](/endpoints/lending/sync-oracle) returns the transaction that pushes a new price. [Sign Price](/endpoints/lending/sign-price) returns the EIP-712 payload for a price update, which the signer signs in its own environment. A borrower then submits that signature alongside their own transaction, updating the price atomically without a separate oracle write. Both endpoints require an explicit positive `price`.
 
-That covers the two sources a price is pushed to. `ORACLE` is the third, and it works the other way: the market reads an external feed named at deployment, the factory probes that feed inside the deployment transaction, and no opening price is stated. Nothing is pushed to an `ORACLE` market. The source is fixed at deployment and cannot be changed afterwards on any market.
+A signer that keeps its key outside your instance posts what it signed to [Record Price Attestation](/endpoints/lending/record-price-attestation). A later push of exactly that price then carries the attestation, and any wallet may broadcast it. [Get Oracle Status](/endpoints/lending/get-oracle-status) reports whether the declared price signer is authorized, [Verify Signer](/endpoints/lending/verify-signer) whether your instance's own wallet is, and [Get Oracle History](/endpoints/lending/get-oracle-history) lists what was attested and pushed.
+
+`ORACLE` works the other way. The market reads an external feed named at deployment, and no opening price is stated. The deployment is refused when that feed cannot answer a positive price dated within 24 hours. Nothing is pushed to an `ORACLE` market: every price surface refuses it with `EXTERNAL_FEED_ACTIVE`.
+
+On every source the oracle's `maxPriceAge` decides when a price is stale, 24 hours by default. A stale price blocks opening loans, drawing more, withdrawing collateral against open debt and liquidating. Repayment never waits on a price.
 
 ## Rate modes
 
-The market's interest model is deployed with the market, and how it prices is fixed there. Read it from `rateMode` on [List Markets](/endpoints/lending/list-markets) or [Get Market Metrics](/endpoints/lending/get-metrics).
+The rate mode is chosen at deployment and read from `rateMode` on [List Markets](/endpoints/lending/list-markets), [Get Market Metrics](/endpoints/lending/get-metrics) and [Get Rate Mode](/endpoints/lending/get-rate-mode).
 
 | `rateMode` | What the borrower pays |
 |---|---|
-| `CURVE` | The utilization curve, unbounded. The default |
-| `CLAMPED` | That curve, held between `rateFloor` and `rateCap` |
+| `CURVE` | The utilization curve, unclamped. The default |
+| `CLAMPED` | That curve, held between `rateFloor` and `rateCap`. The rate stops rising at the cap, and no borrow is ever blocked by it |
 | `FIXED` | One rate, stamped onto each loan when it opens, unchanged for the life of that loan |
 
-On a `FIXED` market, three numbers can differ at once and each answers a different question. `borrowRate` is what the pool charges in aggregate. `fixedStampRateBps` is what a loan opened right now would be stamped with. What an outstanding loan pays was stamped when it opened and is on neither figure. Quote a borrower from the `offering` block on [Open Loan](/endpoints/lending/open-loan), which is the only place the rate for the loan being opened appears before it exists.
+Every rate is bounded at 500 percent. A `FIXED` market must run loan terms with a duration, because the term clock replaces the rate curve as the pull toward repayment. [Borrow More](/endpoints/lending/borrow-more) is refused on a fixed-rate loan: a new draw is a new loan at current terms.
 
-The supply rate is the borrow rate less three deductions: the Trusset infrastructure fee, the `operatorShare` the market offered its lender of record, and the market's own `protocolFeeRate`. `operatorShare` is capped at half, so the liquidity providers always keep the larger part.
+After adoption the interest model owner, the issuer the lender of record named, can change the mode with [Set Rate Mode](/endpoints/lending/set-rate-mode). Accrual is settled under the old mode first. A new mode reaches every open variable-rate loan from then on, while a stamped fixed rate stays with the loan it was stamped on. [Set Max Fixed Rate](/endpoints/lending/set-max-fixed-rate) tightens the ceiling on future fixed rates and can only move it down.
+
+On a `FIXED` market, `borrowRate` is the stamp a loan opened now would receive, the same figure as `fixedStampRateBps`. The utilization curve that still prices any variable loans is `curveBorrowRate`. What an outstanding loan pays was stamped when it opened, and [Get Loan](/endpoints/lending/get-loan) shows it. Quote a borrower from the `offering` block on [Open Loan](/endpoints/lending/open-loan), which carries the rate, due date, grace and term penalty for the loan being opened.
+
+## Interest and fees
+
+Repaid interest splits in a fixed order. Trusset takes its 15 percent infrastructure fee first. The operator share, 8 percent of the remainder, and the distributor share, 5 percent of it, come next. Both are fixed constants that nobody can change. The market's `protocolFeeRate`, which is its insurance-fund rate and zero by default, then applies to what is left. Liquidity providers receive the rest: 73.95 percent of repaid interest at the defaults.
+
+The supply rate follows the same split. The operator share goes to the operator wallet. The distributor share goes to whoever provides the pool's liquidity. A vault passes it to the distributors behind its depositors, and the operator's own liquidity earns it for the operator. [Get Fee Split](/endpoints/lending/get-fee-split) reads the live split from the market.
+
+A market can also charge a flat opening fee and a flat repayment fee. Both are stamped at deployment from defaults Trusset's factory owner sets, both are zero unless set, and neither can change on the market afterwards. Each charge is capped at 0.5 percent of the amount. The borrower receives the borrowed amount less the opening fee and owes the full amount. A loan closes for its debt plus the smaller of the repayment fee and 0.5 percent of that debt. Liquidation and realization never charge either fee.
+
+Every fee leg is booked on the market as a liability and leaves through a sweep to a fixed destination that nobody can redirect. Most sweeps may be sent by any wallet. See [Sweep Operator Fees](/endpoints/lending/sweep-operator-fees), [Sweep Distributor Fees](/endpoints/lending/sweep-distributor-fees), [Sweep Protocol Fees](/endpoints/lending/sweep-protocol-fees) and [Sweep Infrastructure Fees](/endpoints/lending/sweep-infrastructure-fees). Booked fees are never lent out and no liquidity provider can withdraw them.
 
 ## Loan terms
 
-A market can carry a term offering, also fixed at deployment. `maxLoanDuration` sets how long a loan may run, `terminalDueDate` sets a hard date every loan falls due by whatever its own duration, and `termGracePeriod` sets how long after the due date the term penalty waits. A market whose `maxLoanDuration` and `terminalDueDate` are both zero makes open-ended loans and none of this applies to it.
+A market can carry a term offering. `maxLoanDuration` sets how long a loan may run, and `terminalDueDate` sets a hard date every loan falls due by whatever its own duration. `termGracePeriod` sets how long after the due date an unpaid loan becomes realizable, 3 days by default. A market whose `maxLoanDuration` and `terminalDueDate` are both zero makes open-ended loans and none of this applies to it.
 
-Terms change what liquidation means. A termed loan becomes liquidatable when its term runs past the due date plus grace, whatever its health factor. That is a second trigger alongside the health one, and only the health trigger is reported by [Get Liquidatable Loans](/endpoints/lending/get-liquidatable-loans).
+The offering is set at deployment and changed afterwards by the issuer with [Set Term Config](/endpoints/lending/set-term-config), which also sets the term penalty. On current markets each loan is stamped at signing with its due date, grace and term penalty, so a change reaches new loans only. Loans can be extended but never shortened: the issuer proposes and the market admin confirms, with [Propose Extension](/endpoints/lending/propose-extension) once [Set Allow Extension](/endpoints/lending/set-allow-extension) has switched the machinery on.
 
-Terms also bound the exit. `latestDueAt` and `exitHorizon` on [Get Market Metrics](/endpoints/lending/get-metrics) say when the book could in principle be wound down. An unbounded horizon means at least one open-ended loan is outstanding.
+Terms change what liquidation means. A termed loan becomes realizable once its term runs past the due date plus grace, whatever its health factor. That is a second trigger alongside the health one. [Get Liquidatable Loans](/endpoints/lending/get-liquidatable-loans) reports both, naming the `trigger` on each loan.
 
-## Vault liquidity
+Terms also bound the exit. `latestDueAt` and `exitHorizon` on [Get Market Metrics](/endpoints/lending/get-metrics) and [Get Exit Liquidity](/endpoints/lending/get-exit-liquidity) say when the book could in principle be wound down. An unbounded horizon means at least one open-ended loan is outstanding.
 
-A market can be allowed to draw on registered vaults when its own pool runs short. `useVaultLiquidity` says whether it may, and `reserveRatio` is the share of its own pool held back from borrowing.
+## Liquidity
 
-The figure that decides whether a loan can be funded is `borrowableLiquidity`, not `availableLiquidity`. It already nets off the reserve and adds whatever a vault would lend. Gate a borrow control on it.
+The operator wallet is the wallet that took the lender-of-record role. Apart from the vaults the market admin registered, it is the only address that may deposit into the pool directly with [Add Liquidity](/endpoints/lending/add-liquidity), and it receives the operator share. It moves only by its own signature, with [Rotate Operator Wallet](/endpoints/lending/rotate-operator-wallet).
+
+Every other liquidity provider deposits into one of the operator's vaults. A vault reaches a market in two ways: the operator allocates vault funds to it, or the market draws on the vault at the moment a borrow needs the liquidity. The second needs consent on both sides. The market admin switches it on with [Set Vault Liquidity](/endpoints/lending/set-vault-liquidity) and registers the vault with [Register Vault](/endpoints/lending/register-vault). The vault operator sets a cap for that market in the Issuer Portal. A borrow above the pool's free liquidity then draws what the shortfall needs from the registered vaults, in registration order, each within its cap.
+
+`reserveRatio` is the share of the pool held back from borrowing, set by the issuer with [Set Reserve Ratio](/endpoints/lending/set-reserve-ratio) and capped at 50 percent. It never holds back a withdrawal. The figure that decides whether the pool alone can fund a loan is `borrowableLiquidity`, not `availableLiquidity`. It nets off the reserve and does not include what a vault could lend. [Get Vault Liquidity](/endpoints/lending/get-vault-liquidity) shows each vault's room.
 
 ## Units
 
@@ -154,9 +195,9 @@ Three separate decimal domains apply. Send and receive plain decimal strings in 
 | Collateral | The collateral token's decimals, on `collateralDecimals` | Collateral amounts, caps, seized amounts, auction sizes |
 | LP shares | Always 18 | The `shares` argument to [Remove Liquidity](/endpoints/lending/remove-liquidity), and `totalShares` |
 
-Both decimal values are on the market record from [Get Market](/endpoints/lending/get-market). Sending more decimal places than the target token supports returns `VALIDATION_ERROR` with the message `Amount must be a number with at most N decimal places`.
+Both decimal values are on the market record from [Get Market](/endpoints/lending/get-market). Sending more decimal places than the target token supports returns `VALIDATION_ERROR`, and `error.details` names the field with `Amount must be a number with at most N decimal places`. A few responses also carry base-unit figures, most with a `Raw` suffix, and each page names them.
 
-Risk parameters are integers in basis points. `7500` is 75 percent. Health factor is a decimal string where `1.0` is the liquidation boundary: at or above is healthy, below is liquidatable.
+Risk parameters are integers in basis points. `7500` is 75 percent. Health factor is a decimal string where `1.0` is the liquidation boundary: at or above is healthy, below is liquidatable. It reads `null` for a closed loan and for an open loan with no debt.
 
 <Note>
   The borrow asset is fixed at deployment. Any ERC-20 with 6 to 18 decimals is accepted, validated on-chain at deploy time. Omitting it selects USDC. See [List Borrow Assets](/endpoints/lending/list-borrow-assets).
@@ -164,36 +205,39 @@ Risk parameters are integers in basis points. `7500` is 75 percent. Health facto
 
 ## Lender of record
 
-A market is deployed without parties. It names no admin, no issuer and no collateral agent. Instead it carries the `candidates` you nominated at [Deploy Market](/endpoints/lending/deploy-market), or it was opened to every approved institution with `openToAnyCurator`. Until one of them takes the role, the market is **seeking a lender of record**. `DEFAULT_ADMIN_ROLE`, `ISSUER_ROLE` and the oracle owner are all unheld, so every administrative transaction on it would revert. `openLoan` and `addLiquidity` revert too.
+A market is deployed without parties. It names no admin, no issuer and no collateral agent. Until one institution takes the role, the market is **seeking a lender of record**. Its oracle, rate model and insurance fund belong to the market contract itself, which exposes no path to their settings, and its oracle has no price signer. Every administrative transaction on it would revert, and so would `openLoan` and `addLiquidity`.
 
-The API refuses those calls before a wallet signs rather than letting them be paid for in gas. Opening a loan, borrowing more, providing liquidity, changing risk parameters and changing who may liquidate all return `409 MARKET_PENDING_CURATOR` while the market is in this state. [Get Configuration Status](/endpoints/lending/get-configuration-status) reports it as `pendingCurator`, and never reports a market fully configured while it holds.
+The deployer nominates `candidates` at deployment or later with [Nominate Candidate](/endpoints/lending/nominate-candidate), and withdraws a nomination with [Withdraw Nomination](/endpoints/lending/withdraw-nomination). A market deployed with `openToAnyCurator` can also be claimed by an institution nobody nominated. Such a claimant must be verified on the borrower register the deployer installed, and the claim takes two transactions, announced and then completed after a delay. Without such a register only a nominee can take the market.
 
-Taking the role is what names the parties. The adopting institution declares its own `admin`, `issuer`, `collateralAgent`, `saleRecipient`, `liquidationOperator`, `oracleOwner` and `priceSigner`, a `realizationMode` of `EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION`, and a `liquidityCommitment`. Because that binds an institution to another party's market, the right to take the role is granted by Trusset and is not derived from a nomination alone.
+The API refuses the calls that would revert before a wallet signs rather than letting them be paid for in gas. Opening a loan, borrowing more and providing liquidity return `409 MARKET_PENDING_CURATOR` while the market is in this state. So does every configuration call its admin or issuer would sign: risk parameters, rate mode, terms and extensions, reserve ratio, identity gates, vault liquidity, the auction venue, roles and upgrades. The token-side authorizations are still offered. [Get Configuration Status](/endpoints/lending/get-configuration-status) reports the state as `pendingCurator`, and never reports a market fully configured while it holds.
 
-<Note>
-  Adoption is not performed with an instance API key. A nominated institution takes the role from its own Trusset issuer account. This surface exposes two reads. [Get Nominations](/endpoints/lending/get-nominations) shows who has been nominated on a market. [List Pending Markets](/endpoints/lending/list-pending-markets) shows the markets currently seeking a lender of record.
-</Note>
+Taking the role is what names the parties. The adopting institution declares its own `admin`, `issuer`, `collateralAgent`, `saleRecipient`, `liquidationOperator`, `oracleOwner` and `priceSigner`, and a `realizationMode` of `EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION`. It may add a `liquidityCommitment`, identity registers, a liquidator, a vault, a fixed-rate ceiling, and the hash of the asset data it reviewed. The wallet that signs the adoption becomes the market's operator wallet.
+
+The role is taken through this API with [Accept Lender Role](/endpoints/lending/accept-lender-role), which returns the adoption transaction, and [Confirm Lender Role](/endpoints/lending/confirm-lender-role), which records it. Because that binds an institution to another party's market, this API admits only an institution Trusset approved as a lender of record, and refuses any other with `CURATOR_NOT_APPROVED`. [List Queued Markets](/endpoints/lending/list-queued-markets), [Get Queued Market](/endpoints/lending/get-queued-market), [Get Nominations](/endpoints/lending/get-nominations) and [List Pending Markets](/endpoints/lending/list-pending-markets) show what is on offer. [Get Operator](/endpoints/lending/get-operator) shows who holds the role once taken.
 
 ## Market lifecycle
 
 <Steps>
   <Step title="Deploy">
-    [Deploy Market](/endpoints/lending/deploy-market) deploys the market, oracle, interest model, insurance fund, collateral adapter, and a dedicated liquidation router, in one factory transaction. It also nominates the candidates who may become the lender of record.
+    [Deploy Market](/endpoints/lending/deploy-market) deploys the market, oracle, interest model, insurance fund, collateral adapter, and a dedicated liquidation router, in one factory transaction. The same transaction attests the asset data built from the token's published profile and nominates the candidates who may become the lender of record.
   </Step>
   <Step title="Adopt">
-    A nominated candidate takes the lender-of-record role, which names the market's parties and declares how seized collateral is realized. Track it with [Get Nominations](/endpoints/lending/get-nominations).
+    A candidate takes the lender-of-record role with [Accept Lender Role](/endpoints/lending/accept-lender-role) and [Confirm Lender Role](/endpoints/lending/confirm-lender-role). Taking it names the market's parties and declares how seized collateral is realized. On a market from an earlier factory generation, the named owners then accept the oracle, rate model and insurance fund. See [Get Handover](/endpoints/lending/get-handover).
   </Step>
   <Step title="Authorize">
-    A new market cannot take loans until token-side authorizations are complete. [Get Setup Steps](/endpoints/lending/get-setup-steps) returns the outstanding items with ready-to-sign calldata. These are executed by the token's agent or identity registry operator, not by Trusset.
+    A new market cannot take loans until the token-side authorizations are complete. [Get Setup Steps](/endpoints/lending/get-setup-steps) and [Get Configuration Status](/endpoints/lending/get-configuration-status) list the outstanding items. [Configure Market](/endpoints/lending/configure-market) returns the calldata for each. The token-side items are executed by the token's agent or identity registry operator, not by Trusset.
   </Step>
   <Step title="Configure">
-    [Update Market Config](/endpoints/lending/update-config) sets collateral factor, liquidation threshold, penalties, fees, caps, and auction behaviour. Defaults are seeded at deployment.
+    [Update Market Config](/endpoints/lending/update-config) sets collateral factor, liquidation threshold, penalties, the insurance-fund rate, caps, and auction behaviour. Defaults are seeded at deployment. Dutch auctions also need an auction venue, wired with [Wire Auction Module](/endpoints/lending/wire-auction-module).
+  </Step>
+  <Step title="Publish terms">
+    The lender of record publishes its terms of use with [Save Terms](/endpoints/lending/save-terms). A loan opened on a market without them is not refused, but its calldata carries a warning.
   </Step>
   <Step title="Price">
-    Push an initial NAV with [Sync Oracle Price](/endpoints/lending/sync-oracle). Loans revert against a stale price.
+    A `NAV` or `MARKET` market opens with its deployment price. Push a fresh one with [Sync Oracle Price](/endpoints/lending/sync-oracle) once the price signer exists and before the last price turns stale. Loans revert against a stale price.
   </Step>
   <Step title="Fund">
-    Liquidity providers deposit the borrow asset with [Add Liquidity](/endpoints/lending/add-liquidity). The first deposit into an empty pool has a minimum.
+    The operator wallet deposits the borrow asset with [Add Liquidity](/endpoints/lending/add-liquidity), and registered vaults fund the rest. The first deposit into an empty pool must be at least 1,000 whole units of the borrow asset.
   </Step>
   <Step title="Lend">
     Borrowers open positions with [Open Loan](/endpoints/lending/open-loan).
@@ -204,17 +248,17 @@ Confirm readiness with [Get Configuration Status](/endpoints/lending/get-configu
 
 ## Liquidations
 
-A loan becomes liquidatable when its health factor falls below `1.0`. What happens next depends on the market's `useDutchAuction` setting.
+A loan becomes liquidatable when its health factor falls below `1.0`, or when a termed loan runs past its due date plus grace. A term realization takes the whole debt at the term penalty and releases the collateral it does not need back to the borrower. Liquidation needs `LIQUIDATOR_ROLE` on the market, which [Set Liquidator Role](/endpoints/lending/set-liquidator-role) grants and a connected liquidation bot can hold. What happens next depends on the market's `useDutchAuction` setting.
 
-With Dutch auctions enabled, liquidation opens an auction whose price decays linearly from `auctionStartPremium` to `auctionMinPremium` over `auctionDuration`. Bidders buy collateral through [Bid on Auction](/endpoints/lending/bid-on-auction). Collateral unsold when the auction expires routes to the liquidation router through [Settle Expired Auction](/endpoints/lending/settle-expired-auction).
+With Dutch auctions enabled, seized collateral moves to the market's own auction venue, which must be wired first with [Wire Auction Module](/endpoints/lending/wire-auction-module). The auction's price decays linearly from `auctionStartPremium` to `auctionMinPremium` of the liquidation price over `auctionDuration`. Bidders buy collateral from the venue through [Bid on Auction](/endpoints/lending/bid-on-auction), and the borrower may not bid. Collateral unsold when the auction expires routes to the liquidation router through [Settle Expired Auction](/endpoints/lending/settle-expired-auction), which anyone may call unless the market is paused.
 
 With Dutch auctions disabled, seized collateral transfers straight to the liquidation router and a pending liquidation is recorded.
 
-Once collateral reaches the router it does not sell itself. There is no auto-sell for external securities, because these instruments have no on-platform venue. The operator drives settlement explicitly:
+Once collateral reaches the router it does not sell itself. There is no auto-sell for external securities. The only on-platform venue is the market's own auction venue. It sells only what a liquidation seizes into it while its auction runs, and nothing moves from the router back into an auction. The operator drives settlement explicitly:
 
 <Steps>
   <Step title="Withdraw for sale">
-    [Withdraw Collateral for Sale](/endpoints/lending/withdraw-collateral-for-sale) moves collateral to the sale recipient the lender of record fixed when it took the role. That destination cannot be rotated, and it must pass the token's compliance checks.
+    [Withdraw Collateral for Sale](/endpoints/lending/withdraw-collateral-for-sale) moves collateral to the sale recipient the lender of record fixed when it took the role. It must pass the token's compliance checks. The operator decides when and how much, never where. The router admin can rotate the destination only through an announced, one-hour-delayed proposal that is refused while any realization is in flight. This API does not expose that rotation.
   </Step>
   <Step title="Sell off-platform">
     Execute the sale through your own channel. Trusset is not involved.
@@ -223,36 +267,38 @@ Once collateral reaches the router it does not sell itself. There is no auto-sel
     [Report Partial Sale](/endpoints/lending/report-partial-sale) deposits interim proceeds into the router. Repeatable.
   </Step>
   <Step title="Settle">
-    [Settle Liquidation](/endpoints/lending/settle-liquidation) routes the cumulative proceeds to the market and closes the liquidation.
+    [Settle Liquidation](/endpoints/lending/settle-liquidation) routes the cumulative proceeds to the market and closes the liquidation. It is refused while collateral of the record still sits on the router.
   </Step>
 </Steps>
 
-Proceeds above the debt plus liquidation penalty are returned to the borrower by the contract. If the settlement token blocks that transfer on compliance grounds, the surplus is escrowed on the market for the borrower to claim, rather than reverting the settlement.
+The market keeps at most the position's debt at seizure plus the penalty: the liquidation penalty on a health liquidation, the loan's term penalty on a term realization. Proceeds above that are returned to the borrower by the contract. If the transfer to the borrower fails, the surplus is escrowed on the market for the borrower to claim with [Claim Surplus](/endpoints/lending/claim-surplus), rather than reverting the settlement.
 
-A liquidation left unsettled for 7 days can be written off with [Handle Liquidation Timeout](/endpoints/lending/handle-timeout), which draws on the insurance fund to cover the bad debt. Write-off does not recover collateral from the router, so dispose of or return the collateral first.
+When a first settlement retains less than the record's claim, the market draws on its insurance fund for the gap in the same transaction. Only the principal neither covers is the pool's loss. The fund pays what its balance allows, and a fund that is empty or refuses the market covers nothing and blocks nothing. [Get Insurance Status](/endpoints/lending/get-insurance-status) shows its balance and which rule a market runs.
+
+A liquidation left unsettled for 7 days can be written off with [Handle Liquidation Timeout](/endpoints/lending/handle-timeout), which draws on the insurance fund to cover the bad debt. Write-off does not recover collateral from the router, so dispose of or return the collateral first. Two router-admin calls finish the router's side. [Close Liquidation](/endpoints/lending/close-liquidation) closes a router record once the market's record is closed and nothing is left to sell. [Reopen Liquidation](/endpoints/lending/reopen-liquidation) reopens a settled record that collected nothing while collateral remains on the router.
 
 ## Per-market liquidation router
 
-Each market gets its own `SecurityLiquidationRouter`, deployed by the factory in the same transaction. The market admin holds `DEFAULT_ADMIN_ROLE` on it and the `liquidationOperator` holds `OPERATOR_ROLE`. Both are named by the lender of record when it takes the role, not at deployment. Trusset holds no role. Naming your registered wallet as `liquidationOperator` is what allows settlement to be driven through this API.
+Each market gets its own `SecurityLiquidationRouter`, deployed by the factory in the same transaction. The market admin holds `DEFAULT_ADMIN_ROLE` on it and the `liquidationOperator` holds `OPERATOR_ROLE`. Both are named by the lender of record when it takes the role, not at deployment. Trusset holds no role. The settlement endpoints check the router role against your instance's primary verified wallet, so that wallet must hold `OPERATOR_ROLE`. Name it as `liquidationOperator`, or grant it the role with [Set Access Role](/endpoints/lending/set-access-role).
 
 Every market payload carries `liquidationRouterAddress`. Endpoints that act on a liquidation resolve the correct router automatically.
 
-Every market carries its own router for its whole life. Deployment rejects a market without one and no setter can clear it, so there is no shared router to fall back to. Two consequences follow. A router read that fails is a retryable failure rather than a reason to guess, and it comes back as `ROUTER_UNRESOLVED`. And liquidation IDs restart at 1 on each router, so the same ID can name a different liquidation on two markets in one instance. The settlement endpoints take a `marketId` to say which you mean, and refuse with `AMBIGUOUS_LIQUIDATION_ID` when it is missing and needed.
+Every market on the current factory carries its own router for its whole life. Deployment rejects a market without one and no setter can clear it, so there is no shared router to fall back to. Two consequences follow. A router read that fails is a retryable failure rather than a reason to guess, and it comes back as `ROUTER_UNRESOLVED`. And liquidation IDs restart at 1 on each router, so the same ID can name a different liquidation on two markets in one instance. The settlement endpoints take a `marketId` to say which you mean, and refuse with `AMBIGUOUS_LIQUIDATION_ID` when it is missing and needed.
 
 ## Rate limits
 
-Every request made with an instance API key counts against a ceiling of 200 requests per minute for that key. Some endpoints carry a second, tighter limit on top of it:
+Every request made with an API key counts against a ceiling of 200 requests per minute for that key, on every product. Most endpoints on this surface also draw on one of two tighter budgets. Each budget is counted per API key across every endpoint that carries it, not per endpoint.
 
 | Limit | Applies to |
 |---|---|
-| 200 per minute | Every request on this surface, keyed by API key |
-| 10 per minute | Every write, plus [Get Lifecycle Statement](/endpoints/lending/get-lifecycle-statement) |
-| 100 per minute | [List Markets](/endpoints/lending/list-markets), [List Borrow Assets](/endpoints/lending/list-borrow-assets), [Get Market History](/endpoints/lending/get-history), [Get Index Status](/endpoints/lending/get-index-status), [Get Terms](/endpoints/lending/get-terms), [List Terms Versions](/endpoints/lending/list-terms-versions), [Get Nominations](/endpoints/lending/get-nominations), [List Pending Markets](/endpoints/lending/list-pending-markets) |
+| 200 per minute | Every request made with the key |
+| 10 per minute | Every write except [Verify Signed Price](/endpoints/lending/verify-price), plus [Get Lifecycle Statement](/endpoints/lending/get-lifecycle-statement), [Export Terms](/endpoints/lending/export-terms) and [Get Position Statement](/endpoints/lending/get-position-statement) |
+| 100 per minute | [List Markets](/endpoints/lending/list-markets), [List Borrow Assets](/endpoints/lending/list-borrow-assets), [Get Deployment Options](/endpoints/lending/get-deployment-options), [List Queued Markets](/endpoints/lending/list-queued-markets), [Get Queued Market](/endpoints/lending/get-queued-market), [List Pending Markets](/endpoints/lending/list-pending-markets), [Get Nominations](/endpoints/lending/get-nominations), [Get Operator](/endpoints/lending/get-operator), [Get Fee Split](/endpoints/lending/get-fee-split), [Get Cashflows](/endpoints/lending/get-cashflows), [Get Market History](/endpoints/lending/get-history), [Get Index Status](/endpoints/lending/get-index-status), [Get Oracle History](/endpoints/lending/get-oracle-history), [Get Terms](/endpoints/lending/get-terms), [List Terms Versions](/endpoints/lending/list-terms-versions), [Get Terms Version](/endpoints/lending/get-terms-version), [Get Identity Gates](/endpoints/lending/get-identity-gates), [List Connected Vaults](/endpoints/lending/list-connected-vaults), [Preview Asset Data](/endpoints/lending/preview-asset-data), [Get Asset Data](/endpoints/lending/get-asset-data), [Get Asset Data Bundle](/endpoints/lending/get-asset-data-bundle), [List Liquidation Bots](/endpoints/lending/list-bots), [Get Liquidation Bot](/endpoints/lending/get-bot), [List Bot Transactions](/endpoints/lending/list-bot-transactions), every vault read and [List Pledges](/endpoints/asset-register/list-pledges) |
 
-Reads not named above are bounded only by the 200 per minute ceiling. [Verify Signed Price](/endpoints/lending/verify-price) is a write that carries no tighter limit, because it reads a signature rather than moving anything.
+Reads not named above are bounded only by the 200 per minute ceiling.
 
-Exceeding a limit returns `429` with code `RATE_LIMIT_EXCEEDED`, a `Retry-After` header in seconds, and `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`. See [Rate Limits](/endpoints/rate-limits).
+Exceeding a limit returns `429` with code `RATE_LIMIT_EXCEEDED` and a `Retry-After` header in seconds. The 200 per minute ceiling reports its state on every response in `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`. The two tighter budgets report theirs in `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. See [Rate Limits](/endpoints/rate-limits).
 
 ## Credits
 
-Requests on this surface also draw on your instance's monthly API credit allowance, billed against the lending service. Every response carries `X-Credits-Limit`, `X-Credits-Remaining` and `X-Credits-Reset`, plus an `X-Request-Id` you can quote in support requests. When the allowance is exhausted the request is refused with `402` and code `CREDIT_LIMIT_EXCEEDED`, and `metadata` carries `creditsLimit`, `creditsRemaining` and `resetsAt`. Credits consumed by a request that fails with a `5xx` are refunded automatically.
+Requests on this surface also draw on your instance's monthly API credit allowance, billed against the lending service. Every metered response carries `X-Credits-Limit`, `X-Credits-Remaining` and `X-Credits-Reset`, plus an `X-Request-Id` you can quote in support requests. When the allowance is exhausted the request is refused with `402` and code `CREDIT_LIMIT_EXCEEDED`, and `metadata` carries `creditsLimit`, `creditsRemaining` and `resetsAt`. Credits consumed by a request that fails with a `5xx` are refunded automatically.

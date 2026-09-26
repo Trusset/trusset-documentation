@@ -1,23 +1,33 @@
 ---
 title: 'List Pledges'
-api: 'GET /lending-external-securities/api/pledges/{marketAddress}'
+api: 'GET /lending-external-securities-v2/api/pledges/{marketAddress}'
 description: 'Every pledge a market has recorded against its collateral token'
 ---
 
 <Warning>
-  `amount` and `currentAmount` are integer strings in the collateral token's base units, exactly as the adapter emitted them. Every other endpoint on the lending surface returns decimal strings. Divide by ten to the power of `collateralDecimals` from [Get Market](/endpoints/lending/get-market) before you put a figure in a register entry.
+  `amount`, `currentAmount`, `deliverableAmount` and every amount in `changes` are integer strings in the collateral token's base units, exactly as the adapter emitted or answered them. Divide by ten to the power of the token's decimals before you put a figure in a register entry. The decimals are `decimals()` on the token, or `collateralDecimals` on [Get Market](/endpoints/lending/get-market) for an instance that holds the market.
+</Warning>
+
+<Warning>
+  `index.historyTruncatedBeforeBlock` is reported once, on the response to the request that ran the market's first scan. Every later response reads `null`, and `index.complete` can read `true`, although the locks created before that block stay missing. Record the value the first time you see it. See [Reading the index](#reading-the-index).
 </Warning>
 
 Returns every pledge the market's collateral adapter has recorded against the collateral token, oldest first. Each record carries the holder, the pledgee, the amount, the transaction that created the lock, and how the pledge ended if it has.
 
-The records are rebuilt from the adapter's own events, so the response describes the chain rather than a Trusset ledger. Reading this endpoint advances the scan, which is why a first call on a market with long history can return a partial list. `index` says how far the scan has reached.
+The records are rebuilt from the adapter's own events, so the response describes the chain rather than a Trusset ledger. `deliverableAmount` is the one figure read live from the adapter on each call. Reading this endpoint advances the scan, which is why a first call on a market with long history can return a partial list. `index` says how far the scan has reached.
 
-This endpoint takes the market's **contract address**. Every other endpoint on the lending surface takes the market ID.
+This endpoint takes the market's **contract address**, not its market ID.
+
+## Who can read a market
+
+The address is first checked against the v2 lending factory this instance deploys to. Any other address is refused with `MARKET_NOT_V2`, before the query is validated and before access is considered.
+
+Access is then decided per market, not per key. A market opens to an instance that holds an active record of it. The issuer instance that deployed it holds one, and so does the lender of record's instance once its adoption is confirmed. A market also opens to an instance whose verified wallet is nominated on it. A market open to any lender of record, while it is still seeking one, also opens to an account Trusset approved to act as a lender of record. That instance needs a verified wallet. Every other caller is refused.
 
 ## Path Parameters
 
 <ParamField path="marketAddress" type="string" required>
-  The market contract address, as 40 hex characters with a `0x` prefix. Available as `marketAddress` on [List Markets](/endpoints/lending/list-markets).
+  The market contract address, as 40 hex characters with a `0x` prefix. Send it lowercased or correctly checksummed: a mixed-case address whose checksum fails is refused with `MARKET_NOT_V2`.
 </ParamField>
 
 ## Query Parameters
@@ -27,8 +37,10 @@ This endpoint takes the market's **contract address**. Every other endpoint on t
 <ParamField query="limit" type="integer" default="50">Records to return. Between `1` and `200`.</ParamField>
 
 <ParamField query="includeEnded" type="string" default="true">
-  Accepts `true` or `false`. Set it to `false` to return only pledges that have not ended. Any other value is a validation error. `total` follows the same filter.
+  Accepts `true` or `false`. Set it to `false` to leave out pledges with an `endedAt`. Any other value is a validation error. `total` follows the same filter.
 </ParamField>
+
+`includeEnded=false` still returns a pledge whose whole amount was withdrawn or split away, because the adapter emits no ending for that. Such a pledge reads `currentAmount: "0"`, `active: false` and `endedAt: null`. Filter on `active` for the pledges that stand.
 
 ## Response Fields
 
@@ -38,9 +50,9 @@ This endpoint takes the market's **contract address**. Every other endpoint on t
     <ResponseField name="adapterAddress" type="string">The collateral adapter that holds every lock and emits every event behind this list. `null` when the deployment names no adapter, in which case `pledges` is empty.</ResponseField>
     <ResponseField name="tokenAddress" type="string">The collateral token the pledges are over.</ResponseField>
     <ResponseField name="collateralMode" type="string">`FREEZE` or `CUSTODY`. In `FREEZE` the borrower stays the holder and the balance is restricted in place. In `CUSTODY` the token moved to the adapter, which is a transfer for security rather than a pledge.</ResponseField>
-    <ResponseField name="factoryGeneration" type="string">The factory generation that deployed the market.</ResponseField>
+    <ResponseField name="factoryGeneration" type="string">The factory generation that deployed the market. `curator` for every market on the current factory.</ResponseField>
     <ResponseField name="pledgeeUnavailable" type="boolean">True when this adapter does not record a pledgee at all. Every `pledgee` in the list is then `null`, and that is a fact about the adapter rather than a gap in the data.</ResponseField>
-    <ResponseField name="pledgeeSupportUnreadable" type="boolean">True when the adapter could not be read to find out whether it records a pledgee. Treat a `null` pledgee as unknown, not as absent.</ResponseField>
+    <ResponseField name="pledgeeSupportUnreadable" type="boolean">True when the adapter could not be read on this request to establish whether it records a pledgee. Stored records keep what the scan that wrote them established.</ResponseField>
     <ResponseField name="total" type="integer">Pledges matching the filter, across all pages.</ResponseField>
     <ResponseField name="offset" type="integer">Offset applied.</ResponseField>
     <ResponseField name="limit" type="integer">Page size applied.</ResponseField>
@@ -48,35 +60,49 @@ This endpoint takes the market's **contract address**. Every other endpoint on t
       <Expandable>
         <ResponseField name="ref" type="string">The adapter's reference for this lock, as 32 bytes. Unique per adapter.</ResponseField>
         <ResponseField name="holder" type="string">The wallet whose collateral is locked. In a `FREEZE` market this is the holder the register knows.</ResponseField>
-        <ResponseField name="pledgee" type="string">The collateral agent named on the lock. `null` when the adapter records no pledgee, or when it could not be read.</ResponseField>
+        <ResponseField name="pledgee" type="string">The collateral agent named on the lock. `null` when the adapter does not record a pledgee.</ResponseField>
         <ResponseField name="pledgeeUnavailable" type="boolean">True when `pledgee` is `null` because the adapter does not record one.</ResponseField>
         <ResponseField name="tokenAddress" type="string">The collateral token, repeated per record.</ResponseField>
         <ResponseField name="adapterAddress" type="string">The adapter holding this lock.</ResponseField>
         <ResponseField name="marketAddress" type="string">The market this lock belongs to.</ResponseField>
-        <ResponseField name="amount" type="string">Everything ever locked under this reference, in base units. Increases add to it. Decreases, releases and seizures do not reduce it, so it stays the high-water mark.</ResponseField>
-        <ResponseField name="currentAmount" type="string">What is locked right now, in base units. This is the figure a standing register entry describes. `0` once the pledge has ended.</ResponseField>
+        <ResponseField name="amount" type="string">Everything ever locked under this reference, in base units. Increases add to it. Decreases, releases, splits and seizures do not reduce it, so it stays the high-water mark.</ResponseField>
+        <ResponseField name="currentAmount" type="string">What the adapter's events say is still locked, in base units. This is the figure a standing register entry describes. `0` once the pledge has ended.</ResponseField>
         <ResponseField name="lockedAt" type="object">
           <Expandable>
             <ResponseField name="block" type="integer">Block that created the lock.</ResponseField>
-            <ResponseField name="txHash" type="string">Transaction that created the lock. This is the transaction that opened the loan, or that added collateral under a fresh reference.</ResponseField>
+            <ResponseField name="txHash" type="string">Transaction that created the lock. This is the transaction that opened the loan, added collateral under a fresh reference, or split the lock off another one.</ResponseField>
             <ResponseField name="logIndex" type="integer">Log position within that block.</ResponseField>
             <ResponseField name="at" type="string">Block timestamp, ISO 8601.</ResponseField>
           </Expandable>
         </ResponseField>
-        <ResponseField name="changes" type="array">Everything that happened to the lock after it was created, oldest first. Each entry carries `kind`, `amount`, `block` and `txHash`. Only the last 100 are kept.</ResponseField>
+        <ResponseField name="changes" type="array">Everything that happened to the lock after it was created, oldest first. Each entry carries `kind`, `amount`, `block` and `txHash`, plus the extra fields listed under [Change kinds](#change-kinds). Only the last 100 are kept.</ResponseField>
         <ResponseField name="endedAt" type="object">`null` while the pledge stands. Otherwise `kind`, `to`, `block`, `txHash` and `at`.</ResponseField>
         <ResponseField name="active" type="boolean">True when the pledge has not ended and `currentAmount` is above zero.</ResponseField>
+        <ResponseField name="freezeShortfallCount" type="integer">`FREEZE_SHORTFALL` entries among the kept `changes`.</ResponseField>
+        <ResponseField name="freezeShortfallTotal" type="string">Sum of their `amount`, in base units. `"0"` when there are none.</ResponseField>
+        <ResponseField name="deliverableAmount" type="string">What the adapter can still deliver under this lock, read live on this request, in base units. For an active pledge it is the adapter's `lockedAmount`, `null` when that read failed. `"0"` for an ended pledge, and `null` for a pledge that is neither active nor ended.</ResponseField>
+        <ResponseField name="deliverableReadFailed" type="boolean">True for an active pledge whose live read failed.</ResponseField>
+        <ResponseField name="deliverableShortfall" type="string">`currentAmount` minus `deliverableAmount` when the adapter can deliver less than the events record. `null` otherwise.</ResponseField>
+        <ResponseField name="deliverableUncertain" type="boolean">True for an active pledge when the live read failed, when a freeze shortfall was ever recorded on it, or when `deliverableShortfall` is set.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="shortfalls" type="object">
+      Counts over the pledges on this page, not over the whole market.
+      <Expandable>
+        <ResponseField name="pledgesWithFreezeShortfall" type="integer">Pledges with at least one `FREEZE_SHORTFALL` change.</ResponseField>
+        <ResponseField name="pledgesUnderDelivering" type="integer">Pledges with a `deliverableShortfall`.</ResponseField>
+        <ResponseField name="deliverableUnread" type="integer">Pledges whose live read failed.</ResponseField>
       </Expandable>
     </ResponseField>
     <ResponseField name="index" type="object">
       <Expandable>
         <ResponseField name="scannedToBlock" type="integer">Last block read into the index. `null` before the first scan.</ResponseField>
-        <ResponseField name="lastScanAt" type="string">When the index was last advanced.</ResponseField>
-        <ResponseField name="synced" type="boolean">Whether this request advanced the scan.</ResponseField>
+        <ResponseField name="lastScanAt" type="string">When the index was last scanned, whether or not the scan moved it.</ResponseField>
+        <ResponseField name="synced" type="boolean">Whether this request ran the scan.</ResponseField>
         <ResponseField name="reason" type="string">Why it did not. `null` when it did.</ResponseField>
-        <ResponseField name="historyTruncatedBeforeBlock" type="integer">Set when the market's deployment block could not be found and the first scan started from a fixed lookback instead. Locks created before this block are missing and will stay missing.</ResponseField>
-        <ResponseField name="unparsedLogsThisScan" type="integer">Adapter logs this scan could not decode. Above zero does not mean a pledge is missing: the adapters emit events that are not pledge events, and those are counted here. See below.</ResponseField>
-        <ResponseField name="complete" type="boolean">True when the scan ran, decoded every log, and lost no history.</ResponseField>
+        <ResponseField name="historyTruncatedBeforeBlock" type="integer">Set only on the response to the request that ran the market's first scan, and only when that scan could not find the deployment block. The scan then started 200,000 blocks back from the head, and locks created before this block are missing for good. `null` on every other response.</ResponseField>
+        <ResponseField name="unparsedLogsThisScan" type="integer">Adapter logs this scan could not decode. `null` when this request scanned no blocks. Above zero does not mean a pledge is missing. See below.</ResponseField>
+        <ResponseField name="complete" type="boolean">True when this request ran the scan, the scan decoded every log, and it reported no truncated history.</ResponseField>
       </Expandable>
     </ResponseField>
   </Expandable>
@@ -84,33 +110,38 @@ This endpoint takes the market's **contract address**. Every other endpoint on t
 
 ## Change kinds
 
-| `kind` | Meaning | Extra field |
+| `kind` | Meaning | Extra fields |
 |---|---|---|
 | `INCREASED` | Collateral added to an existing pledge | |
-| `DECREASED` | Collateral partly returned to the holder | |
+| `DECREASED` | Collateral partly or wholly returned to the holder | |
 | `ENFORCED` | Collateral seized in a liquidation | `to`, the recipient |
 | `SPLIT_OUT` | Part of this pledge moved to a new reference | `toRef` |
 | `SPLIT_IN` | This pledge was created out of another one | `fromRef` |
+| `FREEZE_SHORTFALL` | The freeze adapter asked the token to unfreeze more than was still frozen for the holder | `requested`, `unfrozen` |
 
 A split is bookkeeping inside the adapter, used to isolate collateral going to auction from the rest of the loan. Both sides carry the same holder and the same pledgee.
 
+A `FREEZE_SHORTFALL` means another agent on the token had already unfrozen part of the market-frozen balance before the market released or seized it. `amount` is the difference between `requested` and `unfrozen`. The holder held that part unencumbered before the market let go of it, which is worth knowing when the register entry is reconciled. The change does not reduce `currentAmount`.
+
 ## How a pledge ends
 
-`endedAt.kind` is `RELEASED` when the loan closed and the collateral went back to the holder. The restriction is gone and the register entry can come off.
+`endedAt.kind` is `RELEASED` when the adapter returned what was left to the holder: the loan closed, or a liquidation sent the remainder home. A liquidation that seizes part of the collateral and returns the rest in the same transaction shows an `ENFORCED` change followed by a `RELEASED` ending. The restriction is gone and the register entry can come off.
 
-It is `ENFORCED` when the last of the collateral was seized in a liquidation. `endedAt.to` is where it went. A partial seizure is not an ending: it lands in `changes` and the pledge keeps standing for the remainder.
+It is `ENFORCED` when a seizure took the last of the collateral. `endedAt.to` is where it went. A partial seizure without a release is not an ending: it lands in `changes` and the pledge keeps standing for the remainder.
+
+In a `CUSTODY` market a return the token refuses is escrowed in the adapter for the holder to claim later. The pledge still reads `RELEASED`.
 
 ## Tie a pledge to a loan
 
-`ref` is derived from the market, the loan ID and a counter, and no endpoint maps it back to a loan. Join on `lockedAt.txHash` against [List Transactions](/endpoints/lending/list-transactions), which records the same hash for the loan that created the lock. `holder` is the borrower.
+`ref` is derived from the market, the loan ID and a counter, and no endpoint maps it back to a loan. Join on `lockedAt.txHash` against [List Transactions](/endpoints/lending/list-transactions), which records the same hash for the loan that created the lock. List Transactions takes the market ID, so the join is open only to an instance that holds the market's record. `holder` is the borrower.
 
 ## Reading the index
 
-The scan reads at most 200,000 blocks per request and stops three blocks behind the head, so a market with long history takes several calls to catch up. It is throttled to once a minute per market. A call inside that minute returns the stored records with `synced: false` and `reason` of `THROTTLED`, which is a normal answer rather than a failure.
+The scan reads at most 200,000 blocks per request, in chunks of 10,000, and stops three blocks behind the head. A market with long history takes several calls to catch up. The scan is throttled to once a minute per market. A call inside that minute returns the stored records with `synced: false` and `reason` of `THROTTLED`, which is a normal answer rather than a failure.
 
 | `reason` | What happened |
 |---|---|
-| `THROTTLED` | The index was advanced less than a minute ago |
+| `THROTTLED` | The index was scanned less than a minute ago |
 | `IN_PROGRESS` | Another request is scanning this market |
 | `CHAIN_UNREADY` | The chain has no block to read past the last scan |
 | `NO_ADAPTER` | The deployment names no collateral adapter |
@@ -119,44 +150,49 @@ The scan reads at most 200,000 blocks per request and stops three blocks behind 
 
 Records already in the index are returned in all six cases.
 
+The first scan starts at the market's deployment block when a platform record of the deployment transaction exists. Without one it starts 200,000 blocks back from the head, and that one response carries `historyTruncatedBeforeBlock`. Nothing stores the value, so the next response reads `null` again.
+
 ### What `complete: false` actually means
 
-`complete` is `synced`, and no truncated history, and no unparsed logs. The last of those three is the one to read carefully.
+`complete` is `synced`, and no truncated history reported on this response, and no unparsed logs. The last of those three is the one to read carefully.
 
-The index models six adapter events: `Locked`, `Increased`, `Decreased`, `Released`, `Enforced` and `RefSplit`. Those are the pledge's whole life. The adapters also emit events that have nothing to do with a pledge: a freeze adapter emits `FreezeShortfall` when it could not freeze the full amount asked for, and a custody adapter emits `CollateralEscrowed` and `EscrowedCollateralClaimed` when a return to the borrower was blocked on compliance and held instead. Any of those in the scanned window is counted in `unparsedLogsThisScan` and turns `complete` to `false`.
+The index models seven adapter events: `Locked`, `Increased`, `Decreased`, `Released`, `Enforced`, `RefSplit` and `FreezeShortfall`. The custody adapter also emits events that are not about a pledge: `CollateralEscrowed` and `EscrowedCollateralClaimed`, when a return to the borrower was blocked on compliance and held instead. Any of those in the scanned window is counted in `unparsedLogsThisScan` and turns `complete` to `false`.
 
-So read the three parts rather than the flag alone:
+So read the parts rather than the flag alone:
 
-- `historyTruncatedBeforeBlock` is the one that means pledges are genuinely missing, and they stay missing.
+- `historyTruncatedBeforeBlock` is the one that means pledges are genuinely missing, and they stay missing. It appears on one response only.
 - `scannedToBlock` well behind the chain head means the scan has not caught up. Call again.
 - `unparsedLogsThisScan` on its own is informational. The pledges returned for the blocks scanned are complete.
 
-Waiting for `complete: true` on a market that has seen a freeze shortfall or an escrowed return means waiting for something that will not arrive.
+The count covers only the blocks this request scanned. A `false` caused by unparsed logs clears on the next scan whose window holds none of them, and it says nothing about the pledges already indexed.
 
-## Errors
+## Error Codes
 
-| Code | Status | Meaning |
+`VALIDATION_ERROR`, `MARKET_NOT_V2` and `MARKET_VERIFICATION_UNAVAILABLE` are answered by the platform's shared error handler. Their body has no `data` member, carries a top-level `statusCode`, and its `metadata.requestId` does not match the `X-Request-Id` header. A validation failure reads `Input validation failed`, with `error.details` listing each offending field.
+
+| Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | 400 | `marketAddress` is not a 40 hex character address, or a query parameter is out of range |
-| `AUTH_REQUIRED` | 401 | No `X-API-Key` header |
-| `AUTH_FAILED` | 401 | The key is malformed, unknown, expired, or its instance is archived |
-| `CREDIT_LIMIT_EXCEEDED` | 402 | The instance's monthly credit allowance is exhausted |
-| `NOT_NOMINATED` | 403 | No verified wallet of this instance is nominated on this market, and the instance holds no record of it |
-| `CURATOR_NOT_APPROVED` | 403 | The market is open to any lender of record and this account is not approved to act as one |
-| `MARKET_NOT_DEPLOYED` | 404 | The lending factory returns no deployment for this address |
-| `MARKET_NOT_V2` | 404 | The address is not a market on the factory this instance deploys to |
-| `WALLET_NOT_CONFIGURED` | 412 | The market is open to any lender of record, but this instance has no verified wallet |
-| `RATE_LIMIT_EXCEEDED` | 429 | Over 100 requests in a minute on this endpoint, or over the surface ceiling |
-| `PLEDGES_FAILED` | 500 | The pledge record could not be assembled |
-| `PLEDGE_INDEX_UNAVAILABLE` | 503 | The index could not be read. Retry shortly |
-| `FACTORY_UNREADABLE` | 503 | The factory could not be read to confirm access. Retry shortly |
-| `MARKET_VERIFICATION_UNAVAILABLE` | 503 | The market could not be checked against the factory. Retry shortly |
+| `VALIDATION_ERROR` | `400` | `marketAddress` is not a 40 hex character address, or a query parameter is out of range |
+| `AUTH_REQUIRED` | `401` | No `X-API-Key` header |
+| `AUTH_FAILED` | `401` | The key is malformed, unknown, expired, or its instance is archived |
+| `CREDIT_LIMIT_EXCEEDED` | `402` | The instance's monthly credit allowance is exhausted |
+| `CURATOR_NOT_APPROVED` | `403` | The market is open to any lender of record and this account is not approved to act as one |
+| `NOT_NOMINATED` | `403` | No verified wallet of this instance is nominated on this market, and the instance holds no record of it |
+| `MARKET_NOT_DEPLOYED` | `404` | The lending factory returns no deployment for this address |
+| `MARKET_NOT_V2` | `404` | The address is not a market on the factory this instance deploys to |
+| `WALLET_NOT_CONFIGURED` | `412` | The market is open to any lender of record, but this instance has no verified wallet |
+| `RATE_LIMIT_EXCEEDED` | `429` | Too many requests. See [Rate limits and credits](/endpoints/asset-register/introduction#rate-limits-and-credits) |
+| `PLEDGES_FAILED` | `500` | The pledge record could not be assembled |
+| `FACTORY_READ_FAILED` | `503` | The lending factory could not be reached to resolve the market. Retry shortly |
+| `FACTORY_UNREADABLE` | `503` | The factory could not be read to confirm access. Retry shortly |
+| `MARKET_VERIFICATION_UNAVAILABLE` | `503` | The market could not be checked against the factory. Retry shortly |
+| `PLEDGE_INDEX_UNAVAILABLE` | `503` | The index could not be read. Retry shortly |
 
-A `403` is a statement about this instance's access to this market. A `503` is a statement about a read that failed, and says nothing about the market or the caller.
+A `403` or `412` is a statement about this instance's access to this market. A `503` is a statement about a read that failed, and says nothing about the market or the caller.
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/pledges/0x70a0...f2c1?includeEnded=false" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/pledges/0x70a0e25c7b768b87e658348b3b577678a173e038?includeEnded=false" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
@@ -167,14 +203,17 @@ function fromBaseUnits(value: string, decimals: number): string {
   return fraction ? `${whole}.${fraction}` : whole;
 }
 
+const collateralDecimals = 18;
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/pledges/${marketAddress}?includeEnded=false&limit=200`,
+  `https://api.trusset.org/lending-external-securities-v2/api/pledges/${marketAddress}?includeEnded=false&limit=200`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
-const { success, data } = await res.json();
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
 
-if (!success || data.index.historyTruncatedBeforeBlock !== null) {
-  throw new Error('Pledge history is incomplete for this market');
+const truncatedBefore: number | null = data.index.historyTruncatedBeforeBlock;
+if (truncatedBefore !== null) {
+  console.warn(`Locks created before block ${truncatedBefore} are missing for good. Store this now.`);
 }
 
 const entries = data.pledges
@@ -183,6 +222,7 @@ const entries = data.pledges
     holder: p.holder,
     pledgee: p.pledgee,
     amount: fromBaseUnits(p.currentAmount, collateralDecimals),
+    needsReview: p.deliverableUncertain,
     evidence: p.lockedAt.txHash,
     lockedAt: p.lockedAt.at
   }));
@@ -194,9 +234,9 @@ const entries = data.pledges
 {
   "success": true,
   "data": {
-    "marketAddress": "0x70a0...f2c1",
-    "adapterAddress": "0x8c4f...2c5f",
-    "tokenAddress": "0x3f8b...6b8c",
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "adapterAddress": "0x8de664140de65aa4da3a819bfa2296da126692f9",
+    "tokenAddress": "0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9",
     "collateralMode": "FREEZE",
     "factoryGeneration": "curator",
     "pledgeeUnavailable": false,
@@ -204,12 +244,12 @@ const entries = data.pledges
     "pledges": [
       {
         "ref": "0x9a1c7e42d8b0f35a6c19e7d4b28f0a5c3e6d9b1f4a7c2e8d0b5f3a6c9e1d4b70",
-        "holder": "0xabc...def",
-        "pledgee": "0x4d7e...9b12",
+        "holder": "0xe119d9413af9d1ddc0c2115c3f160460c8fa28bd",
+        "pledgee": "0x417438df36bd223c45ab2db4e7a2eb8af0197f18",
         "pledgeeUnavailable": false,
-        "tokenAddress": "0x3f8b...6b8c",
-        "adapterAddress": "0x8c4f...2c5f",
-        "marketAddress": "0x70a0...f2c1",
+        "tokenAddress": "0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9",
+        "adapterAddress": "0x8de664140de65aa4da3a819bfa2296da126692f9",
+        "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
         "amount": "1250000000000000000000",
         "currentAmount": "1250000000000000000000",
         "lockedAt": {
@@ -223,14 +263,25 @@ const entries = data.pledges
             "kind": "INCREASED",
             "amount": "250000000000000000000",
             "block": 21459104,
-            "txHash": "0x3b81...7ca2"
+            "txHash": "0x58ee7b37e8a67d1cfdcb22ffcbda5bc40293a14c704c32ba2f1c637d62e2d961"
           }
         ],
         "endedAt": null,
-        "active": true
+        "active": true,
+        "freezeShortfallCount": 0,
+        "freezeShortfallTotal": "0",
+        "deliverableAmount": "1250000000000000000000",
+        "deliverableReadFailed": false,
+        "deliverableShortfall": null,
+        "deliverableUncertain": false
       }
     ],
     "total": 1,
+    "shortfalls": {
+      "pledgesWithFreezeShortfall": 0,
+      "pledgesUnderDelivering": 0,
+      "deliverableUnread": 0
+    },
     "offset": 0,
     "limit": 200,
     "index": {
@@ -253,27 +304,45 @@ const entries = data.pledges
 ```
 ```json Ended pledge record
 {
-  "ref": "0x2f74...c8a1",
-  "holder": "0xabc...def",
-  "pledgee": "0x4d7e...9b12",
+  "ref": "0xb9971dfb1258d2fc73f79a493895c6c4db79fc841559f6eb4c57f48be920566d",
+  "holder": "0xe119d9413af9d1ddc0c2115c3f160460c8fa28bd",
+  "pledgee": "0x417438df36bd223c45ab2db4e7a2eb8af0197f18",
   "pledgeeUnavailable": false,
+  "tokenAddress": "0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9",
+  "adapterAddress": "0x8de664140de65aa4da3a819bfa2296da126692f9",
+  "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
   "amount": "500000000000000000000",
   "currentAmount": "0",
   "lockedAt": {
     "block": 21301877,
-    "txHash": "0x5c19...80fe",
+    "txHash": "0x03921927ad789db89d1ffdbdc4f3a75ef24055a751b3cf49c2d917791b1862e8",
     "logIndex": 17,
     "at": "2026-08-11T14:03:12.000Z"
   },
-  "changes": [],
+  "changes": [
+    {
+      "kind": "FREEZE_SHORTFALL",
+      "amount": "50000000000000000000",
+      "requested": "500000000000000000000",
+      "unfrozen": "450000000000000000000",
+      "block": 21430229,
+      "txHash": "0x02bf7b8935dc46e5c15b875e7412fd7bdebda3896c0cd0663398904bb5c02390"
+    }
+  ],
   "endedAt": {
     "kind": "RELEASED",
     "to": null,
     "block": 21430229,
-    "txHash": "0xd402...61ba",
+    "txHash": "0x02bf7b8935dc46e5c15b875e7412fd7bdebda3896c0cd0663398904bb5c02390",
     "at": "2026-09-01T08:41:55.000Z"
   },
-  "active": false
+  "active": false,
+  "freezeShortfallCount": 1,
+  "freezeShortfallTotal": "50000000000000000000",
+  "deliverableAmount": "0",
+  "deliverableReadFailed": false,
+  "deliverableShortfall": null,
+  "deliverableUncertain": false
 }
 ```
 ```json Error - Not nominated
@@ -283,6 +352,11 @@ const entries = data.pledges
   "error": {
     "code": "NOT_NOMINATED",
     "message": "No verified wallet of this instance is nominated to take this market"
+  },
+  "metadata": {
+    "timestamp": "2026-09-05T12:00:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
   }
 }
 ```
@@ -293,6 +367,11 @@ const entries = data.pledges
   "error": {
     "code": "PLEDGE_INDEX_UNAVAILABLE",
     "message": "The pledge index could not be read right now. Nothing is wrong with the market as far as this check can tell, retry shortly."
+  },
+  "metadata": {
+    "timestamp": "2026-09-05T12:00:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
   }
 }
 ```

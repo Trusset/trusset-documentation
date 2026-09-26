@@ -1,16 +1,20 @@
 ---
 title: 'Update Hook'
-api: 'PUT /lending-external-securities/api/hooks/{marketId}/{hookId}'
-description: 'Partially update an existing hook'
+api: 'PUT /lending-external-securities-v2/api/hooks/{marketId}/{hookId}'
+description: 'Change some or all fields of an existing hook'
 ---
 
-Updates a hook in place. Every field from [Create Hook](/endpoints/lending/create-hook) is accepted and all of them are optional. Only the fields you send are changed.
+Updates a hook in place and returns the full updated record. Every field from [Create Hook](/endpoints/lending/create-hook) is accepted, `hookType` included, and all of them are optional. Only the fields sent are changed. Nothing goes on-chain.
 
-Cross-field validation runs against the merged record, not the request body alone. Clearing `webhookUrl` on a hook whose `actionType` is `inform` is therefore rejected.
+Arrays and `webhookPayload` are replaced whole, not merged. `null` fails validation for every field, so a URL, `checkFrequency`, `actionType` or `riskThreshold` cannot be unset once stored. Arrays can be emptied with `[]`.
+
+Cross-field validation runs against the merged record, not the request body alone. Switching `actionType` to `inform` on a hook that has no `webhookUrl` is therefore rejected with `MISSING_WEBHOOK_URL`. So is switching `hookType` to `monitorRisk` on a hook without a `riskUri`, with `MISSING_RISK_URI`.
 
 <Note>
-  Unlike create, `riskFields` is not re-required on update. A `monitorRisk` hook that already has risk fields keeps them when you send only `checkFrequency`.
+  Unlike create, `riskFields` is not re-required on update. A `monitorRisk` hook that already has risk fields keeps them when only `checkFrequency` is sent. Sending `riskFields: []` empties them, and the monitor then fails every run with `Missing risk config` without logging it.
 </Note>
+
+A changed `checkFrequency` takes effect from the scheduler's next wake-up, not from this call.
 
 ## Path Parameters
 
@@ -19,14 +23,34 @@ Cross-field validation runs against the merged record, not the request body alon
 
 ## Body Parameters
 
-Any subset of the [Create Hook](/endpoints/lending/create-hook) body. Same types, same ranges.
+Any subset of the [Create Hook](/endpoints/lending/create-hook) body, with the same types and ranges. `triggerHookIds` is checked against this market again whenever it is sent non-empty.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  The updated hook record, with a new `updatedAt`. See [List Hooks](/endpoints/lending/list-hooks) for each field.
+</ResponseField>
 
 <RequestExample>
 ```bash cURL
-curl -X PUT "https://api.trusset.org/lending-external-securities/api/hooks/{marketId}/{hookId}" \
+curl -X PUT "https://api.trusset.org/lending-external-securities-v2/api/hooks/{marketId}/{hookId}" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{"checkFrequency": "1h"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/hooks/${marketId}/${hookId}`,
+  {
+    method: 'PUT',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ checkFrequency: '1h' })
+  }
+);
+const { data: hook } = await res.json();
 ```
 </RequestExample>
 
@@ -38,10 +62,57 @@ curl -X PUT "https://api.trusset.org/lending-external-securities/api/hooks/{mark
     "id": "hook_003",
     "marketId": "clx_secmarket_001",
     "hookType": "monitorRisk",
-    "checkFrequency": "1h",
+    "name": "NAV Publication Monitor",
     "active": true,
-    "updatedAt": "2025-06-15T12:05:00.000Z"
+    "riskUri": "https://nav.example.com/funds/NYF1",
+    "riskFields": [{ "path": "ageHours", "operator": "<", "threshold": 36 }],
+    "riskThreshold": null,
+    "checkFrequency": "1h",
+    "parameterChecks": [],
+    "triggerHookIds": [],
+    "actionType": null,
+    "maxBuyPrice": null,
+    "webhookUrl": null,
+    "webhookPayload": null,
+    "signerAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "signerFunded": false,
+    "lastExecutedAt": "2026-09-25T12:00:00.000Z",
+    "lastResult": true,
+    "executionCount": 1,
+    "createdAt": "2026-09-25T12:00:00.000Z",
+    "updatedAt": "2026-09-25T12:05:00.000Z"
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-09-25T12:05:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Missing Webhook URL
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "MISSING_WEBHOOK_URL",
+    "message": "Webhook URL required for inform action"
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field fails the schema, including `null` or a URL on a private or reserved host. `error.details` lists each `{ field, message }` |
+| `MISSING_RISK_URI` | `400` | The merged record is a `monitorRisk` hook without a `riskUri` |
+| `MISSING_ACTION_TYPE` | `400` | The merged record is an `afterLiquidation` hook without an `actionType` |
+| `MISSING_WEBHOOK_URL` | `400` | The merged record has `actionType` `inform` and no `webhookUrl` |
+| `INVALID_TRIGGER_HOOKS` | `400` | An ID in `triggerHookIds` is not a hook on this market |
+| `KEY_MATERIAL_REJECTED` | `400` | A key in the body, including inside `webhookPayload`, is named for key material |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MISSING_HOOK_ID` | `400` | `hookId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID belongs to your instance |
+| `HOOK_NOT_FOUND` | `404` | No hook with this ID exists on this market |

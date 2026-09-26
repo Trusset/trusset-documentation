@@ -1,12 +1,16 @@
 ---
 title: 'Verify Signed Price'
-api: 'POST /lending-external-securities/api/markets/{marketId}/verify-price'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/verify-price'
 description: 'Check an EIP-712 signed price against the market oracle without executing'
 ---
 
 Validates a signed price against the market's oracle contract and returns the recovered signer. Nothing is submitted and no gas is spent.
 
 Use it to confirm a signature before handing it to a borrower, or to diagnose a transaction that reverted on a price signature.
+
+<Warning>
+  `valid: true` does not guarantee the price will land. The oracle's check covers the signature, the signer, expiry and age, but not the deviation limit. It also ignores whether the signature is newer than the price the oracle holds. Inside a lending transaction, a signature dated no later than the stored price is skipped, and a price outside the deviation limit reverts the transaction.
+</Warning>
 
 ## Path Parameters
 
@@ -35,30 +39,53 @@ Use it to confirm a signature before handing it to a borrower, or to diagnose a 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="valid" type="boolean">Whether the oracle accepts the signature.</ResponseField>
-    <ResponseField name="signer" type="string">Recovered signer address, or null when verification could not run.</ResponseField>
-    <ResponseField name="error" type="string">Reason the verification call failed, or null on a completed check.</ResponseField>
+    <ResponseField name="signer" type="string">Recovered signer address. The zero address when the oracle rejected the payload before recovering a signer, and `null` when verification could not run.</ResponseField>
+    <ResponseField name="error" type="string">Reason the verification call failed, or `null` on a completed check.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  `valid: false` with `error: null` means the oracle evaluated the signature and rejected it. `valid: false` with a populated `error` means the check itself could not run, usually an RPC failure. These are different conditions and should be surfaced differently.
+  `valid: false` with `error: null` means the oracle evaluated the signature and rejected it. `valid: false` with a populated `error` means the check itself could not run, usually an RPC failure or a signature that cannot be encoded, such as odd-length hex. These are different conditions and should be surfaced differently.
 </Note>
 
-<Warning>
-  A signature the oracle considers valid can still be rejected at execution time if it has expired between verification and submission. Verification is a point-in-time check against `validUntil`.
-</Warning>
+## Why a Signature Is Rejected
+
+A rejection with a non-zero `signer` means the signature recovered to a key that is neither an authorized signer nor the oracle's owner. Grant it with [Set Access Role](/endpoints/lending/set-access-role) and `ORACLE_SIGNER`, or sign with the declared price signer.
+
+A rejection with the zero address as `signer` means the oracle refused before checking the key. Either `validUntil` has passed, `timestamp` is in the future or older than `maxPriceAge`, the price is zero, or the signature does not recover. An `ORACLE`-priced market rejects every signature this way, because its oracle takes no attested price.
+
+A signature the oracle considers valid can still be rejected at execution time if it has expired between verification and submission. Verification is a point-in-time check against `validUntil`.
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/verify-price" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/verify-price" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{
     "price": "105400000",
     "timestamp": 1718445600,
     "validUntil": 1718445900,
-    "signature": "0xabc...def"
+    "signature": "0x5f1c3a9e0b7d24c68f1e3a5b7c9d0e2f4a6b8c0d1e3f5a7b9c1d3e5f7a9b0c2d4e6f8a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d9e1f3a5b7c9d0e2f4a6b8c0d1e3f1b"
   }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/verify-price`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      price: signed.price,
+      timestamp: signed.timestamp,
+      validUntil: signed.validUntil,
+      signature
+    })
+  }
+);
+const { data } = await res.json();
 ```
 </RequestExample>
 
@@ -68,12 +95,22 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{m
   "success": true,
   "data": {
     "valid": true,
-    "signer": "0x123...456",
+    "signer": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70",
     "error": null
   }
 }
 ```
-```json Response - Rejected
+```json Response - Unauthorized Signer
+{
+  "success": true,
+  "data": {
+    "valid": false,
+    "signer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "error": null
+  }
+}
+```
+```json Response - Rejected Before Recovery
 {
   "success": true,
   "data": {
@@ -93,3 +130,12 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{m
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_ORACLE` | `400` | The market records no oracle address. Checked before the body |
+| `VALIDATION_ERROR` | `400` | `price` is not an integer string, `timestamp` or `validUntil` is not a positive integer, or `signature` is not 0x-prefixed hex |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

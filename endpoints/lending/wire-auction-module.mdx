@@ -1,0 +1,206 @@
+---
+title: 'Wire Auction Module'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/auction-module'
+description: 'Deploy a Dutch auction venue for a market and bind it, as unsigned transactions'
+---
+
+Builds the transactions that give a market its Dutch auction venue, the per-market contract on which auctions run. Call it twice. Without `moduleAddress` it returns the contract-creation transaction for a new venue. With `moduleAddress` it returns the legs that bind that venue to the market and let the liquidation router and the collateral token accept it.
+
+Nothing here turns auctions on. Once the legs are signed, the issuer enables `useDutchAuction` through [Update Market Config](/endpoints/lending/update-config), which the contract refuses while no venue is wired. A market that prices its collateral from a `MARKET` source cannot run Dutch auctions at all, and this call refuses it.
+
+<Warning>
+  Sign every leg before enabling auctions. Without the router leg, an expired auction cannot be settled and its unsold collateral stays in the venue. A venue the collateral token does not admit makes every liquidation revert once `useDutchAuction` is on. Confirm both on [Get Auction Module](/endpoints/lending/get-auction-module) afterwards.
+</Warning>
+
+The market must have a lender of record. A market still seeking one has no admin that could sign the binding, so the call is refused with `MARKET_PENDING_CURATOR`.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="moduleAddress" type="string">
+  Address of the venue you deployed from the first call's transaction. Omit it to receive that deployment transaction. The venue must name this market, because each venue is bound to exactly one market in its constructor.
+</ParamField>
+
+## Deploy the Venue
+
+Without `moduleAddress` the response is `SIGN_TRANSACTION` with a contract creation. `transaction` carries only `data`, the venue's bytecode followed by its constructor arguments: this market, its collateral token, its settlement token (stablecoin) and its collateral scale. It has no `to`, and unlike other writes it carries no `value` or `chainId`, so send it with a value of zero on the market's chain.
+
+Any wallet can deploy it, because the venue gains standing only when the market admin binds it. Read the new address from the deployment receipt's contract address. There is no confirm call. The venue is not upgradeable, and a market that already names one is refused with `MODULE_ALREADY_SET`.
+
+## Bind and Authorize It
+
+With `moduleAddress` the response is `SIGN_TRANSACTIONS` with the legs still missing, so a repeated call returns fewer or none. Each step is `{ key, to, data, description, value, chainId }`, not the `{ action, transaction }` shape other endpoints use. Each leg is signed by a different authority:
+
+| `key` | Target | Signer | What it does |
+|---|---|---|---|
+| `setAuctionModule` | Market | Market admin, `DEFAULT_ADMIN_ROLE` | Binds the venue to the market |
+| `authorizeModuleOnRouter` | Liquidation router | Router admin, `DEFAULT_ADMIN_ROLE` on the router | Lets the venue hand expired remainders to the router |
+| `authorizeVenueOnToken` | Collateral token | The token's compliance admin | Allow-lists the venue on a token that gates holders through its own allow-list |
+| `verifyVenueAsHolder` | Identity registry | A wallet allowed to write to that registry | Registers the venue as a verified holder |
+
+At most one of the last two appears, and only when the token refuses the venue today. When no transaction the API can build would admit it, `tokenAdmission.blocked` says why, and the token issuer has to admit the venue on the token directly.
+
+Passing a different `moduleAddress` replaces the market's venue. The market accepts a replacement only while the current venue has no open auction, including an expired one not yet settled. The API does not check this, so `setAuctionModule` reverts on-chain in that case.
+
+<Note>
+  The auction endpoints under `/liquidations` cache each market's venue address for up to five minutes. For that long after a binding confirms, they can still answer with the previous venue, or as if none were wired. [Get Auction Module](/endpoints/lending/get-auction-module) reads the chain directly and shows the new venue at once.
+</Note>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="success" type="boolean">Nested inside `data`, always `true`.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION` for the deployment, `SIGN_TRANSACTIONS` for the wiring legs.</ResponseField>
+    <ResponseField name="transaction" type="object">The contract creation, `{ data }` only. Returned without `moduleAddress`.</ResponseField>
+    <ResponseField name="contractCreation" type="boolean">`true`. Returned without `moduleAddress`.</ResponseField>
+    <ResponseField name="description" type="string">What the deployment does. Returned without `moduleAddress`.</ResponseField>
+    <ResponseField name="next" type="string">The follow-up call. Returned without `moduleAddress`.</ResponseField>
+    <ResponseField name="moduleAddress" type="string">The venue, lowercased. Returned with `moduleAddress`.</ResponseField>
+    <ResponseField name="steps" type="array">The missing legs in the order above, each `{ key, to, data, description, value, chainId }`. Empty when nothing is left to sign. Returned with `moduleAddress`.</ResponseField>
+    <ResponseField name="tokenAdmission" type="object">
+      Whether the collateral token admits the venue. Returned with `moduleAddress`.
+      <Expandable>
+        <ResponseField name="admitted" type="boolean">`true`, `false`, or `null` when it could not be established.</ResponseField>
+        <ResponseField name="requirement" type="string">How the token decides, as on [Get Auction Module](/endpoints/lending/get-auction-module).</ResponseField>
+        <ResponseField name="identityRegistry" type="string">The registry the token checks holders against, or `null`.</ResponseField>
+        <ResponseField name="blocked" type="object">`{ code, message }` when the venue cannot be admitted by a transaction the API can build, otherwise `null`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="reserve" type="object">
+      How the venue relates to the insurance fund. Returned with `moduleAddress`.
+      <Expandable>
+        <ResponseField name="fundAddress" type="string">The market's insurance fund, lowercased. `null` when it could not be read.</ResponseField>
+        <ResponseField name="venueAuthorizedOnFund" type="boolean">Whether the fund lists the venue. It needs no such listing, and no leg asks for one.</ResponseField>
+        <ResponseField name="venueDrawsReserve" type="boolean">Always `false`. The venue forwards every payment to the market and hands expired remainders to the router, and only the market draws the fund.</ResponseField>
+        <ResponseField name="note" type="string">The same explanation in full.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="afterWiring" type="string">What to do once the legs are signed. It differs by whether the token already admits the venue. Returned with `moduleAddress`.</ResponseField>
+    <ResponseField name="functionName" type="string">`deploySecurityAuctionModule` for the deployment, `wireAuctionModule` for the legs. Both are labels; the second names no contract function.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  [Update Market Config](/endpoints/lending/update-config) refuses to enable `useDutchAuction` with `AUCTION_VENUE_NOT_ADMITTED` while the token refuses the venue, and with `AUCTION_MODULE_NOT_SET` while no venue is wired. The first is the API's own check, because the contract's configuration check never looks at the token. The contract does refuse the switch without a venue, and on a `MARKET` price source.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/auction-module" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"moduleAddress": "0x5c3e8a91d2f04b7e6a1c9d38f0b2e47a6d15c8e3"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/auction-module`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+
+const deployRes = await fetch(url, { method: 'POST', headers, body: JSON.stringify({}) });
+const { data: deployment } = await deployRes.json();
+
+const wireRes = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ moduleAddress: deployedVenueAddress })
+});
+const { data: wiring } = await wireRes.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Deployment Response
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "data": "0x610100604090808252..."
+    },
+    "functionName": "deploySecurityAuctionModule",
+    "contractCreation": true,
+    "description": "Deploy the per-market Dutch auction venue (non-upgradeable, bound to this market and its collateral scale). Confirm with the mined address, then request the wiring legs with moduleAddress.",
+    "next": "POST the same endpoint again with moduleAddress set to the deployed contract to receive the wiring legs."
+  }
+}
+```
+```json Wiring Response
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "action": "SIGN_TRANSACTIONS",
+    "moduleAddress": "0x5c3e8a91d2f04b7e6a1c9d38f0b2e47a6d15c8e3",
+    "steps": [
+      {
+        "key": "setAuctionModule",
+        "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "data": "0x62a40f690000000000000000000000005c3e8a91d2f04b7e6a1c9d38f0b2e47a6d15c8e3",
+        "description": "Bind the venue on the market (requires market DEFAULT_ADMIN_ROLE)",
+        "chainId": 11155111,
+        "value": "0"
+      },
+      {
+        "key": "authorizeModuleOnRouter",
+        "to": "0x3f9b2d7e41a8c05e6d1b94f7a2c8e03d5b6a9f14",
+        "data": "0x...",
+        "description": "Authorize the venue on the liquidation router so expiry remainders can hand off (requires router DEFAULT_ADMIN_ROLE)",
+        "chainId": 11155111,
+        "value": "0"
+      },
+      {
+        "key": "authorizeVenueOnToken",
+        "to": "0x4a7c2e9d1b5f83a06c4e8d2b7f1a93c5e0d6b842",
+        "data": "0x...",
+        "description": "Allow-list the auction venue 0x5c3e8a...15c8e3 on the collateral token so it can hold collateral (requires the token's compliance admin); without it every realization reverts inside the token when seized collateral is delivered to the venue",
+        "chainId": 11155111,
+        "value": "0"
+      }
+    ],
+    "tokenAdmission": {
+      "admitted": false,
+      "requirement": "adapter_must_be_authorized_contract",
+      "identityRegistry": null,
+      "blocked": null
+    },
+    "reserve": {
+      "fundAddress": "0x8e4d1a6c93b7f02e5a8d4c17b3f9e60a2d5c7b91",
+      "venueAuthorizedOnFund": false,
+      "venueDrawsReserve": false,
+      "note": "The auction venue never draws the insurance reserve itself: it forwards every fill to the market's settlement waterfall and an expiry hands the unsold remainder to the liquidation router. On the current market implementation the market draws the reserve for a closing fill that settles below the debt, as it does on a write-off after the seven-day timeout and for the residual of an instant whole-position realization; an earlier market implementation books such a shortfall on the liquidity pool without a draw."
+    },
+    "afterWiring": "Sign the venue admission leg above (or have the token issuer admit the venue on the token) before enabling useDutchAuction: the market risk config refuses the switch while the venue cannot receive the collateral, because every realization would revert inside the token.",
+    "functionName": "wireAuctionModule"
+  }
+}
+```
+```json Error - Market Price Source
+{
+  "success": false,
+  "error": {
+    "code": "AUCTION_UNSUPPORTED_PRICE_SOURCE",
+    "message": "This market prices its collateral from a market price source, on which Dutch-auction realization is not permitted."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
+| `VALIDATION_ERROR` | `400` | `moduleAddress` is not a valid address |
+| `AUCTION_UNSUPPORTED_PRICE_SOURCE` | `400` | The market prices from a `MARKET` source, or its price source could not be read |
+| `MODULE_MARKET_MISMATCH` | `400` | The contract at `moduleAddress` does not name this market, or could not be read as a venue |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody could sign the binding |
+| `MODULE_ALREADY_SET` | `409` | `moduleAddress` was omitted but the market already names a venue. Pass it to re-run the authorization legs |
+| `ROUTER_UNRESOLVED` | `503` | The market's liquidation router could not be resolved. Retry shortly |

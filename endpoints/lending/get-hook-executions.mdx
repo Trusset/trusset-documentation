@@ -1,10 +1,12 @@
 ---
 title: 'Get Hook Executions'
-api: 'GET /lending-external-securities/api/hooks/{marketId}/{hookId}/executions'
-description: 'Retrieve the execution history for a hook'
+api: 'GET /lending-external-securities-v2/api/hooks/{marketId}/{hookId}/executions'
+description: 'Retrieve the execution log of a hook'
 ---
 
-Returns past runs of a hook, newest first, with pagination counters. Both scheduled runs and manual runs from [Execute Hook](/endpoints/lending/execute-hook) appear here.
+Returns the hook's execution log, newest first, with pagination counters. Scheduled runs, chained runs and calls to [Execute Hook](/endpoints/lending/execute-hook) all write to it.
+
+The log is not the same count as the hook's `executionCount`. An unmet trigger, a skipped bid and a short wallet balance add a log entry without counting as a run, and a refusal before anything is evaluated adds neither.
 
 ## Path Parameters
 
@@ -14,11 +16,11 @@ Returns past runs of a hook, newest first, with pagination counters. Both schedu
 ## Query Parameters
 
 <ParamField query="limit" type="integer" default="50">
-  Records to return. Minimum 1, maximum 200.
+  Records to return, 1 to 200. Out-of-range values are clamped rather than refused: above 200 returns 200, a negative value returns 1, and `0` or a non-number falls back to 50.
 </ParamField>
 
 <ParamField query="offset" type="integer" default="0">
-  Records to skip. Minimum 0.
+  Records to skip. A negative value or a non-number counts as 0.
 </ParamField>
 
 ## Response Fields
@@ -26,17 +28,49 @@ Returns past runs of a hook, newest first, with pagination counters. Both schedu
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="executions" type="array">
-      Execution records. Each contains `id`, `hookId`, `marketId`, `loanId`, `executionType`, `result`, `data`, `error`, and `executedAt`.
+      Log entries ordered by `executedAt`, newest first.
+      <Expandable>
+        <ResponseField name="id" type="string">Entry ID.</ResponseField>
+        <ResponseField name="hookId" type="string">Hook that ran.</ResponseField>
+        <ResponseField name="marketId" type="string">Market the hook belongs to.</ResponseField>
+        <ResponseField name="loanId" type="string | null">Loan ID from the data the run was given, or `null`.</ResponseField>
+        <ResponseField name="executionType" type="string">The hook type: `monitorRisk`, `beforeLiquidation` or `afterLiquidation`.</ResponseField>
+        <ResponseField name="result" type="boolean">Outcome. A `buy` run that returned steps is logged as `false`, because nothing was bought.</ResponseField>
+        <ResponseField name="data" type="object | null">What the run saw or did. Shapes are listed below.</ResponseField>
+        <ResponseField name="error" type="string | null">Error message when the run failed.</ResponseField>
+        <ResponseField name="executedAt" type="string">Time of the run.</ResponseField>
+      </Expandable>
     </ResponseField>
-    <ResponseField name="total" type="integer">Total executions recorded for this hook.</ResponseField>
-    <ResponseField name="hasMore" type="boolean">Whether more records exist beyond this page.</ResponseField>
+    <ResponseField name="total" type="integer">Total log entries for this hook.</ResponseField>
+    <ResponseField name="hasMore" type="boolean">Whether more entries exist beyond this page.</ResponseField>
   </Expandable>
 </ResponseField>
 
+## What `data` holds
+
+A `monitorRisk` entry holds `{ fields }`, one `{ path, operator, threshold, value, pass }` per field evaluated. It is `null` when the fetch failed, and `error` says why.
+
+A `beforeLiquidation` entry holds `{ loanData, results }`: the data sent and one `{ parameter, value, pass }` per check.
+
+An `afterLiquidation` entry holds one of these, or `null` when the run raised an error:
+
+- `{ action: "inform", status }` after a webhook answered.
+- `{ action: "buy", reason: "requires_wallet_signature", auctionId, currentPrice }` after bid steps were returned.
+- `{ reason: "Price exceeds max", currentPrice }` when the price was above `maxBuyPrice`.
+- `{ reason: "Insufficient USDC" }` when the registered wallet held too little of the borrow asset, named by its symbol.
+- `{ reason: "Trigger condition not met" }`, with `triggerId` when a listed hook's last result was not `false`.
+
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/hooks/{marketId}/{hookId}/executions?limit=10" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/hooks/{marketId}/{hookId}/executions?limit=10" \
   -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/hooks/${marketId}/${hookId}/executions?limit=10&offset=0`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
 ```
 </RequestExample>
 
@@ -47,31 +81,50 @@ curl "https://api.trusset.org/lending-external-securities/api/hooks/{marketId}/{
   "data": {
     "executions": [
       {
-        "id": "exec_001",
-        "hookId": "hook_003",
-        "marketId": "clx_secmarket_001",
-        "loanId": null,
-        "executionType": "monitorRisk",
-        "result": true,
-        "data": { "ageHours": 12 },
-        "error": null,
-        "executedAt": "2025-06-15T06:00:00.000Z"
-      },
-      {
         "id": "exec_002",
         "hookId": "hook_003",
         "marketId": "clx_secmarket_001",
         "loanId": null,
         "executionType": "monitorRisk",
         "result": false,
-        "data": { "ageHours": 51 },
+        "data": {
+          "fields": [
+            { "path": "ageHours", "operator": "<", "threshold": 36, "value": 51, "pass": false }
+          ]
+        },
         "error": null,
-        "executedAt": "2025-06-15T00:00:00.000Z"
+        "executedAt": "2026-09-25T06:00:00.000Z"
+      },
+      {
+        "id": "exec_001",
+        "hookId": "hook_003",
+        "marketId": "clx_secmarket_001",
+        "loanId": null,
+        "executionType": "monitorRisk",
+        "result": false,
+        "data": null,
+        "error": "Status 503",
+        "executedAt": "2026-09-25T00:00:00.000Z"
       }
     ],
     "total": 142,
     "hasMore": true
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-09-25T12:00:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MISSING_HOOK_ID` | `400` | `hookId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID belongs to your instance |
+| `HOOK_NOT_FOUND` | `404` | No hook with this ID exists on this market |

@@ -1,10 +1,14 @@
 ---
 title: 'Settle Liquidation'
-api: 'POST /lending-external-securities/api/liquidations/settle/{liquidationId}'
+api: 'POST /lending-external-securities-v2/api/liquidations/settle/{liquidationId}'
 description: 'Route sale proceeds back to the market and close the liquidation'
 ---
 
-Closes a liquidation by forwarding the cumulative proceeds from the router to the lending market. This repays the pool, pays any surplus to the borrower, and marks the record `SETTLED`.
+Closes a liquidation by forwarding the router's cumulative proceeds to the market, which runs its capped settlement waterfall over them. The waterfall repays the pool, draws on the insurance fund for a shortfall, pays any surplus to the borrower, and the record moves to `SETTLED`. It is signed by a holder of the router's `OPERATOR_ROLE`.
+
+<Warning>
+  A settlement closes the router's record for good. Collateral still on the router afterwards can no longer be withdrawn. Only the router administrator's [Reopen Liquidation](/endpoints/lending/reopen-liquidation) brings it back, and only while the record collected nothing. This endpoint therefore refuses to settle while any collateral is on the router, with `COLLATERAL_UNSOLD`.
+</Warning>
 
 This is the final step of the manual settlement workflow. Until it is called, the liquidated debt remains outstanding on the market and counts against `pendingLiquidationDebt`.
 
@@ -21,18 +25,26 @@ This is the final step of the manual settlement workflow. Until it is called, th
 </ParamField>
 
 <ParamField body="usdcProceeds" type="string" required>
-  Final proceeds to deposit before settling, in the market's borrow asset. Must be zero or greater.
+  Final proceeds to deposit before settling, in the market's borrow asset, at most as many decimals as that asset has. Must be zero or greater. The confirm call must carry it too, though its value is not used there.
 
   Send the full sale proceeds when settling in one step. Send `"0"` when the proceeds were already deposited through [Report Partial Sale](/endpoints/lending/report-partial-sale), and the router forwards what it already holds.
 </ParamField>
 
 <ParamField body="txHash" type="string">
-  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+  Hash of the `settleLiquidation` transaction you broadcast, not of the approval. Send it to confirm the transaction and record the result. Omit it to receive the calldata. A value that is not a `0x`-prefixed 64-character hex string is ignored.
 </ParamField>
 
 <Note>
-  The signing wallet must hold `OPERATOR_ROLE` on the router. If it does not, the calldata is not returned: the response carries `ROUTER_OPERATOR_ROLE_MISSING` along with the `calldata` that grants the role. When `usdcProceeds` is greater than zero that wallet must also hold the proceeds, since settlement pulls them from it.
+  The wallet that signs must hold `OPERATOR_ROLE` on the router. This endpoint checks the role against your instance's primary verified wallet, since it takes no signer address. If that wallet lacks the role, the calldata is not returned: the response carries `ROUTER_OPERATOR_ROLE_MISSING` along with the `calldata` that grants it. When `usdcProceeds` is greater than zero the signing wallet must also hold the proceeds, since settlement pulls them from it.
 </Note>
+
+## Settle at Zero
+
+A zero final payment is accepted in two cases. The router already holds proceeds from reported partial sales, or the market holds cash the auction venue forwarded for this record before its auction expired. Every other zero is refused before anything is built:
+
+- All collateral left the router and no sale was reported: `SALE_NOT_REPORTED`. The router itself refuses a zero settlement in this state. Report the sale first, or let the record reach the write-off.
+- Nothing was collected and the market holds no auction cash for the record: `NO_PROCEEDS_COLLECTED`.
+- The market holds auction cash, but the router runs an implementation that would close its record without releasing that cash: `ROUTER_UPGRADE_REQUIRED`.
 
 ## Response Fields
 
@@ -42,43 +54,67 @@ This is the final step of the manual settlement workflow. Until it is called, th
     <ResponseField name="success" type="boolean">Nested inside `data` on the calldata response.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="steps" type="array">Ordered `approve` on the borrow asset, then `settleLiquidation`. Returned when `txHash` is omitted. The approve step is omitted when `usdcProceeds` is zero, leaving `settleLiquidation` as the only step.</ResponseField>
-    <ResponseField name="usdcProceeds" type="string">Proceeds the router actually forwarded to the market, read from the settlement event rather than from the request. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="usdcProceeds" type="string">What the market's record settled over in this transaction, read from the market's own event: the router's cash plus any auction cash the market held. Falls back to the router's figure when the market emitted none. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="finalLegProceeds" type="string">What this transaction itself deposited, which is the `usdcProceeds` you sent. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="settlement" type="object">
+      How the market applied the cash. Returned when confirming with `txHash`.
+      <Expandable>
+        <ResponseField name="marketLiquidationId" type="string">The market's own record ID.</ResponseField>
+        <ResponseField name="proceedsReceived" type="string">Cash the market's record settled over. `null` when the market had already settled or written off its record, in which case the cash counted as late proceeds.</ResponseField>
+        <ResponseField name="routerProceeds" type="string">The router's cumulative proceeds for the record.</ResponseField>
+        <ResponseField name="shortfall" type="string">Principal that neither the sale nor the insurance fund covered, which the pool bears as a loss. `null` when there is none.</ResponseField>
+        <ResponseField name="debtApplied" type="string">Recovery above the seized slice's own cap, applied to debt the loan still carries. `null` when none.</ResponseField>
+        <ResponseField name="writeOffRecovered" type="string">Recovery beyond everything the loan still owed, credited to the pool as income. `null` when none.</ResponseField>
+        <ResponseField name="reserve" type="object">What the market asked the insurance fund for in this settlement: `requested`, `covered` and `uncovered`. `null` when the fund was not asked.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="surplus" type="array">Present only when the settlement produced a surplus. Each entry carries `kind` (`SURPLUS_RETURNED` when paid to the borrower, `SURPLUS_ESCROWED` when held for them), `loanId`, `borrower` and `amount`.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 ## Proceeds Distribution
 
-The market keeps at most the liquidated debt plus the market's `liquidationPenalty`. Anything above that is surplus and belongs to the borrower.
+The market keeps at most what the position owed when it was seized, plus a penalty. The penalty is `liquidationPenalty` on a health liquidation and the loan's term penalty on a term realization. Within that cap, cash first makes the pool whole on the record's claim. It then repays anything the insurance fund advanced for this record. What remains of the seized slice's penalty is pool income, and cash above the slice's own cap pays down debt the loan still carries.
 
-Surplus is pushed directly to the borrower's wallet. If the settlement token (stablecoin) rejects that transfer on compliance grounds, the amount is escrowed on the market contract against the borrower's address instead of reverting the settlement, and the borrower claims it later. Settlement therefore always completes, whether or not the borrower can currently receive funds.
+Anything above the cap is surplus and belongs to the borrower. Surplus is pushed directly to the borrower's wallet. If the settlement token (stablecoin) refuses that transfer, for example on compliance grounds, the market escrows the amount against the borrower's address. The settlement does not revert. The borrower claims it later with [Claim Surplus](/endpoints/lending/claim-surplus). Settlement therefore always completes, whether or not the borrower can currently receive funds.
 
-When proceeds fall short of the debt, the shortfall is recorded as slippage on the settlement event. The pool absorbs the loss. It is not automatically covered by the insurance fund, which only steps in on a timeout write-off.
+When the proceeds fall short of the record's claim, the shortfall is recorded as slippage on the router's settlement event. The market then asks its insurance fund for the gap in the same transaction and books what the fund pays against the record. A fund that is empty or refuses the market covers nothing, and the settlement still completes. Only principal that neither the sale nor the fund covers is the pool's loss, reported as `settlement.shortfall`. A record that is never settled draws on the fund the same way when [Handle Liquidation Timeout](/endpoints/lending/handle-timeout) writes it off after 7 days.
 
-<Warning>
-  Settling with zero proceeds is rejected with `NO_PROCEEDS_COLLECTED` unless the router already holds proceeds from a reported partial sale. This prevents accidentally closing a liquidation that recovered nothing, which would silently write off the debt against the pool.
-</Warning>
+Cash that reaches a record the market already settled or wrote off, for example after a reopen, counts as late proceeds. It makes the pool whole on the claim first and then repays what the insurance fund advanced.
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidations/settle/14" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidations/settle/14" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"usdcProceeds": "21400.00"}'
+  -d '{"usdcProceeds": "11600.00", "marketId": "clx_secmarket_001"}'
 ```
 ```typescript TypeScript
-const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/liquidations/settle/${liquidationId}`,
-  {
-    method: 'POST',
-    headers: {
-      'X-API-Key': 'trusset_your_key_here',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ usdcProceeds: '21400.00' })
-  }
-);
-const { success, data, error } = await res.json();
+const url = `https://api.trusset.org/lending-external-securities-v2/api/liquidations/settle/${liquidationId}`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+const body = { usdcProceeds: '11600.00', marketId };
+
+const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+const { data, error } = await res.json();
+if (error) throw new Error(`${error.code}: ${error.message}`);
+
+let settleHash = '';
+for (const step of data.steps) {
+  const tx = await wallet.sendTransaction(step.transaction);
+  await tx.wait();
+  settleHash = tx.hash;
+}
+
+const confirmed = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ ...body, txHash: settleHash })
+});
+const { data: settled } = await confirmed.json();
 ```
 </RequestExample>
 
@@ -88,8 +124,53 @@ const { success, data, error } = await res.json();
   "success": true,
   "data": {
     "liquidationId": "14",
-    "usdcProceeds": "21400.000000",
-    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b"
+    "usdcProceeds": "21400.0",
+    "finalLegProceeds": "11600.0",
+    "settlement": {
+      "marketLiquidationId": "14",
+      "proceedsReceived": "21400.0",
+      "routerProceeds": "21400.0",
+      "shortfall": null,
+      "debtApplied": null,
+      "writeOffRecovered": null,
+      "reserve": null
+    },
+    "txHash": "0x2d7c90e14b3a65f8d1e02c7b49f3a86e5d1c04b7f29e38a6c50d1f47b8e92a3c"
+  }
+}
+```
+```json Response - Short Sale
+{
+  "success": true,
+  "data": {
+    "liquidationId": "15",
+    "usdcProceeds": "15000.0",
+    "finalLegProceeds": "15000.0",
+    "settlement": {
+      "marketLiquidationId": "15",
+      "proceedsReceived": "15000.0",
+      "routerProceeds": "15000.0",
+      "shortfall": "1840.8",
+      "debtApplied": null,
+      "writeOffRecovered": null,
+      "reserve": {
+        "requested": "6159.2",
+        "covered": "4000.0",
+        "uncovered": "2159.2"
+      }
+    },
+    "txHash": "0x71e5c2a9d3b804f6e19a7c53b2d80e4f6a1c97b35d2e08f4c6a91b3e57d20c8a"
+  }
+}
+```
+```json Error - Collateral Unsold
+{
+  "success": false,
+  "error": {
+    "code": "COLLATERAL_UNSOLD",
+    "message": "120.0 units of liquidation 14 still sit on the liquidation router. A settlement closes the router record and leaves that collateral locked there, unreachable through the sale desk. Withdraw it for sale or return it to the borrower first, then settle.",
+    "txHash": null,
+    "collateralRemaining": "120.0"
   }
 }
 ```
@@ -104,13 +185,13 @@ const { success, data, error } = await res.json();
         "marketId": "clx_secmarket_001",
         "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
         "status": "PENDING",
-        "collateralAmount": "220.000000000000000000"
+        "collateralAmount": "220.0"
       },
       {
         "marketId": "clx_secmarket_004",
         "marketAddress": "0x1c74f9a2b0e63d581a47c02f9b8de3517a604c2b",
-        "status": "WITHDRAWN_TO_CUSTODY",
-        "collateralAmount": "85.000000000000000000"
+        "status": "SETTLED",
+        "collateralAmount": "85.0"
       }
     ]
   }
@@ -121,7 +202,8 @@ const { success, data, error } = await res.json();
   "success": false,
   "error": {
     "code": "NO_PROCEEDS_COLLECTED",
-    "message": "No proceeds have been collected for this liquidation"
+    "message": "Cannot settle with zero proceeds unless partial-sale proceeds were already collected or the market holds cash the auction venue forwarded for this record",
+    "txHash": null
   }
 }
 ```
@@ -140,15 +222,21 @@ const { success, data, error } = await res.json();
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `MISSING_ID` | `400` | No liquidation ID in the path |
-| `INVALID_AMOUNT` | `400` | `usdcProceeds` is absent, non-numeric, or negative |
+| `INVALID_AMOUNT` | `400` | `usdcProceeds` is absent, non-numeric, or negative. Checked on the confirm call too |
 | `AMBIGUOUS_LIQUIDATION_ID` | `400` | This ID exists on more than one market in your instance. The error carries `candidates`; resend with `marketId` |
 | `ALREADY_SETTLED` | `400` | The liquidation is already settled or written off |
-| `NO_PROCEEDS_COLLECTED` | `400` | Zero was submitted and the router holds no proceeds |
+| `NO_PROCEEDS_COLLECTED` | `400` | Zero was submitted, the router holds no proceeds and the market holds no auction cash for the record |
 | `WALLET_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance to resolve the signer against |
-| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | The resolved wallet lacks `OPERATOR_ROLE`. The error carries grant `calldata` |
-| `ROUTER_NOT_CONFIGURED` | `400` | No liquidation router resolved for this market |
+| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | Your instance's primary verified wallet lacks `OPERATOR_ROLE`. The error carries grant `calldata` |
 | `TX_NOT_VERIFIED` | `400` | The confirmed transaction settles a different liquidation |
-| `SETTLE_TX_REVERTED` | `400` | The settlement reverted. `error.txHash` carries the hash when one exists |
+| `SETTLE_TX_REVERTED` | `400` | The settlement could not be prepared or recorded, for example because `usdcProceeds` has more decimals than the borrow asset or a chain read failed. `error.txHash` carries the hash when one exists |
 | `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
 | `MARKET_NOT_FOUND` | `404` | `marketId` was supplied but names no market on your instance |
+| `COLLATERAL_UNSOLD` | `409` | Collateral is still on the router. The error carries `collateralRemaining` |
+| `SALE_NOT_REPORTED` | `409` | All collateral left the router and no proceeds were reported, so a zero settlement is refused |
+| `ROUTER_UPGRADE_REQUIRED` | `409` | The market holds auction cash for the record, but the router would close its record without releasing it. The error carries `proceedsHeld` |
+| `LIQUIDATION_ON_VENUE` | `409` | The record's Dutch auction is still open, so the router holds none of its collateral |
+| `ROUTER_UNRESOLVED` | `503` | The market's liquidation router could not be read. Retry shortly |
+| `ROLE_UNVERIFIABLE` | `503` | The role check could not read the router. Nothing was built. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction). A settlement that reverted on-chain is refused there with `TX_REVERTED`.

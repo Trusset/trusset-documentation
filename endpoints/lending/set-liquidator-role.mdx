@@ -1,15 +1,21 @@
 ---
 title: 'Set Liquidator Role'
-api: 'POST /lending-external-securities/api/markets/{marketId}/liquidator-role'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/liquidator-role'
 description: 'Grant or revoke LIQUIDATOR_ROLE on a market'
 ---
 
-Grants or revokes `LIQUIDATOR_ROLE` for any address on the market contract. Holding this role is a prerequisite for [Liquidate Loan](/endpoints/lending/liquidate) and [Settle Expired Auction](/endpoints/lending/settle-expired-auction).
+Grants or revokes `LIQUIDATOR_ROLE` for an address on the market contract. The contract refuses [Liquidate Loan](/endpoints/lending/liquidate) from any caller without the role. [Settle Expired Auction](/endpoints/lending/settle-expired-auction) is open to any caller once the auction has expired, and needs the role only while the market is paused.
 
-The role change has to be executed from the wallet holding `DEFAULT_ADMIN_ROLE` on the market. The endpoint returns `requiresUserAction` with the calldata for that wallet to sign.
+<Warning>
+  Revoking the role from every holder leaves the market with no liquidator. Loans still become liquidatable, but no liquidation can start until an address holds the role again.
+</Warning>
+
+The wallet holding `DEFAULT_ADMIN_ROLE` on the market signs the change. The endpoint returns the unsigned `grantRole` or `revokeRole` call for that wallet, and the same POST with `txHash` verifies the mined transaction against the change you asked for. The confirm call records nothing; it checks the receipt and echoes the hash.
+
+A lender of record can also name a `liquidator` in its adoption terms on [Accept Lender Role](/endpoints/lending/accept-lender-role), and that address receives the role in the adoption transaction. The same change is available as `MARKET_LIQUIDATOR` on [Set Access Role](/endpoints/lending/set-access-role).
 
 <Note>
-  When the address already holds the role you asked for, the response returns `unchanged: true` and no calldata. Nothing needs to be signed.
+  When the address is already in the requested state, the response returns `unchanged: true` and no calldata. Nothing needs to be signed. A role the chain read cannot answer counts as a change, so the calldata comes back.
 </Note>
 
 ## Path Parameters
@@ -19,7 +25,7 @@ The role change has to be executed from the wallet holding `DEFAULT_ADMIN_ROLE` 
 ## Body Parameters
 
 <ParamField body="address" type="string" required>
-  Address to grant or revoke. Must be a 0x-prefixed 40-character hex address.
+  Address to grant or revoke. Must be a 0x-prefixed 40-character hex address other than the zero address.
 </ParamField>
 
 <ParamField body="action" type="string" required>
@@ -27,57 +33,78 @@ The role change has to be executed from the wallet holding `DEFAULT_ADMIN_ROLE` 
 </ParamField>
 
 <ParamField body="txHash" type="string">
-  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+  Hash of the mined transaction, as a 0x-prefixed 64-character hex string. Send it with the same `address` and `action` to verify the change. Omit it to receive the calldata.
 </ParamField>
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="action" type="string">The action performed, echoed back.</ResponseField>
+    <ResponseField name="requiresUserAction" type="boolean">`true` when the role needs changing and the market admin has to sign. Absent otherwise.</ResponseField>
+    <ResponseField name="action" type="string">The action requested, echoed back.</ResponseField>
     <ResponseField name="address" type="string">The address affected, echoed back.</ResponseField>
-    <ResponseField name="txHash" type="string">Transaction hash. `null` when the address was already in the requested state.</ResponseField>
-    <ResponseField name="unchanged" type="boolean">`true` when no transaction was needed because the role already matched the requested state.</ResponseField>
-    <ResponseField name="requiresUserAction" type="boolean">Present and `true` whenever the role actually needs changing. Pair with `configurationCalldata`.</ResponseField>
-    <ResponseField name="configurationCalldata" type="object">Present only alongside `requiresUserAction`. Contains `liquidatorRole` as `{ to, data, description }` for the market admin to sign.</ResponseField>
+    <ResponseField name="configurationCalldata" type="object">Present only alongside `requiresUserAction`. Carries `liquidatorRole`, the unsigned transaction `{ to, data, description, chainId, value }` targeting the market.</ResponseField>
+    <ResponseField name="txHash" type="string">The verified transaction hash when confirming, or `null` when the address was already in the requested state. Absent on the calldata response.</ResponseField>
+    <ResponseField name="unchanged" type="boolean">`true` when no transaction was needed, `false` on a confirmed change. Absent on the calldata response.</ResponseField>
   </Expandable>
 </ResponseField>
 
-<Warning>
-  Revoking the role from every address you control leaves the market with no liquidator. Loans will still become liquidatable, but nothing will act on them until the role is restored or another liquidator is authorized.
-</Warning>
-
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/liquidator-role" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/liquidator-role" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"address": "0x123...456", "action": "grant"}'
+  -d '{"address": "0x5b7e2d91c04a38f6e1d9a72b3c8f40e6d15a9c27", "action": "grant"}'
 ```
 ```typescript TypeScript
-const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/liquidator-role`,
-  {
-    method: 'POST',
-    headers: {
-      'X-API-Key': 'trusset_your_key_here',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ address: issuerWalletAddress, action: 'grant' })
-  }
-);
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/liquidator-role`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+const body = { address: botAddress, action: 'grant' };
+const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
 const { data } = await res.json();
+if (data.requiresUserAction) {
+  const { to, data: calldata, value, chainId } = data.configurationCalldata.liquidatorRole;
+  const tx = await adminWallet.sendTransaction({ to, data: calldata, value, chainId });
+  await tx.wait();
+  await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...body, txHash: tx.hash })
+  });
+}
 ```
 </RequestExample>
 
 <ResponseExample>
-```json Response - Granted
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "requiresUserAction": true,
+    "action": "grant",
+    "address": "0x5b7e2d91c04a38f6e1d9a72b3c8f40e6d15a9c27",
+    "configurationCalldata": {
+      "liquidatorRole": {
+        "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "data": "0x...",
+        "description": "Grant LIQUIDATOR_ROLE to 0x5b7e2d...5a9c27 (requires market DEFAULT_ADMIN_ROLE)",
+        "chainId": 11155111,
+        "value": "0"
+      }
+    }
+  }
+}
+```
+```json Confirmed Response
 {
   "success": true,
   "data": {
     "action": "grant",
-    "address": "0x123...456",
-    "txHash": "0xabc...def",
+    "address": "0x5b7e2d91c04a38f6e1d9a72b3c8f40e6d15a9c27",
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
     "unchanged": false
   }
 }
@@ -87,26 +114,9 @@ const { data } = await res.json();
   "success": true,
   "data": {
     "action": "grant",
-    "address": "0x123...456",
+    "address": "0x5b7e2d91c04a38f6e1d9a72b3c8f40e6d15a9c27",
     "txHash": null,
     "unchanged": true
-  }
-}
-```
-```json Response - Admin Signature Needed
-{
-  "success": true,
-  "data": {
-    "requiresUserAction": true,
-    "action": "grant",
-    "address": "0x123...456",
-    "configurationCalldata": {
-      "liquidatorRole": {
-        "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
-        "data": "0x...",
-        "description": "Grant LIQUIDATOR_ROLE to 0x123...456 (requires market DEFAULT_ADMIN_ROLE)"
-      }
-    }
   }
 }
 ```
@@ -137,8 +147,13 @@ const { data } = await res.json();
 
 | Code | HTTP | Cause |
 |---|---|---|
+| `VALIDATION_ERROR` | `400` | `address` is not a 0x-prefixed 40-character hex address, `action` is not `grant` or `revoke`, or `txHash` is malformed |
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
-| `VALIDATION_ERROR` | `400` | `address` is not a valid address, or `action` is not `grant` or `revoke` |
-| `LIQUIDATOR_ROLE_UPDATE_FAILED` | `400` | The role change could not be prepared and no more specific code applied |
+| `INVALID_ADDRESS` | `400` | `address` is the zero address |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction changes a different role or names a different address |
+| `LIQUIDATOR_ROLE_UPDATE_FAILED` | `400` | The role change could not be prepared or confirmed and no more specific code applied |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds the admin role this change requires. Skipped when confirming with `txHash` |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction). On this endpoint every one of them answers `400`, including `TX_NOT_FOUND`.

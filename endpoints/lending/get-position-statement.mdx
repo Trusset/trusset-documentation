@@ -1,0 +1,91 @@
+---
+title: 'Get Position Statement'
+api: 'GET /lending-external-securities-v2/api/positions/{marketId}/positions/{positionId}/statement'
+description: 'Download a PDF statement of one loan with its verified transaction trail'
+---
+
+Returns a PDF statement of a single loan, assembled at request time for the issuer, the lender of record and a supervisory authority. It carries the loan's figures and terms, every recorded movement, and each realization of its collateral. Its audit trail checks every transaction against the chain.
+
+<Warning>
+  This endpoint does not return the JSON envelope on success. It responds with `Content-Type: application/pdf`, a `Content-Disposition: attachment` header carrying the file name, and `Content-Length`. Errors come back as the usual JSON envelope, so branch on the response content type rather than parsing unconditionally.
+</Warning>
+
+The file name is `Loan-Statement_<collateral symbol>_<loan reference>_<date>.pdf`. The loan reference is the on-chain loan ID, or the position ID when the position has no linked chain loan. The date is the generation date in UTC.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="positionId" type="string" required>Position ID, from [List Positions](/endpoints/lending/list-positions). A position of another market returns `POSITION_NOT_FOUND`.</ParamField>
+
+## What the statement contains
+
+- **Statement.** A document reference, the generation time, the instance name, the network with its chain ID, and whether it is a production or a development environment.
+- **Market.** The collateral token's name, symbol, ISIN and address, the lending module's address, and the settlement token (stablecoin).
+- **Loan.** The on-chain loan ID, the position ID, the borrower, the status, and the dates the loan opened, closed and was realized. Where the loan has a term, it adds the maturity, any extension, the grace period and the term penalty. It also says whether those were stamped at signing or read from the market's configuration. Then outstanding principal, accrued interest, total debt, collateral held, the attested price at drawdown, and the health factor while the loan is open.
+- **Terms recorded on the market.** Collateral factor, liquidation threshold, liquidation bonus and borrow rate as the instance records them, plus the collateral agent and the liquidation operator.
+- **Movements.** Totals drawn, repaid, pledged, released and escrowed. After a liquidation it adds the debt the seizure discharged, the proceeds received and what was retained. It also shows any draw on the insurance reserve, any shortfall the liquidity pool bore, and any surplus returned or escrowed for the borrower.
+- **Realizations of the collateral.** One entry per liquidation record, read from the market contract where it answers, with its seizure and settlement transactions.
+- **Transaction audit trail and verification statement.** Every recorded transaction in execution order, with block, time, gas, sender and recipient, plus an explorer link where the network has one.
+
+When the loan is attributed to a [customer](/endpoints/customers/get), the statement also prints the client reference: the customer's external ID, reference key or customer ID. It is labelled as a platform record the operator asserted, because the chain names only the borrower address.
+
+## How the figures are verified
+
+Each recorded transaction is read back from the chain before it enters the audit trail. It must be mined and must have succeeded. It must also have been sent to one of the market's own contracts: the market, its oracle, insurance fund, collateral adapter, liquidation router or auction module. A transaction that fails any check is excluded and listed separately with the reason. A transaction sent through a smart account therefore appears as excluded, because its recipient is the account rather than a market contract.
+
+The statement still renders when the chain does not answer, and says so rather than failing. Loan figures then come from the instance's records, and the document names that source. Transactions it could not check are listed as excluded instead of confirmed.
+
+The document reference is derived from the market address, the loan reference and the sorted transaction hashes. Two statements of the same loan with the same transactions carry the same reference, and any new transaction changes it.
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/positions/{positionId}/statement" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -o loan-statement.pdf
+```
+```typescript TypeScript
+import { writeFile } from 'node:fs/promises';
+
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/positions/${positionId}/statement`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+
+if (!res.headers.get('content-type')?.includes('application/pdf')) {
+  const { error } = await res.json();
+  throw new Error(`${error.code}: ${error.message}`);
+}
+const disposition = res.headers.get('content-disposition') ?? '';
+const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? 'loan-statement.pdf';
+await writeFile(filename, Buffer.from(await res.arrayBuffer()));
+```
+</RequestExample>
+
+<ResponseExample>
+```json Error - Position Not Found
+{
+  "success": false,
+  "error": {
+    "code": "POSITION_NOT_FOUND",
+    "message": "Position not found"
+  }
+}
+```
+```json Error - Market Not Found
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_NOT_FOUND",
+    "message": "Market not found"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `POSITION_NOT_FOUND` | `404` | No position with this ID in this market |

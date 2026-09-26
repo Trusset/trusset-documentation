@@ -1,0 +1,208 @@
+---
+title: 'Get Earnings'
+api: 'GET /lending-external-securities-v2/api/vaults/{vaultId}/earnings'
+description: 'What your instance earns as a distributor in one vault, and the operator''s view for its own vault'
+---
+
+Returns what the instance behind the API key earns as a distributor in one vault. That is what it has been paid, what the vault holds for it now, and an estimate of its part still waiting on the markets. Every figure covers your instance's own verified wallets only. The vault's operator also gets an `operator` block with its own share and every other distributor's standing.
+
+Any vault visible to your instance can be read, including an unpublished one in which your instance is a distributor of record.
+
+## How a distributor earns
+
+The instance whose API key builds a depositor's first attributed deposit becomes that depositor's distributor. That holds for [Deposit](/endpoints/vaults/deposit) and for a market's [Deposit to Vault](/endpoints/lending/deposit-to-vault) route alike. The vault binds the holder to that instance's distributor wallet once and attributes every share the holder has or later receives to it.
+
+As borrowers repay, each market the vault funds sets aside a distributor share for its liquidity providers. That share is 5 percent of the interest left after Trusset's 15 percent infrastructure fee, plus 5 percent of each fixed transaction fee. The vault's part is its slice, and it waits on the market until someone collects it.
+
+1. [Collect Distributor Fees](/endpoints/vaults/collect-distributor-fees) pulls one market's slice into the vault. The vault credits the part earned by attributed shares to their distributors and the rest, earned by shares no distributor brought, to the vault operator.
+2. [Pay Distributor](/endpoints/vaults/pay-distributor) sends a distributor's credit to its payout wallet. [Pay Operator Fees](/endpoints/vaults/pay-operator-fees) sends the operator's credit to the vault owner.
+
+All three are open to any signer on-chain and pay only fixed recipients, so a keeper can run them. The API builds Pay Operator Fees for the operating instance only. Trusset holds none of these funds.
+
+## When the figures are read
+
+The payout history comes from the vault's events, recorded up to the last settled block. That is the finalized block, or five blocks behind the head on a chain that reports no finality. When `history.complete` is `true`, the balances, claims and payout history are all read at `history.asOfBlock`. The page then trails the chain head by the finality delay, and a payout you just confirmed appears once its block is final.
+
+When `history.complete` is `false`, the vault and market figures are read live and `paid` and `earned` cover only the blocks read so far. A vault created in a block that is not final yet carries `history.pendingFinality: true` until it is.
+
+## Path Parameters
+
+<ParamField path="vaultId" type="string" required>Vault ID.</ParamField>
+
+## Response Fields
+
+Every amount is an object `{ raw, value }`: `raw` in base units of the vault's asset, `value` formatted at its decimals.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="vaultId" type="string">The vault read.</ResponseField>
+    <ResponseField name="vaultAddress" type="string">The vault contract.</ResponseField>
+    <ResponseField name="asset" type="object">`address`, `symbol` and `decimals` of the vault's asset.</ResponseField>
+    <ResponseField name="distributor" type="string">Your instance's distributor wallet, the one a deposit through your API key names. `null` when your instance has no verified wallet.</ResponseField>
+    <ResponseField name="distributors" type="array">Every verified wallet of your instance. The totals below sum over all of them, so a holder bound to an earlier primary wallet that is still verified counts.</ResponseField>
+    <ResponseField name="supported" type="boolean">`false` when the vault runs an implementation from before distributor attribution. The response then carries only the fields above and a `reason`: no deposit is attributed and nothing is earned until its operator upgrades it.</ResponseField>
+    <ResponseField name="earned" type="object">`paid` plus `claimable`: everything your instance has earned in this vault that has reached the vault.</ResponseField>
+    <ResponseField name="paid" type="object">Distributor fees the vault has paid to your instance's payout wallets.</ResponseField>
+    <ResponseField name="claimable" type="object">Distributor fees the vault holds for your instance now, payable at once through [Pay Distributor](/endpoints/vaults/pay-distributor).</ResponseField>
+    <ResponseField name="uncollectedEstimate" type="object">An estimate of your part of the slices still waiting on the markets. It scales each market's claim by your share of the vault's shares today. The vault credits by the attribution in force while the interest accrued, so the amount credited on collection can differ.</ResponseField>
+    <ResponseField name="attributedShares" type="object">Vault shares attributed to your instance.</ResponseField>
+    <ResponseField name="shareOfVaultBps" type="integer">Those shares as a share of all shares in issue, in basis points. `0` when no shares are in issue.</ResponseField>
+    <ResponseField name="boundHolders" type="integer">Holders bound to your instance's wallets in this vault.</ResponseField>
+    <ResponseField name="wallets" type="array">One entry per wallet in `distributors`, with `distributor`, `payoutWallet`, `claimable`, `attributedShares` and `approved`. `payoutWallet` is where [Pay Distributor](/endpoints/vaults/pay-distributor) sends its fees. `approved` says whether a deposit may bind a new holder to that wallet.</ResponseField>
+    <ResponseField name="approval" type="object">
+      Whether deposits through your API key bind new holders to your instance.
+      <Expandable>
+        <ResponseField name="required" type="boolean">`true` when the vault binds a holder only to its owner or an approved distributor. `false` on an implementation that binds to any distributor a deposit names.</ResponseField>
+        <ResponseField name="owner" type="string">The vault owner, who grants approvals.</ResponseField>
+        <ResponseField name="approved" type="boolean">Whether your instance's distributor wallet is approved, or is the owner.</ResponseField>
+        <ResponseField name="note" type="string">Set when approval is required and missing. Until the operator approves your wallet, deposits your instance brings name no distributor and their share goes to the vault operator.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="markets" type="array">
+      Every market the vault funds or has consented to draw for, plus any market it left that still holds a slice for it.
+      <Expandable>
+        <ResponseField name="marketAddress" type="string">The lending market.</ResponseField>
+        <ResponseField name="marketName" type="string">A label such as `TRST / USDC`, or `null` when the market is not on record.</ResponseField>
+        <ResponseField name="vaultClaim" type="object">The vault's slice waiting on that market. `null` when unreadable.</ResponseField>
+        <ResponseField name="yourShareEstimate" type="object">Your estimated part of it. `null` when the claim is unreadable, `routed` is `false`, or no shares are in issue.</ResponseField>
+        <ResponseField name="routed" type="boolean">`true` when the market holds the slice for the vault to collect itself. `false` when the market would pay it elsewhere, so a collection fails with `DISTRIBUTOR_SLICE_NOT_ROUTED`. `null` when there is no claim or the check was inconclusive.</ResponseField>
+        <ResponseField name="funds" type="boolean">Whether the vault currently funds the market or has consented to draw for it.</ResponseField>
+        <ResponseField name="readFailed" type="boolean">`true` when the claim could not be read.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="payouts" type="array">Your instance's last 50 payouts, newest first: `distributor`, `wallet`, `amount`, `txHash` and `at`.</ResponseField>
+    <ResponseField name="vault" type="object">Vault-wide totals. `totalShares` and `attributedShares` count shares in issue and shares attributed to any distributor. `feeCashHeld` is collected distributor fees the vault still holds for distributors and the operator. `collected` sums every collection so far, and `collectedAttributed` the part credited to distributors.</ResponseField>
+    <ResponseField name="history" type="object">`complete`, `asOfBlock`, `basis` (`FINALIZED` or `CONFIRMATIONS`), `note` when incomplete, and `pendingFinality` with `createdInBlock` while the vault's creation block is not final.</ResponseField>
+    <ResponseField name="operator" type="object">
+      Present only when your instance operates the vault.
+      <Expandable>
+        <ResponseField name="owner" type="string">The vault owner, which receives the operator's credit.</ResponseField>
+        <ResponseField name="claimable" type="object">The unattributed slice the vault holds for the operator now, payable through [Pay Operator Fees](/endpoints/vaults/pay-operator-fees). `null` when unreadable.</ResponseField>
+        <ResponseField name="paid" type="object">What the vault has paid its owner so far.</ResponseField>
+        <ResponseField name="otherDistributors" type="array">Every other distributor with holders bound to it and shares or unpaid fees in the vault: `distributor`, `payoutWallet`, `claimable`, `attributedShares`. `null` when unreadable.</ResponseField>
+        <ResponseField name="otherDistributorsReadFailed" type="boolean">`true` when `otherDistributors` could not be read.</ResponseField>
+        <ResponseField name="approvalsSupported" type="boolean">Whether the vault's implementation has distributor approvals.</ResponseField>
+        <ResponseField name="approvedDistributors" type="array">`{ distributor, approved }` for every distributor ever named in an approval on this vault, read live, approved first. `null` when unreadable.</ResponseField>
+        <ResponseField name="approvedDistributorsReadFailed" type="boolean">`true` when `approvedDistributors` could not be read.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd/earnings" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/vaults/${vaultId}/earnings`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+if (data.supported) {
+  console.log(`earned ${data.earned.value}, claimable ${data.claimable.value} ${data.asset.symbol}`);
+  if (data.approval.note) console.warn(data.approval.note);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Distributor Response
+{
+  "success": true,
+  "data": {
+    "vaultId": "cmssh8t2u0003cghxkx1w1fwd",
+    "vaultAddress": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+    "asset": { "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a", "symbol": "USDC", "decimals": 6 },
+    "distributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+    "distributors": ["0x83fd50068b2fc776bbf237f8163495b2247408c1"],
+    "supported": true,
+    "earned": { "raw": "16250000", "value": "16.25" },
+    "paid": { "raw": "12500000", "value": "12.5" },
+    "claimable": { "raw": "3750000", "value": "3.75" },
+    "uncollectedEstimate": { "raw": "4000000", "value": "4.0" },
+    "attributedShares": { "raw": "24938271605", "value": "24938.271605" },
+    "shareOfVaultBps": 2000,
+    "boundHolders": 3,
+    "wallets": [
+      {
+        "distributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+        "payoutWallet": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+        "claimable": { "raw": "3750000", "value": "3.75" },
+        "attributedShares": { "raw": "24938271605", "value": "24938.271605" },
+        "approved": true
+      }
+    ],
+    "approval": {
+      "required": true,
+      "owner": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+      "approved": true,
+      "note": null
+    },
+    "markets": [
+      {
+        "marketAddress": "0xae10e07a899526e97be3940ca6ee03af28394495",
+        "marketName": "TRST / USDC",
+        "vaultClaim": { "raw": "20000000", "value": "20.0" },
+        "yourShareEstimate": { "raw": "4000000", "value": "4.0" },
+        "routed": true,
+        "funds": true,
+        "readFailed": false
+      }
+    ],
+    "payouts": [
+      {
+        "distributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+        "wallet": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+        "amount": { "raw": "12500000", "value": "12.5" },
+        "txHash": "0xa3b3376bfa1263cddfea82d92ef29d70014bc3539d065a9e8b1f3a3150f5e8fd",
+        "at": "2026-09-20T10:15:00.000Z"
+      }
+    ],
+    "vault": {
+      "totalShares": { "raw": "124691358024", "value": "124691.358024" },
+      "attributedShares": { "raw": "62345679012", "value": "62345.679012" },
+      "feeCashHeld": { "raw": "9375000", "value": "9.375" },
+      "collected": { "raw": "46875000", "value": "46.875" },
+      "collectedAttributed": { "raw": "23437500", "value": "23.4375" }
+    },
+    "history": { "complete": true, "asOfBlock": 9284113, "basis": "FINALIZED", "note": null }
+  }
+}
+```
+```json Operator Block
+{
+  "operator": {
+    "owner": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "claimable": { "raw": "5625000", "value": "5.625" },
+    "paid": { "raw": "18750000", "value": "18.75" },
+    "otherDistributors": [
+      {
+        "distributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+        "payoutWallet": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+        "claimable": { "raw": "3750000", "value": "3.75" },
+        "attributedShares": { "raw": "24938271605", "value": "24938.271605" }
+      }
+    ],
+    "otherDistributorsReadFailed": false,
+    "approvalsSupported": true,
+    "approvedDistributors": [
+      { "distributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1", "approved": true }
+    ],
+    "approvedDistributorsReadFailed": false
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VAULT_NOT_FOUND` | `404` | No such vault, or it is not visible to your instance |
+| `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address on record |
+| `VAULT_STATE_UNAVAILABLE` | `503` | The vault's implementation, its attribution, a distributor's standing, or your standing in an unpublished vault could not be read. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read, so nothing was decided. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | The vault records or your instance's verified wallets could not be read. Retry shortly |
+| `VAULT_EARNINGS_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |

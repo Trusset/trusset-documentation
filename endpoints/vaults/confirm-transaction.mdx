@@ -1,12 +1,14 @@
 ---
 title: 'Confirm Transaction'
-api: 'POST /lending-external-securities/api/vaults/{vaultId}/confirm-tx'
+api: 'POST /lending-external-securities-v2/api/vaults/{vaultId}/confirm-tx'
 description: 'Records a broadcast deposit or redemption after receipt verification'
 ---
 
-Reports a broadcast transaction so the vault's ledger records it. The backend fetches the receipt, checks that it succeeded, checks that it called the function the type claims on this vault's address, and reads the amount from the transaction's events rather than from the request body.
+Reports a broadcast deposit or redemption so the vault's ledger records it. The backend fetches the receipt and checks that it succeeded and called the function the type claims on this vault. It reads the amount from the vault's events, never from the request body. The ledger row carries the time of the block the transaction was mined in.
 
-This endpoint accepts investor types only: `DEPOSIT` and `REDEEM`. Operator transactions are confirmed by the operator in the Issuer Portal.
+This endpoint accepts the investor types only: `DEPOSIT` and `REDEEM`. The distributor and fee actions confirm on their own endpoints, by sending `{ "txHash": "0x..." }` back to the route that built them.
+
+A transaction that reached the vault through another contract, such as a smart account, is accepted when the vault emitted the matching `Deposited` or `Redeemed` event. `signedBy` is then the investor that event names.
 
 ## Path Parameters
 
@@ -14,40 +16,48 @@ This endpoint accepts investor types only: `DEPOSIT` and `REDEEM`. Operator tran
 
 ## Body Parameters
 
-<ParamField body="txHash" type="string" required>Hash of the broadcast transaction. For a deposit, use the deposit step's hash, not the approval's.</ParamField>
+<ParamField body="txHash" type="string" required>Hash of the broadcast transaction, `0x` and 64 hex characters. For a deposit, use the deposit step's hash, not the approval's.</ParamField>
 <ParamField body="txType" type="string" required>`DEPOSIT` or `REDEEM`. Any other value answers `VALIDATION_ERROR`.</ParamField>
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
+    <ResponseField name="success" type="boolean">Always `true` on a recorded confirmation.</ResponseField>
     <ResponseField name="txHash" type="string">The verified hash.</ResponseField>
-    <ResponseField name="signedBy" type="string">The wallet that actually signed, read from the receipt.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that signed, read from the receipt, or the investor the event names when the transaction came through another contract.</ResponseField>
     <ResponseField name="txType" type="string">The recorded type.</ResponseField>
-    <ResponseField name="amount" type="string">Settlement-asset amount from the `Deposited` or `Redeemed` event. For a partial redemption this is what was actually paid.</ResponseField>
+    <ResponseField name="amount" type="string">Amount from the `Deposited` or `Redeemed` event, in the vault's asset. For a partial redemption this is what was actually paid.</ResponseField>
+    <ResponseField name="marketAddress" type="string">Always `null` for the two investor types.</ResponseField>
+    <ResponseField name="implementation" type="string">Always `null` for the two investor types.</ResponseField>
+    <ResponseField name="activatesAt" type="integer">Always `null` for the two investor types.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  A failed confirmation does not undo the transaction. It is on-chain regardless, so retry the confirmation and the record reconciles. Never re-broadcast because a confirm call errored.
+  A failed confirmation does not undo the transaction. It is on-chain regardless, so retry the confirmation and the record reconciles. Never re-broadcast because a confirm call errored. Confirming the same hash again is safe, because the ledger holds one row per transaction. A confirmation also drops the cached vault state, so the next read of the vault is fresh.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/vaults/{vaultId}/confirm-tx" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd/confirm-tx" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"txHash": "0x8f3b...89ab", "txType": "DEPOSIT"}'
+  -d '{"txHash": "0x8f3b2c1d4e5f60718293a4b5c6d7e8f9012345678901234567890123456789ab", "txType": "DEPOSIT"}'
 ```
 ```typescript TypeScript
-await fetch(
-  `https://api.trusset.org/lending-external-securities/api/vaults/${vaultId}/confirm-tx`,
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/vaults/${vaultId}/confirm-tx`,
   {
     method: 'POST',
     headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
     body: JSON.stringify({ txHash, txType: 'DEPOSIT' })
   }
 );
+const { success, data, error } = await res.json();
+if (!success && error.code === 'TX_NOT_FOUND') {
+  scheduleRetry();
+}
 ```
 </RequestExample>
 
@@ -58,19 +68,41 @@ await fetch(
   "data": {
     "success": true,
     "txHash": "0x8f3b2c1d4e5f60718293a4b5c6d7e8f9012345678901234567890123456789ab",
-    "signedBy": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "signedBy": "0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b",
     "txType": "DEPOSIT",
-    "amount": "1000"
+    "amount": "1000.0",
+    "marketAddress": null,
+    "implementation": null,
+    "activatesAt": null
   }
 }
 ```
 ```json Error - Wrong function
 {
   "success": false,
+  "data": null,
   "error": {
-    "code": "TX_NOT_VERIFIED",
-    "message": "The transaction did not call deposit on this vault"
+    "code": "TX_WRONG_FUNCTION",
+    "message": "Transaction calls redeem; expected deposit"
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `txHash` is not `0x` and 64 hex characters, or `txType` is not `DEPOSIT` or `REDEEM` |
+| `TX_REVERTED` | `400` | The transaction was mined but reverted |
+| `TX_WRONG_TARGET` | `400` | The transaction neither called this vault nor made it emit the expected event. An approval hash sent for a deposit answers this |
+| `TX_WRONG_FUNCTION` | `400` | The transaction called this vault, but not the function the type names |
+| `VAULT_NOT_FOUND` | `404` | No such vault, or it is not visible to your instance |
+| `TX_NOT_FOUND` | `404` | No receipt yet. The transaction is unmined, dropped, or on another network |
+| `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address on record |
+| `VAULT_STATE_UNAVAILABLE` | `503` | Whether your instance is a distributor of record in an unpublished vault could not be read from the chain. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read, so nothing was decided. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | The vault records or your instance's verified wallets could not be read. Retry shortly |
+| `VAULT_CONFIRM_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |
+
+See [transaction verification errors](/endpoints/introduction#confirm-a-transaction) for how to treat `TX_NOT_FOUND`.

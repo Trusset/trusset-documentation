@@ -1,15 +1,17 @@
 ---
 title: 'Update Market Config'
-api: 'POST /lending-external-securities/api/markets/{marketId}/config'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/config'
 description: 'Set the on-chain risk parameters for a market'
 ---
 
 Writes the market's full `config` struct. Every field is required on every call, so read the current values with [Get Market Config](/endpoints/lending/get-config) first and send them back with your changes applied. Partial updates are not supported: an omitted field fails validation rather than retaining its current value.
 
-Requires `ISSUER_ROLE` on the market contract.
+Requires `ISSUER_ROLE` on the market contract. The lender of record names the wallet that holds it when it takes the market, so that wallet may sit outside your instance. `heldByThisInstance` on the calldata response says whether it does.
+
+The market brings its interest accrual up to date under the old values before the new ones apply.
 
 <Warning>
-  Changing `liquidationThreshold` moves the point at which existing loans become liquidatable. Raising it immediately puts loans at risk that were healthy a moment earlier. The contract caps each change at 10 percent per call.
+  Changing `liquidationThreshold` moves the point at which existing loans become liquidatable. Lowering it immediately puts loans at risk that were healthy a moment earlier. The contract caps each change at 10 percent per call. That cap is counted in percentage points of the threshold: from `8500`, one call reaches anywhere from `7500` to `9500`.
 </Warning>
 
 ## Path Parameters
@@ -20,32 +22,32 @@ Requires `ISSUER_ROLE` on the market contract.
 
 <ParamField body="config" type="object" required>
   <Expandable>
-    <ParamField body="collateralFactor" type="integer" required>Maximum loan to value in basis points. 1000 to 9500.</ParamField>
-    <ParamField body="liquidationThreshold" type="integer" required>Liquidation trigger in basis points. 1000 to 9800. Must exceed `collateralFactor` to leave borrowers any buffer.</ParamField>
-    <ParamField body="liquidationPenalty" type="integer" required>Penalty on liquidated debt in basis points. 0 to 5000.</ParamField>
-    <ParamField body="protocolFeeRate" type="integer" required>Issuer share of accrued interest in basis points. 0 to 10000.</ParamField>
+    <ParamField body="collateralFactor" type="integer" required>Maximum loan to value for new borrowing, in basis points. The schema accepts 1000 to 9500, but anything above 9000 is refused with `INVALID_CONFIG`, because the contract caps it at 90 percent.</ParamField>
+    <ParamField body="liquidationThreshold" type="integer" required>Loan to value at which a loan becomes liquidatable, in basis points. The schema accepts 1000 to 9800, but anything above 9500 is refused with `INVALID_CONFIG`. Must exceed `collateralFactor` to leave borrowers any buffer, and may move at most 1000 from its current value in one call.</ParamField>
+    <ParamField body="liquidationPenalty" type="integer" required>Penalty on liquidated debt in basis points. 0 to 5000. It cannot drop below the market's term penalty, set with [Set Term Config](/endpoints/lending/set-term-config).</ParamField>
+    <ParamField body="protocolFeeRate" type="integer" required>The insurance-fund rate, in basis points. 0 to 10000, and 0 on a new market. Repaid interest first loses Trusset's 15 percent infrastructure fee, then the fixed 8 percent operator and 5 percent distributor shares of the remainder. This rate of what is left goes to the market's insurance fund, and the rest to liquidity providers.</ParamField>
     <ParamField body="minBorrowAmount" type="string" required>Minimum borrow per loan, as a decimal string in borrow asset units.</ParamField>
     <ParamField body="closeFactor" type="integer" required>Maximum fraction of a loan's debt repayable in one liquidation, in basis points. 1000 to 5000.</ParamField>
     <ParamField body="maxTotalCollateral" type="string" required>Global collateral cap as a decimal string in collateral token units. `"0"` means uncapped.</ParamField>
     <ParamField body="maxUserCollateral" type="string" required>Per-borrower collateral cap as a decimal string in collateral token units. `"0"` means uncapped.</ParamField>
-    <ParamField body="useDutchAuction" type="boolean" required>Whether liquidations open a Dutch auction. Rejected on-chain when the market's `priceSource` is `MARKET`.</ParamField>
-    <ParamField body="auctionDuration" type="integer" required>Auction length in seconds. 600 to 86400.</ParamField>
-    <ParamField body="auctionStartPremium" type="integer" required>Opening price multiplier in basis points. 10000 to 20000, where 10000 is oracle price.</ParamField>
+    <ParamField body="useDutchAuction" type="boolean" required>Whether liquidations open a Dutch auction. Rejected on-chain when the market's `priceSource` is `MARKET`. Turning it on also needs an auction venue wired to the market and admitted on the collateral token.</ParamField>
+    <ParamField body="auctionDuration" type="integer" required>Auction length in seconds. 600 to 86400. The schema applies this range even while `useDutchAuction` is `false`.</ParamField>
+    <ParamField body="auctionStartPremium" type="integer" required>Opening price multiplier in basis points. 10000 to 20000, where 10000 is oracle price. Must exceed `auctionMinPremium` while auctions are on.</ParamField>
     <ParamField body="auctionMinPremium" type="integer" required>Floor price multiplier in basis points. 8000 to 10000. Floored at 9800 on-chain when `priceSource` is `MARKET`.</ParamField>
   </Expandable>
 </ParamField>
 
 <ParamField body="txHash" type="string">
-  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata. The confirm call must repeat the full `config` object, because the body is validated before `txHash` is read.
 </ParamField>
 
 <Note>
-  `maxPriceAge` is not part of this struct. It is an oracle setting, not a market setting, and it is read from [Get Oracle Status](/endpoints/lending/get-oracle-status) rather than written here. It still interacts directly with your NAV publication cadence. A fund that publishes NAV daily needs `maxPriceAge` above 86400 seconds, or every loan action will revert against a stale price between publications.
+  `maxPriceAge` is not part of this struct. It is an oracle setting, not a market setting, and it is read from [Get Oracle Status](/endpoints/lending/get-oracle-status) rather than written here. It still interacts directly with your NAV publication cadence. A fund that publishes NAV daily needs `maxPriceAge` above 86400 seconds. Otherwise opening loans, drawing more, withdrawing collateral against open debt and liquidating revert against a stale price between publications.
 </Note>
 
-## Bounds the contract adds
+## Checks Run Before a Signature
 
-The per-field ranges above are what the request schema accepts. The contract is stricter on four of them, and the API mirrors those rules so no signature is asked for a tuple that would revert with a bare selector.
+The per-field ranges above are what the request schema accepts. Before building calldata, the API also runs the contract's cross-field rules and two checks on the auction venue. No signature is asked for a tuple that would revert with a bare selector.
 
 | Rule | Refused with |
 |---|---|
@@ -53,33 +55,39 @@ The per-field ranges above are what the request schema accepts. The contract is 
 | `liquidationThreshold` at most 9500, whatever the schema allows | `INVALID_CONFIG` |
 | `liquidationThreshold` strictly greater than `collateralFactor` | `INVALID_CONFIG` |
 | `auctionStartPremium` strictly greater than `auctionMinPremium`, when auctions are on | `INVALID_CONFIG` |
+| `liquidationPenalty` not below the market's term penalty | `INVALID_CONFIG` |
+| `liquidationThreshold` within 1000 of its current value | `CONFIG_CHANGE_TOO_LARGE` |
+| An auction venue is wired before `useDutchAuction` turns on | `AUCTION_MODULE_NOT_SET` |
+| That venue is admitted on the collateral token | `AUCTION_VENUE_NOT_ADMITTED` |
 
-A market that runs loan terms adds one more: `liquidationPenalty` cannot drop below the market's own `termPenalty`. Lower the term penalty first.
+The venue admission check is the API's own. The contract does not test it, but a venue the collateral token refuses makes every realization revert when seized collateral is delivered to it.
 
-A market whose `priceSource` is `MARKET` cannot run Dutch auctions at all, and needs an `auctionMinPremium` of at least 9800. Turning auctions on there is refused with `AUCTION_UNSUPPORTED_PRICE_SOURCE`.
+A check that has to read the chain, such as the current threshold or the term penalty, is skipped when that read fails. The contract still enforces every rule in the table except venue admission, so a violation that slips through reverts on-chain instead.
 
-<Warning>
-  Turning `useDutchAuction` off withdraws the market from the public feed in the same write. Auctions are what makes a realization publicly actionable, so a market without them would otherwise keep advertising a participation route that no longer exists. The confirm response reports it as `publicListingWithdrawn`.
-</Warning>
+A market whose `priceSource` is `MARKET` cannot run Dutch auctions at all, and needs an `auctionMinPremium` of at least 9800, refused otherwise with `INVALID_CONFIG`. Turning auctions on there is refused with `AUCTION_MODULE_NOT_SET` while no venue is wired, and the API never wires one on such a market. A venue wired by other means leads to `AUCTION_UNSUPPORTED_PRICE_SOURCE` instead.
+
+<Note>
+  Confirming a configuration with `useDutchAuction` off withdraws the market from the public liquidation feed. Auctions are what makes a realization publicly actionable, so a market without them would otherwise keep advertising a participation route that no longer exists. The confirm response reports it as `publicListingWithdrawn`. The API decides from the configuration read back from the chain after the transaction, and falls back to the `config` you sent when that read fails.
+</Note>
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="transaction" type="object">Unsigned transaction for the `setConfig` call. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction for the `setConfig` call, `{ to, data, value, chainId }`, targeting the market contract. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="functionName" type="string">`setConfig`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="requiredRole" type="string">Role the signing wallet must hold on the market.</ResponseField>
-    <ResponseField name="heldByThisInstance" type="boolean">Whether a verified wallet of your instance holds that role. When `false`, the transaction has to be signed by another party.</ResponseField>
-    <ResponseField name="signerAddress" type="string">The wallet the role check ran against.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`ISSUER_ROLE`, the role the signing wallet must hold on the market. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="heldByThisInstance" type="boolean">`true` when a verified wallet of your instance holds `ISSUER_ROLE`, `false` when every wallet was checked and none does, `null` when the check could not be completed. A `false` means another party has to sign. The build is never refused on it. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="signerAddress" type="string">The wallet of your instance found holding `ISSUER_ROLE`, or `null` when none was. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming.</ResponseField>
-    <ResponseField name="publicListingWithdrawn" type="boolean">`true` when this write took the market off the public feed because Dutch auctions were turned off. Returned when confirming.</ResponseField>
+    <ResponseField name="publicListingWithdrawn" type="boolean">`true` when this confirm took the market off the public liquidation feed because Dutch auctions are off. `false` when auctions are on, or the market was not listed. Returned when confirming.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/config" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/config" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{
@@ -87,7 +95,7 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{m
       "collateralFactor": 7000,
       "liquidationThreshold": 8000,
       "liquidationPenalty": 500,
-      "protocolFeeRate": 2500,
+      "protocolFeeRate": 1000,
       "minBorrowAmount": "1000",
       "closeFactor": 5000,
       "maxTotalCollateral": "0",
@@ -99,6 +107,43 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{m
     }
   }'
 ```
+```typescript TypeScript
+const base = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const current = (await (await fetch(`${base}/config`, { headers })).json()).data;
+const config = {
+  collateralFactor: 7000,
+  liquidationThreshold: Number(current.liquidationThreshold),
+  liquidationPenalty: Number(current.liquidationPenalty),
+  protocolFeeRate: Number(current.protocolFeeRate),
+  minBorrowAmount: current.minBorrowAmount,
+  closeFactor: Number(current.closeFactor),
+  maxTotalCollateral: current.maxTotalCollateral,
+  maxUserCollateral: current.maxUserCollateral,
+  useDutchAuction: current.useDutchAuction,
+  auctionDuration: Number(current.auctionDuration),
+  auctionStartPremium: Number(current.auctionStartPremium),
+  auctionMinPremium: Number(current.auctionMinPremium)
+};
+
+const build = await fetch(`${base}/config`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ config })
+});
+const { data: calldata } = await build.json();
+
+const tx = await wallet.sendTransaction(calldata.transaction);
+await tx.wait();
+
+const confirm = await fetch(`${base}/config`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ config, txHash: tx.hash })
+});
+const { data } = await confirm.json();
+```
 </RequestExample>
 
 <ResponseExample>
@@ -107,7 +152,16 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{m
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTION",
-    "transaction": { "to": "0x70A0...", "data": "0x..." }
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "setConfig",
+    "requiredRole": "ISSUER_ROLE",
+    "heldByThisInstance": true,
+    "signerAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab"
   }
 }
 ```
@@ -115,17 +169,17 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{m
 {
   "success": true,
   "data": {
-    "txHash": "0xabc...def",
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
     "publicListingWithdrawn": false
   }
 }
 ```
-```json Error - Update Failed
+```json Error - Threshold Move Too Large
 {
   "success": false,
   "error": {
-    "code": "CONFIG_UPDATE_FAILED",
-    "message": "execution reverted: ThresholdChangeTooLarge"
+    "code": "CONFIG_CHANGE_TOO_LARGE",
+    "message": "The liquidation threshold can move at most 10 percentage points per update; it is 8500 bps now. Stage the change across multiple updates."
   }
 }
 ```
@@ -147,10 +201,16 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{m
 
 | Code | HTTP | Cause |
 |---|---|---|
+| `MISSING_MARKET_ID` | `400` | The `marketId` path segment is longer than 100 characters |
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
-| `VALIDATION_ERROR` | `400` | A `config` field is outside its accepted range. `error.details` names each offending field |
+| `VALIDATION_ERROR` | `400` | A `config` field is missing or outside its accepted range, or `txHash` is malformed. `error.details` names each offending field |
 | `INVALID_CONFIG` | `400` | A cross-field rule the contract enforces was broken. The message names which one |
+| `CONFIG_CHANGE_TOO_LARGE` | `400` | `liquidationThreshold` would move more than 1000 from its current value. Stage the change across several calls |
 | `AUCTION_UNSUPPORTED_PRICE_SOURCE` | `400` | Dutch auctions were turned on for a market whose `priceSource` is `MARKET` |
-| `CONFIG_UPDATE_FAILED` | `400` | The confirmed transaction could not be verified against this market |
+| `CONFIG_UPDATE_FAILED` | `400` | The calldata could not be built, for example because an amount carries more decimal places than its token supports. On the confirm call, the receipt could not be read |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
-| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds the admin role this change requires. Skipped when confirming with `txHash` |
+| `AUCTION_MODULE_NOT_SET` | `409` | `useDutchAuction` is `true` and no auction venue is wired to the market. Wire one with [Wire Auction Module](/endpoints/lending/wire-auction-module) first |
+| `AUCTION_VENUE_NOT_ADMITTED` | `409` | The wired auction venue is not admitted on the collateral token, so every realization delivering to it would revert |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds the `ISSUER_ROLE` this change requires. Skipped when confirming with `txHash` |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction). On this endpoint every one of them answers `400`, including `TX_NOT_FOUND`.

@@ -1,0 +1,149 @@
+---
+title: 'Sweep Protocol Fees'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/protocol-fees/sweep'
+description: 'Deposit the insurance-fund share the market has booked into its insurance fund'
+---
+
+Builds the `sweepProtocolFees` transaction, which deposits everything the market has booked for its insurance fund into that fund. The protocol fee is the insurance-fund rate's share of repaid interest and of interest recovered through liquidation. The on-chain name `protocolFeeRate` is kept from v1.
+
+Any wallet may sign. The market deposits into its own insurance fund, never to the signer, and the fund books the deposit with the market recorded as its source. From then on the money is the reserve that absorbs this market's shortfalls. See [Get Insurance Status](/endpoints/lending/get-insurance-status).
+
+At the default insurance-fund rate of zero, nothing accrues and there is nothing to sweep. The issuer sets the rate through [Update Market Config](/endpoints/lending/update-config).
+
+<Warning>
+  The fund accepts a deposit only from a market it authorizes. If the fund's owner has withdrawn this market's authorization, the sweep reverts on chain, and this endpoint does not check for it first. Read `marketAuthorized` on [Get Insurance Status](/endpoints/lending/get-insurance-status) before signing.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="txHash" type="string">
+  Hash of the sweep you broadcast. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the market. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`sweepProtocolFees`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction deposits and where, in words. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="permissionless" type="boolean">Always `true`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="requiredRole" type="string">Always `null`, because the sweep needs no role. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="requiredSigner" type="string">Always `null`, because any wallet may sign. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="note" type="string">States that the market deposits into its own insurance fund, never to the signer. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="destination" type="string">The market's insurance fund. On the confirm call it is read again from the market, and `null` when that read fails.</ResponseField>
+    <ResponseField name="amount" type="string">On the calldata call, what was booked when the calldata was built. On the confirm call, what the sweep actually deposited, read from the `ProtocolFeePaid` event.</ResponseField>
+    <ResponseField name="amountRaw" type="string">`amount` in the borrow asset's smallest unit.</ResponseField>
+    <ResponseField name="asset" type="object">The borrow asset: `address`, `symbol`, `decimals`.</ResponseField>
+    <ResponseField name="confirmWith" type="object">Where to send the hash: `endpoint` names this route and `field` is `txHash`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="kind" type="string">`protocol`. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="txHash" type="string">Sweep transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that sent the sweep. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="at" type="string">ISO 8601 time of the block the sweep mined in. `null` when the block time could not be read. Returned when confirming with `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+The sweep deposits whatever is booked when it mines, which can exceed the amount quoted when the calldata was built. A confirmed sweep is recorded on the market as a `PROTOCOL_FEES_SWEPT` transaction, visible through [List Transactions](/endpoints/lending/list-transactions). [Record Insurance Top-Up](/endpoints/lending/record-insurance-top-up) refuses it, because a sweep is not a top-up.
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/protocol-fees/sweep" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/protocol-fees/sweep`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const built = await fetch(url, { method: 'POST', headers, body: JSON.stringify({}) });
+const { data } = await built.json();
+
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch(url, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.hash }) });
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "sweepProtocolFees",
+    "description": "Deposit the 36.975 USDC of accrued protocol fees into the market's insurance fund 0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+    "permissionless": true,
+    "requiredRole": null,
+    "requiredSigner": null,
+    "note": "Any wallet may sign this transaction. The market deposits the accrued protocol fee into its own insurance fund, the reserve that absorbs bad debt on its liquidations and, on the current market implementation, the shortfall of a settlement that retains less than the debt owed, never to the signer.",
+    "destination": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+    "amount": "36.975",
+    "amountRaw": "36975000",
+    "asset": {
+      "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "symbol": "USDC",
+      "decimals": 6
+    },
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/clx_secmarket_001/protocol-fees/sweep",
+      "field": "txHash"
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "kind": "protocol",
+    "txHash": "0x3c7e90a1f4d25b68c0e9a7d31b54f28e6a0c9d47b1e3f5a29c8d06b7e41f2a93",
+    "signedBy": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "destination": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+    "amount": "36.975",
+    "amountRaw": "36975000",
+    "asset": {
+      "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "symbol": "USDC",
+      "decimals": 6
+    },
+    "at": "2026-09-25T14:03:12.000Z"
+  }
+}
+```
+```json Error - Nothing Payable
+{
+  "success": false,
+  "error": {
+    "code": "NO_PROTOCOL_FEES",
+    "message": "No protocol fee is payable on this market: 0.0 USDC has accrued, and the leg is booked only out of repaid interest and liquidation proceeds, so sweepProtocolFees would revert. Nothing to sign until interest is repaid or a liquidation settles."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `txHash` is not a 0x-prefixed 32-byte hex hash |
+| `MISSING_MARKET_ID` | `400` | The market ID in the path is longer than 100 characters |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `NO_INSURANCE_FUND` | `409` | The market names no insurance fund, so the sweep has nowhere to deposit and would revert |
+| `NO_PROTOCOL_FEES` | `409` | Nothing is booked for the insurance fund, so the sweep would revert. The message states what has accrued |
+| `MARKET_FEES_UNAVAILABLE` | `503` | The booked balances could not be read, so no transaction is offered. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

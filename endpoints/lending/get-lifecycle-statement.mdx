@@ -1,16 +1,16 @@
 ---
 title: 'Get Lifecycle Statement'
-api: 'GET /lending-external-securities/api/markets/{marketId}/lifecycle-statement'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/lifecycle-statement'
 description: 'Download a PDF statement of a market lifecycle'
 ---
 
-Returns a PDF statement covering the market's configuration, roles, encumbrances, loans, liquidations and auctions, assembled from indexed on-chain events. Use it for reporting and audit rather than for programmatic reads.
+Returns a PDF statement of the market assembled from indexed on-chain events. It covers configuration and parameter changes, roles and authorizations, collateral locks, loans with the liquidity provider ledger, oracle price history, liquidations and auctions. Use it for reporting and audit rather than for programmatic reads.
 
 <Warning>
   This endpoint does not return the JSON envelope. On success it responds with `Content-Type: application/pdf` and a `Content-Disposition: attachment` header carrying the generated filename. Errors are returned as the usual JSON envelope, so branch on the response content type rather than parsing unconditionally.
 </Warning>
 
-This endpoint counts against the write rate limit rather than the read limit. See [Rate Limits](/endpoints/lending/introduction#rate-limits).
+A statement generated from an index that trails the chain would present itself as the market's record while omitting everything since. The endpoint therefore refuses with `INDEX_STALE` when the index is more than 300 seconds behind, unless you pass `allowStale`. [Get Index Status](/endpoints/lending/get-index-status) reports the lag.
 
 ## Path Parameters
 
@@ -19,7 +19,7 @@ This endpoint counts against the write rate limit rather than the read limit. Se
 ## Query Parameters
 
 <ParamField query="categories" type="string">
-  Comma-separated sections to include. Any of `config`, `roles`, `encumbrances`, `loans`, `liquidations`, `auctions`. Omit for all six. Maximum 200 characters. Unknown names are rejected.
+  Comma-separated sections to include. Any of `config`, `roles`, `encumbrances`, `loans`, `liquidations`, `auctions`. Omit for all six. Between 1 and 200 characters. Unknown names are rejected.
 </ParamField>
 
 <ParamField query="loanId" type="string">
@@ -27,26 +27,30 @@ This endpoint counts against the write rate limit rather than the read limit. Se
 </ParamField>
 
 <ParamField query="from" type="string">
-  Start of the reporting window as `YYYY-MM-DD`. Not earlier than `2015-01-01`.
+  Start of the reporting window as `YYYY-MM-DD`, from the start of that day in UTC. Not earlier than `2015-01-01`.
 </ParamField>
 
 <ParamField query="to" type="string">
-  End of the reporting window as `YYYY-MM-DD`, inclusive. Must not be earlier than `from`.
+  End of the reporting window as `YYYY-MM-DD`, inclusive to the end of that day in UTC. Must not be earlier than `from`.
+</ParamField>
+
+<ParamField query="allowStale" type="string">
+  `true` or `1` generates the statement even when the index is more than 300 seconds behind the chain. The document then carries an explicit lag notice in its header and coverage. Any other value leaves the refusal in place.
 </ParamField>
 
 ## Response
 
-A PDF document. The filename is set by the server on the `Content-Disposition` header and identifies the market and the reporting window.
+A PDF document. The server sets the filename on the `Content-Disposition` header from the collateral token symbol, the loan when `loanId` was given, and the generation date, for example `Lending-Lifecycle-Statement_NYF1_loan-5_2026-09-25.pdf`.
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/lifecycle-statement?from=2025-01-01&to=2025-06-30" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/lifecycle-statement?from=2026-01-01&to=2026-06-30" \
   -H "X-API-Key: trusset_your_key_here" \
   -o statement.pdf
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/lifecycle-statement?categories=loans,liquidations`,
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/lifecycle-statement?categories=loans,liquidations`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 
@@ -55,7 +59,7 @@ if (res.headers.get('content-type')?.includes('application/pdf')) {
   save(blob);
 } else {
   const { error } = await res.json();
-  throw new Error(error.message);
+  throw new Error(`${error.code}: ${error.message}`);
 }
 ```
 </RequestExample>
@@ -70,12 +74,12 @@ if (res.headers.get('content-type')?.includes('application/pdf')) {
   }
 }
 ```
-```json Error - Index Unavailable
+```json Error - Index Stale
 {
   "success": false,
   "error": {
-    "code": "INDEX_UNAVAILABLE",
-    "message": "Historical indexing is not available for this network right now"
+    "code": "INDEX_STALE",
+    "message": "The event index is 12 minutes behind the chain (indexed through block 8412791 at 2026-09-25T11:03:24.000Z), so a document generated now would present itself as the market's record while omitting everything since. Retry once the index has caught up, or pass allowStale=true to generate a document that carries an explicit lag notice in its header and coverage."
   }
 }
 ```
@@ -86,20 +90,23 @@ if (res.headers.get('content-type')?.includes('application/pdf')) {
 | Code | HTTP | Cause |
 |---|---|---|
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address |
-| `VALIDATION_ERROR` | `400` | A query parameter is malformed, for example a `from` that is not `YYYY-MM-DD` |
-| `INVALID_CATEGORIES` | `400` | `categories` is empty or names a section that does not exist |
-| `INVALID_LOAN_ID` | `400` | `loanId` is not a positive integer |
-| `INVALID_DATE` | `400` | `from` or `to` is not a valid date, or falls outside the supported range |
+| `VALIDATION_ERROR` | `400` | A query parameter is malformed: `categories` empty or over 200 characters, `loanId` not digits, a date not `YYYY-MM-DD` |
+| `INVALID_CATEGORIES` | `400` | `categories` names a section that does not exist, or names none |
+| `INVALID_LOAN_ID` | `400` | `loanId` is zero |
+| `INVALID_DATE` | `400` | `from` or `to` is not a calendar date, or falls outside the supported range |
 | `INVALID_DATE_RANGE` | `400` | `from` is after `to` |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
-| `LOAN_NOT_FOUND` | `404` | The requested `loanId` does not exist on this market |
-| `DATASET_TOO_LARGE` | `413` | The window covers more activity than one statement can carry. Narrow it with `from`, `to` or `categories` |
-| `NOT_CONFIGURED` | `503` | Historical indexing is not configured for this network |
-| `INDEX_UNAVAILABLE` | `503` | The index could not be reached |
-| `INDEX_UNHEALTHY` | `503` | The index reports errors and its data is not fit to state |
+| `LOAN_NOT_FOUND` | `404` | The requested `loanId` is not recorded for this market |
+| `DATASET_TOO_LARGE` | `413` | The window covers more activity than one statement can carry. Narrow it with `from`, `to`, `categories` or `loanId` |
+| `NOT_CONFIGURED` | `503` | Event indexing is not configured for this network |
+| `INDEX_NOT_DEPLOYED` | `503` | The event index this environment reads is not deployed at its endpoint |
+| `INDEX_UNAVAILABLE` | `503` | The index did not report its status |
+| `INDEX_UNHEALTHY` | `503` | The index reports indexing errors, so statement generation is suspended |
 | `MARKET_NOT_INDEXED` | `503` | The market has produced no indexed history yet |
+| `INDEX_STALE` | `503` | The index is more than 300 seconds behind the chain and `allowStale` was not set |
 | `UPSTREAM_ERROR` | `503` | The index returned an error |
 | `QUERY_ERROR` | `503` | The statement query was rejected by the index |
 | `EMPTY_RESPONSE` | `503` | The index returned no payload |
-| `TIMEOUT` | `503` | The index did not respond in time |
+| `TIMEOUT` | `503` | The statement could not be assembled within its time budget |
 | `NETWORK_ERROR` | `503` | The index could not be reached over the network |

@@ -1,0 +1,166 @@
+---
+title: 'Get Vault Liquidity'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/vault-liquidity'
+description: 'Read the market side of just-in-time vault liquidity, live from the chain'
+---
+
+Returns the market's side of just-in-time vault liquidity. It shows whether the switch is on, which vaults the market admin registered, and what each of those vaults has consented to lend this market. Every figure is read from the chain on the call, not from a stored record.
+
+[Set Vault Liquidity](/endpoints/lending/set-vault-liquidity) and [Register Vault](/endpoints/lending/register-vault) have no confirm leg on this API, so this read is how to check that a switch or a registration landed.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Two-sided consent
+
+A vault funds this market's borrows only when both sides have agreed. The market side belongs to the market admin, the wallet holding `DEFAULT_ADMIN_ROLE`. It turns the switch on with [Set Vault Liquidity](/endpoints/lending/set-vault-liquidity) and admits the vault with [Register Vault](/endpoints/lending/register-vault).
+
+The vault side belongs to the vault operator, who sets a draw cap for this market on the vault. The cap is set in the Issuer Portal and is not on this API. The vault contract accepts a cap only for a market whose lender of record is the vault's own operator and which settles in the vault's asset.
+
+Each leg alone does nothing. A switch with no registered vault draws on nobody, and a registered vault whose cap is zero lends nothing. `inertHalves` names the two market-side half-states, and `inert` flags a registered vault that has not consented.
+
+A lender of record can name one of its own vaults when it takes the role, through [Accept Lender Role](/endpoints/lending/accept-lender-role). That vault is registered and the switch turned on inside the adoption, which leaves the draw cap as the only leg outstanding.
+
+## What happens at borrow time
+
+When a borrow asks for more than the pool can lend, the market draws the shortfall from its registered vaults inside the borrower's own transaction. It asks each vault in the order of `registeredVaults` until the gap is closed. Each vault gives as much of the request as its idle funds and its unused cap allow.
+
+The market credits what arrives as an ordinary liquidity provider deposit, minting the vault LP shares at the pool's current value. With a reserve ratio set, the request is grossed up so the reserve slice stays intact after the loan. Nothing is drawn while the pool alone covers the borrow.
+
+A vault that reverts, has paused deposits, or has nothing left to give contributes zero, and the market moves on to the next one. If the vaults together cannot close the gap, the borrow reverts with `InsufficientLiquidity`. No vault can block borrowing that the pool itself could fund.
+
+Once the borrow is confirmed through [Open Loan](/endpoints/lending/open-loan) or [Borrow More](/endpoints/lending/borrow-more), the confirm response carries `vaultDraws`, one `{ vault, amount }` for each vault that lent. Each draw also appears in [List Transactions](/endpoints/lending/list-transactions) as a `SUPPLY` by that vault.
+
+On the current market implementation a draw is exempt from the first-deposit floor an empty pool applies to a provider. A market still on the earlier implementation holds a draw into an empty pool to that floor, and Open Loan refuses a borrow whose draw would fall below it with `FIRST_DRAW_BELOW_FLOOR`.
+
+## Borrowable liquidity and vault room
+
+`borrowableLiquidity` on [Get Market Metrics](/endpoints/lending/get-metrics) is the pool's own free liquidity after the reserve earmark. It does not include anything a vault could lend. A borrow above it can still be funded when the switch is on and the vaults' combined room covers the shortfall.
+
+A registered vault's room is the smaller of `idleAssets` and its unused cap, which is `drawCap` minus `drawnValue`. Open Loan adds up the same figure before it builds a transaction and refuses with `INSUFFICIENT_LIQUIDITY` when the shortfall exceeds it. That sum still counts a vault whose deposits are paused, which lends nothing, so the contract remains the final check.
+
+<Note>
+  Unlike most of this API, `drawCap`, `idleAssets` and `drawnValue` are integer strings in base units, not decimal strings. `500000000000` is 500,000 of a six-decimal token. Scale them by `borrowAssetDecimals` from [Get Market](/endpoints/lending/get-market), since a vault can only consent to a market that settles in its own asset.
+</Note>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="useVaultLiquidity" type="boolean">The market switch. `false` leaves every registered vault inert and bounds every borrow by the pool alone.</ResponseField>
+    <ResponseField name="registeredVaults" type="array">
+      The vaults the market admin registered, in the order the market draws on them. Registration order holds until a vault is deregistered, which moves the most recently registered vault into the freed position.
+      <Expandable>
+        <ResponseField name="vaultAddress" type="string">The vault contract, lowercased.</ResponseField>
+        <ResponseField name="drawCap" type="string">The vault operator's cap for this market, in base units. `"0"` means the vault has not consented. `null` when the read failed.</ResponseField>
+        <ResponseField name="idleAssets" type="string">The vault's uncommitted funds, in base units of its asset. They are shared across every market the vault funds. `null` when the read failed.</ResponseField>
+        <ResponseField name="depositsPaused" type="boolean">`true` when the vault operator has paused deposits. A paused vault lends nothing to a draw. `null` when the read failed.</ResponseField>
+        <ResponseField name="drawnValue" type="string">The vault's liquidity provider position in this market, in base units, valued at the pool's current mark. It counts everything the vault placed here, by draw, rebalance or allocation. `null` when the read failed.</ResponseField>
+        <ResponseField name="inert" type="boolean">`true` when `drawCap` is zero, so the market can draw nothing from this vault. Also `false` when the cap could not be read, so check `drawCap` for `null`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="inertHalves" type="object">
+      Half-connected states that look configured but fund nothing.
+      <Expandable>
+        <ResponseField name="enabledWithoutVaults" type="boolean">The switch is on and no vault is registered.</ResponseField>
+        <ResponseField name="registeredButDisabled" type="boolean">At least one vault is registered and the switch is off.</ResponseField>
+        <ResponseField name="cappedButUnregisteredIsInvisible" type="boolean">Always `true`. A vault that set a cap for this market without being registered does not appear in `registeredVaults`, because the market cannot see it.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/vault-liquidity" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/vault-liquidity`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+
+const roomOf = (v: { drawCap: string; idleAssets: string; drawnValue: string }) => {
+  const cap = BigInt(v.drawCap);
+  const used = BigInt(v.drawnValue);
+  const unused = cap > used ? cap - used : 0n;
+  const idle = BigInt(v.idleAssets);
+  return unused < idle ? unused : idle;
+};
+
+const vaultRoom = data.useVaultLiquidity
+  ? data.registeredVaults
+      .filter((v) => v.drawCap !== null && v.idleAssets !== null && v.drawnValue !== null && v.depositsPaused === false)
+      .reduce((sum, v) => sum + roomOf(v), 0n)
+  : 0n;
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "useVaultLiquidity": true,
+    "registeredVaults": [
+      {
+        "vaultAddress": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+        "drawCap": "500000000000",
+        "idleAssets": "182500000000",
+        "depositsPaused": false,
+        "drawnValue": "120000000000",
+        "inert": false
+      }
+    ],
+    "inertHalves": {
+      "enabledWithoutVaults": false,
+      "registeredButDisabled": false,
+      "cappedButUnregisteredIsInvisible": true
+    }
+  }
+}
+```
+```json Response (Registered, Not Yet Consented)
+{
+  "success": true,
+  "data": {
+    "useVaultLiquidity": true,
+    "registeredVaults": [
+      {
+        "vaultAddress": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+        "drawCap": "0",
+        "idleAssets": "182500000000",
+        "depositsPaused": false,
+        "drawnValue": "0",
+        "inert": true
+      }
+    ],
+    "inertHalves": {
+      "enabledWithoutVaults": false,
+      "registeredButDisabled": false,
+      "cappedButUnregisteredIsInvisible": true
+    }
+  }
+}
+```
+```json Error - Not Found
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_NOT_FOUND",
+    "message": "Market not found"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `INTERNAL_ERROR` | `500` | The market's vault state could not be read, because the chain did not answer or the market runs an implementation without vault liquidity. [List Connected Vaults](/endpoints/lending/list-connected-vaults) answers an empty list for such a market |

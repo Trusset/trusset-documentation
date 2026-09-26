@@ -1,0 +1,94 @@
+---
+title: 'Get Exit Liquidity'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/exit-liquidity'
+description: 'Read what liquidity providers can withdraw now and when the whole book could turn liquid'
+---
+
+Reads the market's exit position live from the chain: the reserve held back from borrowing, what a new borrow could draw, and what a withdrawal could reach. It also gives the date by which every open loan is due and past its grace. `disclosure` puts the answer in one sentence for a liquidity provider.
+
+A withdrawal can take liquidity only while it sits unlent in the pool. The reserve ratio earmarks a share of the pool against borrowing, not against withdrawals, so it serves whichever provider exits first and guarantees no one an exit. Where loans without a term are outstanding, no exit date exists at all.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="reserveRatioBps" type="integer">Share of total liquidity held back from borrowing, in basis points. Set with [Set Reserve Ratio](/endpoints/lending/set-reserve-ratio).</ResponseField>
+    <ResponseField name="borrowableLiquidity" type="string">What a new borrow can draw from the pool now, in borrow asset units: unlent liquidity less the reserve. It does not count what registered vaults could add at borrow time.</ResponseField>
+    <ResponseField name="availableLiquidity" type="string">Unlent liquidity in the pool, in borrow asset units. This is what withdrawals can reach, reserve included. `null` when it could not be read.</ResponseField>
+    <ResponseField name="totalBorrowed" type="string">Amount lent out, in borrow asset units. `null` when it could not be read.</ResponseField>
+    <ResponseField name="bookEmpty" type="boolean">`true` when nothing is lent out. `null` when it could not be read.</ResponseField>
+    <ResponseField name="latestDueAt" type="string">The latest maturity any loan on this market has carried, in unix seconds. It only ever rises. `null` when no loan has carried one.</ResponseField>
+    <ResponseField name="exitHorizon" type="object">
+      When the whole book can have turned liquid, absent new borrows.
+      <Expandable>
+        <ResponseField name="horizon" type="string">Unix seconds: the latest maturity plus its grace. `null` when no loan has carried a term.</ResponseField>
+        <ResponseField name="bounded" type="boolean">`false` when a loan without a term is outstanding, so no horizon exists.</ResponseField>
+        <ResponseField name="applies" type="boolean">`true` when a bounded horizon exists and the book is not empty.</ResponseField>
+        <ResponseField name="basis" type="string">`OPEN_LOANS` when taken from the open loans' own maturities, `HIGH_WATER_MARK` when it falls back to `latestDueAt` plus the longest grace. Present only when `applies` is `true`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="disclosure" type="string">The exit position in one sentence, fit to show a liquidity provider. It never promises an instant exit.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Read the Disclosure
+
+`disclosure` takes one of three forms, and each carries a different promise.
+
+| Situation | What `disclosure` says |
+|---|---|
+| A loan without a term is outstanding | No bounded exit horizon exists, and withdrawals depend on borrower repayment |
+| Nothing is lent out | Withdrawals are limited only by liquidity already in the pool |
+| Every open loan carries a term | Absent new borrows, the whole book can have turned liquid by `horizon`, so withdrawals may take up to that date |
+
+The horizon holds only absent new borrows. A new loan with a later maturity pushes it out, and a new loan without a term removes it.
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/exit-liquidity" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/exit-liquidity`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+console.log(data.disclosure);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "reserveRatioBps": 500,
+    "borrowableLiquidity": "712500.000000",
+    "availableLiquidity": "762500.000000",
+    "totalBorrowed": "237500.000000",
+    "bookEmpty": false,
+    "latestDueAt": "1789516800",
+    "exitHorizon": {
+      "horizon": "1789776000",
+      "bounded": true,
+      "applies": true,
+      "basis": "OPEN_LOANS"
+    },
+    "disclosure": "Every open loan carries a term: absent new borrows, the whole book can have turned liquid by 1789776000 (unix seconds). The honest LP-facing words are \"withdrawals may take up to that date\", never \"instant\"."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The `marketId` path segment is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `INTERNAL_ERROR` | `500` | The reserve ratio, the borrowable figure or the exit horizon could not be read. Retry shortly |

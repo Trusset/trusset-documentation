@@ -1,6 +1,6 @@
 ---
 title: 'Handle Liquidation Timeout'
-api: 'POST /lending-external-securities/api/liquidations/handle-timeout/{liquidationId}'
+api: 'POST /lending-external-securities-v2/api/liquidations/handle-timeout/{liquidationId}'
 description: 'Write off a liquidation that could not be settled within 7 days'
 ---
 
@@ -9,8 +9,10 @@ Writes off a liquidation the operator was unable to settle. The market clears th
 This is a loss-recognition step, not a recovery step. Use it when collateral proved unsellable within the window, or when a sale realised nothing.
 
 <Warning>
-  Write-off does not touch the liquidation router. Whatever collateral the router still holds stays there, and the backend will refuse further action on the record because `WRITTEN_OFF` is terminal. Dispose of or return the collateral before calling this, otherwise it is stranded.
+  Write-off does not touch the liquidation router. The router's record stays open and whatever collateral it still holds stays there. This API then refuses every further action on the record, because `WRITTEN_OFF` is terminal here. Withdraw it first with [Withdraw Collateral for Sale](/endpoints/lending/withdraw-collateral-for-sale). Otherwise it is stranded as far as this API is concerned.
 </Warning>
+
+On-chain the router's record remains settleable by its operator, so late proceeds can still reach the market directly. The market applies them to the pool's loss first and then to what the insurance fund advanced.
 
 ## Path Parameters
 
@@ -21,30 +23,33 @@ This is a loss-recognition step, not a recovery step. Use it when collateral pro
 ## Body Parameters
 
 <ParamField body="marketId" type="string">
-  Names the market whose liquidation you mean. Every market runs its own liquidation router and IDs restart at `1` on each of them, so the same `liquidationId` can exist on several markets in one instance. Supply this when it does, otherwise the call is refused with `AMBIGUOUS_LIQUIDATION_ID` and the response lists the candidates.
+  Names the market whose liquidation you mean. Every market runs its own liquidation router and IDs restart at `1` on each of them, so the same `liquidationId` can exist on several markets in one instance. Supply this when it does, otherwise the call is refused with `AMBIGUOUS_LIQUIDATION_ID` and the response lists the candidates. Also accepted as a query parameter.
 </ParamField>
 
 <ParamField body="txHash" type="string">
-  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata. A value that is not a `0x`-prefixed 64-character hex string is ignored.
 </ParamField>
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="liquidationId" type="string">Router liquidation ID, echoed back.</ResponseField>
-    <ResponseField name="marketLiquidationId" type="string">Market-local ID the contract call used. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="liquidationId" type="string">Router liquidation ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="marketLiquidationId" type="string">Market-local ID the contract call uses.</ResponseField>
     <ResponseField name="success" type="boolean">Nested inside `data` on the calldata response.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the market contract. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="functionName" type="string">`handleLiquidationTimeout`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="reserve" type="object">What the write-off asked the insurance fund for: `requested`, `covered` and `uncovered`. `null` when the fund was not asked. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 ## The 7 Day Window
 
-The clock starts when the router receives the collateral, which is `onChainData.timestamp` on [Get Pending Liquidations](/endpoints/lending/get-pending-liquidations). Calling before the window has elapsed is refused with `LIQUIDATION_NOT_TIMED_OUT`, and the error carries `eligibleAt` so the retry time is exact.
+The clock starts at the seizure, when the market opened its pending liquidation record. For a liquidation seized straight to the router, that is when the router received the collateral: `onChainData.timestamp` on [Get Pending Liquidations](/endpoints/lending/get-pending-liquidations). For the remainder of an expired auction the clock started earlier, at the seizure into the auction.
+
+The write-off is possible only once the window has fully elapsed. Calling before then is refused with `LIQUIDATION_NOT_TIMED_OUT`, and the error carries `eligibleAt`, the moment after which a retry succeeds.
 
 ## What the Write-Off Does
 
@@ -53,46 +58,76 @@ The clock starts when the router receives the collateral, which is `onChainData.
     The market marks its pending liquidation settled so the debt stops counting against `pendingLiquidationDebt`.
   </Step>
   <Step title="Draw on the insurance fund">
-    The outstanding debt is presented to the market's insurance fund, which covers as much as its balance allows.
+    The market asks its insurance fund for the record's whole claim. The fund covers as much as its balance allows, and nothing when it is empty or no longer authorizes the market. What it pays is booked against the record, so later recoveries repay it.
   </Step>
   <Step title="Reconcile the pool">
     Any shortfall between the covered amount and the principal is deducted from pool liquidity. Liquidity providers absorb what the insurance fund could not.
   </Step>
+  <Step title="Apply held auction cash">
+    Cash the auction venue forwarded for the record, which the market was still holding, counts as late proceeds on the written-off record.
+  </Step>
 </Steps>
 
 <Warning>
-  This call requires the signing wallet to hold `DEFAULT_ADMIN_ROLE` on the market contract, which is a higher privilege than the `LIQUIDATOR_ROLE` and router `OPERATOR_ROLE` the other liquidation endpoints need. Unlike those endpoints, a missing role is not detected in advance and carries no remediation calldata: it reverts on-chain and surfaces as `TIMEOUT_TX_REVERTED`. Confirm the wallet holds market admin before relying on this path.
+  This call requires the signing wallet to hold `DEFAULT_ADMIN_ROLE` on the market contract, which is a higher privilege than the `LIQUIDATOR_ROLE` and router `OPERATOR_ROLE` the other liquidation endpoints need. The role is checked in advance against your instance's primary verified wallet. A missing role is refused with `MARKET_ADMIN_ROLE_MISSING`, which carries no grant calldata.
 </Warning>
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidations/handle-timeout/14" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidations/handle-timeout/14" \
   -H "X-API-Key: trusset_your_key_here" \
-  -H "Content-Type: application/json"
+  -H "Content-Type: application/json" \
+  -d '{"marketId": "clx_secmarket_001"}'
 ```
 ```typescript TypeScript
-const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/liquidations/handle-timeout/${liquidationId}`,
-  {
-    method: 'POST',
-    headers: {
-      'X-API-Key': 'trusset_your_key_here',
-      'Content-Type': 'application/json'
-    }
-  }
-);
-const { success, data, error } = await res.json();
+const url = `https://api.trusset.org/lending-external-securities-v2/api/liquidations/handle-timeout/${liquidationId}`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+
+const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ marketId }) });
+const { data, error } = await res.json();
+if (error?.code === 'LIQUIDATION_NOT_TIMED_OUT') {
+  console.log(`Retry after ${error.eligibleAt}`);
+} else if (data) {
+  const tx = await wallet.sendTransaction(data.transaction);
+  await tx.wait();
+  await fetch(url, { method: 'POST', headers, body: JSON.stringify({ marketId, txHash: tx.hash }) });
+}
 ```
 </RequestExample>
 
 <ResponseExample>
-```json Response
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "marketLiquidationId": "14",
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "handleLiquidationTimeout"
+  }
+}
+```
+```json Confirmed Response
 {
   "success": true,
   "data": {
     "liquidationId": "14",
-    "marketLiquidationId": "2",
-    "txHash": "0xabc...def"
+    "marketLiquidationId": "14",
+    "txHash": "0x6e3a9b27d140c85f2e71b9d04a3c68f5e2b17d90c4a86e3f51b02d7c9e48a1f5",
+    "reserve": {
+      "requested": "21159.2",
+      "covered": "15000.0",
+      "uncovered": "6159.2"
+    }
   }
 }
 ```
@@ -101,8 +136,9 @@ const { success, data, error } = await res.json();
   "success": false,
   "error": {
     "code": "LIQUIDATION_NOT_TIMED_OUT",
-    "message": "Liquidation 14 cannot be written off yet.",
-    "eligibleAt": "2025-06-22T11:30:00.000Z"
+    "message": "A liquidation can only be written off after the 7-day timeout. Liquidation 14 becomes eligible at 2026-06-21T09:12:00.000Z, in 38 hours. Settle it with the sale proceeds instead, or retry after that time.",
+    "txHash": null,
+    "eligibleAt": "2026-06-21T09:12:00.000Z"
   }
 }
 ```
@@ -121,12 +157,16 @@ const { success, data, error } = await res.json();
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `MISSING_ID` | `400` | No liquidation ID in the path |
 | `AMBIGUOUS_LIQUIDATION_ID` | `400` | This ID exists on more than one market in your instance. The error carries `candidates`; resend with `marketId` |
-| `ALREADY_SETTLED` | `400` | The liquidation is already settled or written off |
+| `ALREADY_SETTLED` | `400` | The liquidation is already settled or written off, here or on the market |
+| `LIQUIDATION_NOT_FOUND` | `400` | The market holds no pending liquidation under the resolved market-local ID |
 | `LIQUIDATION_NOT_TIMED_OUT` | `400` | The window has not elapsed. The error carries `eligibleAt` |
+| `WALLET_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance to resolve the signer against |
+| `MARKET_ADMIN_ROLE_MISSING` | `400` | Your instance's primary verified wallet lacks `DEFAULT_ADMIN_ROLE` on the market |
 | `TX_NOT_VERIFIED` | `400` | The confirmed transaction targets a different liquidation |
-| `TIMEOUT_TX_REVERTED` | `400` | The write-off reverted. `error.txHash` carries the hash when one exists |
-| `TIMEOUT_FAILED` | `400` | The write-off could not be prepared and no more specific code applied |
+| `TIMEOUT_TX_REVERTED` | `400` | The write-off could not be prepared or recorded, for example because a chain read failed. `error.txHash` carries the hash when one exists |
 | `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
 | `MARKET_NOT_FOUND` | `404` | `marketId` was supplied but names no market on your instance |
+| `ROLE_UNVERIFIABLE` | `503` | The role check could not read the market. Nothing was built. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction). A write-off that reverted on-chain is refused there with `TX_REVERTED`.

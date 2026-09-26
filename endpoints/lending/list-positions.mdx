@@ -1,16 +1,18 @@
 ---
 title: 'List Positions'
-api: 'GET /lending-external-securities/api/positions/{marketId}/positions'
+api: 'GET /lending-external-securities-v2/api/positions/{marketId}/positions'
 description: 'List every borrowing position recorded for a market'
 ---
 
-Returns all positions for a market, newest first, each with its five most recent transactions.
+Returns every position recorded for a market, newest first, each with its five most recent transactions. There is no pagination: the whole book comes back in one response.
 
-The endpoint reconciles against the chain before reading. Loan state is pulled from the market contract and written back to the position records, so `healthFactor`, `collateralAmount`, `borrowedAmount`, and `status` reflect current chain state rather than the last value the backend happened to write. If the RPC is unavailable the reconciliation is skipped and stored values are returned unchanged.
+The endpoint reconciles against the chain in two steps before it answers. First, an event sweep records loans opened by any wallet and writes terminal statuses from the `LoanClosed` and `LoanLiquidated` events and auction starts it finds. The sweep runs at most once a minute per market.
 
-Live state is fetched for the first 50 open positions only. Beyond that the stored values are served, so a market with more than 50 open loans returns a mix.
+Second, a live read of the open positions pulls collateral, principal, interest, health factor, due date and stamped rate from the market contract and writes them back to the records. If the chain is unreachable, both steps are skipped and stored values are returned unchanged.
 
-`status` is never inferred from that read. A terminal label is written only by the confirm calls and the event sweep that can attest to it. A loan the chain reports as closed therefore keeps its recorded status until its evidence arrives.
+Live state is fetched for the first 50 open positions only. Beyond that the stored values are served, so a market with more than 50 open loans returns a mix. The `compliance` block is attached to those open positions for at most 25 distinct borrowers.
+
+`status` is never inferred from the live read. A terminal label is written only by the confirm calls and the event sweep that can attest to it. A loan the chain reports as closed therefore keeps its recorded status until its evidence arrives.
 
 ## Path Parameters
 
@@ -23,54 +25,54 @@ Live state is fetched for the first 50 open positions only. Beyond that the stor
     <ResponseField name="positions" type="array">
       Position records ordered by `openedAt` descending.
       <Expandable>
-        <ResponseField name="id" type="string">Position ID.</ResponseField>
+        <ResponseField name="id" type="string">Position ID. Use it with [Get Position](/endpoints/lending/get-position) and [Get Position Statement](/endpoints/lending/get-position-statement).</ResponseField>
         <ResponseField name="marketId" type="string">Market ID.</ResponseField>
         <ResponseField name="onChainLoanId" type="string">Numeric loan ID on the market contract. Null when the position was recorded without a linked chain loan.</ResponseField>
         <ResponseField name="userAddress" type="string">Borrower address, lowercased.</ResponseField>
+        <ResponseField name="customerId" type="string">The [customer](/endpoints/customers/get) this loan is attributed to, set when [Open Loan](/endpoints/lending/open-loan) was confirmed with a `clientReference`. Null when the loan is unattributed.</ResponseField>
+        <ResponseField name="customerAttributedAt" type="string">ISO 8601 timestamp the attribution was made or last moved. Null when the loan is unattributed.</ResponseField>
         <ResponseField name="collateralAmount" type="string">Collateral posted, in collateral token units.</ResponseField>
         <ResponseField name="borrowedAmount" type="string">Outstanding principal, in borrow asset units.</ResponseField>
         <ResponseField name="interestAccrued" type="string">Interest accrued and unpaid, in borrow asset units.</ResponseField>
-        <ResponseField name="healthFactor" type="string">Health factor as a decimal string. At or above `1.0` the loan is healthy. Below `1.0` it is liquidatable.</ResponseField>
-        <ResponseField name="priceAtBorrow" type="string">Collateral price recorded when the loan was opened.</ResponseField>
+        <ResponseField name="healthFactor" type="string">Health factor as a decimal string. At or above `1.0` the loan is healthy, below `1.0` it is liquidatable on health. Null once the status is not `ACTIVE`, and for an open loan with no debt.</ResponseField>
+        <ResponseField name="priceAtBorrow" type="string">Collateral price recorded when the loan was opened, in borrow asset units.</ResponseField>
+        <ResponseField name="dueAt" type="string">Unix seconds this loan falls due, as last read from the chain. Null on an open-ended loan, and until a live read has recorded it.</ResponseField>
+        <ResponseField name="fixedRate" type="string">The stamped rate in basis points as stored on the record. Null until a live read has recorded it.</ResponseField>
         <ResponseField name="status" type="string">One of `ACTIVE`, `REPAID`, `LIQUIDATED`.</ResponseField>
-        <ResponseField name="liquidated" type="boolean">Whether the position was liquidated.</ResponseField>
-        <ResponseField name="liquidatedAt" type="string">ISO 8601 timestamp of liquidation, or null.</ResponseField>
+        <ResponseField name="liquidated" type="boolean">Whether any collateral was seized from this position. A partial liquidation sets it while `status` stays `ACTIVE`.</ResponseField>
+        <ResponseField name="liquidatedAt" type="string">ISO 8601 timestamp of the first seizure, or null.</ResponseField>
         <ResponseField name="closedAt" type="string">ISO 8601 timestamp of closure, or null.</ResponseField>
-        <ResponseField name="openedAt" type="string">ISO 8601 timestamp the position was recorded.</ResponseField>
+        <ResponseField name="openedAt" type="string">ISO 8601 timestamp the loan opened. It is the block time of the opening transaction where known, otherwise the time the record was written.</ResponseField>
         <ResponseField name="lastUpdated" type="string">ISO 8601 timestamp of the last write.</ResponseField>
-        <ResponseField name="transactions" type="array">The five most recent transactions on this position, newest first.</ResponseField>
-        <ResponseField name="dueAt" type="string">Unix seconds this loan falls due. Absent on a market that makes open-ended loans.</ResponseField>
-        <ResponseField name="fixedRateBps" type="integer">The rate stamped onto this loan when it opened, in basis points. Absent when the market's model stamps nothing. It does not move with the pool's rate.</ResponseField>
+        <ResponseField name="transactions" type="array">The five most recent transactions on this position, newest first. Each carries `id`, `marketId`, `positionId`, `txType`, `userAddress`, `amount`, `txHash` and `timestamp`.</ResponseField>
         <ResponseField name="term" type="object">
-          The loan's term state, read live from the contract. Absent on a loan with no due date.
-          <Expandable>
-            <ResponseField name="dueAt" type="string">Unix seconds the loan falls due.</ResponseField>
-            <ResponseField name="effectiveDueAt" type="string">The due date actually applied, which is the earlier of the loan's own date and any terminal date on the market.</ResponseField>
-            <ResponseField name="graceEnd" type="string">Unix seconds the grace period ends. The term penalty applies past it.</ResponseField>
-            <ResponseField name="enforceable" type="boolean">`true` once the loan can be liquidated on term alone, whatever its health factor. This is the second liquidation trigger and it is not reported by [Get Liquidatable Loans](/endpoints/lending/get-liquidatable-loans).</ResponseField>
-          </Expandable>
+          The loan's term state, with the same fields as `term` on [Get Loan](/endpoints/lending/get-loan): `dueAt`, `effectiveDueAt`, `graceEnd`, `enforceable`, `termGracePeriod`, `termPenaltyBps`, `stamped` and `termSource`. Present only when this response read the loan from the chain, which covers at most the first 50 open and the first 50 closed positions. Absent or null on an open-ended loan. `enforceable` is the term trigger: `true` once the grace period after the effective due date has run out, whatever the health factor.
         </ResponseField>
+        <ResponseField name="fixedRateBps" type="integer">The rate stamped on this loan when it opened, in basis points. `0` when the market's rate model was not in `FIXED` mode at signing. Present under the same condition as `term`.</ResponseField>
+        <ResponseField name="compliance" type="object">What the collateral token would currently permit for this borrower, in the shape described on [Get Loan](/endpoints/lending/get-loan#compliance). Open positions only, within the limits above.</ResponseField>
       </Expandable>
     </ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  Positions are recorded when a loan is opened through this API on confirm, and are backfilled from chain events during reconciliation. A loan opened by a wallet signing calldata directly is picked up on the next reconciliation pass rather than at broadcast time.
+  Positions are recorded when a loan is opened through this API on confirm, and are backfilled from chain events by the sweep. A loan opened by a wallet signing calldata directly is picked up by the next sweep, rather than at broadcast time.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/positions" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/positions" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/positions`,
+  `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/positions`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
-const atRisk = data.positions.filter(p => parseFloat(p.healthFactor) < 1.1);
+const atRisk = data.positions.filter(
+  p => (p.healthFactor !== null && parseFloat(p.healthFactor) < 1.1) || p.term?.enforceable === true
+);
 ```
 </RequestExample>
 
@@ -84,30 +86,80 @@ const atRisk = data.positions.filter(p => parseFloat(p.healthFactor) < 1.1);
         "id": "secpos_014",
         "marketId": "clx_secmarket_001",
         "onChainLoanId": "5",
-        "userAddress": "0xabc...def",
-        "collateralAmount": "1000.000000000000000000",
-        "borrowedAmount": "50000.000000",
-        "interestAccrued": "128.750000",
-        "healthFactor": "1.842000000000000000",
-        "priceAtBorrow": "104.820000",
+        "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+        "customerId": null,
+        "customerAttributedAt": null,
+        "collateralAmount": "1000.0",
+        "borrowedAmount": "50000.0",
+        "interestAccrued": "961.643835",
+        "healthFactor": "1.842",
+        "priceAtBorrow": "104.82",
+        "dueAt": "1796630400",
+        "fixedRate": "650",
         "status": "ACTIVE",
         "liquidated": false,
         "liquidatedAt": null,
         "closedAt": null,
-        "openedAt": "2025-06-10T08:00:00.000Z",
-        "lastUpdated": "2025-06-15T11:58:00.000Z",
+        "openedAt": "2026-06-10T08:00:00.000Z",
+        "lastUpdated": "2026-09-26T11:58:00.000Z",
         "transactions": [
           {
             "id": "sectx_002",
+            "marketId": "clx_secmarket_001",
+            "positionId": "secpos_014",
             "txType": "BORROW",
-            "amount": "50000",
-            "txHash": "0x123...789",
-            "timestamp": "2025-06-10T08:00:00.000Z"
+            "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+            "amount": "50000.0",
+            "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+            "timestamp": "2026-06-10T08:00:00.000Z"
+          },
+          {
+            "id": "sectx_001",
+            "marketId": "clx_secmarket_001",
+            "positionId": "secpos_014",
+            "txType": "DEPOSIT",
+            "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+            "amount": "1000.0",
+            "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+            "timestamp": "2026-06-10T08:00:00.000Z"
           }
-        ]
+        ],
+        "term": {
+          "dueAt": "1796630400",
+          "effectiveDueAt": "1796630400",
+          "graceEnd": "1796889600",
+          "enforceable": false,
+          "termGracePeriod": "259200",
+          "termPenaltyBps": 300,
+          "stamped": true,
+          "termSource": "STAMPED"
+        },
+        "fixedRateBps": 650,
+        "compliance": {
+          "mode": "FREEZE",
+          "holder": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+          "restricted": false,
+          "code": null,
+          "reason": null,
+          "collateralReturnable": true,
+          "willEscrowOnRelease": false,
+          "escrowedCollateral": null,
+          "escrowedCollateralRaw": null,
+          "holderVerified": true,
+          "holderAddressFrozen": false,
+          "tokenPaused": false,
+          "checkedAt": "2026-09-26T11:58:12.000Z"
+        }
       }
     ]
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

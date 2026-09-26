@@ -1,0 +1,195 @@
+---
+title: 'Register Vault'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/vault-liquidity/{action}'
+description: 'Admit a vault as a just-in-time liquidity source, or remove it'
+---
+
+Builds the transaction that adds a vault to the market's draw list (`registerVault`) or removes it (`deregisterVault`). The market admin, the wallet holding `DEFAULT_ADMIN_ROLE`, signs it.
+
+Registering is the market's admission of the vault as a liquidity provider. A current market takes deposits directly from only two callers, the operator wallet and its registered vaults. A registered vault is therefore how outside money reaches the pool: investors deposit into the vault, and the vault's own gate examines them.
+
+A registered vault funds nothing on its own. The switch must be on through [Set Vault Liquidity](/endpoints/lending/set-vault-liquidity), and the vault operator must set a draw cap for this market in the Issuer Portal. [Get Vault Liquidity](/endpoints/lending/get-vault-liquidity) shows every leg.
+
+Deregistering stops further draws and withdraws the vault's admission as a provider. The position the vault already holds is untouched. It is ordinary pool liquidity and leaves the way any provider's does.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+<ParamField path="action" type="string" required>
+  `register` to admit the vault, `deregister` to remove it. No other value is accepted.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="vaultAddress" type="string" required>
+  The vault contract, `0x` followed by 40 hex characters. A mixed-case address must pass its EIP-55 checksum, and an all-lowercase one always does. The zero address is refused.
+</ParamField>
+
+## What is checked before the transaction is built
+
+Registration runs these checks in order. Deregistration runs none beyond the address format.
+
+1. The address must be a vault created by the v2 vault factory, otherwise the call is refused with `NOT_A_VAULT`. When the factory cannot be read, this check is skipped.
+2. The market's implementation must be readable, otherwise the call is refused with `MARKET_STATE_UNAVAILABLE`.
+3. On a market still running the earlier single-register implementation, the vault must be verified on the market's identity registry, otherwise the call is refused with `IDENTITY_NOT_VERIFIED`. On the current implementation, registration consults no register.
+
+Neither call checks the current draw list. Registering a vault already on it, or deregistering one that is not, reverts on-chain. Registration does not check who operates the vault or which asset it holds either. A vault run by someone other than this market's lender of record, or settling in another asset, can be registered. It stays inert, because its operator can never set a cap for this market.
+
+## Draw order
+
+The market draws on its registered vaults in the order they were registered. Deregistering a vault moves the most recently registered vault into the freed position, and a vault registered again joins at the end.
+
+## Check the result
+
+This API has no confirm call for registration. A `txHash` in the body is ignored and the call answers with calldata again. Once the transaction is mined, look for the vault in `registeredVaults` on [Get Vault Liquidity](/endpoints/lending/get-vault-liquidity).
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction targeting the market contract, carrying `to` and `data` only.</ResponseField>
+    <ResponseField name="to" type="string">The market contract, repeated at the top level.</ResponseField>
+    <ResponseField name="data" type="string">The encoded call, repeated at the top level.</ResponseField>
+    <ResponseField name="value" type="string">`"0"`. On this call it sits on `data` itself, not inside `transaction`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain your instance resolves to. On this call it sits on `data` itself, not inside `transaction`, so pass it to the wallet explicitly.</ResponseField>
+    <ResponseField name="functionName" type="string">`registerVault` or `deregisterVault`.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`DEFAULT_ADMIN_ROLE`, the market role the signing wallet must hold.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction does, in words.</ResponseField>
+    <ResponseField name="warnings" type="array">
+      Present only on `register`, and only when there is something to say. A warning never blocks the registration.
+      <Expandable>
+        <ResponseField name="code" type="string">`VAULT_PREDATES_DISTRIBUTOR`: the vault runs an implementation from before distributor attribution. The market books the distributor share of the vault's interest for the vault, and the vault cannot collect it until its operator upgrades it. Nothing is lost meanwhile.</ResponseField>
+        <ResponseField name="vault" type="string">The vault the warning is about, lowercased.</ResponseField>
+        <ResponseField name="message" type="string">The position in full. Show it to the market admin before signing.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="heldByThisInstance" type="boolean">Whether a wallet registered on your instance holds `DEFAULT_ADMIN_ROLE` on this market. `null` when the roles could not be read.</ResponseField>
+    <ResponseField name="signerAddress" type="string">The instance wallet that holds the role, when one does. `null` otherwise.</ResponseField>
+    <ResponseField name="requiredSigner" type="string">Always `null` on this call. It names a wallet only on setters signed by the oracle or interest model owner.</ResponseField>
+    <ResponseField name="note" type="string">Set when no instance wallet holds the role, or when that could not be read. `null` otherwise.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  A market still seeking a lender of record has no admin, so this call is refused with `MARKET_PENDING_CURATOR` before any check runs. When `heldByThisInstance` is `false`, a transaction signed by an instance wallet reverts on-chain. Hand the calldata to the wallet the lender of record placed `DEFAULT_ADMIN_ROLE` with.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/vault-liquidity/register" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"vaultAddress": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13"}'
+```
+```typescript TypeScript
+const base = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(`${base}/vault-liquidity/register`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ vaultAddress })
+});
+const { data } = await res.json();
+
+for (const warning of data.warnings ?? []) {
+  console.warn(warning.message);
+}
+
+const tx = await adminWallet.sendTransaction({
+  ...data.transaction,
+  value: data.value,
+  chainId: data.chainId
+});
+await tx.wait();
+
+const check = await fetch(`${base}/vault-liquidity`, { headers });
+const { data: status } = await check.json();
+const registered = status.registeredVaults.some(
+  (v: { vaultAddress: string }) => v.vaultAddress === vaultAddress.toLowerCase()
+);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x..."
+    },
+    "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "data": "0x...",
+    "functionName": "registerVault",
+    "requiredRole": "DEFAULT_ADMIN_ROLE",
+    "description": "Register the vault for just-in-time draws - the vault operator must also set a per-market draw cap before anything can be drawn; registering is the admin's admission of the vault as a liquidity provider, and the vault's own register examines its investors (requires DEFAULT_ADMIN_ROLE)",
+    "requiredSigner": null,
+    "heldByThisInstance": true,
+    "signerAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "note": null,
+    "chainId": 11155111,
+    "value": "0"
+  }
+}
+```
+```json Calldata Response (Deregister)
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x..."
+    },
+    "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "data": "0x...",
+    "functionName": "deregisterVault",
+    "requiredRole": "DEFAULT_ADMIN_ROLE",
+    "description": "Deregister the vault: no further draws; the LP position it already holds is untouched (requires DEFAULT_ADMIN_ROLE)",
+    "requiredSigner": null,
+    "heldByThisInstance": true,
+    "signerAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "note": null,
+    "chainId": 11155111,
+    "value": "0"
+  }
+}
+```
+```json Error - Not A Vault
+{
+  "success": false,
+  "error": {
+    "code": "NOT_A_VAULT",
+    "message": "The address is not a vault from the v2 vault factory."
+  }
+}
+```
+```json Error - Pending Lender of Record
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_PENDING_CURATOR",
+    "message": "This market has no lender of record yet, so changing its registered vaults is not possible. A nominated candidate must take the role before the market has an admin that can sign this."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `vaultAddress` is missing or not `0x` followed by 40 hex characters. `error.details` names the field |
+| `INVALID_VAULT` | `400` | `vaultAddress` is the zero address, or a mixed-case address that fails its EIP-55 checksum |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `NOT_A_VAULT` | `400` | `register` only. The address is not a vault from the v2 vault factory |
+| `IDENTITY_NOT_VERIFIED` | `400` | `register` only, on a market running the earlier single-register implementation. The vault is not verified on the market's identity registry |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so no admin exists to sign. See [Lender of record](/endpoints/lending/introduction#lender-of-record) |
+| `MARKET_STATE_UNAVAILABLE` | `503` | `register` only. The market's implementation could not be read. Retry shortly |
+| `VAULTS_NOT_CONFIGURED` | `503` | `register` only. Operator vaults are not configured on your instance's network |

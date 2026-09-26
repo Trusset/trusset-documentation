@@ -1,16 +1,26 @@
 ---
 title: 'Bid on Auction'
-api: 'POST /lending-external-securities/api/liquidations/{marketId}/bid-on-auction'
-description: 'Buy collateral from an active Dutch auction at the current price'
+api: 'POST /lending-external-securities-v2/api/liquidations/{marketId}/bid-on-auction'
+description: 'Buy collateral from a running Dutch auction at the current price'
 ---
 
-Purchases collateral from an open auction. The bidder pays in the market's borrow asset and receives the security tokens. Cost is the collateral quantity multiplied by the auction's live declining price.
+Purchases collateral from a running auction on the market's auction venue. The bidder pays in the market's borrow asset and receives the security tokens. The cost is the collateral quantity multiplied by the auction's live declining price, rounded up to the next base unit of the borrow asset.
 
-Bids can be partial. Buy any quantity up to `collateralRemaining`, and the auction stays open for the rest.
+Bids can be partial. Buy any quantity up to `collateralRemaining`, and the auction stays open for the rest until its end time.
 
 <Warning>
-  The buyer receives a security token, so they must satisfy its compliance rules. A bid from an unverified address reverts on transfer. Confirm the bidder is a verified holder on the token's identity registry before submitting.
+  The buyer receives a security token, so the token must admit them. Delivery is an ordinary compliance-gated transfer: if the token refuses the bidding wallet, the whole bid reverts and no money moves. The API does not check the bidder, so confirm the wallet is a verified holder on the token's identity registry before submitting.
 </Warning>
+
+## When a Bid Reverts
+
+The API prices the bid and refuses auctions that are closed or past their end time. It checks nothing about the wallet or the market beyond that, and the venue reverts the bid in each of these cases:
+
+- The market is paused.
+- The market's oracle price is stale. The auction's schedule was fixed when it opened, but the venue still demands a fresh price. Push one through [Sync Oracle Price](/endpoints/lending/sync-oracle) first.
+- The bidding wallet is the borrower whose collateral is on sale. A borrower cannot buy back their own seized collateral.
+- The auction reached its end time between quoting and mining.
+- The wallet lacks the payment, or the allowance from the first step.
 
 ## Path Parameters
 
@@ -19,62 +29,106 @@ Bids can be partial. Buy any quantity up to `collateralRemaining`, and the aucti
 ## Body Parameters
 
 <ParamField body="auctionId" type="integer" required>
-  Auction ID. Must be a positive integer sent as a JSON number.
+  Auction ID on the market's venue. Must be a positive integer sent as a JSON number. Required on the confirm call too.
 </ParamField>
 
 <ParamField body="collateralAmount" type="string" required>
-  Collateral to purchase, as a decimal string in collateral token units. Must be greater than zero.
+  Collateral to purchase, as a decimal string in collateral token units, with no more decimals than the collateral token has. Must be greater than zero. Required on the confirm call too, although the confirmation reads the purchased amount from the receipt.
 </ParamField>
 
 <ParamField body="txHash" type="string">
-  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+  Hash of the `bidOnAuction` transaction you broadcast. Send it with the same `auctionId` to confirm the bid and record the result. Omit it to receive the calldata.
 </ParamField>
+
+## Sign the Two Steps
+
+Without `txHash` the response is `SIGN_TRANSACTIONS` with two steps. Sign both from the bidding wallet, in order, because the venue pulls the payment from the wallet that calls it.
+
+<Steps>
+  <Step title="Approve the venue">
+    `approve` on the borrow asset, naming the auction venue as spender, for `estimatedCost`. The venue collects the payment, not the market.
+  </Step>
+  <Step title="Bid">
+    `bidOnAuction` on the venue, for the clamped `collateralAmount`. Confirm with this step's hash, which `confirmStepIndex` names.
+  </Step>
+</Steps>
+
+## What the Closing Bid Settles
+
+The venue forwards each payment to the market straight away, and the market holds it against the liquidation record until the auction closes. The bid that buys the last unit closes the auction. In that same transaction the market settles the record over everything the auction raised.
+
+The market keeps at most what the whole position owed at seizure, plus the liquidation penalty (the term penalty on a term realization). Anything above that goes to the borrower, or is escrowed on the market when the settlement token (stablecoin) refuses the transfer. If the proceeds fall short of the record's claim, the market draws the insurance fund for the gap. Only principal the fund could not cover is booked against the liquidity pool.
+
+Only the confirmation of that closing bid carries `auctionSettled: true` with the settlement figures. Collateral still unsold at the end time is not settled by any bid; it moves to the liquidation router through [Settle Expired Auction](/endpoints/lending/settle-expired-auction).
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` when `txHash` is omitted.</ResponseField>
-    <ResponseField name="auctionId" type="integer">Auction the payload bids on.</ResponseField>
-    <ResponseField name="steps" type="array">Ordered transactions. The first approves the market to pull the borrow asset for the priced cost of this bid, the second calls `bidOnAuction`.</ResponseField>
+    <ResponseField name="auctionId" type="integer">Auction the bid targets.</ResponseField>
+    <ResponseField name="steps" type="array">The two transactions above, each `{ action, transaction: { to, data, value, chainId }, functionName }`. The `approve` step also carries a `description`.</ResponseField>
+    <ResponseField name="venueAddress" type="string">The market's auction venue, lowercased. The approval's spender and the bid's target.</ResponseField>
     <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm with. Always `1`.</ResponseField>
     <ResponseField name="confirmWith" type="string">`bidOnAuction`.</ResponseField>
-    <ResponseField name="collateralAmount" type="string">Collateral the bid will actually buy, clamped to what the auction has left.</ResponseField>
-    <ResponseField name="pricePerUnit" type="string">The auction's live price per collateral unit, in borrow asset units.</ResponseField>
-    <ResponseField name="estimatedCost" type="string">`collateralAmount` priced at `pricePerUnit`. The approval step is sized to this.</ResponseField>
+    <ResponseField name="collateralAmount" type="string">Collateral the bid will buy, clamped to what the auction has left.</ResponseField>
+    <ResponseField name="pricePerUnit" type="string">The auction's price per whole collateral unit at quote time, in borrow asset units.</ResponseField>
+    <ResponseField name="estimatedCost" type="string">`collateralAmount` priced at `pricePerUnit`, rounded up. The approval is sized to this.</ResponseField>
     <ResponseField name="borrowAssetSymbol" type="string">Symbol of the asset the bid is paid in.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="collateralPurchased" type="string">Collateral actually bought, read from the receipt. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="amountPaid" type="string">Amount actually paid, in borrow asset units, at the price at execution time. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="bidder" type="string">Address that signed the bid. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="collateralPurchased" type="string">Collateral actually bought, read from the venue's bid event, or from the transaction's own amount when the event cannot be read. Returned when confirming.</ResponseField>
+    <ResponseField name="amountPaid" type="string">Amount actually paid, in borrow asset units, at the price in the block the bid mined in. Returned when confirming, `null` if the bid event could not be read.</ResponseField>
+    <ResponseField name="bidder" type="string">Wallet that sent the bid, lowercased. When the bid was verified from the receipt log, the address the venue recorded as bidder. Returned when confirming.</ResponseField>
+    <ResponseField name="auctionSettled" type="boolean">`true` when this bid bought the last unit, closed the auction and settled the liquidation record. Returned when confirming.</ResponseField>
+    <ResponseField name="totalProceeds" type="string">Everything the auction raised, settled on the market's record in this transaction. `null` unless `auctionSettled`.</ResponseField>
+    <ResponseField name="debtCovered" type="string">The debt the auction was opened against, as the venue's settlement event reports it. It is not reduced by a shortfall; read `shortfall` and `reserve` for that. `null` unless `auctionSettled`.</ResponseField>
+    <ResponseField name="marketLiquidationId" type="string">The market's liquidation record the auction settled into. `null` unless `auctionSettled`.</ResponseField>
+    <ResponseField name="shortfall" type="string">Principal the liquidity pool absorbed because the proceeds and the insurance fund together fell short. `null` when there was none, and whenever `auctionSettled` is `false`.</ResponseField>
+    <ResponseField name="reserve" type="object">
+      What the market asked the insurance fund for in this transaction, and what it paid. `null` when nothing was asked, and whenever `auctionSettled` is `false`.
+      <Expandable>
+        <ResponseField name="requested" type="string">Amount requested from the fund, in borrow asset units.</ResponseField>
+        <ResponseField name="covered" type="string">Amount the fund paid.</ResponseField>
+        <ResponseField name="uncovered" type="string">`requested` minus `covered`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="surplus" type="array">
+      Present only when the settlement paid or escrowed a surplus for the borrower. Each entry is `{ kind, loanId, borrower, amount }`.
+      <Expandable>
+        <ResponseField name="kind" type="string">`SURPLUS_RETURNED` when the surplus reached the borrower. `SURPLUS_ESCROWED` when the transfer to the borrower was refused and the market holds the amount for the borrower to collect through [Claim Surplus](/endpoints/lending/claim-surplus).</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="verifiedBy" type="string">`receipt-log`, present only when the transaction did not call the venue directly, for example a bid sent through a smart-contract wallet. The API then verified it from the venue's bid event instead.</ResponseField>
+    <ResponseField name="outerTarget" type="string">The contract the transaction actually called. Present with `verifiedBy`.</ResponseField>
+    <ResponseField name="outerSender" type="string">The wallet that sent the transaction. Present with `verifiedBy`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  A bid larger than the collateral left is clamped by the contract to what remains, and the API prices the clamped amount. `collateralAmount` and `estimatedCost` in the response are therefore what the bid will actually cost, which can be less than what you asked for.
+  A bid larger than the collateral left is clamped to what remains, and the API prices the clamped amount. `collateralAmount` and `estimatedCost` in the response are therefore what the bid will cost, which can be less than you asked for.
 </Note>
 
 <Note>
-  The price is read at execution, not at quote time, and it falls continuously. The amount actually paid is therefore at or below `estimatedCost`, never above.
+  The price is read at execution, not at quote time, and it only falls. Another bidder can also take part of the lot first, which shrinks what yours buys. The amount actually paid is therefore at or below `estimatedCost`, never above, and the approval always covers it.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidations/{marketId}/bid-on-auction" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidations/{marketId}/bid-on-auction" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{"auctionId": 3, "collateralAmount": "100"}'
 ```
 ```typescript TypeScript
 const auctionRes = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/liquidations/${marketId}/auctions/3`,
+  `https://api.trusset.org/lending-external-securities-v2/api/liquidations/${marketId}/auctions/3`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data: auction } = await auctionRes.json();
 
-if (Number(auction.currentPrice) <= reservePrice) {
-  await fetch(
-    `https://api.trusset.org/lending-external-securities/api/liquidations/${marketId}/bid-on-auction`,
+if (auction.biddable && Number(auction.currentPrice) <= reservePrice) {
+  const bidRes = await fetch(
+    `https://api.trusset.org/lending-external-securities-v2/api/liquidations/${marketId}/bid-on-auction`,
     {
       method: 'POST',
       headers: {
@@ -87,6 +141,7 @@ if (Number(auction.currentPrice) <= reservePrice) {
       })
     }
   );
+  const { data: bid } = await bidRes.json();
 }
 ```
 </RequestExample>
@@ -108,12 +163,12 @@ if (Number(auction.currentPrice) <= reservePrice) {
           "chainId": 11155111
         },
         "functionName": "approve",
-        "description": "Approve the market to pull USDC"
+        "description": "Approve the auction venue to pull USDC"
       },
       {
         "action": "SIGN_TRANSACTION",
         "transaction": {
-          "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+          "to": "0x5c3e8a91d2f04b7e6a1c9d38f0b2e47a6d15c8e3",
           "data": "0x...",
           "value": "0",
           "chainId": 11155111
@@ -121,11 +176,12 @@ if (Number(auction.currentPrice) <= reservePrice) {
         "functionName": "bidOnAuction"
       }
     ],
+    "venueAddress": "0x5c3e8a91d2f04b7e6a1c9d38f0b2e47a6d15c8e3",
     "confirmStepIndex": 1,
     "confirmWith": "bidOnAuction",
-    "collateralAmount": "100.000000000000000000",
-    "pricePerUnit": "112.180000",
-    "estimatedCost": "11218.000000",
+    "collateralAmount": "100.0",
+    "pricePerUnit": "112.18",
+    "estimatedCost": "11218.0",
     "borrowAssetSymbol": "USDC"
   }
 }
@@ -136,18 +192,50 @@ if (Number(auction.currentPrice) <= reservePrice) {
   "data": {
     "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
     "auctionId": 3,
-    "collateralPurchased": "100.000000000000000000",
-    "amountPaid": "11204.500000",
-    "bidder": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"
+    "venueAddress": "0x5c3e8a91d2f04b7e6a1c9d38f0b2e47a6d15c8e3",
+    "collateralPurchased": "100.0",
+    "amountPaid": "11204.5",
+    "bidder": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "auctionSettled": false,
+    "totalProceeds": null,
+    "debtCovered": null,
+    "marketLiquidationId": null,
+    "shortfall": null,
+    "reserve": null
   }
 }
 ```
-```json Error - Auction Not Active
+```json Confirmed Response - Closing Bid
+{
+  "success": true,
+  "data": {
+    "txHash": "0x4e7a90c2d15b83f6e0a9d4c71b2e58f3a6d09c1e7b45f28a3c6d91e0b7f2a584",
+    "auctionId": 3,
+    "venueAddress": "0x5c3e8a91d2f04b7e6a1c9d38f0b2e47a6d15c8e3",
+    "collateralPurchased": "20.0",
+    "amountPaid": "1901.5",
+    "bidder": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "auctionSettled": true,
+    "totalProceeds": "19875.0",
+    "debtCovered": "21159.2",
+    "marketLiquidationId": "12",
+    "shortfall": null,
+    "reserve": {
+      "requested": "1284.2",
+      "covered": "1284.2",
+      "uncovered": "0.0"
+    }
+  }
+}
+```
+```json Error - Auction Expired
 {
   "success": false,
   "error": {
-    "code": "AUCTION_NOT_ACTIVE",
-    "message": "Auction 3 is not active. It was fully bought, settled after expiry, or never existed. Bidding on it reverts, so no transaction is offered."
+    "code": "AUCTION_EXPIRED",
+    "message": "Auction 3 ended at 2024-06-15T11:00:00.000Z (unix 1718449200); bidOnAuction reverts AuctionNotActive after the end time, so no approval or bid is offered. Settle it through the settle-expired-auction path to route the unsold collateral to the liquidation router.",
+    "endTime": 1718449200,
+    "settleWith": "settle-expired-auction"
   }
 }
 ```
@@ -157,9 +245,15 @@ if (Number(auction.currentPrice) <= reservePrice) {
 
 | Code | HTTP | Cause |
 |---|---|---|
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
-| `VALIDATION_ERROR` | `400` | `auctionId` is not a positive integer, or `collateralAmount` is not a positive decimal string |
+| `VALIDATION_ERROR` | `400` | `auctionId` is not a positive integer, `collateralAmount` is not a positive decimal string or carries more decimals than the collateral token, or `txHash` is malformed |
 | `TX_NOT_VERIFIED` | `400` | The confirmed transaction bids on a different auction |
+| `AUCTION_NOT_FOUND` | `404` | The venue has not created an auction with this ID |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
-| `AUCTION_NOT_ACTIVE` | `409` | The auction was fully bought, settled after expiry, has no collateral left, or never existed |
+| `AUCTION_MODULE_NOT_SET` | `409` | The market has no auction venue wired, so no auction can exist on it |
+| `AUCTION_NOT_ACTIVE` | `409` | The auction was fully bought or settled after expiry, or has no collateral left |
+| `AUCTION_EXPIRED` | `409` | The auction passed its end time. The error carries `endTime` and `settleWith` |
 | `AUCTION_STATE_UNAVAILABLE` | `503` | The auction could not be read on-chain, so the bid could not be priced. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

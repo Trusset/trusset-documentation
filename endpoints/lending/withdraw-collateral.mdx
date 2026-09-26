@@ -1,10 +1,16 @@
 ---
 title: 'Withdraw Collateral'
-api: 'POST /lending-external-securities/api/positions/{marketId}/withdraw-collateral'
+api: 'POST /lending-external-securities-v2/api/positions/{marketId}/withdraw-collateral'
 description: 'Release excess collateral from an open loan'
 ---
 
-Removes collateral from a loan while leaving it open. The contract reverts if the withdrawal would push the health factor below `1.0`, so a loan can only shed collateral it does not need.
+Removes collateral from a loan while leaving it open. Only the loan's borrower can sign it. The contract reverts if the withdrawal would push the health factor below `1.0`, measured at the liquidation threshold, so a loan can only shed collateral it does not need.
+
+<Warning>
+  A `CUSTODY` withdrawal the collateral token refuses does not revert. The adapter escrows the balance instead, so the borrower signs a transaction that confirms and delivers nothing. When that is the case, or when the token's verdict cannot be read, the response carries `collateralRelease` and `warning`. Surface them to the borrower before they sign.
+</Warning>
+
+The API applies a stricter bound than the contract. It refuses a withdrawal that would leave the debt above what the remaining collateral supports at the market's collateral factor, the limit a new borrow faces. A withdrawal between that limit and the liquidation threshold is refused here with `WOULD_BREACH_HEALTH_FACTOR`, although the contract would accept it.
 
 Single transaction in both modes.
 
@@ -18,12 +24,12 @@ Single transaction in both modes.
   On-chain loan ID. A positive integer. Accepted as a JSON number or as a numeric string, so the value [Get Loan](/endpoints/lending/get-loan) returns passes straight back.
 </ParamField>
 
-<ParamField body="amount" type="string" required>
-  Security tokens to release, as a decimal string. Parsed at the collateral token's decimals.
+<ParamField body="amount" type="string">
+  Security tokens to release, as a positive decimal string. Parsed at the collateral token's decimals. Required when building calldata, not needed on the confirm call.
 </ParamField>
 
 <ParamField body="signedPrice" type="object">
-  EIP-712 signed price from [Sign Price](/endpoints/lending/sign-price). Omit to price against the stored oracle value.
+  EIP-712 signed price from [Sign Price](/endpoints/lending/sign-price). Omit to price against the stored oracle value. A market that prices from an external feed refuses a signed price with `EXTERNAL_FEED_ACTIVE`.
   <Expandable>
     <ParamField body="price" type="string">Price in base units.</ParamField>
     <ParamField body="timestamp" type="integer">Signing timestamp.</ParamField>
@@ -40,35 +46,61 @@ Single transaction in both modes.
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="loanId" type="integer">Loan ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="amount" type="string">Collateral released, echoed back. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION` when `txHash` is omitted.</ResponseField>
     <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, for the `withdrawCollateral` call. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="functionName" type="string">`withdrawCollateral`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="collateralRelease" type="object">Present on a `CUSTODY` market when the collateral token would refuse to return the collateral to the borrower. The withdrawal still succeeds; the adapter escrows the balance instead of reverting, and the borrower reclaims it through [Claim Escrowed Collateral](/endpoints/lending/claim-escrowed-collateral).</ResponseField>
+    <ResponseField name="collateralRelease" type="object">Present on a `CUSTODY` market when the collateral token would refuse to return the collateral to the borrower, or when its verdict cannot be read before signing. The withdrawal still succeeds, and the borrower reclaims an escrowed balance through [Claim Escrowed Collateral](/endpoints/lending/claim-escrowed-collateral).</ResponseField>
     <ResponseField name="warning" type="string">Human-readable form of `collateralRelease`, present alongside it.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="loanId" type="integer">Loan ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="amount" type="string">Collateral released from the loan, read from the mined transaction. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="escrowed" type="boolean">`true` when the adapter escrowed the release instead of delivering it. Present only then, together with `escrowedAmount`, `delivered: false`, `adapterAddress`, `claimAction: "claim-escrowed-collateral"` and a `message`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Warning>
-  A withdrawal that would breach the health factor, exceed the posted collateral, or target an inactive loan is refused before a transaction is offered, with `WOULD_BREACH_HEALTH_FACTOR`, `INSUFFICIENT_COLLATERAL` or `LOAN_NOT_ACTIVE`. The price is only consulted while the loan still carries debt, so a debt-free withdrawal is never refused for a stale price.
-</Warning>
-
-<Warning>
-  A `CUSTODY` withdrawal the collateral token refuses does not revert. The adapter escrows the balance instead, so the borrower signs a transaction that confirms and delivers nothing. When that is the case the response carries `collateralRelease` and `warning`. Surface them to the borrower before they sign.
+  A withdrawal that would breach that bound, exceed the posted collateral, or target an inactive loan is refused before a transaction is offered, with `WOULD_BREACH_HEALTH_FACTOR`, `INSUFFICIENT_COLLATERAL` or `LOAN_NOT_ACTIVE`. The price is only consulted while the loan still carries debt, so a debt-free withdrawal is never refused for a stale price.
 </Warning>
 
 <Note>
   Where the released tokens end up depends on the market mode. `FREEZE` markets unfreeze them in place, so the borrower's balance does not change but the tokens become transferable again. `CUSTODY` markets transfer them out of the adapter back to the borrower.
 </Note>
 
+While a Dutch auction is open against the loan, the contract reverts the withdrawal. The API does not check for an open auction before offering calldata.
+
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/withdraw-collateral" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/withdraw-collateral" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{"loanId": 5, "amount": "100"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/withdraw-collateral`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ loanId: 5, amount: '100' })
+});
+const { data } = await res.json();
+if (data.collateralRelease) {
+  console.warn(data.warning);
+}
+
+const tx = await borrowerWallet.sendTransaction(data.transaction);
+await tx.wait();
+
+const confirmed = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ loanId: 5, txHash: tx.hash })
+});
+const { data: result } = await confirmed.json();
 ```
 </RequestExample>
 
@@ -78,7 +110,12 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTION",
-    "transaction": { "to": "0x70A0...", "data": "0x..." },
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
     "functionName": "withdrawCollateral"
   }
 }
@@ -87,9 +124,25 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
 {
   "success": true,
   "data": {
-    "txHash": "0xabc...def",
+    "txHash": "0x2d6f8b0a4c1e3957b9d1f3a5c7e9b0d2f4a6c8e1b3d5f7a9c2e4b6d8f0a1c3e5",
     "loanId": 5,
-    "amount": "100"
+    "amount": "100.0"
+  }
+}
+```
+```json Confirmed Response - Escrowed
+{
+  "success": true,
+  "data": {
+    "txHash": "0x2d6f8b0a4c1e3957b9d1f3a5c7e9b0d2f4a6c8e1b3d5f7a9c2e4b6d8f0a1c3e5",
+    "loanId": 5,
+    "amount": "100.0",
+    "escrowed": true,
+    "escrowedAmount": "100.0",
+    "delivered": false,
+    "adapterAddress": "0x3c5e8b1d7f9a2046c8e1b3d5f7a9c0e2d4b6f8a1",
+    "claimAction": "claim-escrowed-collateral",
+    "message": "The collateral token refused this release, so the custody adapter holds the amount in escrow instead of delivering it. The holder reclaims it with claim-escrowed-collateral once the restriction is lifted."
   }
 }
 ```
@@ -100,12 +153,16 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
 | Code | HTTP | Cause |
 |---|---|---|
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
-| `VALIDATION_ERROR` | `400` | `loanId` is not a positive integer, or `amount` carries more decimal places than the collateral token supports |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `VALIDATION_ERROR` | `400` | `loanId` is not a positive integer, or `amount` is missing on the build call, not a positive decimal string, or carries more decimal places than the collateral token supports |
 | `LOAN_NOT_ACTIVE` | `400` | The loan is closed and can no longer be modified |
 | `INSUFFICIENT_COLLATERAL` | `400` | `amount` exceeds the collateral the loan holds |
-| `WOULD_BREACH_HEALTH_FACTOR` | `400` | The withdrawal would leave the loan under-collateralised against its outstanding debt |
-| `PRICE_STALE` | `400` | The loan carries debt and the oracle price is outside the market's `maxPriceAge`. Push a NAV with [Sync Oracle Price](/endpoints/lending/sync-oracle), or supply a `signedPrice` |
+| `WOULD_BREACH_HEALTH_FACTOR` | `400` | The remaining collateral would support less than the loan's outstanding debt at the market's collateral factor |
+| `PRICE_STALE` | `400` | The loan carries debt and the price is older than the oracle's staleness window. On an attested market, push a price with [Sync Oracle Price](/endpoints/lending/sync-oracle) or supply a `signedPrice`. On an external-feed market, wait for the feed to publish |
 | `LOAN_NOT_FOUND` | `404` | No loan with that ID exists on this market |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
-| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to check its price window. Retry shortly |
-| `LOAN_STATE_UNAVAILABLE` | `503` | The loan or the resulting health factor could not be read. Retry shortly |
+| `EXTERNAL_FEED_ACTIVE` | `409` | A `signedPrice` was sent to a market that prices from an external feed. Retry without it |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to check its price. Retry shortly |
+| `LOAN_STATE_UNAVAILABLE` | `503` | The loan or the resulting borrow limit could not be read. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

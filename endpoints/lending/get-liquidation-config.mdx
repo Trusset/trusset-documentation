@@ -1,6 +1,6 @@
 ---
 title: 'Get Liquidation Config'
-api: 'GET /lending-external-securities/api/liquidations/{marketId}/config'
+api: 'GET /lending-external-securities-v2/api/liquidations/{marketId}/config'
 description: 'Check whether a market can be liquidated and settled'
 ---
 
@@ -8,16 +8,16 @@ Returns the readiness of the liquidation path for a market: every gate `liquidat
 
 Call this before relying on liquidation. A market can accept loans while its liquidation path is incomplete, which leaves bad debt with no remedy.
 
-Realization is two hops with two different signers, so readiness carries two aggregates. `seizureConfigured` covers everything up to and including moving collateral to the router. `isConfigured` covers that and one thing more: the collateral must also be able to leave the router for the sale recipient.
+Realization is two hops with two different signers, so readiness carries two aggregates. `seizureConfigured` covers everything up to and including moving collateral to the router, or to the auction venue when Dutch auctions are on. `isConfigured` covers that and more: the router's operator must hold its role, and the collateral must be able to leave the router for the sale recipient.
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>Market ID. At most 100 characters.</ParamField>
 
 ## Query Parameters
 
 <ParamField query="signerAddress" type="string">
-  Wallet to evaluate the role and signer checks against. Omit to use your instance's registered wallet. Anything that is not a valid address is ignored.
+  Wallet to evaluate the liquidator role against. Omit to use your instance's primary verified wallet. Anything that is not a valid address is ignored.
 </ParamField>
 
 ## Response Fields
@@ -27,51 +27,64 @@ Realization is two hops with two different signers, so readiness carries two agg
     <ResponseField name="marketId" type="string">Market ID.</ResponseField>
     <ResponseField name="marketAddress" type="string">Market contract.</ResponseField>
     <ResponseField name="liquidationRouterAddress" type="string">This market's liquidation router, resolved per market. Also present as `routerAddress`.</ResponseField>
-    <ResponseField name="routerAuthorized" type="boolean">The router accepts liquidations originating from this market. Set by the factory at deployment.</ResponseField>
-    <ResponseField name="routerTokenEligible" type="boolean">The router can legally receive the collateral token under its ERC-3643 compliance rules, either as an allow-listed contract or as a verified identity. Without this, seizing collateral reverts.</ResponseField>
-    <ResponseField name="liquidatorRoleReady" type="boolean">The resolved signer holds `LIQUIDATOR_ROLE` on the market, which calling `liquidate` requires. Null when it could not be read.</ResponseField>
-    <ResponseField name="operatorRoleReady" type="boolean">The resolved signer holds `OPERATOR_ROLE` on the router, which withdrawal and settlement require.</ResponseField>
-    <ResponseField name="signerAddress" type="string">The address the role checks were resolved against, or null when none was available.</ResponseField>
-    <ResponseField name="collateralTransferAllowed" type="boolean">Whether the collateral token would permit the seizure transfer to the router. Null when it could not be evaluated, which includes every `FREEZE` market, where collateral is frozen in place rather than moved. `collateralTransferChecked` says whether the check ran, and `collateralTransferCode` carries the restriction code below.</ResponseField>
-    <ResponseField name="saleRecipient" type="string">The recipient the lender of record fixed for onward sale, or null when none is set.</ResponseField>
-    <ResponseField name="saleDeliveryAllowed" type="boolean">Whether the collateral token would permit the onward transfer from the router to that recipient. `saleDeliveryChecked` and `saleDeliveryCode` accompany it.</ResponseField>
+    <ResponseField name="routerAuthorized" type="boolean">The router accepts liquidations originating from this market. Set by the factory at deployment. `null` when the read failed.</ResponseField>
+    <ResponseField name="routerTokenEligible" type="boolean">The router can legally receive the collateral token under the token's own compliance rules, either as an allow-listed contract or as a verified identity. Without this, seizing collateral reverts. `null` when the token could not answer.</ResponseField>
+    <ResponseField name="routerTokenRequirement" type="string">What the token asks of the router: `adapter_must_be_authorized_contract`, `adapter_must_be_verified_holder`, `none_required`, `holder_status_unreadable` or `unknown`. `null` when no router or no collateral token is known.</ResponseField>
+    <ResponseField name="liquidatorRoleReady" type="boolean">Whether `LIQUIDATOR_ROLE` on the market, which calling `liquidate` requires, is held by `signerAddress` or by a connected liquidation bot. `null` when it could not be read.</ResponseField>
+    <ResponseField name="liquidatorViaBot" type="boolean">`true` when a connected liquidation bot rather than the signer wallet holds `LIQUIDATOR_ROLE`. `liquidatorBotAddress` names the bot.</ResponseField>
+    <ResponseField name="operatorRoleReady" type="boolean">Whether `operatorAddress` holds `OPERATOR_ROLE` on the router, which withdrawal, partial sales and settlement require. `null` when the read failed.</ResponseField>
+    <ResponseField name="operatorAddress" type="string">The address the operator-role check ran against: the liquidation operator the market records, or `signerAddress` when it records none. `operatorDeclared` says which.</ResponseField>
+    <ResponseField name="signerAddress" type="string">The address the liquidator-role check resolved against, or `null` when none was available.</ResponseField>
+    <ResponseField name="collateralTransferAllowed" type="boolean">Whether the collateral token would permit the seizure transfer from the custody adapter to the router. `null` when the check did not run. It never runs on a `FREEZE` market, where seizure is a forced transfer that bypasses the sender-side gates, or while the adapter holds no collateral. `collateralTransferChecked` says whether it ran, `collateralTransferCode` carries the restriction code below and `collateralTransferReason` states it in words.</ResponseField>
+    <ResponseField name="saleRecipient" type="string">The recipient the lender of record fixed for onward sale, or `null` when none is set yet.</ResponseField>
+    <ResponseField name="saleRecipientFixed" type="boolean">`true` when the router's recipient was read, `null` when the router could not be read.</ResponseField>
+    <ResponseField name="saleRecipientRotatable" type="boolean">`true` for every market with a router. The router admin can rotate the recipient through an announced, delayed flow, which this API does not expose.</ResponseField>
+    <ResponseField name="saleVenue" type="string">The destination that applies: `saleRecipient`, or the trading venue recorded for the market (`configuredSaleVenue`) when no recipient is known.</ResponseField>
+    <ResponseField name="saleDeliveryAllowed" type="boolean">Whether the collateral token would permit the onward transfer from the router to `saleRecipient`. `saleDeliveryChecked`, `saleDeliveryCode` and `saleDeliveryAmount` accompany it.</ResponseField>
+    <ResponseField name="dutchAuctionEnabled" type="boolean">The market's `useDutchAuction` switch. With it on, a health liquidation delivers the collateral to the auction venue instead of the router.</ResponseField>
+    <ResponseField name="auctionVenue" type="string">The auction venue wired on the market, or `null`.</ResponseField>
+    <ResponseField name="auctionVenueAdmitted" type="boolean">Whether the collateral token admits the venue as a holder. A market with Dutch auctions on and a venue the token refuses cannot seize at all. `auctionVenueRequirement` says what the token asks of the venue.</ResponseField>
     <ResponseField name="priceStale" type="boolean">Whether the oracle price sits outside its window, which makes `liquidate` revert. `priceAge` in seconds accompanies it.</ResponseField>
-    <ResponseField name="seizureConfigured" type="boolean">Every gate up to and including the seizure is satisfied.</ResponseField>
-    <ResponseField name="isConfigured" type="boolean">`seizureConfigured`, plus onward delivery to the sale recipient.</ResponseField>
-    <ResponseField name="canSeizeNow" type="boolean">`seizureConfigured` and the price is not stale.</ResponseField>
-    <ResponseField name="canRealizeNow" type="boolean">`isConfigured` and the price is not stale.</ResponseField>
-    <ResponseField name="routerTokenRequirement" type="string">What the collateral token asks of the router, when it could be established.</ResponseField>
-    <ResponseField name="liquidatorViaBot" type="boolean">`true` when `LIQUIDATOR_ROLE` is held by a connected liquidation bot rather than by a signer wallet. `liquidatorBotAddress` names it.</ResponseField>
-    <ResponseField name="operatorAddress" type="string">The address the operator-role check ran against. `operatorDeclared` says whether the market records a liquidation operator at all.</ResponseField>
-    <ResponseField name="saleRecipientFixed" type="boolean">Whether the sale recipient is fixed on the router. `saleRecipientRotatable` says whether the router supports rotating it, and `configuredSaleVenue` and `saleVenue` name the destination that applies.</ResponseField>
-    <ResponseField name="collateralTransferChecked" type="boolean">Whether the seizure transfer probe ran. `collateralTransferCode` and `collateralTransferAmount` accompany it, and `saleDeliveryChecked`, `saleDeliveryCode` and `saleDeliveryAmount` do the same for the onward transfer.</ResponseField>
-    <ResponseField name="priceAge" type="integer">Seconds since the oracle was last priced.</ResponseField>
+    <ResponseField name="seizureConfigured" type="boolean">Every gate up to and including the seizure is satisfied, including the liquidator role.</ResponseField>
+    <ResponseField name="isConfigured" type="boolean">`seizureConfigured`, plus the router's operator role and onward delivery to the sale recipient.</ResponseField>
+    <ResponseField name="canSeizeNow" type="boolean">`seizureConfigured`, and the price was read and is not stale.</ResponseField>
+    <ResponseField name="canRealizeNow" type="boolean">`isConfigured`, and the price was read and is not stale.</ResponseField>
     <ResponseField name="readFailed" type="boolean">`true` when at least one gate could not be read. `unverifiedSections` lists which, `errors` carries the same as objects, and `unverifiedReason` states it in one sentence. A failed read is never reported as a closed gate.</ResponseField>
     <ResponseField name="blockedConfirmed" type="boolean">`true` only when a gate was actually read and found closed. `seizureBlockedConfirmed` is the same restricted to the seizure gates.</ResponseField>
-    <ResponseField name="blockedReason" type="string">The first gate that fails, in words. Null when nothing blocks.</ResponseField>
+    <ResponseField name="blockedReason" type="string">The first gate that fails, in words. When nothing is confirmed closed it carries `unverifiedReason`, which is `null` when every read succeeded.</ResponseField>
     <ResponseField name="stats" type="object">
       <Expandable>
-        <ResponseField name="totalLiquidations" type="integer">Lifetime liquidations on this market.</ResponseField>
-        <ResponseField name="pendingLiquidationDebt" type="string">Debt seized but not yet settled, in borrow asset units.</ResponseField>
-        <ResponseField name="totalAuctions" type="integer">Lifetime Dutch auctions created.</ResponseField>
+        <ResponseField name="totalLiquidations" type="integer">Liquidation records the market has opened over its lifetime, on either trigger and on either path.</ResponseField>
+        <ResponseField name="pendingLiquidationDebt" type="string">Debt seized but not yet settled or written off, in borrow asset units.</ResponseField>
+        <ResponseField name="totalAuctions" type="integer">Dutch auctions the market's auction venue has opened. `0` when no venue is wired.</ResponseField>
+        <ResponseField name="readFailed" type="boolean">Present and `true` when a counter could not be read. The unread counters then read `0`.</ResponseField>
       </Expandable>
     </ResponseField>
-    <ResponseField name="onChainError" type="string">Present when the chain reads failed. The readiness fields and `stats` are absent in that case.</ResponseField>
+    <ResponseField name="onChainError" type="string">Present when the readiness read failed as a whole. The readiness fields and `stats` are absent in that case.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Warning>
-  `routerTokenEligible` is reported as `true` when the collateral token exposes no identity registry and no contract allow-list, because eligibility cannot be evaluated without one. That is an unknown, not a pass. Confirm the router's compliance status out of band for such markets.
+  `routerTokenEligible` is reported as `true` when the collateral token exposes no identity registry and no contract allow-list, because eligibility cannot be evaluated without one. That is an unknown, not a pass. `routerTokenRequirement` reads `none_required` in that case. Confirm the router's compliance status out of band for such markets.
 </Warning>
 
 <Note>
-  `operatorRoleReady` and `liquidatorRoleReady` are evaluated against `signerAddress`, or against your instance's registered wallet when it is omitted. If the market's lender of record named a different `liquidationOperator`, settlement runs through that wallet rather than this API and the flag reads `false` by design. Pass `signerAddress` to ask about that wallet instead.
+  The two role flags answer for different wallets. `liquidatorRoleReady` answers for `signerAddress`, or your instance's primary verified wallet when it is omitted, and also counts a connected liquidation bot. `operatorRoleReady` answers for the liquidation operator the market records, and falls back to that same wallet only when the market records none. The settlement endpoints of this API check `OPERATOR_ROLE` against your instance's primary verified wallet, so a market whose operator is a different wallet settles outside this API.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/liquidations/{marketId}/config" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/liquidations/{marketId}/config" \
   -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/liquidations/${marketId}/config`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+if (data.readFailed) console.warn(data.unverifiedReason);
+if (!data.canRealizeNow) console.warn(data.blockedReason);
 ```
 </RequestExample>
 
@@ -83,30 +96,52 @@ curl "https://api.trusset.org/lending-external-securities/api/liquidations/{mark
     "marketId": "clx_secmarket_001",
     "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
     "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
-    "liquidationRouterAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
     "routerAuthorized": true,
     "routerTokenEligible": true,
-    "liquidatorRoleReady": true,
+    "routerTokenRequirement": "adapter_must_be_verified_holder",
     "operatorRoleReady": true,
+    "operatorAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "operatorDeclared": true,
+    "liquidatorRoleReady": true,
+    "liquidatorViaBot": false,
+    "liquidatorBotAddress": null,
     "signerAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
     "collateralTransferChecked": true,
     "collateralTransferAllowed": true,
-    "collateralTransferCode": null,
+    "collateralTransferCode": 0,
+    "collateralTransferReason": null,
+    "collateralTransferAmount": "1500000000000000000000",
     "saleRecipient": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
+    "saleRecipientFixed": true,
+    "saleRecipientRotatable": true,
+    "configuredSaleVenue": null,
+    "saleVenue": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
     "saleDeliveryChecked": true,
     "saleDeliveryAllowed": true,
-    "saleDeliveryCode": null,
+    "saleDeliveryCode": 0,
+    "saleDeliveryAmount": "1500000000000000000000",
+    "auctionVenue": null,
+    "auctionVenueAdmitted": null,
+    "auctionVenueRequirement": null,
+    "dutchAuctionEnabled": false,
     "priceStale": false,
     "priceAge": 184,
     "seizureConfigured": true,
     "isConfigured": true,
+    "readFailed": false,
+    "blockedConfirmed": false,
+    "seizureBlockedConfirmed": false,
+    "unverifiedReason": null,
+    "unverifiedSections": null,
+    "errors": null,
     "canSeizeNow": true,
     "canRealizeNow": true,
     "blockedReason": null,
+    "liquidationRouterAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
     "stats": {
       "totalLiquidations": 2,
-      "pendingLiquidationDebt": "0.000000",
-      "totalAuctions": 1
+      "pendingLiquidationDebt": "0.0",
+      "totalAuctions": 0
     }
   }
 }
@@ -118,29 +153,51 @@ curl "https://api.trusset.org/lending-external-securities/api/liquidations/{mark
     "marketId": "clx_secmarket_001",
     "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
     "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
-    "liquidationRouterAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
     "routerAuthorized": true,
     "routerTokenEligible": false,
-    "liquidatorRoleReady": true,
+    "routerTokenRequirement": "adapter_must_be_verified_holder",
     "operatorRoleReady": true,
+    "operatorAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "operatorDeclared": true,
+    "liquidatorRoleReady": true,
+    "liquidatorViaBot": false,
+    "liquidatorBotAddress": null,
     "signerAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
     "collateralTransferChecked": true,
     "collateralTransferAllowed": false,
     "collateralTransferCode": 2,
+    "collateralTransferReason": "The collateral token blocks the seizure transfer from the custody adapter 0x3f0b7d52c1e84a96b0d7c3e5a18f27d946c1b0e2 to the liquidation router 0x067a3feea46649adad8e31c33b3a4d8774b8d8cf: the receiver is not a verified holder on this token. Restore the receiver's verified status on the collateral token's identity registry for 0x067a3feea46649adad8e31c33b3a4d8774b8d8cf.",
+    "collateralTransferAmount": "1500000000000000000000",
     "saleRecipient": null,
+    "saleRecipientFixed": true,
+    "saleRecipientRotatable": true,
+    "configuredSaleVenue": null,
+    "saleVenue": null,
     "saleDeliveryChecked": false,
     "saleDeliveryAllowed": null,
     "saleDeliveryCode": null,
+    "saleDeliveryAmount": null,
+    "auctionVenue": null,
+    "auctionVenueAdmitted": null,
+    "auctionVenueRequirement": null,
+    "dutchAuctionEnabled": false,
     "priceStale": false,
     "priceAge": 92,
     "seizureConfigured": false,
     "isConfigured": false,
+    "readFailed": false,
+    "blockedConfirmed": true,
+    "seizureBlockedConfirmed": true,
+    "unverifiedReason": null,
+    "unverifiedSections": null,
+    "errors": null,
     "canSeizeNow": false,
     "canRealizeNow": false,
-    "blockedReason": "The liquidation router is not an eligible holder of the collateral token.",
+    "blockedReason": "The liquidation router 0x067a3feea46649adad8e31c33b3a4d8774b8d8cf is not a verified holder in the collateral token's identity registry, so it cannot receive seized collateral.",
+    "liquidationRouterAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
     "stats": {
       "totalLiquidations": 0,
-      "pendingLiquidationDebt": "0.000000",
+      "pendingLiquidationDebt": "0.0",
       "totalAuctions": 0
     }
   }
@@ -154,17 +211,18 @@ curl "https://api.trusset.org/lending-external-securities/api/liquidations/{mark
 
 | Code | Meaning | Lever that lifts it |
 |---|---|---|
-| `1` | The sender is not a verified holder on this token | Restore the holder's verified status on the token's identity registry |
-| `2` | The receiver is not a verified holder on this token | Restore the receiver's verified status on the token's identity registry |
+| `1` | The sender is not a verified holder on this token | Restore the sender's verified status on the token's identity registry, or allow-list it on a token without a registry |
+| `2` | The receiver is not a verified holder on this token | Restore the receiver's verified status on the token's identity registry, or allow-list it on a token without a registry |
 | `3` | The sender address is frozen on this token | Unfreeze the sender address |
 | `4` | The receiver address is frozen on this token | Unfreeze the receiver address |
 | `5` | The token compliance module rejects this transfer | Lift the restriction on the token's compliance contract |
 | `6` | The token is paused | Un-pause the token |
-| `7` | The sender does not hold enough unfrozen balance | Release the sender's frozen balance |
+| `7` | The sender does not hold enough of the collateral token | Fund the sender's balance of the collateral token |
 
 ## Error Codes
 
 | Code | HTTP | Cause |
 |---|---|---|
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

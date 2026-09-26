@@ -1,10 +1,14 @@
 ---
 title: 'Toggle Hook'
-api: 'POST /lending-external-securities/api/hooks/{marketId}/{hookId}/toggle'
+api: 'POST /lending-external-securities-v2/api/hooks/{marketId}/{hookId}/toggle'
 description: 'Enable or disable a hook without deleting it'
 ---
 
-Sets the `active` flag. Inactive hooks are skipped by the scheduler and by liquidation processing, and are not reachable as chained triggers. Execution history is preserved.
+Sets the `active` flag and returns the full hook record. Execution history is preserved, and nothing goes on-chain.
+
+An inactive hook drops out of everything that runs on its own. The scheduler skips an inactive `monitorRisk` hook. A monitor that evaluates to `false` does not run an inactive `afterLiquidation` hook. An inactive hook listed in another hook's `triggerHookIds` never satisfies that trigger. [Execute Hook](/endpoints/lending/execute-hook) still runs an inactive hook when called for it directly.
+
+Re-enabling a monitor puts it back on the schedule from the scheduler's next wake-up, not from this call.
 
 ## Path Parameters
 
@@ -14,15 +18,35 @@ Sets the `active` flag. Inactive hooks are skipped by the scheduler and by liqui
 ## Body Parameters
 
 <ParamField body="active" type="boolean" required>
-  `true` to enable, `false` to disable. Any non-boolean value returns `INVALID_ACTIVE`.
+  `true` to enable, `false` to disable. Any non-boolean value, including the string `"false"`, returns `INVALID_ACTIVE`.
 </ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  The updated hook record. See [List Hooks](/endpoints/lending/list-hooks) for each field.
+</ResponseField>
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/hooks/{marketId}/{hookId}/toggle" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/hooks/{marketId}/{hookId}/toggle" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{"active": false}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/hooks/${marketId}/${hookId}/toggle`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ active: false })
+  }
+);
+const { data: hook } = await res.json();
 ```
 </RequestExample>
 
@@ -32,13 +56,40 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/hooks/{mar
   "success": true,
   "data": {
     "id": "hook_003",
-    "active": false
+    "marketId": "clx_secmarket_001",
+    "hookType": "monitorRisk",
+    "name": "NAV Publication Monitor",
+    "active": false,
+    "riskUri": "https://nav.example.com/funds/NYF1",
+    "riskFields": [{ "path": "ageHours", "operator": "<", "threshold": 36 }],
+    "riskThreshold": null,
+    "checkFrequency": "1h",
+    "parameterChecks": [],
+    "triggerHookIds": [],
+    "actionType": null,
+    "maxBuyPrice": null,
+    "webhookUrl": null,
+    "webhookPayload": null,
+    "signerAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "signerFunded": false,
+    "lastExecutedAt": "2026-09-25T12:00:00.000Z",
+    "lastResult": true,
+    "executionCount": 1,
+    "createdAt": "2026-09-25T12:00:00.000Z",
+    "updatedAt": "2026-09-25T12:10:00.000Z"
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-09-25T12:10:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
   }
 }
 ```
 ```json Error - Invalid Body
 {
   "success": false,
+  "data": null,
   "error": {
     "code": "INVALID_ACTIVE",
     "message": "active must be boolean"
@@ -46,3 +97,13 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/hooks/{mar
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ACTIVE` | `400` | `active` is missing or not a boolean |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MISSING_HOOK_ID` | `400` | `hookId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID belongs to your instance |
+| `HOOK_NOT_FOUND` | `404` | No hook with this ID exists on this market |

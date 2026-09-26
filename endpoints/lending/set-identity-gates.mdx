@@ -1,0 +1,244 @@
+---
+title: 'Set Identity Gates'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/identity-gates'
+description: 'Install, replace or clear the borrower and provider registers of a market'
+---
+
+Builds the `setIdentityGates` transaction that installs, replaces or clears the market's borrower register and provider register in one call. The wallet holding `DEFAULT_ADMIN_ROLE` on the market signs it. The same POST with `txHash` verifies the mined transaction and records it.
+
+The borrower register gates `openLoan` and `borrowMore` on the market. The provider register is read by every registered vault before it admits a depositor, because the market itself takes direct deposits only from the operator wallet and registered vaults. [Get Identity Gates](/endpoints/lending/get-identity-gates) describes both doors in full.
+
+<Note>
+  A change applies from the next open, draw, vault deposit or share transfer. Existing loans and vault holdings are not examined again, and repaying, closing and redeeming are never gated.
+</Note>
+
+## Choose What Each Side Gets
+
+Each field is read on its own:
+
+- **Omitted**: the market keeps the register it has now.
+- **An address**: that register is installed.
+- **`null`, an empty string or the zero address**: the register is cleared, and the side is left without one.
+
+Sending only `borrowerRegistry` therefore changes the borrower side and leaves the provider side as it is.
+
+## Registers That Must Stay
+
+A `MARKET`-priced market must keep a borrower register. The API refuses to clear it with `IDENTITY_REGISTRY_REQUIRED`, and the contract would revert the same change.
+
+On a current market the provider register can be cleared, since the market takes no third-party deposit that it would guard. On an older market whose pool is open to third-party providers, the API refuses to clear the provider register with `IDENTITY_REGISTRY_REQUIRED`. `details.field` names the side in both cases.
+
+A market on the earlier single-register implementation examines both sides through one register and cannot change it. It is refused with `MARKET_UPGRADE_REQUIRED` until the admin moves it onto the current implementation with [Upgrade Market](/endpoints/lending/upgrade-market).
+
+## Checks Before the Calldata
+
+Every register named is probed first. One that cannot be reached is refused with `IDENTITY_REGISTRY_UNREADABLE`, and one that does not answer `isVerified(address)` with `IDENTITY_REGISTRY_INCOMPATIBLE`, because as a gate it would refuse every party. ERC-3643 identity registries, ONCHAINID-based registers and the Trusset register all answer.
+
+A request that would leave both registers as they are is refused with `IDENTITY_GATES_UNCHANGED` rather than answered with a transaction that only costs gas. There is no `unchanged: true` response on this endpoint.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="borrowerRegistry" type="string">
+  The borrower register to install, or `null`, `""` or the zero address to clear it. Omit it to keep the current one. An address must be 0x followed by 40 hex characters, all-lowercase or with a valid EIP-55 checksum.
+</ParamField>
+
+<ParamField body="providerRegistry" type="string">
+  The provider register to install, or `null`, `""` or the zero address to clear it. Omit it to keep the current one. Same address rules as `borrowerRegistry`.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined transaction, as a 0x-prefixed 64-character hex string. Send it to confirm; the registers are then read from the chain, so the other fields are not needed. Omit it to receive the calldata.
+</ParamField>
+
+## Response Fields
+
+The calldata response:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">`{ to, data }`, the `setIdentityGates` call on the market. The `chainId` and `value` to sign with sit on `data` itself, not inside this object.</ResponseField>
+    <ResponseField name="to" type="string">The market address, repeated from `transaction`.</ResponseField>
+    <ResponseField name="data" type="string">The calldata, repeated from `transaction`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain to sign on.</ResponseField>
+    <ResponseField name="value" type="string">Always `0`.</ResponseField>
+    <ResponseField name="functionName" type="string">`setIdentityGates`.</ResponseField>
+    <ResponseField name="borrowerRegistry" type="string">The borrower register the transaction installs, lowercased, or `null` for none.</ResponseField>
+    <ResponseField name="providerRegistry" type="string">The provider register the transaction installs, lowercased, or `null` for none.</ResponseField>
+    <ResponseField name="unchanged" type="boolean">Always `false`, since a request that changes nothing is refused.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction sets, in words.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`DEFAULT_ADMIN_ROLE`.</ResponseField>
+    <ResponseField name="requiredSigner" type="string">Always `null` on this endpoint.</ResponseField>
+    <ResponseField name="heldByThisInstance" type="boolean">Whether a wallet registered on this instance holds `DEFAULT_ADMIN_ROLE` on the market. `null` when the check could not be read.</ResponseField>
+    <ResponseField name="signerAddress" type="string">The instance wallet that holds the role, or `null`.</ResponseField>
+    <ResponseField name="note" type="string">Why no instance wallet can sign, or why that is unknown. `null` when an instance wallet holds the role.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: the POST to send back with the transaction hash in `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+The four signer fields are absent when the role lookup itself fails.
+
+The confirmed response:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">The verified transaction hash.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that sent it.</ResponseField>
+    <ResponseField name="borrowerRegistry" type="string">The borrower register now on the market, or `null`.</ResponseField>
+    <ResponseField name="providerRegistry" type="string">The provider register now on the market, or `null`.</ResponseField>
+    <ResponseField name="gates" type="object">The full [Get Identity Gates](/endpoints/lending/get-identity-gates) answer after the change, or `null` when it could not be read.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+Confirming records an `IDENTITY_GATES_SET` transaction on the market, visible through [List Transactions](/endpoints/lending/list-transactions), once per transaction hash.
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/identity-gates" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"borrowerRegistry": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/identity-gates`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ borrowerRegistry: '0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90' })
+});
+const { data } = await res.json();
+const tx = await adminWallet.sendTransaction({
+  to: data.transaction.to,
+  data: data.transaction.data,
+  chainId: data.chainId
+});
+await tx.wait();
+await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ ...data.confirmWith.body, txHash: tx.hash })
+});
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x..."
+    },
+    "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "data": "0x...",
+    "functionName": "setIdentityGates",
+    "requiredRole": "DEFAULT_ADMIN_ROLE",
+    "borrowerRegistry": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
+    "providerRegistry": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+    "unchanged": false,
+    "description": "Set borrower register 0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90 and provider register 0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37 (every registered vault examines its depositors against it) on this market; every entry is a live read against the register at call time (requires DEFAULT_ADMIN_ROLE)",
+    "requiredSigner": null,
+    "heldByThisInstance": true,
+    "signerAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "note": null,
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/clx4k1m7a0000m8tq2b5c9d1e/identity-gates",
+      "field": "txHash",
+      "body": {
+        "borrowerRegistry": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
+        "providerRegistry": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+        "txHash": null
+      }
+    },
+    "chainId": 11155111,
+    "value": "0"
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "signedBy": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "borrowerRegistry": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
+    "providerRegistry": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+    "gates": {
+      "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "generation": "TWO_REGISTERS",
+      "adjustable": true,
+      "pendingCurator": false,
+      "priceSource": "NAV",
+      "borrowerRegistry": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
+      "providerRegistry": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+      "operatorOnlyLiquidity": true,
+      "borrowerGateRequired": false,
+      "providerGateRequired": false,
+      "vaultOnlyLiquidity": true,
+      "providerGateReadBy": "VAULTS",
+      "borrower": {
+        "address": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
+        "shape": "bool",
+        "usable": true
+      },
+      "provider": {
+        "address": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+        "shape": "tuple",
+        "usable": true
+      },
+      "upgradeRequired": false
+    }
+  }
+}
+```
+```json Error - Borrower Register Required
+{
+  "success": false,
+  "error": {
+    "code": "IDENTITY_REGISTRY_REQUIRED",
+    "message": "This market prices its collateral from a live market price, which carries the free-hand realization path under § 1259 BGB, and that path is only available against professional borrowers. A borrower register has to stay installed on it.",
+    "details": { "field": "borrowerRegistry" }
+  }
+}
+```
+```json Error - Upgrade Required
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_UPGRADE_REQUIRED",
+    "message": "This market runs an earlier implementation that examines borrowers and providers against one register and offers no way to change it. Move the market onto the current implementation first (the admin signs POST /markets/:id/upgrade), then choose its registers here."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+Refusals from the checks above carry `details` as an object: `field` for the side concerned, and `registry` on `IDENTITY_REGISTRY_INCOMPATIBLE`. `IDENTITY_GATES_UNCHANGED` carries the two registers the market already has.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A register is not 0x followed by 40 hex characters, fails its EIP-55 checksum, or `txHash` is malformed |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `IDENTITY_GATES_FAILED` | `400` | The change could not be prepared or confirmed and no more specific code applied |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds the admin role that sets its registers. Skipped when confirming with `txHash` |
+| `MARKET_UPGRADE_REQUIRED` | `409` | The market runs the earlier single-register implementation |
+| `IDENTITY_REGISTRY_REQUIRED` | `409` | The request would clear a register the market must keep |
+| `IDENTITY_GATES_UNCHANGED` | `409` | The request would leave both registers as they are |
+| `IDENTITY_REGISTRY_INCOMPATIBLE` | `422` | A named register does not answer `isVerified(address)` |
+| `IDENTITY_GATES_UNREADABLE` | `503` | The market's current registers could not be read. Retry |
+| `IDENTITY_REGISTRY_UNREADABLE` | `503` | A named register could not be reached to be checked. Retry |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction), with the status listed there.

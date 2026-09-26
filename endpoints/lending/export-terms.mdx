@@ -1,0 +1,91 @@
+---
+title: 'Export Terms'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/terms/export'
+description: 'Download a market terms of use as a PDF, plain text or markdown file'
+---
+
+Returns the market's current terms of use as a file an institution can archive. The PDF header carries what makes a printed copy checkable against the API: the market, the collateral token, the version and the content hash.
+
+A successful call answers with the file itself, not the JSON envelope. Failures answer with the usual JSON error body.
+
+What is exported depends on the caller. An instance that could author the terms receives the current record even when it is a draft or was unpublished. It qualifies when one of its verified wallets is the lender of record or holds the market's admin or issuer role. Every other instance receives published terms only, exactly as [Get Terms](/endpoints/lending/get-terms) serves them.
+
+<Warning>
+  A draft exported by an author instance still prints a **Published** line in the PDF, filled from the time of the last save. Before filing an author's export as the published text, confirm that [Get Terms](/endpoints/lending/get-terms), which serves published terms only, returns the same `contentHash`.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Query Parameters
+
+<ParamField query="format" type="string" default="pdf">
+  `pdf`, `text` or `markdown`. Any other value is refused with `VALIDATION_ERROR`.
+</ParamField>
+
+## Response
+
+The file name is `Lending-Terms-{symbol}-v{version}` with the extension of the format. `{symbol}` is the collateral token symbol reduced to letters and digits, at most 12 characters, or `MARKET` when there is none.
+
+| `format` | `Content-Type` | Body |
+|---|---|---|
+| `pdf` | `application/pdf` | An A4 document, described below |
+| `text` | `text/plain; charset=utf-8` | The same plain-text rendering Get Terms returns as `plainText` |
+| `markdown` | `text/markdown; charset=utf-8` | The stored markdown, unchanged |
+
+Every format is sent with `Content-Disposition: attachment`.
+
+The PDF opens with the title and a block of facts. It lists the market and collateral token addresses, the ISIN when the market records one, the lender of record, the version and the content hash. The publication time, the network and environment, the retrieving instance's name and the generation time follow. The document body comes next, and every page carries a footer with the title, the version and the market address.
+
+The **Lender of record** line prints the terms' `curatorAddress`. That is the wallet that saved the version, which can be a wallet holding the market's admin or issuer role rather than the lender of record's own.
+
+<RequestExample>
+```bash cURL
+curl -OJ "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/terms/export?format=pdf" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+import { writeFile } from 'node:fs/promises';
+
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/terms/export?format=pdf`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+if (!res.ok) {
+  const { error } = await res.json();
+  throw new Error(`${error.code}: ${error.message}`);
+}
+
+const disposition = res.headers.get('Content-Disposition') ?? '';
+const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? 'terms.pdf';
+await writeFile(filename, Buffer.from(await res.arrayBuffer()));
+```
+</RequestExample>
+
+<ResponseExample>
+```text Response Headers
+HTTP/1.1 200 OK
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="Lending-Terms-NYF1-v3.pdf"
+```
+```json Error - Not Published
+{
+  "success": false,
+  "error": {
+    "code": "TERMS_NOT_PUBLISHED",
+    "message": "No terms of use are published for this market"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
+| `VALIDATION_ERROR` | `400` | `format` is not `pdf`, `text` or `markdown` |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `TERMS_NOT_PUBLISHED` | `404` | No terms exist for this market, or, for an instance that cannot author them, none are published |

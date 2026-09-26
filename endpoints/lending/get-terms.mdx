@@ -1,12 +1,14 @@
 ---
 title: 'Get Terms'
-api: 'GET /lending-external-securities/api/markets/{marketId}/terms'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/terms'
 description: 'Read the published terms of use for a market'
 ---
 
-Returns the terms of use published by the market's lender of record. A borrow button cannot be shipped compliantly without them. This is where an integrating application fetches them: by API key, on the market it already knows, in the form it renders.
+Returns the terms of use published for the market. The lender of record authors them through [Save Terms](/endpoints/lending/save-terms), as can a wallet holding the market's admin or issuer role. A borrow button cannot be shipped compliantly without them. This is where an integrating application fetches them: by API key, on the market it already knows, in the form it renders.
 
-Only published terms are returned. A draft that was never promoted reads as if no terms exist.
+The document is stored against the market's contract address, not against an instance. Every instance that holds the market reads the same terms, including the issuer instance that deployed it.
+
+Only published terms are returned. A draft, or terms the author took down with [Unpublish Terms](/endpoints/lending/unpublish-terms), reads as if no terms exist. Loan builds on such a market, [Open Loan](/endpoints/lending/open-loan) and [Borrow More](/endpoints/lending/borrow-more), carry a `TERMS_NOT_PUBLISHED` warning, and nothing on chain enforces it.
 
 ## Path Parameters
 
@@ -15,7 +17,7 @@ Only published terms are returned. A draft that was never promoted reads as if n
 ## Query Parameters
 
 <ParamField query="format" type="string" default="markdown">
-  `markdown` or `html`. Any other value is rejected with `VALIDATION_ERROR`.
+  `markdown` or `html`. Any other value is refused with `VALIDATION_ERROR`.
 </ParamField>
 
 ## Response Fields
@@ -25,41 +27,57 @@ Only published terms are returned. A draft that was never promoted reads as if n
     <ResponseField name="terms" type="object">
       <Expandable>
         <ResponseField name="id" type="string">Terms record ID.</ResponseField>
-        <ResponseField name="marketAddress" type="string">Market the terms belong to.</ResponseField>
-        <ResponseField name="title" type="string">Document title.</ResponseField>
-        <ResponseField name="version" type="integer">Current version number.</ResponseField>
-        <ResponseField name="contentHash" type="string">Hash of the content, stable per version.</ResponseField>
-        <ResponseField name="curatorAddress" type="string">Address of the lender of record that published this version.</ResponseField>
+        <ResponseField name="marketAddress" type="string">Market the terms belong to, lowercased.</ResponseField>
+        <ResponseField name="title" type="string">Document title. `null` when the author set none.</ResponseField>
+        <ResponseField name="version" type="integer">Current version number. Every save that changes the text, the title, the publication state or the template binding raises it by one.</ResponseField>
+        <ResponseField name="contentHash" type="string">keccak256 over the UTF-8 bytes of the stored markdown. Changes whenever the text changes.</ResponseField>
+        <ResponseField name="curatorAddress" type="string">The wallet that saved the current version: the lender of record, or a wallet holding the market's admin or issuer role.</ResponseField>
         <ResponseField name="published" type="boolean">Always `true` on this endpoint.</ResponseField>
-        <ResponseField name="publishedAt" type="string">ISO 8601 publication timestamp.</ResponseField>
-        <ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
-        <ResponseField name="updatedAt" type="string">ISO 8601 timestamp of the last save.</ResponseField>
-        <ResponseField name="contentBytes" type="integer">Size of the source content in bytes.</ResponseField>
+        <ResponseField name="publishedAt" type="string">ISO 8601 time of the save that published the current version.</ResponseField>
+        <ResponseField name="createdAt" type="string">ISO 8601 time the terms were first saved.</ResponseField>
+        <ResponseField name="updatedAt" type="string">ISO 8601 time of the last write to the record.</ResponseField>
+        <ResponseField name="templateId" type="string">The terms library template the document was bound from. `null` when the author wrote it directly.</ResponseField>
+        <ResponseField name="templateVersion" type="integer">Template version at the time of binding. `null` without a template.</ResponseField>
+        <ResponseField name="customised" type="boolean">True when the author edited the text after binding a template.</ResponseField>
+        <ResponseField name="contentBytes" type="integer">Size of the stored markdown in bytes.</ResponseField>
         <ResponseField name="format" type="string">Echoes the requested format.</ResponseField>
         <ResponseField name="content" type="string">Raw markdown. Present when `format` is `markdown`.</ResponseField>
-        <ResponseField name="plainText" type="string">Rendered plain text. Present when `format` is `markdown`.</ResponseField>
-        <ResponseField name="html" type="string">Rendered HTML. Present when `format` is `html`.</ResponseField>
+        <ResponseField name="plainText" type="string">Plain-text rendering. Present when `format` is `markdown`.</ResponseField>
+        <ResponseField name="html" type="string">Sanitized HTML rendering. Present when `format` is `html`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="binding" type="object">
+      How the document relates to a terms library template. `null` when it was not bound from one.
+      <Expandable>
+        <ResponseField name="templateId" type="string">Template ID.</ResponseField>
+        <ResponseField name="templateVersion" type="integer">Template version the market's terms were bound at.</ResponseField>
+        <ResponseField name="customised" type="boolean">True when the text was edited after binding.</ResponseField>
+        <ResponseField name="status" type="string">`TEMPLATE_ARCHIVED` when the template was archived. Otherwise `CUSTOMISED` when the text was edited, then `TEMPLATE_OUTDATED` when the template has a newer version, and `TEMPLATE` when none of these apply.</ResponseField>
+        <ResponseField name="template" type="object">`id`, `title`, `currentVersion`, `archived` and `authorInstanceId` of the template. `null` when the template could not be read.</ResponseField>
+        <ResponseField name="outdated" type="boolean">True when the template moved on and the market's text was not customised.</ResponseField>
       </Expandable>
     </ResponseField>
   </Expandable>
 </ResponseField>
 
-<Note>
-  The markdown form travels with its plain-text rendering in the same response, so displaying terms in a surface that has no markdown renderer never costs a second request.
-</Note>
+The markdown form travels with its plain-text rendering in the same response, so displaying terms in a surface that has no markdown renderer never costs a second request. The plain text carries the title in capitals, drops a leading heading that repeats it, and keeps lists as indentation.
+
+The HTML form is sanitized before it leaves, because the terms are authored by one tenant and displayed inside another's application. Tags outside a fixed allowlist of headings, paragraphs, lists, emphasis, code, quotes, links and tables are removed, and links keep only `http`, `https`, `mailto` and `#` targets.
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/terms" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/terms" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/terms?format=html`,
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/terms?format=html`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
-const { data } = await res.json();
-container.innerHTML = data.terms.html;
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+
+document.getElementById('terms')!.innerHTML = data.terms.html;
 ```
 </RequestExample>
 
@@ -73,17 +91,21 @@ container.innerHTML = data.terms.html;
       "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
       "title": "ACME Secured Lending Facility: Terms of Use",
       "version": 3,
-      "contentHash": "0x8c1f42a7d905b63e0f27c4a8b13d95e6027f4a81c39b6d20e5847af13c02b96d",
+      "contentHash": "0xf0b3379e4102181f66822fd86cd5c1f93e448e5bdfd3f8961151b05c5feacc5a",
       "curatorAddress": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
       "published": true,
-      "publishedAt": "2025-06-10T09:12:44.000Z",
-      "createdAt": "2025-05-28T14:03:07.000Z",
-      "updatedAt": "2025-06-10T09:12:44.000Z",
-      "contentBytes": 8421,
+      "publishedAt": "2026-09-10T09:12:44.000Z",
+      "createdAt": "2026-08-28T14:03:07.000Z",
+      "updatedAt": "2026-09-10T09:12:44.000Z",
+      "templateId": null,
+      "templateVersion": null,
+      "customised": false,
+      "contentBytes": 225,
       "format": "markdown",
-      "content": "# Terms of Use\n\n## 1. Parties\n...",
-      "plainText": "Terms of Use\n\n1. Parties\n..."
-    }
+      "content": "# Terms of Use\n\n## 1. Parties\n\nACME Bank AG acts as lender of record for this market.\n\n## 2. Collateral\n\n- Pledged tokens stay frozen in the wallet of the borrower.\n- A loan below the liquidation threshold can be liquidated.\n",
+      "plainText": "ACME SECURED LENDING FACILITY: TERMS OF USE\n===========================================\n\nTERMS OF USE\n------------\n\n1. Parties\n\nACME Bank AG acts as lender of record for this market.\n\n2. Collateral\n\n  - Pledged tokens stay frozen in the wallet of the borrower.\n  - A loan below the liquidation threshold can be liquidated.\n"
+    },
+    "binding": null
   }
 }
 ```
@@ -102,7 +124,8 @@ container.innerHTML = data.terms.html;
 
 | Code | HTTP | Cause |
 |---|---|---|
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address |
 | `VALIDATION_ERROR` | `400` | `format` is not `markdown` or `html` |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
-| `TERMS_NOT_PUBLISHED` | `404` | The lender of record has published no terms for this market |
+| `TERMS_NOT_PUBLISHED` | `404` | No terms exist for this market, or they are a draft or were unpublished |

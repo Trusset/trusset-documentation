@@ -1,12 +1,12 @@
 ---
 title: 'Deposit'
-api: 'POST /lending-external-securities/api/vaults/{vaultId}/deposit'
-description: 'Approve-and-deposit calldata for a verified wallet'
+api: 'POST /lending-external-securities-v2/api/vaults/{vaultId}/deposit'
+description: 'Approve-and-deposit calldata that names your instance as the depositor''s distributor'
 ---
 
-Builds the two transactions a deposit needs: an ERC-20 approval for the vault to pull the settlement asset, then the deposit itself. Both come back as ordered steps for the depositor's wallet to sign. The depositor receives vault shares at the current share price.
+Builds the two transactions a deposit needs: an ERC-20 approval for the vault to pull its asset, a settlement token (stablecoin), then the deposit itself. The depositor's wallet signs both, in order, and receives vault shares at the current share price. On a vault that supports distributor attribution, the deposit also names your instance as the depositor's distributor.
 
-Deposits are identity-gated. The vault admits only wallets its identity register verifies, and that register is fixed for the life of the vault. The operator's register provider admits depositors.
+The vault admits a depositor only when every register it reads verifies the wallet. That is the vault's own identity register, when the vault names one, and the provider register of every market the vault funds or has consented to draw for. A vault without a register of its own still applies the markets' registers. The vault operator's register provider and each market's register provider admit depositors.
 
 ## Path Parameters
 
@@ -15,70 +15,106 @@ Deposits are identity-gated. The vault admits only wallets its identity register
 ## Body Parameters
 
 <ParamField body="amount" type="string" required>
-  Amount to deposit as a decimal string, for example `"1000"`. Denominated in the vault's settlement asset and parsed at `assetDecimals`.
+  Amount to deposit as a decimal string, for example `"1000"`. Digits with an optional fraction, greater than zero. Denominated in the vault's asset and parsed at `assetDecimals`, so a finer fraction answers `VALIDATION_ERROR`.
 </ParamField>
 
 <ParamField body="holderAddress" type="string">
-  Wallet that will sign. When supplied, the API checks it against the vault's identity register before offering a transaction and refuses with `DEPOSITOR_NOT_VERIFIED` if the deposit would revert on-chain. Omit it to skip the check. The contract enforces the gate either way.
+  Wallet that will sign. When it is a `0x` address, the API checks it against the vault's register and, on a vault with distributor attribution, each market's provider register. It refuses with `DEPOSITOR_NOT_VERIFIED` when the deposit would revert, and reads whether the wallet is already bound to a distributor. Omit it to skip both; the contract enforces the registers either way. Any other value is ignored.
 </ParamField>
+
+## When a deposit is refused on the vault's own state
+
+Two refusals are about the vault rather than the depositor. Both stop shares being issued against a number nobody can stand behind, and neither affects redemptions, which stay open throughout.
+
+A deposit is refused with `VAULT_BOOK_INCOMPLETE` when a market the vault funds is not answering. The vault cannot total its own book, so it would issue shares at a price computed from a partial book. The message names the market. It clears when that market answers again, or when the operator writes it off.
+
+A deposit is refused with `VAULT_WIPED_OUT` when shares are in issue against assets totalling zero. A deposit into that vault would be absorbed by the existing holders rather than buying a position. A vault whose value is gone cannot be recapitalized, and the operator has to run a new one.
+
+<Warning>
+  These checks, and the pause check, read the vault's live state. When that read fails, the API still returns calldata. The current vault implementation refuses all three cases on-chain. The earlier one, `supportsNotice: false` on [Get Vault](/endpoints/vaults/get-vault), does not refuse a wiped-out vault, so do not sign there while `onChain.readFailed` is `true`.
+</Warning>
+
+## Distributor attribution
+
+The instance whose API key builds a deposit is that depositor's distributor, and a market's [Deposit to Vault](/endpoints/lending/deposit-to-vault) route attributes the same way. The deposit step names your instance's distributor wallet in `deposit(amount, distributor)`. That is its primary verified wallet, or its earliest verified wallet when none is primary. The vault binds the signing wallet to the first distributor a deposit names and never rebinds it. Every share the holder has or later receives is then attributed to that distributor. A share transfer moves the attribution to the recipient's distributor, or to none.
+
+Each market sets aside a distributor share: 5 percent of repaid interest after Trusset's 15 percent infrastructure fee, and 5 percent of each fixed transaction fee. It credits that share to its liquidity providers per share, and the vault's part is its slice. The vault passes the part earned by attributed shares to their distributors and the rest to the vault operator. [Get Earnings](/endpoints/vaults/get-earnings) shows what your instance has earned.
+
+On the current vault implementation a deposit may bind a new holder only to the vault owner or to a distributor the vault operator approved. When your instance's wallet is not approved, the API names no distributor unless the wallet is already bound, so the deposit still goes through. The operator approves distributors with [Set Distributor Approval](/endpoints/vaults/set-distributor-approval). If the approval is withdrawn after the calldata is built, a deposit that would bind a new holder to your wallet reverts and nothing moves.
+
+The `attribution` block states what this deposit does:
+
+| `binding` | Meaning |
+|---|---|
+| `BINDS_NOW` | The wallet is not bound yet. This deposit binds it to your instance's distributor wallet |
+| `ALREADY_BOUND` | The wallet is already bound to your instance |
+| `BOUND_ELSEWHERE` | The wallet is bound to another distributor, named in `distributor`, which keeps the credit |
+| `NOT_APPROVED` | The vault operator has not approved your instance's distributor wallet. The deposit names no distributor, so a wallet not yet bound stays unbound and its share goes to the vault operator |
+| `UNATTRIBUTED` | Your instance has no verified wallet, so the deposit names no distributor |
+| `null` | `holderAddress` was omitted, so the binding could not be read. When the deposit names your wallet, a wallet not yet bound binds to it and a bound one keeps its distributor |
+
+The binding follows the wallet that signs the deposit, not `holderAddress`. Name the signing wallet, or the checks and the `binding` reading describe the wrong wallet.
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
-    <ResponseField name="steps" type="array">Ordered transactions to sign and broadcast: the approval, then the `deposit` call. Each carries `to`, `data`, and a human-readable `description`.</ResponseField>
-    <ResponseField name="confirmWith" type="object">Where to report the hash: the `confirm-tx` endpoint with `txType: "DEPOSIT"`. Confirm with the deposit step's hash, not the approval's.</ResponseField>
+    <ResponseField name="steps" type="array">Ordered transactions to sign and broadcast: the approval on the asset, then the deposit on the vault. Each carries `to`, `data`, `value` (`"0"`), `chainId` and a human-readable `description`.</ResponseField>
+    <ResponseField name="functionName" type="string">`deposit`.</ResponseField>
+    <ResponseField name="attribution" type="object">
+      <Expandable>
+        <ResponseField name="supported" type="boolean">`false` when the vault runs an implementation from before distributor attribution. The deposit then names no distributor, and `warning` says so.</ResponseField>
+        <ResponseField name="binding" type="string">One of the values in the table above, or `null`.</ResponseField>
+        <ResponseField name="requestedDistributor" type="string">Your instance's distributor wallet, or `null` when it has none.</ResponseField>
+        <ResponseField name="distributor" type="string">The distributor these shares will credit. `null` when no distributor is credited.</ResponseField>
+        <ResponseField name="creditsThisInstance" type="boolean">Whether your instance earns the distributor share on this deposit. `null` when that depends on a binding that could not be read.</ResponseField>
+        <ResponseField name="approvalRequired" type="boolean">Present and `true` with `NOT_APPROVED`.</ResponseField>
+        <ResponseField name="note" type="string">Plain-language statement of a binding that credits your instance, or of an unread one.</ResponseField>
+        <ResponseField name="warning" type="string">Plain-language statement of a binding that does not credit your instance. Show it before the depositor signs.</ResponseField>
+        <ResponseField name="gates" type="array">`{ marketAddress, providerRegister }` for every market the vault funds or has consented to draw for. `providerRegister` is `null` where the market names none. Empty on a vault from before distributor attribution.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="confirmWith" type="object">Where to report the hash: [Confirm Transaction](/endpoints/vaults/confirm-transaction) with `txType: "DEPOSIT"`. Confirm with the deposit step's hash, not the approval's.</ResponseField>
   </Expandable>
 </ResponseField>
 
-## When a deposit is refused on the vault's own state
-
-Two refusals are about the vault rather than about the depositor, and both exist to stop shares being issued against a number nobody can stand behind. Neither affects redemptions, which stay open throughout.
-
-A deposit is refused with `VAULT_BOOK_INCOMPLETE` when a market the vault funds is not answering. The vault cannot total its own book, so the share price it would issue at is a price computed from a partial book. The message names the market. It clears when that market answers again, or when the operator writes it off.
-
-A deposit is refused with `VAULT_WIPED_OUT` when shares are in issue against assets totalling zero. A deposit into that vault would be absorbed by the existing holders rather than buying a position. A vault whose value is gone cannot be recapitalized, and the operator has to run a new one.
-
-## Errors
-
-| Code | Status | Meaning |
-|---|---|---|
-| `VALIDATION_ERROR` | 400 | Malformed amount. `error.details` names the field. |
-| `INVALID_AMOUNT` | 400 | `amount` carries more decimal places than the vault's asset supports. |
-| `DEPOSITOR_NOT_VERIFIED` | 403 | The wallet is not verified on this vault's identity register. The message names the register. Show it verbatim. |
-| `VAULT_NOT_FOUND` | 404 | No such vault, or it is not visible to your instance. |
-| `DEPOSITS_PAUSED` | 409 | The operator paused deposits. Redemptions stay open. |
-| `VAULT_NOT_DEPLOYED` | 409 | The vault has no on-chain address yet. |
-| `VAULT_BOOK_INCOMPLETE` | 409 | A market the vault funds is not answering, so its book cannot be totalled. |
-| `VAULT_WIPED_OUT` | 409 | Shares are in issue against zero assets. |
-
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/vaults/{vaultId}/deposit" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd/deposit" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"amount": "1000", "holderAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab"}'
+  -d '{"amount": "1000", "holderAddress": "0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b"}'
 ```
 ```typescript TypeScript
-const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/vaults/${vaultId}/deposit`,
-  {
-    method: 'POST',
-    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ amount: '1000', holderAddress: wallet })
-  }
-);
+const base = 'https://api.trusset.org/lending-external-securities-v2/api/vaults';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(`${base}/${vaultId}/deposit`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ amount: '1000', holderAddress: await signer.getAddress() })
+});
 const { data } = await res.json();
+if (data.attribution.warning) console.warn(data.attribution.warning);
+
+let depositHash = '';
 for (const step of data.steps) {
-  const tx = await signer.sendTransaction({ to: step.to, data: step.data });
+  const tx = await signer.sendTransaction({ to: step.to, data: step.data, value: step.value, chainId: step.chainId });
   await tx.wait();
+  depositHash = tx.hash;
 }
+
+await fetch(`${base}/${vaultId}/confirm-tx`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ txHash: depositHash, txType: 'DEPOSIT' })
+});
 ```
 </RequestExample>
 
 <ResponseExample>
-```json Response
+```json Calldata Response
 {
   "success": true,
   "data": {
@@ -87,15 +123,30 @@ for (const step of data.steps) {
       {
         "to": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
         "data": "0x095ea7b3...",
-        "description": "Approve the vault to pull 1000 USDC"
+        "description": "Approve the vault to pull 1000 USDC",
+        "chainId": 11155111,
+        "value": "0"
       },
       {
         "to": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
-        "data": "0xb6b55f25...",
-        "description": "Deposit 1000 USDC into Trusset Prime Demo Vault"
+        "data": "0x6e553f65...",
+        "description": "Deposit 1000 USDC into Trusset Prime Demo Vault",
+        "chainId": 11155111,
+        "value": "0"
       }
     ],
     "functionName": "deposit",
+    "attribution": {
+      "supported": true,
+      "requestedDistributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+      "binding": "BINDS_NOW",
+      "distributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+      "creditsThisInstance": true,
+      "note": "This deposit binds 0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b to this instance's distributor wallet 0x83fd50068b2fc776bbf237f8163495b2247408c1: the vault credits this instance the distributor share of repaid interest on the wallet's shares from now on.",
+      "gates": [
+        { "marketAddress": "0xae10e07a899526e97be3940ca6ee03af28394495", "providerRegister": null }
+      ]
+    },
     "confirmWith": { "endpoint": "confirm-tx", "txHash": true, "txType": "DEPOSIT" }
   }
 }
@@ -103,10 +154,28 @@ for (const step of data.steps) {
 ```json Error - Not Verified
 {
   "success": false,
+  "data": null,
   "error": {
     "code": "DEPOSITOR_NOT_VERIFIED",
-    "message": "Wallet 0xabc...def is not verified on this vault's identity register (0xe9114c40934f6fb6bb317935156b731f7a86d006), so the deposit would revert. The vault operator's register provider admits depositors."
+    "message": "Wallet 0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b is not verified on this vault's identity register (0xe9114c40934f6fb6bb317935156b731f7a86d006), so the deposit would revert. The vault operator's register provider admits depositors."
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `amount` is missing, not a positive decimal string, finer than the asset's decimals, or too large. `error.details` names the field |
+| `DEPOSITOR_NOT_VERIFIED` | `403` | `holderAddress` is not verified on the vault's identity register, or on the provider register of a market the vault funds. The message names the register, and the market where one refused. Show it verbatim |
+| `VAULT_NOT_PUBLISHED` | `403` | The vault is unpublished and your instance sees it only as a distributor of record. It takes deposits only through its operator's instance until published. Redemptions stay open |
+| `VAULT_NOT_FOUND` | `404` | No such vault, or it is not visible to your instance |
+| `DEPOSITS_PAUSED` | `409` | The operator paused deposits. Redemptions stay open |
+| `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address on record |
+| `VAULT_BOOK_INCOMPLETE` | `409` | A market the vault funds is not answering, so its book cannot be totalled |
+| `VAULT_WIPED_OUT` | `409` | Shares are in issue against zero assets |
+| `VAULT_STATE_UNAVAILABLE` | `503` | The vault implementation, its markets, whether it admits your distributor wallet, or your standing in an unpublished vault could not be read. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read, so nothing was decided. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | The vault records or your instance's verified wallets could not be read. Retry shortly |
+| `VAULT_DEPOSIT_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |

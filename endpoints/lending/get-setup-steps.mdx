@@ -1,12 +1,14 @@
 ---
 title: 'Get Setup Steps'
-api: 'GET /lending-external-securities/api/markets/{marketId}/setup-steps'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/setup-steps'
 description: 'Post-deployment checklist with calldata for each outstanding step'
 ---
 
-Returns the authorization work a market still needs before it can lend, as an ordered checklist. Each incomplete step comes with ready-to-sign calldata and the role required to execute it.
+Returns the work a market still needs before it can lend, as an ordered checklist. The first step is always a lender of record taking the market. Each step after it names the role required to execute it. Every incomplete step after it comes with ready-to-sign calldata, unless it is blocked or delegated to another party.
 
-The steps differ by collateral mode, because freeze markets and custody markets rely on different token-side permissions. Two steps are common to both.
+The checklist fails closed. When the factory cannot be read, or holds no deployment record for the market, the lender-of-record step is reported blocked rather than done, and `complete` stays `false`.
+
+The token-side steps differ by collateral mode, because freeze markets and custody markets rely on different token-side permissions. They also differ by how the collateral token gates its holders: through a contract allow-list, or through an identity registry.
 
 ## Path Parameters
 
@@ -16,85 +18,100 @@ The steps differ by collateral mode, because freeze markets and custody markets 
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="complete" type="boolean">True when the market has a lender of record and every step is either done or delegated.</ResponseField>
-    <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`. Determines which steps appear.</ResponseField>
+    <ResponseField name="complete" type="boolean">True when a lender of record has taken the market and every step is either done or delegated.</ResponseField>
+    <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`. Determines which token-side steps appear.</ResponseField>
     <ResponseField name="priceSource" type="string">`NAV`, `MARKET` or `ORACLE`, read from the contract where possible and from the record otherwise.</ResponseField>
-    <ResponseField name="collateralAgent" type="string">Named pledgee recorded at deployment.</ResponseField>
+    <ResponseField name="collateralAgent" type="string">Named pledgee, from the factory record where it could be read. Addresses read from the factory record keep their checksum casing.</ResponseField>
     <ResponseField name="curator" type="string">The institution holding the lender-of-record role, or `null`.</ResponseField>
-    <ResponseField name="seekingCurator" type="boolean">`true` while the market has no lender of record.</ResponseField>
+    <ResponseField name="seekingCurator" type="boolean">`true` while the market has no lender of record. `null` when the factory record could not be read.</ResponseField>
     <ResponseField name="realizationMode" type="string">How that institution declared it will realize seized collateral: `EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION`.</ResponseField>
     <ResponseField name="saleRecipient" type="string">Where seized collateral is sent for realization.</ResponseField>
-    <ResponseField name="operable" type="boolean">Whether the market has been adopted and can be operated at all. `complete` can never be true while this is `false`.</ResponseField>
-    <ResponseField name="deploymentReadable" type="boolean">Whether the factory record for this market could be read. When `false`, the lender-of-record fields above fall back to the stored record.</ResponseField>
+    <ResponseField name="operable" type="boolean">Whether a lender of record has taken the market, so it can be operated at all. `complete` can never be true while this is `false`.</ResponseField>
+    <ResponseField name="deploymentReadable" type="boolean">Whether the current factory holds a deployment record for this market and it could be read. When `false`, the lender-of-record fields above fall back to the stored record.</ResponseField>
     <ResponseField name="governance" type="object">`marketAdminHeldByInstance`, `oracleOwnedByInstance` and `oracleOwner`. Says which of the two administrative keys your instance actually holds, which decides which steps you can sign yourself.</ResponseField>
-    <ResponseField name="liquidationRouterAddress" type="string">Router that must be made an eligible collateral recipient.</ResponseField>
-    <ResponseField name="relayerAddress" type="string">The instance's registered wallet: the primary one, or the oldest verified wallet when no primary is set. Oracle signer and liquidator role checks are evaluated against this address. When null, the liquidator step can never report done.</ResponseField>
+    <ResponseField name="liquidationRouterAddress" type="string">Router that must be an eligible holder of the collateral token.</ResponseField>
+    <ResponseField name="relayerAddress" type="string">The instance's registered wallet: the primary one, or the oldest verified wallet when no primary is set. The oracle signer and liquidator steps are evaluated against this address, and when it is `null` neither can complete.</ResponseField>
     <ResponseField name="steps" type="array">
       <Expandable>
         <ResponseField name="key" type="string">Step identifier.</ResponseField>
         <ResponseField name="title" type="string">Human-readable description.</ResponseField>
         <ResponseField name="done" type="boolean">Whether the on-chain state already satisfies this step.</ResponseField>
-        <ResponseField name="requiredRole" type="string">Role the executing wallet must hold.</ResponseField>
+        <ResponseField name="requiredRole" type="string">Role the executing party must hold.</ResponseField>
         <ResponseField name="target" type="string">Contract the transaction is sent to.</ResponseField>
-        <ResponseField name="subject" type="string">Address being authorized.</ResponseField>
-        <ResponseField name="delegated" type="boolean">`true` when the step is not this instance's to perform and another party already covers it. A delegated step counts toward `complete` without being `done`.</ResponseField>
+        <ResponseField name="subject" type="string">Address being authorized. On the lender-of-record step, the institution that took the role.</ResponseField>
+        <ResponseField name="candidates" type="array">Lender-of-record step only. The addresses nominated for the role.</ResponseField>
+        <ResponseField name="delegated" type="boolean">Oracle signer and liquidator steps only. `true` when the step is not this instance's to perform, because another party holds the authority it needs. A delegated step counts toward `complete` without being `done`, and carries no calldata.</ResponseField>
         <ResponseField name="blocked" type="boolean">`true` when the step cannot be achieved as things stand, rather than merely being outstanding.</ResponseField>
-        <ResponseField name="blockedReason" type="string">Why, in words. Present alongside `blocked`.</ResponseField>
-        <ResponseField name="blockedCode" type="string">The machine-readable form of the same. Present alongside `blocked`.</ResponseField>
+        <ResponseField name="blockedReason" type="string">Why, in words. Carried by the allow-list and registry steps, `null` when not blocked, and by a blocked lender-of-record step.</ResponseField>
+        <ResponseField name="blockedCode" type="string">The machine-readable form of the same, on the same steps. See the table below.</ResponseField>
       </Expandable>
     </ResponseField>
-    <ResponseField name="calldata" type="object">Transactions for incomplete steps, keyed by step name, each `{ to, data, description }`. Completed steps are omitted.</ResponseField>
+    <ResponseField name="calldata" type="object">Transactions for incomplete steps, keyed by calldata name, each `{ to, data, description }` with `value` and `chainId` added. Completed, blocked and delegated steps carry none.</ResponseField>
   </Expandable>
 </ResponseField>
 
-## Steps by Mode
+## Steps
 
-**`FREEZE`**
+Every checklist opens with the lender-of-record step and closes with the two steps the market admin and the oracle owner sign. The token-side steps sit between them.
 
-| `key` | `requiredRole` | Executed by |
-|---|---|---|
-| `grantAdapterAgentRole` | `TOKEN_AGENT_ADMIN` | The collateral token's agent administrator |
-| `verifyRouterOnRegistry` | `IDENTITY_REGISTRY_AGENT` | The token's identity registry operator |
-| `authorizeOracleSigner` | `ORACLE_OWNER` | The oracle owner, which is the admin address from deployment |
-| `grantLiquidatorRole` | `DEFAULT_ADMIN_ROLE` | The market admin |
-
-**`CUSTODY`**
-
-| `key` | `requiredRole` | Executed by |
-|---|---|---|
-| `verifyAdapterAsHolder` | `IDENTITY_REGISTRY_AGENT` | The token's identity registry operator |
-| `verifyRouterAsHolder` | `IDENTITY_REGISTRY_AGENT` | The token's identity registry operator |
-| `authorizeOracleSigner` | `ORACLE_OWNER` | The oracle owner |
-| `grantLiquidatorRole` | `DEFAULT_ADMIN_ROLE` | The market admin |
+| `key` | `requiredRole` | Calldata key | Executed by |
+|---|---|---|---|
+| `adoptCurator` | `NOMINATED_CANDIDATE` | None | A nominated candidate, through [Accept Lender Role](/endpoints/lending/accept-lender-role) |
+| `grantAdapterAgentRole` | `TOKEN_AGENT_ADMIN` | `grantAdapterAgentRole` | `FREEZE` only. The collateral token's agent administrator |
+| `authorizeAdapterOnToken` | `TOKEN_COMPLIANCE_ADMIN` | `authorizeAdapterOnToken` | `CUSTODY`, allow-list token. The token's compliance administrator |
+| `verifyAdapterAsHolder` | `IDENTITY_REGISTRY_AGENT` | `verifyAdapterAsHolder` | `CUSTODY`, registry token. An agent of the token's identity registry |
+| `authorizeRouterOnToken` | `TOKEN_COMPLIANCE_ADMIN` | `authorizeRouterOnToken` | Allow-list token. The token's compliance administrator |
+| `verifyRouterOnRegistry` | `IDENTITY_REGISTRY_AGENT` | `verifyRouterAsHolder` | `FREEZE`, registry token. An agent of the token's identity registry |
+| `verifyRouterAsHolder` | `IDENTITY_REGISTRY_AGENT` | `verifyRouterAsHolder` | `CUSTODY`, registry token. An agent of the token's identity registry |
+| `authorizeVenueOnToken` | `TOKEN_COMPLIANCE_ADMIN` | `authorizeVenueOnToken` | Present when an auction venue is wired. The token's compliance administrator |
+| `verifyVenueAsHolder` | `IDENTITY_REGISTRY_AGENT` | `verifyVenueAsHolder` | Present when an auction venue is wired. An agent of the token's identity registry |
+| `authorizeOracleSigner` | `ORACLE_OWNER` | `authorizeRelayerOnOracle` | The oracle owner named by the lender of record |
+| `grantLiquidatorRole` | `DEFAULT_ADMIN_ROLE` | `grantLiquidatorRole` | The market admin |
 
 <Note>
-  In `FREEZE` mode the router step has key `verifyRouterOnRegistry` but its calldata is emitted under `verifyRouterAsHolder`, matching the custody naming. Look up calldata by the `calldata` object's own keys rather than by step key.
+  Two step keys differ from the calldata keys they produce: `verifyRouterOnRegistry` emits `verifyRouterAsHolder`, and `authorizeOracleSigner` emits `authorizeRelayerOnOracle`. Look up calldata by the `calldata` object's own keys rather than by step key. [Configure Market](/endpoints/lending/configure-market) names the agent-role grant `grantAgentRoleToAdapter`, not `grantAdapterAgentRole`.
 </Note>
 
+## Blocked Codes
+
+| `blockedCode` | Step | Meaning |
+|---|---|---|
+| `MARKET_NOT_IN_FACTORY` | `adoptCurator` | The factory this instance deploys to holds no deployment record for the market. A market from an earlier factory generation has to be deployed again |
+| `FACTORY_READ_FAILED` | `adoptCurator` | The factory could not be read, so nothing on the checklist counts as done. Retry |
+| `IDENTITY_REGISTRY_WRITE_REJECTED` | Registry steps | Replayed from your instance's wallet, the registration reverts. The registry's own agent must send it |
+| `IDENTITY_REGISTRY_UNRECOGNISED` | Registry steps | The registry answers neither the Trusset nor the ERC-3643 reference interface |
+| `ONCHAINID_REQUIRED` | Registry steps | The ERC-3643 registry admits a holder only through an ONCHAINID, and the subject has none yet |
+| `IDENTITY_CLAIMS_REQUIRED` | Registry steps | The subject's ONCHAINID lacks a valid claim for a required topic |
+| `IDENTITY_ALREADY_REGISTERED` | Registry steps | The subject already holds a valid ONCHAINID on the registry |
+| `CLAIM_TOPICS_UNREADABLE` | Registry steps | The ERC-3643 registry did not return the claim topics it requires |
+
+`grantAdapterAgentRole` reports `blocked: true` without a code when the token does not implement the freeze interface. That market has to be redeployed in `CUSTODY` mode.
+
 <Warning>
-  The first two steps in either mode are executed by whoever administers the collateral token, which for an imported third-party security is the original issuer or their transfer agent, not Trusset and not necessarily you. Plan for that dependency before announcing a market.
+  The token-side steps are executed by whoever administers the collateral token. For an imported third-party security that is the original issuer or its transfer agent, not Trusset and not necessarily you. Plan for that dependency before announcing a market.
 </Warning>
 
 <Tip>
-  `grantLiquidatorRole` can be executed directly through [Set Liquidator Role](/endpoints/lending/set-liquidator-role) when the registered wallet holds the market admin role.
+  [Set Liquidator Role](/endpoints/lending/set-liquidator-role) builds the same `LIQUIDATOR_ROLE` grant for any address, for the market admin to sign.
 </Tip>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/setup-steps" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/setup-steps" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/setup-steps`,
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/setup-steps`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
 
-for (const step of data.steps.filter(s => !s.done)) {
-  const tx = data.calldata[step.key] ?? data.calldata.verifyRouterAsHolder;
-  console.log(`${step.title} requires ${step.requiredRole}`, tx);
+const outstanding = data.steps.filter((s) => !s.done && !s.delegated);
+for (const step of outstanding) {
+  console.log(`${step.title} requires ${step.requiredRole}`, step.blocked ? step.blockedReason : '');
 }
+console.log('Calldata ready to sign:', Object.keys(data.calldata));
 ```
 </RequestExample>
 
@@ -105,63 +122,129 @@ for (const step of data.steps.filter(s => !s.done)) {
   "data": {
     "mode": "FREEZE",
     "priceSource": "NAV",
-    "collateralAgent": "0x555...666",
+    "collateralAgent": "0x5A1f7C3E9d2B4068E1c5a7F3B9D0E2C4a6f81666",
     "liquidationRouterAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
-    "relayerAddress": "0x123...456",
+    "relayerAddress": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+    "curator": "0x4E91A7C05D3b62F18A0c94E7DB2358f1C60a4e93",
+    "seekingCurator": false,
+    "realizationMode": "EXCHANGE_SALE",
+    "saleRecipient": "0x9c3E5a7F1b2D4068e0c2a4F6b8d9E1C3A5F70B11",
+    "operable": true,
+    "deploymentReadable": true,
+    "governance": {
+      "marketAdminHeldByInstance": true,
+      "oracleOwnedByInstance": true,
+      "oracleOwner": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"
+    },
     "steps": [
+      {
+        "key": "adoptCurator",
+        "title": "A nominated lender of record takes the market",
+        "done": true,
+        "requiredRole": "NOMINATED_CANDIDATE",
+        "target": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "subject": "0x4E91A7C05D3b62F18A0c94E7DB2358f1C60a4e93",
+        "candidates": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"]
+      },
       {
         "key": "grantAdapterAgentRole",
         "title": "Grant the freeze adapter the agent role on the token",
         "done": false,
+        "blocked": false,
         "requiredRole": "TOKEN_AGENT_ADMIN",
-        "target": "0xabc...def",
-        "subject": "0x4d2b...77ae",
-        "blocked": false
+        "target": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+        "subject": "0x4d2b9e71c3a05f8d6e2b41c7a9f03d58e6b177ae"
       },
       {
         "key": "verifyRouterOnRegistry",
         "title": "Verify the market liquidation router on the identity registry",
         "done": false,
+        "blocked": false,
+        "blockedReason": null,
+        "blockedCode": null,
         "requiredRole": "IDENTITY_REGISTRY_AGENT",
-        "target": "0x9e3c...1145",
+        "target": "0x2f6a0c9e41d7b3a58e0c2f4a6d8b1e3c5a7f9d10",
         "subject": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf"
       },
       {
         "key": "authorizeOracleSigner",
         "title": "Authorize the issuer wallet as oracle price signer",
         "done": true,
+        "delegated": false,
         "requiredRole": "ORACLE_OWNER",
         "target": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
-        "subject": "0x123...456"
+        "subject": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"
       },
       {
         "key": "grantLiquidatorRole",
         "title": "Grant LIQUIDATOR_ROLE to the issuer wallet",
         "done": false,
+        "delegated": false,
         "requiredRole": "DEFAULT_ADMIN_ROLE",
         "target": "0x70a0e25c7b768b87e658348b3b577678a173e038",
-        "subject": "0x123...456"
+        "subject": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"
       }
     ],
     "calldata": {
       "grantAdapterAgentRole": {
-        "to": "0xabc...def",
-        "data": "0x...",
-        "description": "Grant agent role to freeze adapter 0x4d2b...77ae on the security token (requires token agent admin)"
+        "to": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+        "data": "0x84e798420000000000000000000000004d2b9e71c3a05f8d6e2b41c7a9f03d58e6b177ae",
+        "description": "Grant agent role to freeze adapter 0x4d2b...77ae on the security token (requires token agent admin)",
+        "value": "0",
+        "chainId": 11155111
       },
       "verifyRouterAsHolder": {
-        "to": "0x9e3c...1145",
-        "data": "0x...",
-        "description": "Verify the market liquidation router as a holder on the identity registry"
+        "to": "0x2f6a0c9e41d7b3a58e0c2f4a6d8b1e3c5a7f9d10",
+        "data": "0x05bd97c8000000000000000000000000067a3feea46649adad8e31c33b3a4d8774b8d8cf...",
+        "description": "Register liquidation router 0x067a...d8cf as a verified holder on the identity registry via verifyIdentity (requires KYC provider role)",
+        "value": "0",
+        "chainId": 11155111
       },
       "grantLiquidatorRole": {
         "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
-        "data": "0x...",
-        "description": "Grant LIQUIDATOR_ROLE to issuer wallet 0x123...456 (requires market DEFAULT_ADMIN_ROLE)"
+        "data": "0x2f2ff15d5e17fc5225d4a099df75359ce1f405503ca79498a8dc46a7d583235a0ee45c16...",
+        "description": "Grant LIQUIDATOR_ROLE to issuer wallet 0x4e91...4e93 (requires market DEFAULT_ADMIN_ROLE)",
+        "value": "0",
+        "chainId": 11155111
       }
     },
     "complete": false
   }
 }
 ```
+```json Excerpt - Not In Factory
+{
+  "success": true,
+  "data": {
+    "mode": "CUSTODY",
+    "operable": false,
+    "deploymentReadable": false,
+    "seekingCurator": null,
+    "steps": [
+      {
+        "key": "adoptCurator",
+        "title": "A nominated lender of record takes the market",
+        "done": false,
+        "blocked": true,
+        "blockedCode": "MARKET_NOT_IN_FACTORY",
+        "blockedReason": "The external securities lending v2 factory this instance deploys to holds no deployment record for this market, so no lender of record can take it here. A market deployed through an earlier factory generation has to be deployed again through the current factory.",
+        "requiredRole": "NOMINATED_CANDIDATE",
+        "target": "0x1c74f9a2b0e63d581a47c02f9b8de3517a604c2b",
+        "subject": null,
+        "candidates": []
+      }
+    ],
+    "complete": false
+  }
+}
+```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `ROUTER_UNRESOLVED` | `503` | The record carries no router address and the market's router could not be read. Retry |

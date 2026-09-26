@@ -1,0 +1,150 @@
+---
+title: 'Record Price Attestation'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/price-attestation'
+description: 'Record a signed price produced by a key outside this instance'
+---
+
+Records a price signature that a key outside this instance produced, so it joins the market's attested price history. It is the counterpart to [Sign Price](/endpoints/lending/sign-price) for a price signer that keeps its key in its own environment: sign the returned payload there, then post the result here.
+
+The oracle is asked to accept the signature before anything is written, so the history never holds a signature nobody verified. Recording writes nothing on-chain and moves no price.
+
+A recorded attestation has two uses. It appears in the `signed` list on [Get Oracle History](/endpoints/lending/get-oracle-history), with `pushedTxHash` stamped once the price lands. A later [Sync Oracle Price](/endpoints/lending/sync-oracle) of exactly that price can also submit it, so any wallet may broadcast the push. That works only while the attestation is unexpired, unpushed, dated after the oracle's current price and at most 15 minutes old.
+
+<Note>
+  The oracle's acceptance covers the signature, the signer, expiry and age. It does not cover the deviation limit, so a recorded attestation can still revert when submitted.
+</Note>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="price" type="string" required>
+  Price in base units as an integer string, exactly as signed. Must be greater than zero.
+</ParamField>
+
+<ParamField body="timestamp" type="integer" required>
+  The signed timestamp in unix seconds. Must be a positive integer.
+</ParamField>
+
+<ParamField body="validUntil" type="integer" required>
+  The signed expiry in unix seconds. Must be a positive integer later than `timestamp`.
+</ParamField>
+
+<ParamField body="signature" type="string" required>
+  The 65-byte EIP-712 signature, as 0x followed by 130 hex characters.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="attestation" type="object">
+      The recorded attestation.
+      <Expandable>
+        <ResponseField name="id" type="string">Attestation ID.</ResponseField>
+        <ResponseField name="price" type="string">The price in base units.</ResponseField>
+        <ResponseField name="priceDecimal" type="string">The same price as a decimal string at the borrow asset's decimals.</ResponseField>
+        <ResponseField name="attestedAt" type="integer">The signed timestamp, in unix seconds.</ResponseField>
+        <ResponseField name="validUntil" type="integer">The signed expiry, in unix seconds.</ResponseField>
+        <ResponseField name="signer" type="string">The key the oracle recovered from the signature.</ResponseField>
+        <ResponseField name="source" type="string">`API` when recorded through this endpoint, `APP` when recorded through the Trusset app.</ResponseField>
+        <ResponseField name="pushedTxHash" type="string">The transaction that landed this price on the oracle, or `null` until it lands.</ResponseField>
+        <ResponseField name="pushedAt" type="string">When that transaction was mined, or `null`.</ResponseField>
+        <ResponseField name="createdAt" type="string">When the attestation was recorded.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="alreadyRecorded" type="boolean">`true` when this signature was already recorded for the market. The existing record is returned and nothing new is written.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/price-attestation" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "price": "105400000",
+    "timestamp": 1718445600,
+    "validUntil": 1718445900,
+    "signature": "0x5f1c3a9e0b7d24c68f1e3a5b7c9d0e2f4a6b8c0d1e3f5a7b9c1d3e5f7a9b0c2d4e6f8a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d9e1f3a5b7c9d0e2f4a6b8c0d1e3f1b"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/price-attestation`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      price: signed.price,
+      timestamp: signed.timestamp,
+      validUntil: signed.validUntil,
+      signature
+    })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "attestation": {
+      "id": "clx4k2p9e0001m8tq3v7h5z2a",
+      "price": "105400000",
+      "priceDecimal": "105.4",
+      "attestedAt": 1718445600,
+      "validUntil": 1718445900,
+      "signer": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70",
+      "source": "API",
+      "pushedTxHash": null,
+      "pushedAt": null,
+      "createdAt": "2024-06-15T10:00:04.512Z"
+    },
+    "alreadyRecorded": false
+  }
+}
+```
+```json Error - Signature Not Accepted
+{
+  "success": false,
+  "error": {
+    "code": "SIGNATURE_NOT_ACCEPTED",
+    "message": "The oracle does not accept this signature. It is expired, malformed, or signed by a key the oracle has not authorized."
+  }
+}
+```
+```json Error - Invalid Payload
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Invalid attestation payload",
+    "details": [
+      { "field": "signature", "message": "Invalid" }
+    ]
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | The body does not match the schema, the price is zero, or `validUntil` does not follow `timestamp`. The schema refusal says `Invalid attestation payload` and lists `details` |
+| `NO_ORACLE` | `400` | The market records no oracle address |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `EXTERNAL_FEED_ACTIVE` | `409` | The market's oracle reads an external feed and takes no attested price |
+| `SIGNATURE_NOT_ACCEPTED` | `422` | The oracle rejects the signature: it is expired, dated in the future or older than `maxPriceAge`, does not recover, or recovers to an unauthorized key |
+| `ATTESTATION_FAILED` | `500` | The attestation could not be recorded and no more specific code applied |
+| `ORACLE_UNREACHABLE` | `503` | The oracle could not be reached to verify the signature. Nothing was recorded |

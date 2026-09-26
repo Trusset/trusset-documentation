@@ -13,7 +13,7 @@ The register entry is the operative act and it stays with the register provider.
 ## Base Path
 
 ```
-https://api.trusset.org/lending-external-securities/api/pledges
+https://api.trusset.org/lending-external-securities-v2/api/pledges
 ```
 
 Every request authenticates with an instance API key in the `X-API-Key` header. See [Authentication](/endpoints/authentication).
@@ -27,7 +27,7 @@ Every request authenticates with an instance API key in the `X-API-Key` header. 
     Call [List Pledges](/endpoints/asset-register/list-pledges) with the market's contract address. Poll it on a schedule, or call it when a loan opens on a token you keep the register for.
   </Step>
   <Step title="Check the index">
-    `index.scannedToBlock` says how far the chain has been read. When it sits well behind the head, the pledges returned are real but the list may be short, so call again. `index.historyTruncatedBeforeBlock` is the one that means pledges are missing for good. `index.complete` folds both together, and one more thing besides: read [Reading the index](/endpoints/asset-register/list-pledges#reading-the-index) before you gate on it.
+    `index.scannedToBlock` says how far the chain has been read. When it sits well behind the head, the pledges returned are real but the list may be short, so call again. `index.historyTruncatedBeforeBlock` is the one that means pledges are missing for good. It is reported only on the response to the market's first scan, so record it the first time you see it. `index.complete` folds both together, and one more thing besides: read [Reading the index](/endpoints/asset-register/list-pledges#reading-the-index) before you gate on it.
   </Step>
   <Step title="Take the standing pledges">
     A pledge with `active: true` is still standing. Each one carries `holder`, `pledgee`, `currentAmount`, and the block, timestamp and transaction hash of the lock that created it.
@@ -36,7 +36,7 @@ Every request authenticates with an instance API key in the `X-API-Key` header. 
     Convert the amount out of base units, then make the entry against the holder's position in your register. What the entry is called is yours to decide. A German Kryptowertpapierregister records a restriction on disposal, a Verfügungsbeschränkung, in favour of the pledgee.
   </Step>
   <Step title="Watch for the end">
-    `endedAt.kind` of `RELEASED` means the collateral went back to the holder and the entry can come off. `ENFORCED` means it was seized in a liquidation and moved to the address in `endedAt.to`.
+    `endedAt.kind` of `RELEASED` means the adapter let go of the collateral and the entry can come off. That includes the unseized remainder after a liquidation took only part of a pledge, and a `CUSTODY` return the token refused, which the adapter escrows for the holder to claim. `ENFORCED` means it was seized in a liquidation and moved to the address in `endedAt.to`.
   </Step>
 </Steps>
 
@@ -50,11 +50,13 @@ In a `CUSTODY` market the token moves to the market's collateral adapter. That i
 
 ## Amounts are base units
 
-`amount` and `currentAmount` are integer strings in the collateral token's base units, exactly as the adapter emitted them. Every other lending endpoint returns decimal strings. Read [List Pledges](/endpoints/asset-register/list-pledges) before you convert anything.
+`amount` and `currentAmount` are integer strings in the collateral token's base units, exactly as the adapter emitted them. The lending endpoints otherwise return decimal strings, and name the few base-unit figures they carry on their own pages. Read [List Pledges](/endpoints/asset-register/list-pledges) before you convert anything.
 
 ## Who can read a market
 
-Access is decided per market, not per key. A market opens to the instance that holds its record, and to an instance whose verified wallet is nominated on it. A market left open to any lender of record also opens to an approved bank issuer with a verified wallet. Every other caller is refused.
+Access is decided per market, not per key. A market opens to the instance that holds its record, and to an instance whose verified wallet is nominated on it. A market left open to any lender of record also opens to an approved bank issuer with a verified wallet. That holds for as long as it is still seeking a lender of record. Every other caller is refused.
+
+The address must belong to a market deployed through the current lending factory. Any other address is refused with `MARKET_NOT_V2` before access is considered, including a market deployed through an earlier factory generation.
 
 ## Response envelope
 
@@ -71,10 +73,12 @@ Access is decided per market, not per key. A market opens to the instance that h
 }
 ```
 
-On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. Schema failures use `VALIDATION_ERROR` with `error.details` listing each offending field. `metadata.requestId` always equals the `X-Request-Id` response header, so you can quote it when reporting a problem. Always branch on `success` rather than on the HTTP status alone.
+On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. `metadata.requestId` equals the `X-Request-Id` response header, so you can quote it when reporting a problem. Always branch on `success` rather than on the HTTP status alone.
+
+Three refusals come from the platform's shared error handler instead, before the pledge record is read: a malformed address or query (`VALIDATION_ERROR`, with `error.details` listing each offending field), `MARKET_NOT_V2`, and `MARKET_VERIFICATION_UNAVAILABLE`. That envelope carries no `data`, adds a top-level `statusCode`, and mints its own `metadata.requestId`, so quote `X-Request-Id` for those.
 
 ## Rate limits and credits
 
-This endpoint carries a limit of 100 requests per minute, keyed by API key, inside the ceiling of 200 per minute that applies to the whole lending surface. Exceeding either returns `429` with code `RATE_LIMIT_EXCEEDED` and a `Retry-After` header in seconds. See [Rate Limits](/endpoints/rate-limits).
+This endpoint draws on a limit of 100 requests per minute, counted per API key across every endpoint that carries it. That sits inside the ceiling of 200 per minute that applies to every request made with the key. Exceeding either returns `429` with code `RATE_LIMIT_EXCEEDED` and a `Retry-After` header in seconds. See [Rate Limits](/endpoints/rate-limits).
 
 Requests also draw on the instance's monthly API credit allowance, billed against the lending service. Every response carries `X-Credits-Limit`, `X-Credits-Remaining` and `X-Credits-Reset`. When the allowance is exhausted the request is refused with `402` and code `CREDIT_LIMIT_EXCEEDED`.

@@ -1,12 +1,18 @@
 ---
 title: 'Sign Price'
-api: 'POST /lending-external-securities/api/markets/{marketId}/sign-price'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/sign-price'
 description: 'Produce an EIP-712 signed price for atomic use in a transaction'
 ---
 
-Returns an EIP-712 payload for a NAV, ready to sign. You sign it with the wallet authorized on the market's oracle, then pass the price and your signature as `signedPrice` on [Open Loan](/endpoints/lending/open-loan), [Borrow More](/endpoints/lending/borrow-more), [Withdraw Collateral](/endpoints/lending/withdraw-collateral), or [Liquidate Loan](/endpoints/lending/liquidate). The contract applies the price and the action in one transaction.
+Returns an EIP-712 payload for a NAV, ready to sign. Sign it with a key authorized on the market's oracle. Then pass the price and the signature as `signedPrice` on [Open Loan](/endpoints/lending/open-loan), [Borrow More](/endpoints/lending/borrow-more), [Withdraw Collateral](/endpoints/lending/withdraw-collateral), [Repay](/endpoints/lending/repay) or [Liquidate Loan](/endpoints/lending/liquidate). The contract applies the price and the action in one transaction.
 
-This is the alternative to [Sync Oracle Price](/endpoints/lending/sync-oracle). Signing costs no gas and writes nothing on-chain, so it suits per-transaction pricing where a borrower needs a fresh valuation without waiting for an oracle write. Pushing suits a scheduled NAV publication that every loan in the market should see.
+<Warning>
+  A signed price does not stay private to the transaction that carries it. When it lands, the oracle stores it, and every loan in the market is valued at it from then on. Sign only a price the market's price authority stands behind.
+</Warning>
+
+This is the alternative to [Sync Oracle Price](/endpoints/lending/sync-oracle). Signing costs no gas and writes nothing on-chain; the price lands only with the transaction that carries it. That suits a borrower who needs a fresh valuation without waiting for a scheduled push. A key that signs outside this instance can also post its signature to [Record Price Attestation](/endpoints/lending/record-price-attestation), which lets a later push submit it.
+
+An `ORACLE`-priced market reads an external feed and refuses every attested price. This endpoint refuses it with `EXTERNAL_FEED_ACTIVE`.
 
 ## Path Parameters
 
@@ -15,15 +21,15 @@ This is the alternative to [Sync Oracle Price](/endpoints/lending/sync-oracle). 
 ## Body Parameters
 
 <ParamField body="price" type="number" required>
-  Net asset value per collateral token, denominated in the market's borrow asset. Must be greater than zero.
+  Net asset value per collateral token, denominated in the market's borrow asset. Must be greater than zero, and a numeric string is accepted too. More decimal places than the borrow asset carries fail with `SIGNING_FAILED`.
 </ParamField>
 
 <ParamField body="validitySeconds" type="integer" default="300">
-  Signature lifetime in seconds. Values below 60 are raised to 60 and values above 3600 are lowered to 3600.
+  Signature lifetime in seconds. Values below 60 are raised to 60 and values above 3600 are lowered to 3600. Zero or a non-numeric value falls back to 300.
 </ParamField>
 
 <ParamField body="signerAddress" type="string">
-  The wallet that will sign, when price authority sits with a key this instance does not hold. Supply it and the payload is built for that address and its authorization is checked against the oracle. Omit it and the signer is resolved in order: the price signer the market's lender of record declared, then your instance's registered wallet.
+  The wallet that will sign, when price authority sits with a key this instance does not hold. Supply it and the payload is built for that address and its authorization is checked against the oracle. Omit it and the signer is resolved in order: the price signer the market's lender of record declared, then your instance's first verified wallet. A value that is not a 0x-prefixed 40-character hex address is ignored.
 </ParamField>
 
 ## Response Fields
@@ -66,20 +72,26 @@ PriceUpdate = {
 }
 ```
 
-The signature is bound to one oracle through `verifyingContract` and expires at `validUntil`. It carries no nonce, so a signature can be replayed by anyone who holds it until it expires. Keep `validitySeconds` tight, and treat a signed price as a bearer credential over its lifetime.
+The signature is bound to one oracle on one chain through `verifyingContract` and `chainId`, and expires at `validUntil`. It carries no nonce and names no submitter, so anyone who holds it can submit it until it expires. It lands at most once, because the oracle only accepts a timestamp newer than the price it holds. Keep `validitySeconds` tight, and treat a signed price as a bearer credential over its lifetime.
 
-Verify a signature without spending gas using [Verify Signed Price](/endpoints/lending/verify-price).
+## What the Oracle Checks When the Price Lands
+
+The oracle judges the signature again inside the transaction that carries it, and a refusal reverts that whole transaction. It refuses a signature past `validUntil`, one dated in the future or older than `maxPriceAge`, and one whose signer is neither an authorized signer nor the owner. It also refuses a price outside the deviation limit, both against the current price and against the price that opened the current one-hour window.
+
+A signed price dated no later than the price the oracle already holds is skipped rather than refused. The transaction then runs against the stored price, which must not be stale.
+
+Check a signature without spending gas using [Verify Signed Price](/endpoints/lending/verify-price).
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/sign-price" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/sign-price" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{"price": 105.40, "validitySeconds": 300}'
 ```
 ```typescript TypeScript
 const signRes = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/sign-price`,
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/sign-price`,
   {
     method: 'POST',
     headers: {
@@ -90,12 +102,10 @@ const signRes = await fetch(
   }
 );
 const { data: signed } = await signRes.json();
-
 const { domain, types, message } = signed.typedData;
-const signature = await wallet._signTypedData(domain, types, message);
-
+const signature = await priceSignerWallet._signTypedData(domain, types, message);
 const loanRes = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/open-loan`,
+  `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/open-loan`,
   {
     method: 'POST',
     headers: {
@@ -105,6 +115,7 @@ const loanRes = await fetch(
     body: JSON.stringify({
       collateralAmount: '1000',
       borrowAmount: '50000',
+      borrowerAddress: '0xabc7f1093d5e26b804a1c3f78de025916b47c0d3',
       signedPrice: {
         price: signed.price,
         timestamp: signed.timestamp,
@@ -128,7 +139,7 @@ const loanRes = await fetch(
         "name": "SecurityPriceOracle",
         "version": "1",
         "chainId": 11155111,
-        "verifyingContract": "0x8B2e...4a7c"
+        "verifyingContract": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423"
       },
       "types": {
         "PriceUpdate": [
@@ -149,13 +160,13 @@ const loanRes = await fetch(
       "priceUsd": "105.4",
       "timestamp": 1718445600,
       "validUntil": 1718445900,
-      "signer": "0x123...456"
+      "signer": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70"
     },
     "price": "105400000",
     "priceUsd": "105.4",
     "timestamp": 1718445600,
     "validUntil": 1718445900,
-    "signer": "0x123...456"
+    "signer": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70"
   }
 }
 ```
@@ -182,11 +193,15 @@ const loanRes = await fetch(
 
 ## Error Codes
 
+Every refusal from the signing step carries `signerAddress` in the error object. It names the rejected wallet on `SIGNER_NOT_AUTHORIZED` and is `null` otherwise.
+
 | Code | HTTP | Cause |
 |---|---|---|
 | `NO_ORACLE` | `400` | The market records no oracle address |
 | `MISSING_PRICE` | `400` | `price` is missing, unparseable, or not greater than zero |
-| `SIGNER_NOT_AUTHORIZED` | `400` | The resolved signer is not an authorized signer on the market's oracle. The response echoes it as `signerAddress` |
-| `WALLET_NOT_CONFIGURED` | `400` | No `signerAddress` was given, the market declared no price signer, and this instance has no verified wallet registered |
+| `EXTERNAL_FEED_ACTIVE` | `400` | The market's oracle reads an external feed and refuses signed prices |
+| `SIGNER_NOT_AUTHORIZED` | `400` | The resolved signer is neither an authorized signer nor the owner of the market's oracle |
+| `WALLET_NOT_CONFIGURED` | `400` | No `signerAddress` was given, the market declared no price signer, and this instance has no verified wallet |
 | `SIGNING_FAILED` | `400` | The payload could not be built and no more specific code applied |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

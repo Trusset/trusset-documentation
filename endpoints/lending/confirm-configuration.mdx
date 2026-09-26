@@ -1,0 +1,137 @@
+---
+title: 'Confirm Configuration'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/confirm-configuration'
+description: 'Record a mined configuration transaction and re-read the market readiness'
+---
+
+Verifies a configuration transaction you broadcast from [Configure Market](/endpoints/lending/configure-market) or [Get Configuration Status](/endpoints/lending/get-configuration-status). It records the transaction in the market's ledger and returns the market's readiness, read fresh from the chain. Called without `txHash`, it only re-reads readiness.
+
+Name the `action` the transaction performed. The transaction must then call one of that action's functions and target its contract. Where the action is about the adapter, the router or the auction venue, it must also authorize that address. Without an `action`, any successful transaction to one of the market's contracts is recorded as a configuration change, whatever it did.
+
+Nothing on the chain changes here. A transaction that failed verification is not recorded, and readiness reflects only what the chain holds.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="txHash" type="string">
+  Hash of the mined configuration transaction, `0x` followed by 64 hex characters. Omit to re-read readiness without recording anything.
+</ParamField>
+
+<ParamField body="action" type="string">
+  The configuration action the transaction performed, 1 to 60 characters. One of `setInsuranceFund`, `grantLiquidatorRole`, `authorizeOnRouter`, `upgradeMarket`, `upgradeRouter`, `authorizeAdapterOnToken`, `authorizeRouterOnToken`, `grantAgentRoleToAdapter`, `authorizeRelayerOnOracle`, `verifyAdapterAsHolder`, `verifyRouterAsHolder`, `authorizeVenueOnToken`, `verifyVenueAsHolder`.
+</ParamField>
+
+## What Each Action Accepts
+
+| `action` | Functions accepted | Sent to | Subject checked |
+|---|---|---|---|
+| `setInsuranceFund` | `setInsuranceFund(address)` | The market | None |
+| `grantLiquidatorRole` | `grantRole(bytes32,address)` | The market | None |
+| `upgradeMarket` | `upgradeToAndCall`, `upgradeTo` or `pokeSnapshot` | The market | None |
+| `authorizeOnRouter` | `authorizeLendingMarket(address,bool)` | The liquidation router | None |
+| `upgradeRouter` | `upgradeToAndCall` or `upgradeTo` | The liquidation router | None |
+| `grantAgentRoleToAdapter` | `addAgent(address)` | The collateral token | None |
+| `authorizeAdapterOnToken` | `addAuthorizedContract(address)` | The collateral token | The adapter |
+| `authorizeRouterOnToken` | `addAuthorizedContract(address)` | The collateral token | The router |
+| `authorizeVenueOnToken` | `addAuthorizedContract(address)` | The collateral token | The auction venue |
+| `authorizeRelayerOnOracle` | `setAuthorizedSigner(address,bool)` or `authorizeSigner(address,bool)` | The oracle | None |
+| `verifyAdapterAsHolder` | `verifyIdentity`, `updateIdentity` or `registerIdentity` | Any contract of the market, typically the identity registry | The adapter |
+| `verifyRouterAsHolder` | Same as above | Same as above | The router |
+| `verifyVenueAsHolder` | Same as above | Same as above | The auction venue |
+
+The market's contracts are the market, its oracle, insurance fund, adapter and liquidation router, and the collateral token. The market's recorded identity register and the collateral token's identity registry count too. A transaction sent anywhere else is refused with `TX_WRONG_TARGET`.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="fullyConfigured" type="boolean">The readiness verdict, composed as on [Get Configuration Status](/endpoints/lending/get-configuration-status).</ResponseField>
+    <ResponseField name="configurationStatus" type="object">The contract wiring: `liquidationContract`, `insuranceFund`, `adapter`, `liquidationConfigured`, `insuranceFundConfigured`, `adapterConfigured`, `routerAuthorized`, and `fullyConfigured` as above. `readFailed: true` is present when a wiring read failed.</ResponseField>
+    <ResponseField name="collateralAuthStatus" type="object">Adapter authorization on the collateral token, as on [Get Configuration Status](/endpoints/lending/get-configuration-status). `null` when the market has no collateral token recorded.</ResponseField>
+    <ResponseField name="routerHolderAuthorized" type="boolean">The router is an eligible holder of the collateral token. `null` when unreadable.</ResponseField>
+    <ResponseField name="oracleSignerAuthorized" type="boolean">The instance's wallet may sign prices on the oracle, or owns it.</ResponseField>
+    <ResponseField name="liquidatorRoleGranted" type="boolean">The instance's wallet holds `LIQUIDATOR_ROLE`.</ResponseField>
+    <ResponseField name="pendingCurator" type="boolean">The market has no lender of record yet.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/confirm-configuration" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "txHash": "0x5b8e2c7a1f9d304e6b2a8c5f7d1e9b3a6c4f2e8d0b7a5c3e1f9d7b5a3c1e8f6d",
+    "action": "grantLiquidatorRole"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/confirm-configuration`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHash: sent.hash, action: 'grantLiquidatorRole' })
+  }
+);
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+console.log('Market ready:', data.fullyConfigured);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "configurationStatus": {
+      "liquidationContract": "0x067a3FeEA46649AdAd8e31c33B3a4D8774b8d8cF",
+      "insuranceFund": "0x8F1A4c2e9b7d3056a1E8C4f29D0b7a3e5c619c22",
+      "adapter": "0x4D2b9E71c3a05F8D6e2b41c7a9F03D58E6b177aE",
+      "liquidationConfigured": true,
+      "insuranceFundConfigured": true,
+      "adapterConfigured": true,
+      "routerAuthorized": true,
+      "fullyConfigured": true
+    },
+    "collateralAuthStatus": {
+      "mode": "FREEZE",
+      "adapterAuthorized": true,
+      "interfaceSupported": true,
+      "requirement": "adapter_must_hold_agent_role"
+    },
+    "routerHolderAuthorized": true,
+    "oracleSignerAuthorized": true,
+    "liquidatorRoleGranted": true,
+    "pendingCurator": false,
+    "fullyConfigured": true
+  }
+}
+```
+```json Error - Action Mismatch
+{
+  "success": false,
+  "error": {
+    "code": "TX_ACTION_MISMATCH",
+    "message": "Transaction 0x5b8e2c7a1f9d304e6b2a8c5f7d1e9b3a6c4f2e8d0b7a5c3e1f9d7b5a3c1e8f6d calls addAgent(address) (grantAgentRoleToAdapter), not grantRole(bytes32,address) as action 'grantLiquidatorRole' requires. Nothing was recorded."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `VALIDATION_ERROR` | `400` | `txHash` is not a 32-byte hex hash, or `action` is empty or longer than 60 characters |
+| `UNSUPPORTED_CONFIGURE_ACTION` | `400` | `action` is not one of the values above. The error carries `supportedActions` |
+| `TX_NOT_VERIFIED` | `400` | The transaction is not found, not yet mined, or reverted. Wait for a confirmation and retry an unmined one |
+| `TX_WRONG_TARGET` | `400` | The transaction was not sent to a contract of this market |
+| `TX_ACTION_MISMATCH` | `400` | The transaction calls a different function, targets a different contract, or authorizes a different address than `action` requires |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

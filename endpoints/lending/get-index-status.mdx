@@ -1,10 +1,10 @@
 ---
 title: 'Get Index Status'
-api: 'GET /lending-external-securities/api/markets/{marketId}/index-status'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/index-status'
 description: 'Check how far the historical index trails the chain'
 ---
 
-Reports whether the market has indexed history and how far behind the chain the index currently sits. Use it to decide whether [Get Market History](/endpoints/lending/get-history) is trustworthy before charting it, and to tell "no activity" apart from "not indexed yet".
+Reports whether the market has indexed history and how far behind the chain the index currently sits. Use it to decide whether [Get Market History](/endpoints/lending/get-history) is trustworthy before charting it, and to tell "no activity" apart from "not indexed yet". The answer is cached for up to a minute.
 
 Like the history endpoint, an indexing outage returns `200` with `available: false` rather than an error.
 
@@ -25,15 +25,26 @@ Like the history endpoint, an indexing outage returns `200` with `available: fal
     <ResponseField name="indexedBlock" type="integer">Latest block the indexer has processed, or null.</ResponseField>
     <ResponseField name="indexedAt" type="string">ISO 8601 timestamp of that block, or null.</ResponseField>
     <ResponseField name="hasIndexingErrors" type="boolean">Whether the indexer reports errors on this deployment.</ResponseField>
-    <ResponseField name="reason" type="string">Present when `available` is false. One of `NOT_CONFIGURED`, `NO_MARKET_ADDRESS`, `INDEX_STALE`, `INDEXING_ERRORS`, `UPSTREAM_ERROR`, `QUERY_ERROR`, `EMPTY_RESPONSE`.</ResponseField>
+    <ResponseField name="lagSeconds" type="integer">How many seconds the indexed block trailed the clock when the status was read, which can be up to a minute before this response. `null` when the index reported no block time.</ResponseField>
+    <ResponseField name="stale" type="boolean">`true` when `lagSeconds` exceeds `staleThresholdSeconds`. `null` when the lag is unknown.</ResponseField>
+    <ResponseField name="staleThresholdSeconds" type="integer">The lag beyond which the index counts as stale: `300`. [Get Lifecycle Statement](/endpoints/lending/get-lifecycle-statement) refuses to generate past it unless told otherwise.</ResponseField>
+    <ResponseField name="reason" type="string">Present when `available` is false. One of `NOT_CONFIGURED`, `NO_MARKET_ADDRESS`, `INDEX_NOT_DEPLOYED`, `UPSTREAM_ERROR`, `QUERY_ERROR`, `EMPTY_RESPONSE`, `TIMEOUT`, `NETWORK_ERROR`.</ResponseField>
     <ResponseField name="message" type="string">Human-readable explanation accompanying `reason`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/index-status" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/index-status" \
   -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/index-status`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const trustworthy = data.available && data.indexed && data.stale === false && !data.hasIndexingErrors;
 ```
 </RequestExample>
 
@@ -42,15 +53,18 @@ curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}
 {
   "success": true,
   "data": {
-    "marketId": "clx_secmarket_001",
+    "marketId": "cmssh7p1k0001cghxq2m4v8rz",
     "available": true,
     "indexed": true,
     "snapshotCount": 412,
     "lastSnapshotBlock": 8412774,
-    "lastSnapshotAt": "2025-06-15T11:00:00.000Z",
+    "lastSnapshotAt": "2026-09-25T11:00:00.000Z",
     "indexedBlock": 8412791,
-    "indexedAt": "2025-06-15T11:03:24.000Z",
-    "hasIndexingErrors": false
+    "indexedAt": "2026-09-25T11:03:24.000Z",
+    "hasIndexingErrors": false,
+    "lagSeconds": 36,
+    "stale": false,
+    "staleThresholdSeconds": 300
   }
 }
 ```
@@ -58,7 +72,7 @@ curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}
 {
   "success": true,
   "data": {
-    "marketId": "clx_secmarket_001",
+    "marketId": "cmssh7p1k0001cghxq2m4v8rz",
     "available": false,
     "reason": "NOT_CONFIGURED",
     "message": "Historical indexing is not configured for this network"
@@ -71,4 +85,5 @@ curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}
 
 | Code | HTTP | Cause |
 |---|---|---|
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

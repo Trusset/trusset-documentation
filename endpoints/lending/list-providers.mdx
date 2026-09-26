@@ -1,10 +1,12 @@
 ---
 title: 'List Liquidity Providers'
-api: 'GET /lending-external-securities/api/positions/{marketId}/providers'
+api: 'GET /lending-external-securities-v2/api/positions/{marketId}/providers'
 description: 'List active liquidity providers for a market'
 ---
 
-Returns the market's active liquidity providers, newest deposit first. The endpoint reconciles against the chain before reading, so provider records reflect on-chain share balances where they can be resolved. If the RPC is unavailable the reconciliation is skipped and stored values are returned.
+Returns the market's active liquidity providers, newest first. Before reading, the endpoint reconciles the stored records against the market contract, so share balances and deposits reflect the chain where they can be read. The reconciliation runs at most once a minute per market, so a record can trail the chain by up to a minute. If the chain cannot be read, the reconciliation is skipped and stored values are returned. A market with no stored providers then answers with an empty list, so an empty list does not prove the market has none.
+
+On current markets only the operator wallet and the vaults the market admin registered can deposit directly. A wallet that deposited before its market moved to that rule keeps its shares and can still redeem them, so it can still appear here.
 
 For an authoritative single-provider balance, use [Get Provider Balance](/endpoints/lending/get-provider-balance), which reads the market contract directly.
 
@@ -22,12 +24,12 @@ For an authoritative single-provider balance, use [Get Provider Balance](/endpoi
         <ResponseField name="id" type="string">Record ID.</ResponseField>
         <ResponseField name="marketId" type="string">Market ID.</ResponseField>
         <ResponseField name="provider" type="string">Provider address, lowercased.</ResponseField>
-        <ResponseField name="amountDeposited" type="string">Deposited amount in borrow asset units.</ResponseField>
-        <ResponseField name="sharesOwned" type="string">LP shares held.</ResponseField>
-        <ResponseField name="active" type="boolean">Always true in this response. Fully withdrawn providers are excluded.</ResponseField>
-        <ResponseField name="depositedAt" type="string">ISO 8601 timestamp of the first deposit.</ResponseField>
-        <ResponseField name="withdrawnAt" type="string">ISO 8601 timestamp of full withdrawal, or null.</ResponseField>
-        <ResponseField name="source" type="string">`wallet` when the provider is a wallet supplying directly, `vault` when it is an operator vault funding the market on its depositors' behalf.</ResponseField>
+        <ResponseField name="amountDeposited" type="string">Total the provider has deposited, in borrow asset units, as the market contract records it. Withdrawals do not reduce it, so it is not the provider's current stake.</ResponseField>
+        <ResponseField name="sharesOwned" type="string">LP shares held, at 18 decimals.</ResponseField>
+        <ResponseField name="active" type="boolean">Always `true` in this response. Fully withdrawn providers are excluded.</ResponseField>
+        <ResponseField name="depositedAt" type="string">ISO 8601 timestamp of when Trusset first recorded the provider, reset when the reconciliation finds that a fully withdrawn provider has deposited again. It is the recording time, not the block time.</ResponseField>
+        <ResponseField name="withdrawnAt" type="string">`null` for every provider in this response, because fully withdrawn providers are excluded.</ResponseField>
+        <ResponseField name="source" type="string">`vault` when the provider address is a vault registered with Trusset, funding the market on its depositors' behalf. `wallet` otherwise.</ResponseField>
         <ResponseField name="vault" type="object">Present when `source` is `vault`. Carries the vault's `id`, and its `name` and `symbol` when the vault belongs to your instance. On another institution's vault both are `null`: the funding is visible, the vault's own identity is not.</ResponseField>
       </Expandable>
     </ResponseField>
@@ -36,8 +38,16 @@ For an authoritative single-provider balance, use [Get Provider Balance](/endpoi
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/providers" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/providers" \
   -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/providers`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const vaultFunded = data.providers.filter((p) => p.source === 'vault');
 ```
 </RequestExample>
 
@@ -48,24 +58,13 @@ curl "https://api.trusset.org/lending-external-securities/api/positions/{marketI
   "data": {
     "providers": [
       {
-        "id": "seclp_003",
-        "marketId": "clx_secmarket_001",
-        "provider": "0x111...222",
-        "amountDeposited": "250000",
-        "sharesOwned": "250000",
-        "active": true,
-        "depositedAt": "2025-06-08T14:20:00.000Z",
-        "withdrawnAt": null,
-        "source": "wallet"
-      },
-      {
-        "id": "seclp_004",
-        "marketId": "clx_secmarket_001",
+        "id": "cmsw2k9r40011cghx3b8e7qtl",
+        "marketId": "cmssh7p1k0001cghxq2m4v8rz",
         "provider": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
-        "amountDeposited": "750000",
-        "sharesOwned": "735294",
+        "amountDeposited": "750000.0",
+        "sharesOwned": "735294.117647058823529411",
         "active": true,
-        "depositedAt": "2025-06-09T09:05:00.000Z",
+        "depositedAt": "2026-09-09T09:05:00.000Z",
         "withdrawnAt": null,
         "source": "vault",
         "vault": {
@@ -73,8 +72,28 @@ curl "https://api.trusset.org/lending-external-securities/api/positions/{marketI
           "name": "Trusset Prime Demo Vault",
           "symbol": "TPV"
         }
+      },
+      {
+        "id": "cmsw1f6d20009cghx0p4n5wka",
+        "marketId": "cmssh7p1k0001cghxq2m4v8rz",
+        "provider": "0x2b6ed29a95753c3ad948348e3e7b1a251080ffb9",
+        "amountDeposited": "250000.0",
+        "sharesOwned": "250000.0",
+        "active": true,
+        "depositedAt": "2026-09-08T14:20:00.000Z",
+        "withdrawnAt": null,
+        "source": "wallet"
       }
     ]
+  }
+}
+```
+```json Error - Market Not Found
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_NOT_FOUND",
+    "message": "Market not found"
   }
 }
 ```
@@ -84,5 +103,5 @@ curl "https://api.trusset.org/lending-external-securities/api/positions/{marketI
 
 | Code | HTTP | Cause |
 |---|---|---|
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
-| `CHAIN_READ_FAILED` | `503` | The provider set could not be read from the chain and nothing was recorded to fall back on. An empty list is never served in place of a failed read |

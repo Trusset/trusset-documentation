@@ -1,0 +1,144 @@
+---
+title: 'Acknowledge Asset Data'
+api: 'POST /lending-external-securities-v2/api/markets/{market}/asset-data/acknowledge'
+description: 'Build the transaction that records the lender of record approval of an asset data version'
+---
+
+Returns the unsigned `acknowledgeAssetData` transaction that records the lender of record's approval of the asset data version it reviewed. The lender of record, or the admin it named, signs it with its own wallet and confirms it with [Confirm Asset Data Acknowledgement](/endpoints/lending/confirm-asset-data-acknowledgement).
+
+Name the hash that was actually read, from [Get Asset Data Bundle](/endpoints/lending/get-asset-data-bundle). The build refuses a hash that no longer stands with `ASSET_DATA_STALE`, rather than approving whatever stands now. The factory applies the same rule when the transaction mines: if the issuer re-attests in between, the acknowledgement reverts with `AssetDataMismatch`. Read the new bundle and acknowledge again.
+
+An acknowledgement records a review, and the chain stores only the hash. The market contracts never read it, and no loan, liquidity or liquidation operation depends on it.
+
+## Who can acknowledge
+
+The caller must pass the market access check described on [Get Asset Data](/endpoints/lending/get-asset-data#who-can-read-it). One of this instance's verified wallets must also be the wallet that took the lender-of-record role, or the admin it named. Any other instance is refused with `NOT_ACKNOWLEDGER`, and `details.acknowledgers` names the wallets that can sign.
+
+Before a lender of record adopts the market there is nobody to acknowledge, and the call is refused with `NOT_ADOPTED`. The adoption itself can carry the first acknowledgement: name the reviewed hash as `assetDataHash` in the adoption terms on [Accept Lender Role](/endpoints/lending/accept-lender-role).
+
+## Path Parameters
+
+<ParamField path="market" type="string" required>
+  The market contract address, as 40 hex characters with a `0x` prefix.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="contentHash" type="string" required>
+  The hash of the version reviewed, as `0x` and 64 hex characters. The zero hash is refused with `INVALID_CONTENT_HASH`, because it names no version.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the lending factory.</ResponseField>
+    <ResponseField name="functionName" type="string">`acknowledgeAssetData`.</ResponseField>
+    <ResponseField name="marketAddress" type="string">The market, lowercased.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet of this instance that must sign: the lender of record's wallet when this instance holds it, otherwise the admin's.</ResponseField>
+    <ResponseField name="contentHash" type="string">The version being acknowledged, lowercased.</ResponseField>
+    <ResponseField name="version" type="integer">Its attestation version.</ResponseField>
+    <ResponseField name="attestor" type="string">The wallet that attested it.</ResponseField>
+    <ResponseField name="attestedAt" type="string">ISO 8601 time it was attested.</ResponseField>
+    <ResponseField name="previouslyAcknowledged" type="string">The version acknowledged before, as a hash. `null` when none.</ResponseField>
+    <ResponseField name="schemaVersion" type="string">Bundle schema of the stored bytes. `null` when the platform holds none.</ResponseField>
+    <ResponseField name="bundleAvailable" type="boolean">`true` when the platform holds the bytes behind the hash.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field }` naming the confirm route and the `txHash` field it takes.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/0x70a0e25c7b768b87e658348b3b577678a173e038/asset-data/acknowledge" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "contentHash": "0xba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a" }'
+```
+```typescript TypeScript
+const base = 'https://api.trusset.org/lending-external-securities-v2/api/markets';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const build = await fetch(`${base}/${marketAddress}/asset-data/acknowledge`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ contentHash: reviewedHash })
+});
+const { success, data, error } = await build.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch(`${base}/${marketAddress}/asset-data/acknowledge/confirm`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ txHash: tx.hash })
+});
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0xf1aD12F5698F58badd8a662AcfFcCb067A2Ddb8a",
+      "data": "0xd780db9e00000000000000000000000070a0e25c7b768b87e658348b3b577678a173e038ba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "acknowledgeAssetData",
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "signer": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+    "contentHash": "0xba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a",
+    "version": 2,
+    "attestor": "0x511f527bcee080ac9b88afbf24386baedf393948",
+    "attestedAt": "2026-09-20T10:15:40.000Z",
+    "previouslyAcknowledged": "0x65ed3a41511863cfbeacd3617041f1ccfcf281ab1a29bd7c08002a15cb427ccb",
+    "schemaVersion": "1.0.0",
+    "bundleAvailable": true,
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/0x70a0e25c7b768b87e658348b3b577678a173e038/asset-data/acknowledge/confirm",
+      "field": "txHash"
+    }
+  }
+}
+```
+```json Error - Stale Review
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ASSET_DATA_STALE",
+    "message": "The version you reviewed (0x65ed3a41511863cfbeacd3617041f1ccfcf281ab1a29bd7c08002a15cb427ccb) is no longer the one the issuer stands behind: version 2 (0xba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a) was attested at 2026-09-20T10:15:40.000Z. Read the current bundle again and approve that one; the factory refuses an acknowledgement of a version that no longer stands.",
+    "details": {
+      "reviewed": "0x65ed3a41511863cfbeacd3617041f1ccfcf281ab1a29bd7c08002a15cb427ccb",
+      "standing": "0xba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a",
+      "standingVersion": 2,
+      "attestedAt": "2026-09-20T10:15:40.000Z"
+    }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+The asset data routes report a validation failure with the first failing rule as `message` and no `details` list. Every access code from [Get Asset Data](/endpoints/lending/get-asset-data#error-codes) applies here too.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `market` is not a 40-character hex address, or `contentHash` is missing or not `0x` and 64 hex characters |
+| `INVALID_CONTENT_HASH` | `400` | `contentHash` is the zero hash |
+| `NOT_ACKNOWLEDGER` | `403` | No verified wallet of this instance is the lender of record or its named admin. `details.acknowledgers` lists who is |
+| `MARKET_NOT_DEPLOYED` | `404` | The lending factory returns no deployment for this address |
+| `ACKNOWLEDGEMENT_CURRENT` | `409` | The standing version is already the acknowledged one. `details` carries `contentHash` and `version` |
+| `ASSET_DATA_NONE` | `409` | Nothing has been attested on the market, so there is no version to acknowledge |
+| `ASSET_DATA_STALE` | `409` | The reviewed hash is no longer the standing attestation. `details` carries `reviewed`, `standing`, `standingVersion` and `attestedAt` |
+| `FACTORY_UPGRADE_REQUIRED` | `409` | The factory implementation predates asset data attestation |
+| `NOT_ADOPTED` | `409` | The market has no lender of record yet. Acknowledge inside the adoption instead |
+| `ACKNOWLEDGE_BUILD_FAILED` | `500` | The transaction could not be built for a reason the service did not classify |
+| `FACTORY_READ_FAILED` | `503` | The factory could not be read. Retry shortly |

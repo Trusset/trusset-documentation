@@ -1,0 +1,167 @@
+---
+title: 'Propose Extension'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/extensions'
+description: 'Propose pushing out the maturity of one loan, every open loan, or the market due floor'
+---
+
+Builds the `proposeExtension` transaction, the first of two steps that move a maturity later. Requires `ISSUER_ROLE` on the market. The admin then confirms the proposal within seven days with [Extension Action](/endpoints/lending/extension-action). No maturity moves before that confirmation.
+
+Extensions only ever push dates out, and they never change a rate: a stamped fixed rate survives every extension. They need no signature from the borrower. The market's extension switch must therefore be on, set with [Set Allow Extension](/endpoints/lending/set-allow-extension), and the lender of record's terms of use must provide for them.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="kind" type="string" required>
+  `LOAN`, `BATCH` or `FLOOR`. See below for what each one reaches.
+</ParamField>
+
+<ParamField body="loanId" type="integer | string">
+  The on-chain loan ID a `LOAN` proposal extends, and required by it. A positive integer or a string of digits. Refused on `BATCH` and `FLOOR`, which name no loan.
+</ParamField>
+
+<ParamField body="newDueAt" type="integer | string" required>
+  The new maturity, in unix seconds. A positive integer or a string of digits. Must be in the future.
+</ParamField>
+
+## Choose the Kind
+
+**`LOAN`** extends one loan. The loan must be open and carry a maturity, and `newDueAt` must be later than its effective maturity: the later of its own maturity and the market due floor. The extension applies when the admin confirms it.
+
+**`BATCH`** extends every loan opened up to the moment of the proposal. It records the loan counter at that point, and loans opened later are out of its reach. After confirmation, the loans are applied in pages of up to 200 IDs, and a loan that is closed, carries no maturity, or already matures on or after `newDueAt` is skipped.
+
+**`FLOOR`** raises the market due floor to `newDueAt`, which must be above the current floor. Every loan that carries a maturity then matures no earlier than that date, including loans opened while the floor stands. Loans without a term stay without one. The raise applies when the admin confirms it.
+
+## Record Each Step
+
+The proposal ID only exists once the transaction mines. Send the mined hash to [Confirm Extension Transaction](/endpoints/lending/confirm-extension-transaction), which is what `confirmWith` names. It reads the ID from the receipt and returns it in `activity`. This endpoint takes no `txHash`.
+
+## Response Fields
+
+The calldata response carries the transaction twice. `transaction` holds `to` and `data`. The same `to` and `data` also sit directly on `data`, and that is where the `chainId` and `value` binding lands, so sign from those four fields.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">`{ to, data }` for the `proposeExtension` call on the market.</ResponseField>
+    <ResponseField name="to" type="string">The market address.</ResponseField>
+    <ResponseField name="data" type="string">The encoded `proposeExtension` call.</ResponseField>
+    <ResponseField name="value" type="string">Always `"0"`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain your instance resolves to.</ResponseField>
+    <ResponseField name="functionName" type="string">`proposeExtension`.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`ISSUER_ROLE`.</ResponseField>
+    <ResponseField name="kind" type="string">The proposal kind, echoed back.</ResponseField>
+    <ResponseField name="description" type="string">Plain-language summary of the proposal and the steps that follow it.</ResponseField>
+    <ResponseField name="requiredSigner" type="string">Always `null` here: the signer is whoever holds `ISSUER_ROLE`, not one fixed address.</ResponseField>
+    <ResponseField name="heldByThisInstance" type="boolean">`true` when a verified wallet of your instance holds `ISSUER_ROLE`, `false` when none does, `null` when the check could not be completed. The build is never refused on it.</ResponseField>
+    <ResponseField name="signerAddress" type="string">The wallet of your instance that holds `ISSUER_ROLE`, or `null`.</ResponseField>
+    <ResponseField name="note" type="string">What to do when your instance cannot sign: the wallet the lender of record placed the role with must sign, because any other wallet reverts `NotAuthorized`. `null` when your instance can sign.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field }`, pointing at [Confirm Extension Transaction](/endpoints/lending/confirm-extension-transaction) with the field `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/extensions" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "kind": "LOAN",
+    "loanId": "5",
+    "newDueAt": 1795000000
+  }'
+```
+```typescript TypeScript
+const base = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/extensions`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const build = await fetch(base, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ kind: 'BATCH', newDueAt: 1797292800 })
+});
+const { data: calldata } = await build.json();
+
+const tx = await issuerWallet.sendTransaction({
+  to: calldata.to,
+  data: calldata.data,
+  value: calldata.value,
+  chainId: calldata.chainId
+});
+await tx.wait();
+
+const confirm = await fetch(`${base}/confirm-tx`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ txHash: tx.hash })
+});
+const { data } = await confirm.json();
+const proposalId = data.activity.find(a => a.event === 'ExtensionProposed')?.proposalId;
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x..."
+    },
+    "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "data": "0x...",
+    "functionName": "proposeExtension",
+    "requiredRole": "ISSUER_ROLE",
+    "kind": "LOAN",
+    "requiredSigner": null,
+    "heldByThisInstance": true,
+    "signerAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "note": null,
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/clx_secmarket_001/extensions/confirm-tx",
+      "field": "txHash"
+    },
+    "chainId": 11155111,
+    "value": "0"
+  }
+}
+```
+```json Error - Extensions Switched Off
+{
+  "success": false,
+  "error": {
+    "code": "EXTENSION_NOT_ALLOWED",
+    "message": "The extension machinery is switched off for this market. The market admin enables it with setAllowExtension when the operator terms of use provide for extensions."
+  }
+}
+```
+```json Error - Date Not Later
+{
+  "success": false,
+  "error": {
+    "code": "INVALID_EXTENSION",
+    "message": "newDueAt must be after the loan's effective maturity of 1795000000: extensions only ever push dates out."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The `marketId` path segment is longer than 100 characters |
+| `VALIDATION_ERROR` | `400` | `kind` or `newDueAt` is missing, or a field has the wrong format |
+| `INVALID_EXTENSION` | `400` | `loanId` is missing on `LOAN` or present on another kind, `newDueAt` is not in the future, or it does not push the loan's effective maturity or the market due floor later |
+| `LOAN_NOT_ACTIVE` | `400` | The loan a `LOAN` proposal names is closed |
+| `LOAN_NOT_FOUND` | `404` | The loan a `LOAN` proposal names does not exist on this market |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `TERMS_NOT_ENABLED` | `409` | The market has no loan terms, so there is nothing to extend |
+| `EXTENSION_NOT_ALLOWED` | `409` | The extension switch is off, or the loan was opened while the market had no terms and carries no maturity |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds `ISSUER_ROLE` |
+| `LOAN_STATE_UNAVAILABLE` | `503` | The loan could not be read to check it. Retry shortly |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market's term configuration or the loan's term could not be read. Retry shortly |

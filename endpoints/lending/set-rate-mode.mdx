@@ -1,0 +1,221 @@
+---
+title: 'Set Rate Mode'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/rate-mode'
+description: 'Switch the market between the raw curve, a clamped curve and a fixed rate'
+---
+
+Builds the `setRateMode` transaction that changes how the market prices borrowing. It targets the market's interest model, not the market, and only the model owner can sign it. That is the `issuer` the lender of record named at adoption, unless ownership has moved since. [Get Rate Mode](/endpoints/lending/get-rate-mode) shows the current mode and `modelOwner`.
+
+The model brings the market's interest accrual up to date under the old mode before switching, so the elapsed time is charged at the rate that actually ran.
+
+<Warning>
+  A clamp reaches every open variable-rate loan from the next accrual, not only new loans. Only a `FIXED` stamp is limited to new loans. Under `FIXED`, loans opened before the switch keep accruing on the raw, unclamped curve.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="rateMode" type="string" required>
+  `CURVE`, `CLAMPED` or `FIXED`.
+
+  `CURVE` is the utilization curve and takes no bounds. `CLAMPED` holds that curve between a floor and a cap. `FIXED` stamps one rate onto each new loan, and that rate does not move for the life of the loan.
+</ParamField>
+
+<ParamField body="rateFloorBps" type="integer" default="0">
+  Lower bound for `CLAMPED`. Integer, 0 to 50000.
+</ParamField>
+
+<ParamField body="rateCapBps" type="integer">
+  Upper bound for `CLAMPED`, and required by it. Integer, 1 to 50000, and at least `rateFloorBps`.
+</ParamField>
+
+<ParamField body="fixedRateBps" type="integer">
+  The stamped rate for `FIXED`, and required by it. Integer, 1 to 50000. It cannot exceed the market's `maxFixedRateBps` when a ceiling is recorded.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata. When `txHash` is present, every other field is ignored.
+</ParamField>
+
+The three modes do not mix. A bound that belongs to another mode is refused rather than dropped, and so is any bound sent with `CURVE`.
+
+## Switch to a Fixed Rate
+
+`FIXED` is refused with `FIXED_RATE_REQUIRES_TERMS` until the market runs a maximum loan duration, set with [Set Term Config](/endpoints/lending/set-term-config). A terminal due date alone does not satisfy it. A fixed rate removes the curve's pull toward repayment, and the term clock replaces it.
+
+A stamped loan keeps its rate through every later change, including a switch back to `CURVE`. It cannot draw more: [Borrow More](/endpoints/lending/borrow-more) refuses it with `FIXED_RATE_LOAN`, so a further draw is a new loan at the terms then in force. While the model stamps a fixed rate, loan terms cannot be switched off.
+
+A clamp never blocks a borrow. Once the raw curve crosses `rateCapBps` the rate stays at the cap, and liquidity alone limits the borrow.
+
+## Confirm the Change
+
+Send the mined hash back to this path as `{ "txHash": "0x..." }`. The API checks that the transaction called `setRateMode` on the market's interest model. It then reads the offering back from the chain and updates the market record.
+
+## Response Fields
+
+The calldata response carries the transaction twice. `transaction` holds `to` and `data`. The same `to` and `data` also sit directly on `data`, and that is where the `chainId` and `value` binding lands, so sign from those four fields.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">`{ to, data }` for the `setRateMode` call on the interest model. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="to" type="string">The interest model address. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="data" type="string">The encoded `setRateMode` call. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="value" type="string">Always `"0"`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain your instance resolves to. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`setRateMode`, or the verified function when confirming.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`INTEREST_MODEL_OWNER`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="description" type="string">Plain-language summary of the change. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="requiredSigner" type="string">The model owner, the one wallet that can sign. `null` when the owner could not be read. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="heldByThisInstance" type="boolean">`true` when the owner is a verified wallet of your instance, `false` when it is not, `null` when the owner could not be read. The build is never refused on it. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="signerAddress" type="string">The owner, when your instance holds it. Otherwise `null`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="note" type="string">Says the owner could not be read, or what to do when your instance cannot sign: hand the calldata to the owner, because any other wallet reverts `OwnableUnauthorizedAccount`. `null` when your instance holds the owner wallet. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field }`: the call that confirms this transaction, and the body field that carries the hash. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that sent the transaction. Returned when confirming.</ResponseField>
+    <ResponseField name="blockNumber" type="integer">Block the transaction was mined in. Returned when confirming.</ResponseField>
+    <ResponseField name="offering" type="object">
+      The market's rate and term offering, read back from the chain after the transaction. Rates, penalties and ratios are basis-point strings, durations are seconds, and dates are unix seconds. A part that could not be read is left out. Returned when confirming.
+      <Expandable>
+        <ResponseField name="rateMode" type="string">`CURVE`, `CLAMPED` or `FIXED`.</ResponseField>
+        <ResponseField name="rateFloor" type="string">Clamp floor, or the fixed rate under `FIXED`.</ResponseField>
+        <ResponseField name="rateCap" type="string">Clamp cap, or the fixed rate under `FIXED`.</ResponseField>
+        <ResponseField name="maxFixedRate" type="string">Fixed-rate ceiling, or `null` when none is recorded.</ResponseField>
+        <ResponseField name="maxLoanDuration" type="string">Maximum loan duration in seconds. `"0"` when unset.</ResponseField>
+        <ResponseField name="termGracePeriod" type="string">Grace period in seconds.</ResponseField>
+        <ResponseField name="terminalDueDate" type="string">Terminal due date, or `null`.</ResponseField>
+        <ResponseField name="marketDueFloor" type="string">Market due floor, or `null`.</ResponseField>
+        <ResponseField name="termPenalty" type="string">Term penalty.</ResponseField>
+        <ResponseField name="allowExtension" type="boolean">Whether the extension flow is switched on.</ResponseField>
+        <ResponseField name="reserveRatio" type="string">Reserve ratio.</ResponseField>
+        <ResponseField name="operatorShare" type="string">The operator's share of repaid interest after the infrastructure fee.</ResponseField>
+        <ResponseField name="externalOracleFeed" type="string">The external price feed. Present only on a market whose `priceSource` is `ORACLE`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="updatedColumns" type="array">Names of the stored market fields this confirmation changed. Empty when the record already matched the chain. Returned when confirming.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/rate-mode" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "rateMode": "CLAMPED",
+    "rateFloorBps": 300,
+    "rateCapBps": 1200
+  }'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/rate-mode`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const build = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ rateMode: 'FIXED', fixedRateBps: 800 })
+});
+const { data: calldata } = await build.json();
+
+const tx = await ownerWallet.sendTransaction({
+  to: calldata.to,
+  data: calldata.data,
+  value: calldata.value,
+  chainId: calldata.chainId
+});
+await tx.wait();
+
+const confirm = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ txHash: tx.hash })
+});
+const { data } = await confirm.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+      "data": "0x..."
+    },
+    "to": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+    "data": "0x...",
+    "functionName": "setRateMode",
+    "requiredRole": "INTEREST_MODEL_OWNER",
+    "requiredSigner": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "heldByThisInstance": true,
+    "signerAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "note": null,
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/clx_secmarket_001/rate-mode",
+      "field": "txHash"
+    },
+    "chainId": 11155111,
+    "value": "0"
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "functionName": "setRateMode",
+    "signedBy": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "blockNumber": 6789012,
+    "offering": {
+      "maxLoanDuration": "15552000",
+      "termGracePeriod": "259200",
+      "terminalDueDate": null,
+      "termPenalty": "200",
+      "marketDueFloor": null,
+      "allowExtension": false,
+      "rateMode": "CLAMPED",
+      "rateFloor": "300",
+      "rateCap": "1200",
+      "maxFixedRate": "1500",
+      "reserveRatio": "500",
+      "operatorShare": "800"
+    },
+    "updatedColumns": ["rateMode", "rateFloor", "rateCap"]
+  }
+}
+```
+```json Error - Fixed Rate Needs Terms
+{
+  "success": false,
+  "error": {
+    "code": "FIXED_RATE_REQUIRES_TERMS",
+    "message": "The model refuses FIXED mode while the market has no loan terms: set a term configuration first, so the term clock replaces the curve as the repayment pull."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The `marketId` path segment is longer than 100 characters |
+| `VALIDATION_ERROR` | `400` | A field is outside its range, a bound belongs to another mode, a bound the mode requires is missing, or `txHash` is malformed |
+| `INVALID_RATE_OFFERING` | `400` | `rateFloorBps` exceeds `rateCapBps` |
+| `RATE_ABOVE_MAX_FIXED` | `400` | `fixedRateBps` exceeds the market's fixed-rate ceiling |
+| `INVALID_CONFIRMATION` | `400` | The market has no on-chain address, so there is nothing to confirm against |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `FIXED_RATE_REQUIRES_TERMS` | `409` | `FIXED` was requested on a market with no maximum loan duration |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so the market itself still owns the model and no wallet can sign. Skipped when confirming with `txHash` |
+| `INTERNAL_ERROR` | `500` | The chain could not be read while confirming. Retry shortly |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market's term configuration could not be read to check a switch to `FIXED`. Retry shortly |
+| `MODEL_UNRESOLVED` | `503` | The market's interest model address could not be resolved. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

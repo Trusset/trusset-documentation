@@ -1,17 +1,17 @@
 ---
 title: 'Get Position'
-api: 'GET /lending-external-securities/api/positions/{marketId}/positions/{positionId}'
+api: 'GET /lending-external-securities-v2/api/positions/{marketId}/positions/{positionId}'
 description: 'Retrieve one position with live on-chain figures and its full history'
 ---
 
 Returns a single position record merged with live loan data from the market contract, plus every transaction recorded against it. This is the endpoint behind a position detail view.
 
-On-chain values take precedence where a linked `onChainLoanId` exists. Stored values are used as a fallback when the chain read returns nothing.
+On-chain values take precedence where a linked `onChainLoanId` exists. Stored values are used as a fallback when the chain read returns nothing. Unlike [List Positions](/endpoints/lending/list-positions), this read does not write the chain figures back to the record.
 
 ## Path Parameters
 
 <ParamField path="marketId" type="string" required>Market ID.</ParamField>
-<ParamField path="positionId" type="string" required>Position ID.</ParamField>
+<ParamField path="positionId" type="string" required>Position ID, from [List Positions](/endpoints/lending/list-positions). A position of another market returns `POSITION_NOT_FOUND`.</ParamField>
 
 ## Response Fields
 
@@ -19,27 +19,56 @@ On-chain values take precedence where a linked `onChainLoanId` exists. Stored va
   <Expandable>
     <ResponseField name="positionId" type="string">Position record ID.</ResponseField>
     <ResponseField name="onChainLoanId" type="string">Numeric loan ID on the market contract, or null when the position has no linked chain loan.</ResponseField>
-    <ResponseField name="userAddress" type="string">Borrower address.</ResponseField>
+    <ResponseField name="userAddress" type="string">Borrower address, lowercased.</ResponseField>
     <ResponseField name="borrowedAmount" type="string">Outstanding principal in borrow asset units.</ResponseField>
     <ResponseField name="collateralAmount" type="string">Collateral pledged, in collateral token units.</ResponseField>
-    <ResponseField name="accumulatedInterest" type="string">Interest accrued and unpaid, in borrow asset units.</ResponseField>
-    <ResponseField name="healthFactor" type="string">Health factor as a decimal string. Below `1.0` the loan is liquidatable.</ResponseField>
-    <ResponseField name="priceAtBorrow" type="string">Collateral price recorded when the loan was opened. Useful for computing price movement since origination.</ResponseField>
+    <ResponseField name="accumulatedInterest" type="string">Interest accrued and unpaid, in borrow asset units. The same figure is named `interestAccrued` on List Positions.</ResponseField>
+    <ResponseField name="healthFactor" type="string">Health factor as a decimal string. Below `1.0` the loan is liquidatable on health. Null once the recorded status is not `ACTIVE`.</ResponseField>
+    <ResponseField name="priceAtBorrow" type="string">Collateral price recorded when the loan was opened, in borrow asset units. Useful for computing price movement since origination.</ResponseField>
+    <ResponseField name="currentPrice" type="string">The price the market's oracle currently stores, in borrow asset units. It is not checked for staleness here. Null when the market has no configured oracle or the price is zero or unreadable.</ResponseField>
+    <ResponseField name="collateralValue" type="string">`collateralAmount` valued at `currentPrice`, in borrow asset units. Null when there is no current price.</ResponseField>
+    <ResponseField name="collateralValueAtBorrow" type="string">`collateralAmount` valued at `priceAtBorrow`. It prices the collateral held now at the opening price, not the collateral posted at opening.</ResponseField>
+    <ResponseField name="dueAt" type="string">Unix seconds the loan falls due, from the chain where readable and the stored record otherwise. Null on an open-ended loan.</ResponseField>
+    <ResponseField name="term" type="object">The loan's term state, with the same fields as `term` on [Get Loan](/endpoints/lending/get-loan): `dueAt`, `effectiveDueAt`, `graceEnd`, `enforceable`, `termGracePeriod`, `termPenaltyBps`, `stamped` and `termSource`. Null on an open-ended loan, or when the chain read returned nothing.</ResponseField>
+    <ResponseField name="fixedRateBps" type="integer">The rate stamped on this loan when it opened, in basis points. `0` when the market's rate model was not in `FIXED` mode at signing. Falls back to the stored rate, and is null when neither is known.</ResponseField>
+    <ResponseField name="customerId" type="string">The [customer](/endpoints/customers/get) this loan is attributed to, set when [Open Loan](/endpoints/lending/open-loan) was confirmed with a `clientReference`. Null when the loan is unattributed.</ResponseField>
+    <ResponseField name="customerAttributedAt" type="string">ISO 8601 timestamp the attribution was made or last moved. Null when the loan is unattributed.</ResponseField>
     <ResponseField name="status" type="string">`ACTIVE`, `REPAID`, or `LIQUIDATED`.</ResponseField>
-    <ResponseField name="openedAt" type="string">ISO 8601 timestamp.</ResponseField>
-    <ResponseField name="compliance" type="object">What the collateral token would currently permit for this borrower: whether the address is frozen, whether the identity is still verified, whether the token is paused, and whether a release would be delivered or escrowed. Identical in shape to the block on [Get Loan](/endpoints/lending/get-loan#compliance), where each field is described. `null` when the probe could not run.</ResponseField>
-    <ResponseField name="transactions" type="array">Every transaction on this position, newest first.</ResponseField>
+    <ResponseField name="openedAt" type="string">ISO 8601 timestamp the loan opened.</ResponseField>
+    <ResponseField name="closedAt" type="string">ISO 8601 timestamp the position closed, or null.</ResponseField>
+    <ResponseField name="liquidatedAt" type="string">ISO 8601 timestamp of the first seizure, or null.</ResponseField>
+    <ResponseField name="compliance" type="object">What the collateral token would currently permit for this borrower. It says whether the address is frozen, the identity still verified, or the token paused, and whether a release would be delivered or escrowed. Identical in shape to the block on [Get Loan](/endpoints/lending/get-loan#compliance), where each field is described. `null` when the probe could not run.</ResponseField>
+    <ResponseField name="surplus" type="object">
+      Realization surplus: sale or auction proceeds above the debt plus penalty, which belong to the borrower. Null when it could not be assembled.
+      <Expandable>
+        <ResponseField name="returned" type="string">Surplus paid out to the borrower for this loan, summed from its history, in borrow asset units.</ResponseField>
+        <ResponseField name="escrowed" type="string">Surplus the market holds in escrow for this borrower's address, in borrow asset units. It covers every loan of the address on this market, not this loan alone. Read only when collateral was seized from this position, and null otherwise.</ResponseField>
+        <ResponseField name="claimable" type="boolean">`true` when `escrowed` is above zero. Claim it with [Claim Surplus](/endpoints/lending/claim-surplus).</ResponseField>
+        <ResponseField name="escrowReadFailed" type="boolean">`true` when collateral was seized but the escrow could not be read, so a null `escrowed` means unknown rather than none.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="transactions" type="array">Every transaction on this loan, newest first, up to 1,000 rows. Each carries `id`, `marketId`, `positionId`, `txType`, `userAddress`, `amount`, `txHash` and `timestamp`. Where another Trusset instance on the same network also tracks this market, its rows for the same loan are merged in once per transaction. `recordedByThisInstance` tells them apart, and a row recorded only by the other instance carries null `marketId` and `positionId`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  `status` is read from the stored record and is not re-derived from chain state here. A loan repaid without a confirm call can still read `ACTIVE` until the next reconciliation pass. For a live view of whether the loan is open, read `active` from [Get Loan](/endpoints/lending/get-loan), or call [List Positions](/endpoints/lending/list-positions), which reconciles before returning.
+  `status` is read from the stored record and is not re-derived from chain state here. A loan repaid without a confirm call can still read `ACTIVE` until the next reconciliation pass. For a live view of whether the loan is open, read `active` from [Get Loan](/endpoints/lending/get-loan). [List Positions](/endpoints/lending/list-positions) also reconciles before it returns.
 </Note>
+
+A printable record of the same loan, with every transaction verified against the chain, is available from [Get Position Statement](/endpoints/lending/get-position-statement).
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/positions/{positionId}" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/positions/{positionId}" \
   -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/positions/${positionId}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const surplusToClaim = data.surplus?.claimable === true ? data.surplus.escrowed : null;
 ```
 </RequestExample>
 
@@ -50,24 +79,76 @@ curl "https://api.trusset.org/lending-external-securities/api/positions/{marketI
   "data": {
     "positionId": "secpos_014",
     "onChainLoanId": "5",
-    "userAddress": "0xabc...def",
-    "borrowedAmount": "50000.000000",
-    "collateralAmount": "1000.000000000000000000",
-    "accumulatedInterest": "128.750000",
-    "healthFactor": "1.842000000000000000",
-    "priceAtBorrow": "104.820000",
+    "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "borrowedAmount": "50000.0",
+    "collateralAmount": "1000.0",
+    "accumulatedInterest": "961.643835",
+    "healthFactor": "1.842",
+    "priceAtBorrow": "104.82",
+    "currentPrice": "109.4",
+    "collateralValue": "109400",
+    "collateralValueAtBorrow": "104820",
+    "dueAt": "1796630400",
+    "term": {
+      "dueAt": "1796630400",
+      "effectiveDueAt": "1796630400",
+      "graceEnd": "1796889600",
+      "enforceable": false,
+      "termGracePeriod": "259200",
+      "termPenaltyBps": 300,
+      "stamped": true,
+      "termSource": "STAMPED"
+    },
+    "fixedRateBps": 650,
+    "customerId": null,
+    "customerAttributedAt": null,
     "status": "ACTIVE",
-    "openedAt": "2025-06-10T08:00:00.000Z",
+    "openedAt": "2026-06-10T08:00:00.000Z",
+    "closedAt": null,
+    "liquidatedAt": null,
+    "compliance": {
+      "mode": "FREEZE",
+      "holder": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+      "restricted": false,
+      "code": null,
+      "reason": null,
+      "collateralReturnable": true,
+      "willEscrowOnRelease": false,
+      "escrowedCollateral": null,
+      "escrowedCollateralRaw": null,
+      "holderVerified": true,
+      "holderAddressFrozen": false,
+      "tokenPaused": false,
+      "checkedAt": "2026-09-26T11:58:12.000Z"
+    },
+    "surplus": {
+      "returned": "0.000000",
+      "escrowed": null,
+      "claimable": false,
+      "escrowReadFailed": false
+    },
     "transactions": [
       {
         "id": "sectx_002",
         "marketId": "clx_secmarket_001",
         "positionId": "secpos_014",
         "txType": "BORROW",
-        "userAddress": "0xabc...def",
-        "amount": "50000",
-        "txHash": "0x123...789",
-        "timestamp": "2025-06-10T08:00:00.000Z"
+        "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+        "amount": "50000.0",
+        "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+        "timestamp": "2026-06-10T08:00:00.000Z",
+        "recordedByThisInstance": true
+      },
+      {
+        "id": "sectx_001",
+        "marketId": "clx_secmarket_001",
+        "positionId": "secpos_014",
+        "txType": "DEPOSIT",
+        "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+        "amount": "1000.0",
+        "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+        "timestamp": "2026-06-10T08:00:00.000Z",
+        "recordedByThisInstance": true
       }
     ]
   }
@@ -83,3 +164,11 @@ curl "https://api.trusset.org/lending-external-securities/api/positions/{marketI
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `POSITION_NOT_FOUND` | `404` | No position with this ID in this market |

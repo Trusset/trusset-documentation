@@ -1,0 +1,157 @@
+---
+title: 'Top Up Insurance Fund'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/insurance/top-up'
+description: 'Approve-and-top-up calldata that adds capital to the market insurance fund'
+---
+
+Builds the two transactions that add capital to the market's insurance fund: an approval for the fund to pull the settlement token (stablecoin), then the fund's `topUp` call.
+
+<Warning>
+  A top-up is a one-way transfer. The wallet that sends it receives no shares and holds no claim on the fund, and nothing is owed back to it. Money leaves the fund only as coverage paid to a market it authorizes, or through a withdrawal by the fund owner.
+</Warning>
+
+Any wallet may top up, whether the operator funding its own reserve or a third party standing behind the pool.
+
+The fund books a top-up as a deposit with the sending wallet recorded as its source. That is what makes the capital count in the fund's lifetime deposits. An earlier fund implementation cannot book one, so the API refuses it rather than offer a plain transfer.
+
+## Top up and record it
+
+<Steps>
+  <Step title="Build the calldata">
+    Call this endpoint with `amount` and the `fromAddress` that will sign. The API checks that the wallet holds enough of the borrow asset before offering anything.
+  </Step>
+  <Step title="Sign both steps from fromAddress">
+    Broadcast the approval, then `topUp`, in order. The fund pulls from the wallet that sends `topUp`, and records that wallet as the source, so both steps must come from `fromAddress`.
+  </Step>
+  <Step title="Record the top-up">
+    Send the `topUp` step's hash to [Record Insurance Top-Up](/endpoints/lending/record-insurance-top-up), with the `amount` and `fromAddress` that `confirmWith.body` carries. This route has no confirm call of its own.
+  </Step>
+</Steps>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="amount" type="string" required>
+  Amount to add as a decimal string, for example `"5000"`. Must be greater than zero. Denominated in the market's borrow asset and parsed at its decimals.
+</ParamField>
+
+<ParamField body="fromAddress" type="string" required>
+  The wallet that will sign both steps, as a 0x-prefixed 20-byte address. The API checks its balance against `amount`, and the fund records it as the top-up's source.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="steps" type="array">Two transactions to broadcast in order. Each is `{ to, data, description, chainId, value }`: first the approval on the borrow asset, then `topUp` on the fund.</ResponseField>
+    <ResponseField name="functionName" type="string">`topUp`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">Always `1`. Record the top-up with the `topUp` step's hash, not the approval's.</ResponseField>
+    <ResponseField name="fundAddress" type="string">The insurance fund the top-up goes to.</ResponseField>
+    <ResponseField name="amount" type="string">The amount, echoed back.</ResponseField>
+    <ResponseField name="amountRaw" type="string">The amount in the borrow asset's smallest unit.</ResponseField>
+    <ResponseField name="booked" type="boolean">Always `true`. The fund books this top-up as a deposit.</ResponseField>
+    <ResponseField name="note" type="string">States how the fund books a top-up, in words.</ResponseField>
+    <ResponseField name="confirmWith" type="object">Where to record the top-up. `endpoint` names [Record Insurance Top-Up](/endpoints/lending/record-insurance-top-up) and `field` is `txHash`. `body` carries the `amount` and `fromAddress` to send with the hash.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/insurance/top-up" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": "5000", "fromAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52"}'
+```
+```typescript TypeScript
+const base = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+const fromAddress = await wallet.getAddress();
+
+const built = await fetch(`${base}/insurance/top-up`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ amount: '5000', fromAddress })
+});
+const { data } = await built.json();
+
+const [approval, topUp] = data.steps;
+await (await wallet.sendTransaction({ to: approval.to, data: approval.data })).wait();
+
+const tx = await wallet.sendTransaction({ to: topUp.to, data: topUp.data });
+await tx.wait();
+
+await fetch(`${base}/insurance/record-topup`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ ...data.confirmWith.body, txHash: tx.hash })
+});
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "steps": [
+      {
+        "to": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+        "data": "0x095ea7b3...",
+        "description": "Approve the insurance fund to pull 5000 USDC",
+        "chainId": 11155111,
+        "value": "0"
+      },
+      {
+        "to": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+        "data": "0x...",
+        "description": "Top up the insurance fund with 5000 USDC, booked as a deposit from 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+        "chainId": 11155111,
+        "value": "0"
+      }
+    ],
+    "functionName": "topUp",
+    "confirmStepIndex": 1,
+    "fundAddress": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+    "amount": "5000",
+    "amountRaw": "5000000000",
+    "booked": true,
+    "note": "A top-up pulls the settlement asset through topUp(amount) and the fund books it as a deposit with the source recorded, so Lifetime Deposits counts protocol-fee sweeps and top-ups alike, and the balance is what it can pay.",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/clx_secmarket_001/insurance/record-topup",
+      "field": "txHash",
+      "body": {
+        "amount": "5000",
+        "fromAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52"
+      }
+    }
+  }
+}
+```
+```json Error - Insufficient Balance
+{
+  "success": false,
+  "error": {
+    "code": "INSUFFICIENT_BALANCE",
+    "message": "Wallet 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 holds 1200.0 USDC, less than the 5000 USDC top-up"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `amount` is missing or not a positive decimal string, or `fromAddress` is missing or malformed |
+| `MISSING_MARKET_ID` | `400` | The market ID in the path is longer than 100 characters |
+| `NO_INSURANCE_FUND` | `400` | The market records no insurance fund |
+| `INVALID_AMOUNT` | `400` | `amount` carries more decimal places than the borrow asset supports |
+| `INSUFFICIENT_BALANCE` | `400` | `fromAddress` holds less of the borrow asset than `amount`. The message states the balance. Skipped when the balance cannot be read |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `FUND_UPGRADE_REQUIRED` | `409` | The fund runs the earlier implementation that only its markets may fund, so `topUp` would revert and a plain transfer would not be booked. The fund owner upgrades it first through [Upgrade Market](/endpoints/lending/upgrade-market). The message says who holds the fund |
+| `FUND_STATE_UNAVAILABLE` | `503` | The fund's implementation could not be read, so whether it books a top-up is unknown. Retry shortly |

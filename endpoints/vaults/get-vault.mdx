@@ -1,10 +1,12 @@
 ---
 title: 'Get Vault'
-api: 'GET /lending-external-securities/api/vaults/{vaultId}'
+api: 'GET /lending-external-securities-v2/api/vaults/{vaultId}'
 description: 'Full vault record plus live chain state and an optional holder position'
 ---
 
-Returns the complete vault record with two enrichment blocks: `onChain`, the vault's live state read from the chain in one aggregate, and `holder`, the position of the wallet named in `address`. Without an `address`, `holder` is `null`.
+Returns the vault record with its live state. `onChain` is the vault read from the chain in one aggregate. `holder` is the position of the wallet named in `address`, or `null` without one. On a vault your instance operates, `implementation` and `jitLiquidity` add the operator's view; on every other vault both are `null`.
+
+The record fields are those of a [List Vaults](/endpoints/vaults/list-vaults) row, `depositorGate` and `distributorView` included. A vault is visible here under the same rules as on that list.
 
 ## Path Parameters
 
@@ -13,7 +15,7 @@ Returns the complete vault record with two enrichment blocks: `onChain`, the vau
 ## Query Parameters
 
 <ParamField query="address" type="string">
-  Wallet to read a position for. When present, `holder` carries that wallet's shares and their current value.
+  Wallet to read a position for. When it is a `0x` address, `holder` carries that wallet's shares and their current value. Any other value is ignored and `holder` is `null`.
 </ParamField>
 
 ## Response Fields
@@ -21,36 +23,80 @@ Returns the complete vault record with two enrichment blocks: `onChain`, the vau
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="onChain" type="object">
+      `null` for a vault with no recorded address.
       <Expandable>
-        <ResponseField name="readFailed" type="boolean">True when the chain could not be read. Every other field in this block is then absent, apart from `isOnChain` and `supportsNotice`. Keep your last verified values instead of rendering zeros.</ResponseField>
+        <ResponseField name="readFailed" type="boolean">True when the chain could not be read. Every other field in this block is then absent, apart from `isOnChain` and, when they could still be established, `supportsNotice` and `feeNotice`. Keep your last verified values instead of rendering zeros.</ResponseField>
         <ResponseField name="isOnChain" type="boolean">`true` on a clean read, `null` when the read failed.</ResponseField>
         <ResponseField name="vaultAddress" type="string">The vault contract, lowercased.</ResponseField>
-        <ResponseField name="owner" type="string">The wallet that owns the vault on-chain.</ResponseField>
-        <ResponseField name="asset" type="string">Settlement token, read from the contract rather than from the record.</ResponseField>
-        <ResponseField name="identityRegistry" type="string">The register that admits depositors, read from the contract.</ResponseField>
-        <ResponseField name="totalAssets" type="string">Everything the vault is worth: idle funds plus its value across allocated markets. Formatted at the vault's asset decimals.</ResponseField>
+        <ResponseField name="owner" type="string">The wallet that owns the vault on-chain. Only it can sign the vault's owner-only actions, distributor approvals included.</ResponseField>
+        <ResponseField name="asset" type="string">The vault's asset, read from the contract rather than from the record.</ResponseField>
+        <ResponseField name="identityRegistry" type="string">The vault's own identity register, read from the contract. `null` when the vault names none.</ResponseField>
+        <ResponseField name="totalAssets" type="string">Everything the vault is worth: idle funds plus its position in every allocated market. Formatted at the vault's asset decimals.</ResponseField>
         <ResponseField name="totalAssetsRaw" type="string">The same figure in base units.</ResponseField>
         <ResponseField name="totalShares" type="string">Shares in issue.</ResponseField>
         <ResponseField name="totalSharesRaw" type="string">The same figure in base units.</ResponseField>
-        <ResponseField name="sharePrice" type="string">Value of one share in the settlement asset, as an 18-decimal string. `"1.0"` is par. It rises as the funded markets pay interest.</ResponseField>
+        <ResponseField name="sharePrice" type="string">Value of one share in the vault's asset, as an 18-decimal string. `"1.0"` is par. It rises as the funded markets pay interest.</ResponseField>
         <ResponseField name="idleAssets" type="string">Funds not allocated to any market.</ResponseField>
         <ResponseField name="allocatedAssets" type="string">Total assets minus idle assets: funds working in the operator's lending markets.</ResponseField>
-        <ResponseField name="redeemableNow" type="string">What a redemption could actually pay out at this moment, in the settlement asset. It is idle funds plus, for each allocated market, the smaller of two figures: what the vault holds there, and what that market has uncommitted. Size a redemption against this, not against `idleAssets`.</ResponseField>
+        <ResponseField name="redeemableNow" type="string">What a redemption could pay out at this moment. It is idle funds plus, for each allocated market, the smaller of two figures: the vault's position there, and what that market has uncommitted. `null` when any leg or the idle balance could not be read. Size a redemption against this, not against `idleAssets`.</ResponseField>
         <ResponseField name="redeemableNowRaw" type="string">The same figure in base units.</ResponseField>
         <ResponseField name="depositsPaused" type="boolean">True while the operator has paused deposits. Redemptions cannot be paused. `null` when unreadable, which is not the same as unpaused.</ResponseField>
         <ResponseField name="performanceFeeBps" type="integer">Live fee. The contract only accepts decreases.</ResponseField>
-        <ResponseField name="blockTimestamp" type="integer">The block these figures were read at.</ResponseField>
-        <ResponseField name="assetsFullyReadable" type="boolean">`false` when at least one allocated market would not answer, so `totalAssets` understates the vault. Treat a `false` here the way you would treat `readFailed`.</ResponseField>
-        <ResponseField name="supportsNotice" type="boolean">Whether this vault runs the implementation that announces its changes and can write a dead market off.</ResponseField>
-        <ResponseField name="worstCaseHorizon" type="object">`{ horizon, bounded, complete }`. `horizon` is seconds until every allocation could in principle be wound down. `bounded` is `false` when at least one funded market carries an open-ended loan, and `complete` says whether every leg answered. The whole block is `null` when the vault does not expose it.</ResponseField>
-        <ResponseField name="allocations" type="array">Per-market legs: `marketAddress`, `marketName`, `marketSymbol`, `lpValue`, `lpValueRaw`, `lpShares`, `deposited`, `marketAvailable`, and a per-leg `readFailed` when one market could not be read. Each healthy leg also carries `utilizationBps`, `borrowRateBps`, and `supplyRateBps`, which are the rates shown on that market's own page.</ResponseField>
+        <ResponseField name="blockTimestamp" type="integer">Unix time of the block these figures were read in.</ResponseField>
+        <ResponseField name="assetsFullyReadable" type="boolean">`false` when the vault's position in at least one allocated market could not be read, so `totalAssets` understates the vault. Deposits are then refused with `VAULT_BOOK_INCOMPLETE`, and redemptions are quoted low.</ResponseField>
+        <ResponseField name="supportsNotice" type="boolean">Whether this vault runs the implementation that announces its changes in advance and can write a dead market off. `null` when that could not be established.</ResponseField>
+        <ResponseField name="feeNotice" type="object">
+          The performance-fee notice. Collecting the fee mints shares to the operator and dilutes holders. The current implementation takes it only after an announced notice period.
+          <Expandable>
+            <ResponseField name="supported" type="boolean">`true` when the vault requires the notice, `false` on the earlier implementation that collects without one, `null` when unknown.</ResponseField>
+            <ResponseField name="activatesAt" type="integer">Unix time from which an announced collection may be taken. `null` when none is announced. A holder who disagrees with the collection can redeem before it.</ResponseField>
+            <ResponseField name="delaySeconds" type="integer">The notice period the vault applies.</ResponseField>
+            <ResponseField name="ready" type="boolean">Whether a collection could be taken now. Always `true` on a vault without the notice.</ResponseField>
+          </Expandable>
+        </ResponseField>
+        <ResponseField name="worstCaseHorizon" type="object">
+          The vault's disclosed exit ceiling, `null` on a vault that does not expose it. Show it as the latest date a withdrawal may wait for, never as instant liquidity.
+          <Expandable>
+            <ResponseField name="horizon" type="string">Unix time, in seconds. It marks the latest moment a loan in any funded market can still be outstanding, grace period included. `null` when no market ever stamped a term.</ResponseField>
+            <ResponseField name="bounded" type="boolean">`false` when at least one funded market carries a loan without a term, so no bounded horizon exists.</ResponseField>
+            <ResponseField name="complete" type="boolean">`false` when a funded market could not be read. The horizon then understates.</ResponseField>
+            <ResponseField name="applies" type="boolean">`true` when the horizon is bounded, set, and at least one funded market has money lent out. The contract keeps the latest due date it ever stamped, so a horizon that does not apply describes loans already gone.</ResponseField>
+            <ResponseField name="basis" type="string">`OPEN_LOANS` when the horizon was narrowed to the due dates of the loans actually open. Absent when it is the contract's own figure.</ResponseField>
+          </Expandable>
+        </ResponseField>
+        <ResponseField name="allocations" type="array">
+          One leg per allocated market, empty when nothing is allocated.
+          <Expandable>
+            <ResponseField name="marketAddress" type="string">The lending market.</ResponseField>
+            <ResponseField name="marketName" type="string">Name of the collateral the market lends against. `null` when the market is not on record.</ResponseField>
+            <ResponseField name="marketSymbol" type="string">Symbol of that collateral.</ResponseField>
+            <ResponseField name="marketImageUri" type="string">The collateral token's image, as the market's own instance uploaded it. `null` when none.</ResponseField>
+            <ResponseField name="lpShares" type="string">The vault's liquidity-provider shares in the market, in base units.</ResponseField>
+            <ResponseField name="lpValue" type="string">What those shares are worth, in the vault's asset. This is what the vault counts toward `totalAssets`.</ResponseField>
+            <ResponseField name="lpValueRaw" type="string">The same figure in base units.</ResponseField>
+            <ResponseField name="deposited" type="string">What the vault deposited into the market, as the market records it.</ResponseField>
+            <ResponseField name="marketAvailable" type="string">What the market has uncommitted, which bounds how much the vault can draw back now.</ResponseField>
+            <ResponseField name="marketAvailableRaw" type="string">The same figure in base units.</ResponseField>
+            <ResponseField name="utilizationBps" type="integer">The market's utilization. `null` when its metrics could not be read.</ResponseField>
+            <ResponseField name="borrowRateBps" type="integer">The borrow rate that applies, a stamped fixed rate where the market's interest model sets one. These are the rates shown on that market's own page.</ResponseField>
+            <ResponseField name="supplyRateBps" type="number">The rate liquidity providers earn there, after the fee split.</ResponseField>
+            <ResponseField name="curveBorrowRateBps" type="integer">The rate the interest curve alone gives.</ResponseField>
+            <ResponseField name="fixedStampRateBps" type="integer">The fixed rate the market's interest model stamps, or `null` when it stamps none.</ResponseField>
+            <ResponseField name="drawCap" type="string">The vault's just-in-time draw cap for this market, in base units. `"0"` means the vault has not consented to draws there. `null` when unreadable.</ResponseField>
+            <ResponseField name="drawCapFormatted" type="string">The same cap formatted at the asset's decimals.</ResponseField>
+            <ResponseField name="evictionActivatesAt" type="integer">Unix time from which the operator may write this market off, when a write-off notice is running. `null` when none is.</ResponseField>
+            <ResponseField name="exitHorizon" type="object">This market's own `horizon`, `bounded` and `applies`, plus `basis` (`OPEN_LOANS` or `HIGH_WATER_MARK`) when it applies. `null` when unreadable. The vault-wide figure is `worstCaseHorizon`.</ResponseField>
+            <ResponseField name="lpReadFailed" type="boolean">Present and `true` when the vault's position in this market could not be read. This is the failure that makes `assetsFullyReadable` false.</ResponseField>
+            <ResponseField name="readFailed" type="boolean">Present and `true` when the position or the market's metrics could not be read. A metrics failure costs the rates only.</ResponseField>
+          </Expandable>
+        </ResponseField>
         <ResponseField name="interest" type="object">
           <Expandable>
             <ResponseField name="readFailed" type="boolean">True when any allocation leg could not be read. The other fields are then absent, because a sum over the legs that did answer would understate the total.</ResponseField>
-            <ResponseField name="grossAnnual" type="string">Interest the current allocations would earn over a year at today's rates, before the performance fee. In the settlement asset.</ResponseField>
+            <ResponseField name="grossAnnual" type="string">Interest the current allocations would earn over a year at today's supply rates, before the performance fee. In the vault's asset.</ResponseField>
             <ResponseField name="netAnnual" type="string">The same figure after the operator's performance fee.</ResponseField>
-            <ResponseField name="blendedGrossApyBps" type="integer">Gross annual interest over total assets, in basis points. Idle funds earn nothing, so this sits below the rate of any single funded market. `null` when the vault holds nothing.</ResponseField>
-            <ResponseField name="blendedNetApyBps" type="integer">The same blended rate after the fee. This is the rate an investor earns.</ResponseField>
+            <ResponseField name="blendedGrossApyBps" type="number">Gross annual interest over total assets, in basis points, to two decimals. Idle funds earn nothing, so this sits below the rate of any single funded market. `null` when the vault holds nothing.</ResponseField>
+            <ResponseField name="blendedNetApyBps" type="number">The same blended rate after the fee. This is the rate an investor earns.</ResponseField>
             <ResponseField name="performanceFeeBps" type="integer">The fee applied to get from gross to net.</ResponseField>
           </Expandable>
         </ResponseField>
@@ -58,16 +104,18 @@ Returns the complete vault record with two enrichment blocks: `onChain`, the vau
     </ResponseField>
     <ResponseField name="holder" type="object">
       <Expandable>
+        <ResponseField name="holderAddress" type="string">The wallet read, lowercased.</ResponseField>
         <ResponseField name="shares" type="string">The wallet's share balance.</ResponseField>
-        <ResponseField name="value" type="string">Those shares at the current share price, in the settlement asset.</ResponseField>
-        <ResponseField name="readFailed" type="boolean">True when the position could not be read. `shares` and `value` are then `null`, not zero.</ResponseField>
+        <ResponseField name="sharesRaw" type="string">The same balance in base units.</ResponseField>
+        <ResponseField name="value" type="string">Those shares at the current share price, in the vault's asset.</ResponseField>
+        <ResponseField name="readFailed" type="boolean">True when the position could not be read. `shares`, `sharesRaw` and `value` are then `null`, not zero.</ResponseField>
       </Expandable>
     </ResponseField>
     <ResponseField name="implementation" type="object">
-      Present only on your own vault, `null` on every other. Carries `readFailed`, and on a clean read `upgradeAvailable`, `upgradeActivatesAt`, `upgradeReady` and `pendingIsPlatform`, describing whether the vault's implementation differs from the platform's current one and when a pending upgrade becomes activatable.
+      Present only on your own vault, `null` on every other. `current` is the implementation the vault runs and `platform` the one the platform's vault factory serves. The block also carries `readFailed`, `upgradeAvailable`, `supportsNotice`, `pendingImplementation`, `upgradeActivatesAt`, `upgradeReady` and `pendingIsPlatform`.
     </ResponseField>
     <ResponseField name="jitLiquidity" type="object">
-      Present only on your own vault, `null` on every other. Carries `readFailed` and a `markets` array of the operator's lending markets that settle in the vault's asset and could draw on it, each with `marketId`, `marketAddress`, `marketName`, `marketSymbol`, `borrowAssetSymbol` and a `readiness` verdict.
+      Present only on your own vault, `null` on every other. Carries `readFailed` and a `markets` array: the operator's lending markets that settle in the vault's asset and could draw on it. Each entry names the market (`marketId`, `marketAddress`, `marketName`, `marketSymbol`, `borrowAssetSymbol`), states both sides of the connection, and ends in a `readiness` verdict.
     </ResponseField>
   </Expandable>
 </ResponseField>
@@ -77,7 +125,7 @@ Returns the complete vault record with two enrichment blocks: `onChain`, the vau
 </Warning>
 
 <Note>
-  `sharePrice` is an 18-decimal string regardless of the asset's own decimals. Every other amount in the block is formatted at `assetDecimals`.
+  `sharePrice` is an 18-decimal string regardless of the asset's own decimals. Every other amount in the block is formatted at `assetDecimals`. A healthy `onChain` read is cached for 20 seconds, so calls inside that window see the same figures.
 </Note>
 
 <Note>
@@ -86,17 +134,17 @@ Returns the complete vault record with two enrichment blocks: `onChain`, the vau
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/vaults/{vaultId}?address=0x5ad87a0621175206b72d10e4b8577b192e7f40ab" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd?address=0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/vaults/${vaultId}?address=${wallet}`,
+  `https://api.trusset.org/lending-external-securities-v2/api/vaults/${vaultId}?address=${wallet}`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
-if (data.onChain?.readFailed) {
-  // keep last verified values and retry
+if (!data.onChain || data.onChain.readFailed) {
+  scheduleRetry();
 } else {
   console.log(`share price ${data.onChain.sharePrice}, ${data.onChain.idleAssets} ${data.assetSymbol} idle`);
 }
@@ -111,58 +159,92 @@ if (data.onChain?.readFailed) {
     "id": "cmssh8t2u0003cghxkx1w1fwd",
     "own": false,
     "vaultAddress": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+    "assetAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
     "assetSymbol": "USDC",
     "assetDecimals": 6,
+    "identityRegistryAddress": "0xe9114c40934f6fb6bb317935156b731f7a86d006",
+    "depositorGate": {
+      "kind": "REGISTER",
+      "register": "0xe9114c40934f6fb6bb317935156b731f7a86d006",
+      "statement": "Deposits and share transfers are examined against this register."
+    },
     "name": "Trusset Prime Demo Vault",
     "symbol": "TPV",
     "performanceFeeBps": 500,
     "active": true,
-    "riskDisclosure": "Deposits fund overcollateralized security-token lending markets.",
+    "riskDisclosure": "Deposits fund overcollateralized lending markets.",
     "riskDisclosureUrl": "https://bank.example/vault-risk",
     "operatedBy": { "instanceName": "Trusset Client Demo", "issuerName": "Trusset UG", "isBank": true },
     "onChain": {
       "isOnChain": true,
       "readFailed": false,
+      "vaultAddress": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
       "owner": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
       "asset": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
       "identityRegistry": "0xe9114c40934f6fb6bb317935156b731f7a86d006",
-      "totalAssets": "125000.0",
-      "totalShares": "123456.789012",
-      "sharePrice": "1.0125",
+      "totalAssets": "126250.0",
+      "totalAssetsRaw": "126250000000",
+      "totalShares": "124691.358024",
+      "totalSharesRaw": "124691358024",
+      "sharePrice": "1.012500000005613861",
       "idleAssets": "25000.0",
-      "allocatedAssets": "100000.0",
+      "allocatedAssets": "101250.0",
+      "redeemableNow": "87500.0",
+      "redeemableNowRaw": "87500000000",
       "depositsPaused": false,
       "performanceFeeBps": 500,
+      "blockTimestamp": 1786700400,
+      "assetsFullyReadable": true,
+      "supportsNotice": true,
+      "feeNotice": { "supported": true, "activatesAt": null, "delaySeconds": 604800, "ready": false },
+      "worstCaseHorizon": {
+        "horizon": "1794472800",
+        "bounded": true,
+        "complete": true,
+        "applies": true,
+        "basis": "OPEN_LOANS"
+      },
       "allocations": [
         {
           "marketAddress": "0xae10e07a899526e97be3940ca6ee03af28394495",
           "marketName": "Trusset Security Token",
           "marketSymbol": "TRST",
+          "marketImageUri": null,
           "lpShares": "100000000000",
           "lpValue": "101250.0",
           "lpValueRaw": "101250000000",
           "deposited": "100000.0",
           "marketAvailable": "62500.0",
+          "marketAvailableRaw": "62500000000",
           "utilizationBps": 5503,
           "borrowRateBps": 750,
-          "supplyRateBps": 309
+          "supplyRateBps": 309,
+          "curveBorrowRateBps": 750,
+          "fixedStampRateBps": null,
+          "drawCap": "0",
+          "drawCapFormatted": "0.0",
+          "evictionActivatesAt": null,
+          "exitHorizon": { "horizon": "1794472800", "bounded": true, "applies": true, "basis": "OPEN_LOANS" }
         }
       ],
       "interest": {
         "readFailed": false,
         "grossAnnual": "3128.625",
         "netAnnual": "2972.19375",
-        "blendedGrossApyBps": 250,
-        "blendedNetApyBps": 237,
+        "blendedGrossApyBps": 247.81,
+        "blendedNetApyBps": 235.42,
         "performanceFeeBps": 500
       }
     },
     "holder": {
-      "holderAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+      "holderAddress": "0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b",
       "shares": "1000.0",
+      "sharesRaw": "1000000000",
       "value": "1012.5",
       "readFailed": false
-    }
+    },
+    "implementation": null,
+    "jitLiquidity": null
   }
 }
 ```
@@ -173,13 +255,16 @@ if (data.onChain?.readFailed) {
     "id": "cmssh8t2u0003cghxkx1w1fwd",
     "name": "Trusset Prime Demo Vault",
     "onChain": { "readFailed": true, "isOnChain": null },
-    "holder": null
+    "holder": null,
+    "implementation": null,
+    "jitLiquidity": null
   }
 }
 ```
 ```json Error - Not Found
 {
   "success": false,
+  "data": null,
   "error": {
     "code": "VAULT_NOT_FOUND",
     "message": "Vault not found"
@@ -187,3 +272,12 @@ if (data.onChain?.readFailed) {
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VAULT_NOT_FOUND` | `404` | No such vault, or it is archived, on another network or environment, or an unpublished vault of another operator in which your instance is not a distributor of record |
+| `VAULT_STATE_UNAVAILABLE` | `503` | Whether your instance is a distributor of record in an unpublished vault could not be read from the chain. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | The vault records or your instance's verified wallets could not be read. Retry shortly |
+| `VAULT_READ_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |

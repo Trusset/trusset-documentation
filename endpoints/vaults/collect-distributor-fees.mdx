@@ -1,0 +1,161 @@
+---
+title: 'Collect Distributor Fees'
+api: 'POST /lending-external-securities-v2/api/vaults/{vaultId}/distributor-fees/collect'
+description: 'Calldata that pulls the vault''s distributor slice from one market into the vault'
+---
+
+Builds `collectDistributorFees(market)` on the vault. It pulls the vault's slice of one market's distributor share into the vault. The vault then credits the part earned by attributed shares to their distributors and the rest, earned by shares no distributor brought, to the vault operator. It collects one market at a time.
+
+Any wallet may sign. The market pays the slice to the vault itself, never to the signer, and it refuses anyone else's attempt to sweep the vault's slice. A collection pays nobody out: follow it with [Pay Distributor](/endpoints/vaults/pay-distributor) or [Pay Operator Fees](/endpoints/vaults/pay-operator-fees). [Get Earnings](/endpoints/vaults/get-earnings) shows each market's waiting claim.
+
+The market must be one whose lender of record is the vault's owner, settling in the vault's asset. Any instance that can see the vault may build the call.
+
+## Path Parameters
+
+<ParamField path="vaultId" type="string" required>Vault ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="marketAddress" type="string">
+  The market to collect from, as a `0x` address. Required to build the calldata.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The wallet you intend to sign with. The API simulates the collection before offering calldata, from this wallet when given and from the vault's own address otherwise. The contract accepts any signer either way.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined collection, `0x` and 64 hex characters. Send it to confirm and record the result; nothing else is needed then. Omit it to receive the calldata.
+</ParamField>
+
+The route validates every field of the schema it shares with the other distributor actions (`marketAddress`, `distributor`, `wallet`, `approved`, `signerAddress`, `txHash`), even where this action ignores it.
+
+## Response Fields
+
+The calldata response:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">`to` (the vault), `data`, `value` (`"0"`) and `chainId`.</ResponseField>
+    <ResponseField name="functionName" type="string">`collectDistributorFees`.</ResponseField>
+    <ResponseField name="permissionless" type="boolean">Always `true`: any wallet may sign.</ResponseField>
+    <ResponseField name="amount" type="string">The vault's claim on the market when the calldata was built, formatted at the vault's asset decimals. The amount collected is what the market pays when the transaction mines.</ResponseField>
+    <ResponseField name="amountRaw" type="string">The same claim in base units.</ResponseField>
+    <ResponseField name="marketAddress" type="string">The market, lowercased.</ResponseField>
+    <ResponseField name="description" type="string">The transaction in words.</ResponseField>
+    <ResponseField name="note" type="string">States that the market pays the vault, never the signer.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`endpoint`, this route with the vault ID filled in, and `field`, always `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+The confirmation response, after the backend has verified the receipt:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">The verified hash.</ResponseField>
+    <ResponseField name="action" type="string">`collect`.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet that signed.</ResponseField>
+    <ResponseField name="amount" type="string">What the vault received, from its `DistributorFeesCollected` event.</ResponseField>
+    <ResponseField name="amountRaw" type="string">The same amount in base units.</ResponseField>
+    <ResponseField name="events" type="array">The distributor events the vault emitted in the transaction, here `COLLECTED`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd/distributor-fees/collect" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"marketAddress": "0xae10e07a899526e97be3940ca6ee03af28394495"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/vaults/${vaultId}/distributor-fees/collect`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ marketAddress, signerAddress: await signer.getAddress() })
+});
+const { data } = await res.json();
+
+const tx = await signer.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch(url, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.hash }) });
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+      "data": "0xb58fa52c...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "collectDistributorFees",
+    "permissionless": true,
+    "amount": "20.0",
+    "amountRaw": "20000000",
+    "marketAddress": "0xae10e07a899526e97be3940ca6ee03af28394495",
+    "description": "Collect 20.0 USDC of distributor fees from the market into the vault, split between the distributors behind its holders and the operator",
+    "note": "Any wallet may sign this transaction. The market pays the slice to the vault itself, never to the signer.",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd/distributor-fees/collect",
+      "field": "txHash"
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0x237777cc42195706cd10b199f4c92289dbf1ce77479ccf6c58254fb6894ed61c",
+    "action": "collect",
+    "signer": "0xb4f9fc17e9114d3703481e9d3d1d0aea9187050b",
+    "amount": "20.0",
+    "amountRaw": "20000000",
+    "events": ["COLLECTED"]
+  }
+}
+```
+```json Error - Nothing Accrued
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "NOTHING_ACCRUED",
+    "message": "The market holds no distributor slice for this vault yet: it is credited per share as borrowers repay interest."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `marketAddress` is missing when building, or a body field is malformed |
+| `VAULT_NOT_FOUND` | `404` | No such vault, or it is not visible to your instance |
+| `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address on record |
+| `VAULT_UPGRADE_REQUIRED` | `409` | The vault runs an implementation from before distributor attribution. Its operator has to upgrade it first |
+| `MARKET_UPGRADE_REQUIRED` | `409` | The market runs an implementation without the distributor leg, so there is nothing to collect until its admin upgrades it |
+| `NOTHING_ACCRUED` | `409` | The market holds no slice for the vault. The message says whether the vault holds no position there or nothing is booked yet |
+| `MARKET_NOT_OPERATORS` | `409` | The market's lender of record is not the vault's owner, so the vault does not collect from it |
+| `DISTRIBUTOR_SLICE_NOT_ROUTED` | `409` | The market would pay the vault's slice to its operator wallet instead of the vault. The vault was registered before the market moved to the fee-model implementation, and the market admin re-registers it with [Register Vault](/endpoints/lending/register-vault) |
+| `NOT_AUTHORIZED` | `409` | The market refused the collection for this vault |
+| `TX_WOULD_REVERT` | `409` | The simulation reverted for another reason, such as `AssetMismatch` when the market settles in a different asset. The message names the revert when it can be decoded. Nothing to sign |
+| `VAULT_STATE_UNAVAILABLE` | `503` | The vault implementation, or your standing in an unpublished vault, could not be read. Retry shortly |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market implementation or the vault's claim on it could not be read. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read, so nothing was decided. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | The vault records or your instance's verified wallets could not be read. Retry shortly |
+| `VAULT_DISTRIBUTOR_ACTION_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |
+
+Confirming with `txHash` can also return `TX_NOT_FOUND` (`404`), `TX_REVERTED`, `TX_WRONG_TARGET` or `TX_WRONG_FUNCTION` (`400`), and `TX_NOT_VERIFIED` (`400`) when the transaction carries no collection on this vault. See [transaction verification errors](/endpoints/introduction#confirm-a-transaction).

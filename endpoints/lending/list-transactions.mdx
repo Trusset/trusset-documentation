@@ -1,10 +1,12 @@
 ---
 title: 'List Transactions'
-api: 'GET /lending-external-securities/api/markets/{marketId}/transactions'
-description: 'List recorded transactions for a market, newest first'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/transactions'
+description: 'List the recorded transactions of a market, newest first'
 ---
 
-Returns the market's recorded activity with pagination counters. Records are written when a transaction is confirmed through this API or observed during a chain sync. A transaction that is broadcast but never confirmed with `txHash` is not recorded here until the next reconciliation pass.
+Returns the market's recorded ledger with pagination counters. Records are written when a transaction is confirmed through this API or observed during a chain sync. A transaction that is broadcast but never confirmed with `txHash` is not recorded here until the next reconciliation pass.
+
+One on-chain market can be recorded by several instances: the one that deployed it and the one that took the lender-of-record role, for example. The ledger is one record of the market. Rows written by every instance that holds the same market on the same network and environment are merged, and a transaction recorded twice is listed once. `recordedByThisInstance` says which rows your instance wrote.
 
 ## Path Parameters
 
@@ -13,12 +15,16 @@ Returns the market's recorded activity with pagination counters. Records are wri
 ## Query Parameters
 
 <ParamField query="limit" type="integer" default="50">
-  Records to return. Minimum 1, maximum 200.
+  Records to return, from 1 to 200. A value outside that range is clamped, and one that does not parse falls back to 50.
 </ParamField>
 
 <ParamField query="offset" type="integer" default="0">
   Records to skip. Minimum 0.
 </ParamField>
+
+<Note>
+  Pages are cut from the most recent 2,000 records at most. An `offset` past that returns an empty page, even when `total` is larger.
+</Note>
 
 ## Response Fields
 
@@ -28,16 +34,17 @@ Returns the market's recorded activity with pagination counters. Records are wri
       Transaction records ordered by `timestamp` descending.
       <Expandable>
         <ResponseField name="id" type="string">Record ID.</ResponseField>
-        <ResponseField name="marketId" type="string">Market ID.</ResponseField>
+        <ResponseField name="marketId" type="string">The market record the row was written against. On a row another instance recorded, that is the other instance's market ID.</ResponseField>
         <ResponseField name="positionId" type="string">Linked position, when the action belonged to a loan. Null otherwise.</ResponseField>
-        <ResponseField name="txType" type="string">Action type. See the table below.</ResponseField>
-        <ResponseField name="userAddress" type="string">Address that performed the action, lowercased. Oracle syncs triggered through this API record `api`.</ResponseField>
-        <ResponseField name="amount" type="string">Amount in the relevant asset for the action, as a decimal string.</ResponseField>
+        <ResponseField name="txType" type="string">Action type. See the tables below.</ResponseField>
+        <ResponseField name="userAddress" type="string">Usually the address that sent the transaction, lowercased. Vault rows record the vault, and a placeholder such as `system` stands in where no address was known.</ResponseField>
+        <ResponseField name="amount" type="string">Amount as a decimal string, in the unit the tables below give for its type.</ResponseField>
         <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
-        <ResponseField name="timestamp" type="string">ISO 8601 timestamp.</ResponseField>
+        <ResponseField name="timestamp" type="string">ISO 8601 timestamp. Rows first stamped with the server clock are moved to the block time when the page is read.</ResponseField>
+        <ResponseField name="recordedByThisInstance" type="boolean">Whether your instance wrote this row.</ResponseField>
       </Expandable>
     </ResponseField>
-    <ResponseField name="total" type="integer">Total records for this market.</ResponseField>
+    <ResponseField name="total" type="integer">Total records for this market, less the duplicates found in the scanned window.</ResponseField>
     <ResponseField name="hasMore" type="boolean">Whether more records exist beyond this page.</ResponseField>
     <ResponseField name="limit" type="integer">Applied limit.</ResponseField>
     <ResponseField name="offset" type="integer">Applied offset.</ResponseField>
@@ -46,33 +53,74 @@ Returns the market's recorded activity with pagination counters. Records are wri
 
 ## Transaction Types
 
-| `txType` | Written when |
-|---|---|
-| `SUPPLY` | Liquidity added to the pool |
-| `WITHDRAW` | LP shares redeemed |
-| `BORROW` | A loan is opened or increased |
-| `REPAY` | Debt is repaid |
-| `CLOSE` | A fully repaid loan is closed |
-| `COLLATERAL_ADDED` | Collateral is posted to an existing loan |
-| `COLLATERAL_WITHDRAWN` | Collateral is released from a loan |
-| `LIQUIDATION` | A loan is liquidated |
-| `ORACLE_SYNC` | A NAV price is pushed on-chain |
+Amounts are in the borrow asset unless the table says otherwise.
 
-<Note>
-  `amount` is denominated in the market's borrow asset for `SUPPLY`, `WITHDRAW`, `BORROW`, and `REPAY`, in collateral token units for `COLLATERAL_ADDED` and `COLLATERAL_WITHDRAWN`, and carries the submitted price for `ORACLE_SYNC`. `CLOSE` records `0`.
-</Note>
+**Loans**
+
+| `txType` | Written when | `amount` |
+|---|---|---|
+| `DEPOSIT` | Collateral is pledged as a loan opens | Collateral units |
+| `BORROW` | A loan is opened, or borrowed further | The debt taken on |
+| `OPEN_FEE` | The market charged an open fee on that borrow | The fee |
+| `REPAY` | Debt is repaid | The amount repaid |
+| `REPAY_FEE` | The market charged a repay fee | The fee |
+| `COLLATERAL_ADDED` | Collateral is posted to an existing loan | Collateral units |
+| `COLLATERAL_WITHDRAWN` | Collateral is released to the borrower | Collateral units |
+| `COLLATERAL_ESCROWED` | A release was refused by the collateral token and held by the custody adapter | Collateral units |
+| `CLOSE` | A fully repaid loan is closed | `0` |
+
+**Liquidations**
+
+| `txType` | Written when | `amount` |
+|---|---|---|
+| `LIQUIDATION` | Collateral is seized | Collateral units |
+| `AUCTION_BID` | A bid buys auctioned collateral | The amount paid |
+| `COLLATERAL_ROUTED` | Collateral unsold at auction expiry moves to the liquidation router | Collateral units |
+| `COLLATERAL_WITHDRAWN_FOR_SALE` | Seized collateral leaves the router for sale | Collateral units |
+| `PARTIAL_SALE` | Interim sale proceeds are reported | The proceeds |
+| `LIQUIDATION_SETTLED` | A liquidation is settled | The final proceeds |
+| `RESERVE_DRAWN` | The insurance fund covered a shortfall | The amount covered |
+| `COLLATERAL_RETURNED` | The router returns collateral to the borrower | Collateral units |
+| `LIQUIDATION_REOPENED` | A liquidation is reopened | `0` |
+| `LIQUIDATION_WRITTEN_OFF` | A liquidation is written off | `0` |
+| `SURPLUS_RETURNED` | Proceeds above the debt are paid to the borrower | The surplus |
+| `SURPLUS_ESCROWED` | That payment was blocked and the surplus held for the borrower | The surplus |
+| `SURPLUS_CLAIMED` | The borrower claims an escrowed surplus | The surplus |
+
+**Pool, fees and administration**
+
+| `txType` | Written when | `amount` |
+|---|---|---|
+| `SUPPLY` | Liquidity is added, directly or by a vault | The amount supplied |
+| `WITHDRAW` | Liquidity is withdrawn, directly or by a vault | The amount withdrawn |
+| `OPERATOR_FEES_SWEPT` | Operator fees are swept | The amount swept |
+| `DISTRIBUTOR_FEES_SWEPT` | Distributor fees are swept | The amount swept |
+| `PROTOCOL_FEES_SWEPT` | The insurance-fund share is swept into the fund | The amount swept |
+| `INFRASTRUCTURE_FEES_SWEPT` | Infrastructure fees are swept to Trusset | The amount swept |
+| `INSURANCE_TOPUP` | A transfer to the insurance fund is recorded | The amount |
+| `INSURANCE_TOPUP_BOOKED` | A top-up the insurance fund booked as a deposit is recorded | The amount |
+| `ORACLE_SYNC` | A price is pushed on-chain | The new price |
+| `CURATOR_ACCEPTED` | A lender of record takes the market | `0` |
+| `CONFIGURATION` | A configuration transaction is confirmed | `0` |
+| `IDENTITY_GATES_SET` | The identity registers are changed | `0` |
+| `VAULT_LIQUIDITY_SET` | Vault liquidity is switched on or off | `0` |
+| `VAULT_REGISTERED` | A vault is registered on the market | `0` |
+| `VAULT_DEREGISTERED` | A vault is deregistered | `0` |
+| `MARKET_PAUSE_STATE` | The market is paused or unpaused | `1` paused, `0` unpaused |
+| `CONTROLLER_TRANSFER_COMPLETE` | A controller transfer completes | `0` |
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/transactions?limit=20" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/transactions?limit=20" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/transactions?limit=20&offset=0`,
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/transactions?limit=20&offset=0`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
+const loanRows = data.transactions.filter((t) => t.positionId !== null);
 ```
 </RequestExample>
 
@@ -83,24 +131,26 @@ const { data } = await res.json();
   "data": {
     "transactions": [
       {
-        "id": "sectx_001",
-        "marketId": "clx_secmarket_001",
+        "id": "cmt0b3k8q0004cghx6r2d9w1e",
+        "marketId": "cmssh7p1k0001cghxq2m4v8rz",
         "positionId": null,
         "txType": "ORACLE_SYNC",
-        "userAddress": "api",
+        "userAddress": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
         "amount": "104.82",
-        "txHash": "0xabc...def",
-        "timestamp": "2025-06-15T11:30:00.000Z"
+        "txHash": "0x3d1f7a9c2e5b80146fd2a3c9e7b5d1f08a6c4e2b9d7f1a3c5e8b0d2f4a6c8e1b",
+        "timestamp": "2026-09-25T11:30:00.000Z",
+        "recordedByThisInstance": true
       },
       {
-        "id": "sectx_002",
-        "marketId": "clx_secmarket_001",
-        "positionId": "secpos_014",
+        "id": "cmt09x2f10002cghx8k4n6p3q",
+        "marketId": "cmssh7p1k0001cghxq2m4v8rz",
+        "positionId": "cmt09x2e70001cghx1a5c7e9g",
         "txType": "BORROW",
-        "userAddress": "0xabc...def",
-        "amount": "50000",
-        "txHash": "0x123...789",
-        "timestamp": "2025-06-15T10:05:00.000Z"
+        "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+        "amount": "50000.0",
+        "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+        "timestamp": "2026-09-25T10:05:00.000Z",
+        "recordedByThisInstance": true
       }
     ],
     "total": 214,
@@ -111,3 +161,10 @@ const { data } = await res.json();
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

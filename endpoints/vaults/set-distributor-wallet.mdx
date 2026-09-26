@@ -1,0 +1,167 @@
+---
+title: 'Set Distributor Wallet'
+api: 'POST /lending-external-securities-v2/api/vaults/{vaultId}/distributor-wallet'
+description: 'Calldata that moves where the vault pays your instance''s distributor fees'
+---
+
+<Warning>
+  Once the move mines, only the new wallet can move the payout wallet again. Nobody else can undo it, the vault owner included. A payout wallet whose key is lost keeps receiving the distributor's fees with no way back. The API therefore builds a move only to a wallet your instance has verified.
+</Warning>
+
+Builds `setDistributorWallet(distributor, wallet)` on the vault. It moves the payout wallet of one of your instance's distributor wallets in this vault, the wallet [Pay Distributor](/endpoints/vaults/pay-distributor) sends its fees to. The attribution does not change: holders stay bound to the distributor, and only the destination of its fees moves.
+
+Only the distributor's current payout wallet can sign. Until it is first moved, that is the distributor address itself. The contract accepts any non-zero address as the new wallet from that signer. The API is stricter and refuses a wallet your instance has not verified.
+
+## Path Parameters
+
+<ParamField path="vaultId" type="string" required>Vault ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="wallet" type="string">
+  The new payout wallet, as a `0x` address. Required to build the calldata. It must be a verified wallet of your instance, and not the zero address.
+</ParamField>
+
+<ParamField body="distributor" type="string">
+  Which of your instance's distributor wallets to move the payout wallet for. Defaults to your instance's distributor wallet: its primary verified wallet, or its earliest when none is primary. A wallet your instance has not verified answers `DISTRIBUTOR_NOT_OWNED`.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The wallet that will sign. When given, the API refuses with `NOT_DISTRIBUTOR_WALLET` unless it is the current payout wallet.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined transaction, `0x` and 64 hex characters. Send it to confirm and record the result; nothing else is needed then. Omit it to receive the calldata.
+</ParamField>
+
+The route validates every field of the schema it shares with the other distributor actions, even where this action ignores it.
+
+## Response Fields
+
+The calldata response:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">`to` (the vault), `data`, `value` (`"0"`) and `chainId`.</ResponseField>
+    <ResponseField name="functionName" type="string">`setDistributorWallet`.</ResponseField>
+    <ResponseField name="requiredSigner" type="string">The current payout wallet. The vault refuses every other signer.</ResponseField>
+    <ResponseField name="distributor" type="string">The distributor whose payout wallet moves.</ResponseField>
+    <ResponseField name="wallet" type="string">The new payout wallet, lowercased.</ResponseField>
+    <ResponseField name="irreversible" type="boolean">Always `true`: after the move only the new wallet can move it again.</ResponseField>
+    <ResponseField name="description" type="string">The transaction in words.</ResponseField>
+    <ResponseField name="warning" type="string">The same irreversibility in words, naming the new wallet. Show it before the signature.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`endpoint`, this route with the vault ID filled in, and `field`, always `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+The confirmation response, after the backend has verified the receipt:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">The verified hash.</ResponseField>
+    <ResponseField name="action" type="string">`wallet`.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet that signed.</ResponseField>
+    <ResponseField name="amount" type="string">Always `"0.0"`: the move pays nothing.</ResponseField>
+    <ResponseField name="amountRaw" type="string">Always `"0"`.</ResponseField>
+    <ResponseField name="events" type="array">The distributor events the vault emitted in the transaction, here `WALLET_UPDATED`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd/distributor-wallet" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"wallet": "0xc5b6f2d6fa8f86f91085fb0e5efb50cfd51a2466", "signerAddress": "0x83fd50068b2fc776bbf237f8163495b2247408c1"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/vaults/${vaultId}/distributor-wallet`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ wallet: newPayoutWallet, signerAddress: await signer.getAddress() })
+});
+const { data } = await res.json();
+console.warn(data.warning);
+
+const tx = await signer.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch(url, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.hash }) });
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+      "data": "0x112ece61...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "setDistributorWallet",
+    "requiredSigner": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+    "distributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+    "wallet": "0xc5b6f2d6fa8f86f91085fb0e5efb50cfd51a2466",
+    "irreversible": true,
+    "description": "Pay this instance's distributor fees in the vault to 0xc5b6f2d6fa8f86f91085fb0e5efb50cfd51a2466 from now on",
+    "warning": "Once this transaction mines, only 0xc5b6f2d6fa8f86f91085fb0e5efb50cfd51a2466 can move the payout wallet again. Nobody else can undo it, the vault owner included.",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd/distributor-wallet",
+      "field": "txHash"
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0xbe3f62be98e40ed24897e3bde7e3f674351a86cd6b1ee6cffc7e8a57a98d7feb",
+    "action": "wallet",
+    "signer": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+    "amount": "0.0",
+    "amountRaw": "0",
+    "events": ["WALLET_UPDATED"]
+  }
+}
+```
+```json Error - Wallet Not Verified
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "WALLET_NOT_VERIFIED",
+    "message": "0x3621702ab038e1089472d56bdbdee13ea6be0d01 is not a verified wallet of this instance. The payout wallet receives this instance's distributor fees in the vault, and once it moves only that wallet can ever move it again, so it can only move to a wallet this instance proved it controls. Verify the wallet on the wallet page first."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `wallet` is missing when building, or a body field is malformed |
+| `INVALID_WALLET` | `400` | `wallet` is the zero address |
+| `DISTRIBUTOR_NOT_OWNED` | `403` | `distributor` is not a verified wallet of your instance |
+| `WALLET_NOT_VERIFIED` | `403` | `wallet` is not a verified wallet of your instance. Verify it first |
+| `NOT_DISTRIBUTOR_WALLET` | `403` | `signerAddress` is not the current payout wallet, which alone can move it |
+| `VAULT_NOT_FOUND` | `404` | No such vault, or it is not visible to your instance |
+| `NO_DISTRIBUTOR_WALLET` | `409` | Your instance has no verified wallet, so it has no distributor identity in any vault |
+| `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address on record |
+| `VAULT_UPGRADE_REQUIRED` | `409` | The vault runs an implementation from before distributor attribution |
+| `WALLET_UNCHANGED` | `409` | `wallet` is already the payout wallet |
+| `VAULT_STATE_UNAVAILABLE` | `503` | The vault implementation, the current payout wallet, or your standing in an unpublished vault could not be read. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read, so nothing was decided. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | The vault records or your instance's verified wallets could not be read. Retry shortly |
+| `VAULT_DISTRIBUTOR_ACTION_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |
+
+Confirming with `txHash` can also return `TX_NOT_FOUND` (`404`), `TX_REVERTED`, `TX_WRONG_TARGET` or `TX_WRONG_FUNCTION` (`400`), and `TX_NOT_VERIFIED` (`400`) when the transaction carries no payout-wallet change on this vault. See [transaction verification errors](/endpoints/introduction#confirm-a-transaction).

@@ -1,0 +1,167 @@
+---
+title: 'Sweep Distributor Fees'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/distributor-fees/sweep'
+description: 'Pay the distributor slice a direct liquidity provider earned on the market'
+---
+
+Builds the `sweepDistributorFees` transaction for one direct liquidity provider: a provider that funds the pool itself rather than through a registered vault. The market credits the distributor share to providers in proportion to the liquidity each supplied while the interest accrued, so a direct position earns a slice like any other.
+
+On a current market the only direct provider that can still deposit is the operator wallet. Omit `provider` and the sweep is built for it. Pass `provider` to sweep for another direct position, such as a former operator wallet that supplied liquidity before rotating.
+
+A registered vault cannot be swept here. It collects its own slice through [Collect Distributor Fees](/endpoints/vaults/collect-distributor-fees) and passes it to the distributors behind its holders.
+
+## Who receives the slice
+
+The destination is fixed by the market, never by the signer, and `recipient` in the response names it. Which wallet that is depends on the market implementation.
+
+| Market implementation | Where the slice goes |
+|---|---|
+| Current, with distributor accrual | The provider itself. A direct provider brought its own liquidity, so it keeps its own slice |
+| Earlier fee implementation | The operator wallet. A provider that is not a vault has no distributor behind it, so its slice is the operator's |
+
+Any wallet may sign, with one exception on the current implementation. When the provider is a contract, such as a multisig, the market accepts the sweep only from that contract itself, and any other signer reverts.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="provider" type="string">
+  The direct liquidity provider whose slice to sweep, as a 0x-prefixed 20-byte address. Defaults to the market's operator wallet. Ignored when confirming with `txHash`.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the sweep you broadcast. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the market. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`sweepDistributorFees`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="permissionless" type="boolean">Always `true`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="provider" type="string">The provider whose slice is paid. On the confirm call, read from the `DistributorFeePaid` event.</ResponseField>
+    <ResponseField name="recipient" type="string">The wallet the market pays: the provider itself, or the operator wallet on the earlier fee implementation. On the confirm call, read from the `DistributorFeePaid` event.</ResponseField>
+    <ResponseField name="amount" type="string">On the calldata call, the provider's slice when the calldata was built. On the confirm call, what the sweep actually paid.</ResponseField>
+    <ResponseField name="amountRaw" type="string">`amount` in the borrow asset's smallest unit.</ResponseField>
+    <ResponseField name="asset" type="object">The borrow asset: `address`, `symbol`, `decimals`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction pays and to whom, in words. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="note" type="string">States who receives the slice and that the signer never does. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="confirmWith" type="object">Where to send the hash: `endpoint` names this route and `field` is `txHash`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="txHash" type="string">Sweep transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that sent the sweep. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="at" type="string">ISO 8601 time of the block the sweep mined in. `null` when the block time could not be read. Returned when confirming with `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+Before offering calldata, the API simulates the sweep from the wallet the market would pay. A simulated revert comes back as an error instead of a transaction. A confirmed sweep is recorded on the market as a `DISTRIBUTOR_FEES_SWEPT` transaction, visible through [List Transactions](/endpoints/lending/list-transactions).
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/distributor-fees/sweep" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/distributor-fees/sweep`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const built = await fetch(url, { method: 'POST', headers, body: JSON.stringify({}) });
+const { success, data, error } = await built.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch(url, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.hash }) });
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "sweepDistributorFees",
+    "permissionless": true,
+    "provider": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "recipient": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "amount": "12.5",
+    "amountRaw": "12500000",
+    "asset": {
+      "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "symbol": "USDC",
+      "decimals": 6
+    },
+    "description": "Pay the 12.5 USDC distributor slice earned by 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 to 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 itself",
+    "note": "Any wallet may sign this transaction. A provider that is not a vault brought its own liquidity, so the market pays its slice to that provider, never the signer.",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/clx_secmarket_001/distributor-fees/sweep",
+      "field": "txHash"
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0x7d2e5a1c08b94f63e2a7d0c5b18f94e6a3c2d7b05e81f4a96c3b0d27e5a8f1c4",
+    "signedBy": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "provider": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "recipient": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "amountRaw": "12500000",
+    "amount": "12.5",
+    "at": "2026-09-25T14:03:12.000Z"
+  }
+}
+```
+```json Error - Registered Vault
+{
+  "success": false,
+  "error": {
+    "code": "VAULT_COLLECTS_ITSELF",
+    "message": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13 is a vault this market registered, so only the vault itself may collect its distributor slice here: collect it through the vault (POST /vaults/cmssh8t2u0003cghxkx1w1fwd/distributor-fees/collect with marketAddress 0x70a0e25c7b768b87e658348b3b577678a173e038, the Collect into the vault control on the vault's Earnings tab), which passes it to the distributors behind its holders. Any wallet may sign that collection, whether or not the vault still funds this market."
+  }
+}
+```
+```json Error - Nothing Accrued
+{
+  "success": false,
+  "error": {
+    "code": "NOTHING_ACCRUED",
+    "message": "No distributor slice is payable for that provider yet: it is paid out of repaid interest, in proportion to the liquidity the provider supplied while that interest accrued."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `provider` is not a 0x-prefixed 20-byte address, or `txHash` is not a 32-byte hex hash |
+| `MISSING_MARKET_ID` | `400` | The market ID in the path is longer than 100 characters |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction paid no distributor fee on this market |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_NOT_ADOPTED` | `409` | `provider` was omitted and no operator wallet could be established, or the earlier fee implementation has no operator wallet to pay. A fee split that could not be read also answers this way when `provider` is omitted, so retry once before treating it as final |
+| `MARKET_UPGRADE_REQUIRED` | `409` | The market runs an implementation without the distributor leg |
+| `VAULT_COLLECTS_ITSELF` | `409` | `provider` is a vault the market registered. Only the vault collects its own slice. The message names the vault route |
+| `NOTHING_ACCRUED` | `409` | No slice is booked for that provider |
+| `TX_WOULD_REVERT` | `409` | The simulated sweep reverted for another reason. The message names the revert where it could be decoded |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market implementation or the provider's claim could not be read. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

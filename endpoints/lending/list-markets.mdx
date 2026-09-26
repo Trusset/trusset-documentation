@@ -1,14 +1,14 @@
 ---
 title: 'List Markets'
-api: 'GET /lending-external-securities/api/markets'
-description: 'List all active external securities lending markets for your instance'
+api: 'GET /lending-external-securities-v2/api/markets'
+description: 'List the active lending markets recorded on your instance'
 ---
 
-Returns every active market deployed under the instance bound to your API key. Archived and inactive markets are excluded.
+Returns every active market recorded on the instance bound to your API key: the markets it deployed and the markets it took the lender-of-record role on. Archived and inactive markets are excluded.
 
-The stored aggregates are served by default and `onChain` is `null`. Live per-market state is opt-in through `includeOnChain`, because enriching a list runs a full position sync per market and turns a list read into an unbounded chain scan. For live state on a single market, prefer [Get Market](/endpoints/lending/get-market) or [Get Market Metrics](/endpoints/lending/get-metrics).
+The stored record is served by default and `onChain` is `null`. Live per-market state is opt-in through `includeOnChain`, because enriching a list runs a position sync per market and turns a list read into an unbounded chain scan. For live state on a single market, prefer [Get Market](/endpoints/lending/get-market) or [Get Market Metrics](/endpoints/lending/get-metrics).
 
-When enrichment is requested it is still best effort. If the RPC is unreachable for a given market, `onChain` comes back `null` and the stored fields are served regardless. Always check `onChain` before reading from it.
+Enrichment is best effort. When the chain cannot be read for a market, its `onChain` block carries `isOnChain: false` and zeroed figures, plus `readFailed: true` for a market that has a deployed contract. The stored fields are served regardless, so check `onChain.isOnChain` before reading from it.
 
 ## Query Parameters
 
@@ -23,14 +23,14 @@ When enrichment is requested it is still best effort. If the RPC is unreachable 
     <ResponseField name="markets" type="array">
       <Expandable>
         <ResponseField name="id" type="string">Market ID. Use this as `marketId` on every other endpoint.</ResponseField>
-        <ResponseField name="marketAddress" type="string">Lending market contract.</ResponseField>
+        <ResponseField name="marketAddress" type="string">Lending module contract.</ResponseField>
         <ResponseField name="oracleAddress" type="string">Price oracle contract.</ResponseField>
         <ResponseField name="insuranceFundAddress" type="string">Insurance fund contract.</ResponseField>
         <ResponseField name="adapterAddress" type="string">Collateral adapter. A freeze adapter in `FREEZE` mode, a custody adapter in `CUSTODY` mode.</ResponseField>
         <ResponseField name="liquidationRouterAddress" type="string">This market's own liquidation router. Every market has one for life, and there is no shared router.</ResponseField>
-        <ResponseField name="collateralAgent" type="string">Named pledgee recorded on the market and on every adapter lock.</ResponseField>
-        <ResponseField name="liquidationOperator" type="string">Address holding `OPERATOR_ROLE` on this market's liquidation router.</ResponseField>
-        <ResponseField name="saleRecipient" type="string">Where seized collateral is sent for realization. Fixed by the lender of record when it took the role and not rotatable afterwards.</ResponseField>
+        <ResponseField name="collateralAgent" type="string">Named pledgee recorded on the market and on every adapter lock. `null` while the market is seeking a lender of record.</ResponseField>
+        <ResponseField name="liquidationOperator" type="string">Address holding `OPERATOR_ROLE` on this market's liquidation router, or `null` when none is recorded.</ResponseField>
+        <ResponseField name="saleRecipient" type="string">Where seized collateral is sent for realization. Fixed when the lender of record took the role. The router admin can rotate it only through an announced, one-hour-delayed flow, which this API key surface does not expose.</ResponseField>
         <ResponseField name="priceSource" type="string">`NAV`, `MARKET` or `ORACLE`.</ResponseField>
         <ResponseField name="externalOracleFeed" type="string">The external feed an `ORACLE` market reads. `null` on every other price source.</ResponseField>
         <ResponseField name="collateralTokenAddress" type="string">Security token accepted as collateral.</ResponseField>
@@ -39,27 +39,27 @@ When enrichment is requested it is still best effort. If the RPC is unreachable 
         <ResponseField name="collateralTokenIsin" type="string">ISIN of the underlying security, when recorded.</ResponseField>
         <ResponseField name="collateralMode" type="string">`FREEZE` or `CUSTODY`.</ResponseField>
         <ResponseField name="collateralDecimals" type="integer">Decimals of the collateral token. Every collateral amount on this surface is formatted at this scale.</ResponseField>
-        <ResponseField name="identityRegistryAddress" type="string">The market's identity gate, or `null` when none is installed.</ResponseField>
-        <ResponseField name="borrowAssetAddress" type="string">Settlement token the market lends and is repaid in.</ResponseField>
+        <ResponseField name="identityRegistryAddress" type="string">The borrower identity register recorded for the market, lowercased. The zero address or `null` means the market has no borrower register. `identityGate` on [Get Market](/endpoints/lending/get-market) reads the register from the contract itself.</ResponseField>
+        <ResponseField name="borrowAssetAddress" type="string">Settlement token (stablecoin) the market lends and is repaid in.</ResponseField>
         <ResponseField name="borrowAssetSymbol" type="string">Its symbol, for example `USDC`.</ResponseField>
         <ResponseField name="borrowAssetDecimals" type="integer">Its decimals. Every borrow-side amount is formatted at this scale.</ResponseField>
         <ResponseField name="permitSupported" type="boolean">Whether the settlement asset implements EIP-2612, so [Repay Loan](/endpoints/lending/repay) can take a single-signature `permit`. `null` until probed.</ResponseField>
-        <ResponseField name="collateralFactor" type="string">Maximum loan to value in basis points.</ResponseField>
-        <ResponseField name="liquidationThreshold" type="string">Liquidation trigger in basis points.</ResponseField>
-        <ResponseField name="liquidationBonus" type="string">Liquidator incentive in basis points.</ResponseField>
+        <ResponseField name="collateralFactor" type="string">Maximum loan to value in basis points, as last recorded.</ResponseField>
+        <ResponseField name="liquidationThreshold" type="string">Liquidation trigger in basis points, as last recorded.</ResponseField>
+        <ResponseField name="liquidationBonus" type="string">The market's liquidation penalty in basis points, as last recorded. The contract calls it `liquidationPenalty`.</ResponseField>
         <ResponseField name="closeFactor" type="string">Maximum fraction of debt repayable in one liquidation, in basis points.</ResponseField>
-        <ResponseField name="maxTotalCollateral" type="string">Supply cap across the market, in collateral units. `"0"` means uncapped.</ResponseField>
-        <ResponseField name="maxUserCollateral" type="string">Supply cap per borrower, in collateral units. `"0"` means uncapped.</ResponseField>
+        <ResponseField name="maxTotalCollateral" type="string">Supply cap across the market, in collateral units. `"0.0"` means uncapped.</ResponseField>
+        <ResponseField name="maxUserCollateral" type="string">Supply cap per borrower, in collateral units. `"0.0"` means uncapped.</ResponseField>
         <ResponseField name="useDutchAuction" type="boolean">Whether liquidations open a Dutch auction.</ResponseField>
-        <ResponseField name="totalDeposits" type="string">Last recorded pool deposits.</ResponseField>
-        <ResponseField name="totalBorrows" type="string">Last recorded outstanding borrows.</ResponseField>
+        <ResponseField name="totalDeposits" type="string">Last recorded pool liquidity, in borrow asset units.</ResponseField>
+        <ResponseField name="totalBorrows" type="string">Last recorded outstanding principal, in borrow asset units.</ResponseField>
         <ResponseField name="utilizationRate" type="string">Last recorded utilization in basis points.</ResponseField>
-        <ResponseField name="borrowRate" type="string">Last recorded borrow rate in basis points.</ResponseField>
-        <ResponseField name="supplyRate" type="string">Last recorded supply rate in basis points.</ResponseField>
+        <ResponseField name="borrowRate" type="string">Last recorded borrow rate in basis points. On a `FIXED` market it is the rate stamped onto new loans, not the model's curve.</ResponseField>
+        <ResponseField name="supplyRate" type="string">Last recorded supply rate in basis points. It can carry up to four decimal places.</ResponseField>
         <ResponseField name="active" type="boolean">Always true in this response.</ResponseField>
         <ResponseField name="createdAt" type="string">ISO 8601 timestamp.</ResponseField>
         <ResponseField name="isOnChain" type="boolean">Whether the market has a deployed address recorded.</ResponseField>
-        <ResponseField name="onChain" type="object">Live contract metrics. `null` unless `includeOnChain=true`, and `null` when the read failed. See [Get Market Metrics](/endpoints/lending/get-metrics) for the full field list.</ResponseField>
+        <ResponseField name="onChain" type="object">Live contract metrics. `null` unless `includeOnChain=true`. See [Get Market Metrics](/endpoints/lending/get-metrics) for the full field list.</ResponseField>
       </Expandable>
     </ResponseField>
   </Expandable>
@@ -70,30 +70,30 @@ When enrichment is requested it is still best effort. If the RPC is unreachable 
 <ResponseField name="data.markets" type="array">
   <Expandable>
     <ResponseField name="curator" type="string">The institution holding the lender-of-record role, or `null` while the market is still seeking one.</ResponseField>
-    <ResponseField name="seekingCurator" type="boolean">`true` while no institution has taken the role. Every money path on the market is refused with `MARKET_PENDING_CURATOR` while this holds.</ResponseField>
+    <ResponseField name="seekingCurator" type="boolean">`true` while no institution has taken the role. Opening a loan, borrowing more and providing liquidity are refused with `MARKET_PENDING_CURATOR` while this holds.</ResponseField>
     <ResponseField name="curatorImported" type="boolean">Whether this row exists because the instance took the role on another platform's market, rather than because it deployed the market itself.</ResponseField>
-    <ResponseField name="realizationMode" type="string">How the lender of record declared it will realize seized collateral: `EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION`.</ResponseField>
-    <ResponseField name="liquidityCommitment" type="string">Liquidity the lender of record committed when it took the role, in borrow asset units.</ResponseField>
+    <ResponseField name="realizationMode" type="string">How the lender of record declared it will realize seized collateral: `EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION`. `UNDECLARED` while the market is seeking a lender of record.</ResponseField>
+    <ResponseField name="liquidityCommitment" type="string">Liquidity the lender of record committed when it took the role, as an integer string in the borrow asset's base units. A commitment of 1,000,000 USDC reads `"1000000000000"`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 ### Rate and term offering
 
-Fixed at deployment and healed from the chain whenever the market is read. All rate values are basis-point strings, all durations are strings of seconds.
+Set at deployment. The rate mode, fixed-rate ceiling, term configuration, extension switch and reserve ratio can each change afterwards through their own endpoints. These columns are healed from the chain whenever the market is read in detail or an offering change is confirmed, so a list read can trail the chain. Rate values are basis-point strings, durations are strings of seconds.
 
 <ResponseField name="data.markets" type="array">
   <Expandable>
     <ResponseField name="rateMode" type="string">`CURVE`, `CLAMPED` or `FIXED`.</ResponseField>
-    <ResponseField name="rateFloor" type="string">Floor the model holds to. `"0"` on `CURVE`.</ResponseField>
-    <ResponseField name="rateCap" type="string">Cap the model holds to. `"0"` on `CURVE`.</ResponseField>
-    <ResponseField name="maxFixedRate" type="string">Ceiling the lender of record may stamp a fixed rate at, or `null`.</ResponseField>
-    <ResponseField name="operatorShare" type="string">Share of post-infrastructure interest that goes to the lender of record, in basis points. It is one of the three deductions between the borrow rate and the supply rate.</ResponseField>
+    <ResponseField name="rateFloor" type="string">Floor the model holds to. `"0"` on `CURVE`. On `FIXED` it equals the fixed rate.</ResponseField>
+    <ResponseField name="rateCap" type="string">Cap the model holds to. `"0"` on `CURVE`. On `FIXED` it equals the fixed rate.</ResponseField>
+    <ResponseField name="maxFixedRate" type="string">Ceiling on any fixed rate the rate model owner can set, or `null` when none is recorded. It can only move down.</ResponseField>
+    <ResponseField name="operatorShare" type="string">The lender of record's share of repaid interest after the Trusset infrastructure fee, in basis points. On current markets it is the factory's fixed `800`, and a fixed 5 percent distributor share is taken beside it. [Get Fee Split](/endpoints/lending/get-fee-split) reads the whole split from the contracts.</ResponseField>
     <ResponseField name="reserveRatio" type="string">Share of the pool held back from borrowing, in basis points.</ResponseField>
-    <ResponseField name="maxLoanDuration" type="string">Seconds a loan may run before it falls due. `"0"` means the market makes open-ended loans.</ResponseField>
-    <ResponseField name="termGracePeriod" type="string">Seconds after the due date before the term penalty applies.</ResponseField>
+    <ResponseField name="maxLoanDuration" type="string">Seconds a loan may run before it falls due. `"0"` means no rolling term, and the market makes open-ended loans unless `terminalDueDate` is set.</ResponseField>
+    <ResponseField name="termGracePeriod" type="string">Seconds after the due date before an unpaid loan can be liquidated on its term.</ResponseField>
     <ResponseField name="terminalDueDate" type="string">Unix seconds every loan falls due by, whatever its own duration, or `null`.</ResponseField>
-    <ResponseField name="termPenalty" type="string">Penalty applied past the grace period, in basis points.</ResponseField>
-    <ResponseField name="marketDueFloor" type="string">Earliest due date the market will accept, or `null`.</ResponseField>
+    <ResponseField name="termPenalty" type="string">Penalty charged when an overdue loan is liquidated on its term, in basis points.</ResponseField>
+    <ResponseField name="marketDueFloor" type="string">Market-wide extension floor in unix seconds: no termed loan falls due before it. Raised through a `FLOOR` extension, `null` when never set.</ResponseField>
     <ResponseField name="allowExtension" type="boolean">Whether a borrower may be granted more time on a termed loan.</ResponseField>
   </Expandable>
 </ResponseField>
@@ -104,32 +104,32 @@ Read once per oracle across the whole list and attached to every market, so the 
 
 <ResponseField name="data.markets" type="array">
   <Expandable>
-    <ResponseField name="isStale" type="boolean">Whether the stored price is older than the market's `maxPriceAge`. `null` when the oracle could not be read, which is not the same as fresh.</ResponseField>
+    <ResponseField name="isStale" type="boolean">Whether the stored price is older than the oracle's `maxPriceAge`. `null` when the oracle could not be read, which is not the same as fresh.</ResponseField>
     <ResponseField name="priceAge" type="integer">Seconds since the last price update, or `null`.</ResponseField>
-    <ResponseField name="maxPriceAge" type="integer">The staleness bound in seconds, or `null`.</ResponseField>
-    <ResponseField name="oracleLastUpdate" type="string">When the price was last pushed, or `null`.</ResponseField>
+    <ResponseField name="maxPriceAge" type="integer">The oracle's staleness bound in seconds, or `null`.</ResponseField>
+    <ResponseField name="oracleLastUpdate" type="string">ISO 8601 timestamp of the last price update, or `null`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  Database totals on the market record are refreshed after write operations executed through this API. Treat the `onChain` block as authoritative for live figures.
+  The stored totals are refreshed when loan and liquidity transactions are confirmed through this API, and when the market is synchronized from the chain. Treat the `onChain` block as authoritative for live figures.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/markets?includeOnChain=true" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets?includeOnChain=true" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  'https://api.trusset.org/lending-external-securities/api/markets?includeOnChain=true',
+  'https://api.trusset.org/lending-external-securities-v2/api/markets?includeOnChain=true',
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
 
 for (const m of data.markets) {
   const live = m.onChain?.isOnChain ? m.onChain : null;
-  console.log(m.collateralTokenSymbol, m.collateralMode, live?.availableLiquidity ?? 'unavailable');
+  console.log(m.collateralTokenSymbol, m.collateralMode, live?.borrowableLiquidity ?? 'unavailable');
 }
 ```
 </RequestExample>
@@ -141,43 +141,50 @@ for (const m of data.markets) {
   "data": {
     "markets": [
       {
-        "id": "clx_secmarket_001",
-        "marketAddress": "0x70A0E25c7b768B87e658348B3b577678A173E038",
-        "oracleAddress": "0x3b25752c1459C5Cf1b0bfcFdF0D56883c8047423",
-        "insuranceFundAddress": "0x8f1a...9c22",
-        "adapterAddress": "0x4d2b...77ae",
+        "id": "cmssh7p1k0001cghxq2m4v8rz",
+        "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "oracleAddress": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+        "insuranceFundAddress": "0x8f1a4c2e9b7d3056a1e8c4f29d0b7a3e5c619c22",
+        "adapterAddress": "0x4d2b9e71c3a05f8d6e2b41c7a9f03d58e6b177ae",
         "liquidationRouterAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
-        "collateralAgent": "0x555...666",
-        "liquidationOperator": "0x777...888",
+        "collateralAgent": "0x5a1f7c3e9d2b4068e1c5a7f3b9d0e2c4a6f81666",
+        "liquidationOperator": "0x7e2c4a9f1b3d5068c2e4a6f8b0d1c3e5a7f92888",
+        "saleRecipient": "0x9c3e5a7f1b2d4068e0c2a4f6b8d9e1c3a5f70b11",
         "priceSource": "NAV",
-        "collateralTokenAddress": "0xabc...def",
+        "externalOracleFeed": null,
+        "collateralTokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
         "collateralTokenName": "Nyala Fund I",
         "collateralTokenSymbol": "NYF1",
         "collateralTokenIsin": "DE000A0F5UF5",
         "collateralMode": "FREEZE",
+        "collateralDecimals": 18,
+        "identityRegistryAddress": "0x0000000000000000000000000000000000000000",
+        "borrowAssetAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+        "borrowAssetSymbol": "USDC",
+        "borrowAssetDecimals": 6,
+        "permitSupported": true,
         "collateralFactor": "7500",
         "liquidationThreshold": "8500",
+        "liquidationBonus": "500",
         "closeFactor": "5000",
+        "maxTotalCollateral": "0.0",
+        "maxUserCollateral": "0.0",
         "useDutchAuction": false,
-        "totalDeposits": "1000000",
-        "totalBorrows": "250000",
+        "totalDeposits": "1000000.0",
+        "totalBorrows": "250000.0",
         "utilizationRate": "2500",
         "borrowRate": "450",
-        "supplyRate": "84",
+        "supplyRate": "83.1938",
         "curator": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
         "seekingCurator": false,
         "curatorImported": false,
-        "realizationMode": "EXCHANGE_SALE",
-        "liquidityCommitment": "1000000",
-        "borrowAssetSymbol": "USDC",
-        "borrowAssetDecimals": 6,
-        "collateralDecimals": 18,
-        "permitSupported": true,
+        "realizationMode": "ISSUER_REDEMPTION",
+        "liquidityCommitment": "1000000000000",
         "rateMode": "CLAMPED",
         "rateFloor": "200",
         "rateCap": "1200",
         "maxFixedRate": null,
-        "operatorShare": "1000",
+        "operatorShare": "800",
         "reserveRatio": "500",
         "maxLoanDuration": "15552000",
         "termGracePeriod": "432000",
@@ -188,30 +195,32 @@ for (const m of data.markets) {
         "isStale": false,
         "priceAge": 3241,
         "maxPriceAge": 86400,
-        "oracleLastUpdate": "2025-06-15T11:06:00.000Z",
+        "oracleLastUpdate": "2026-09-25T11:06:00.000Z",
         "active": true,
-        "createdAt": "2025-06-01T09:00:00.000Z",
+        "createdAt": "2026-09-01T09:00:00.000Z",
         "isOnChain": true,
         "onChain": {
           "isOnChain": true,
           "paused": false,
-          "totalDeposits": "1000000.000000",
-          "totalBorrows": "250000.000000",
-          "availableLiquidity": "750000.000000",
+          "totalDeposits": "1000000.0",
+          "totalBorrows": "250000.0",
+          "availableLiquidity": "750000.0",
+          "borrowableLiquidity": "700000.0",
           "utilizationRate": "2500",
           "borrowRate": "450",
-          "supplyRate": "84",
+          "supplyRate": "83.1938",
           "activeLoans": 4,
           "activeAuctions": 0,
           "pendingLiquidations": 0,
-          "pendingLiquidationDebt": "0.000000"
+          "pendingLiquidationDebt": "0.0"
         }
       }
     ]
   },
+  "error": null,
   "metadata": {
-    "timestamp": "2025-06-15T12:00:00.000Z",
-    "requestId": "a1b2c3d4-...",
+    "timestamp": "2026-09-25T12:00:00.000Z",
+    "requestId": "7c1e4b2a-9f3d-4e8a-b5c6-2d1f0a9e8b7c",
     "instanceId": "inst_abc123"
   }
 }

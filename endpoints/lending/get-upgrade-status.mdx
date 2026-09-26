@@ -1,0 +1,161 @@
+---
+title: 'Get Upgrade Status'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/upgrade'
+description: 'Compare the implementations a market runs with the ones the factory serves'
+---
+
+Reports, for the market and each of its three upgradeable satellites, which implementation it runs, which one the factory serves today, and whether an upgrade is available. The market, its interest rate model, its liquidation router and its insurance fund are separate proxies with separate administrators, and each entry names who must sign its upgrade. [Upgrade Market](/endpoints/lending/upgrade-market) builds the transaction.
+
+An upgrade is offered only to a market the factory deployed and recorded. A market from another factory generation runs its own storage layout, so the factory's implementation is never an upgrade for it: `inFactory` is then `false` and no entry offers an upgrade.
+
+The read never fails outright. When the factory or the chain cannot be reached, it answers with `readable: false` and empty entries.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="marketId" type="string">Market ID.</ResponseField>
+    <ResponseField name="marketAddress" type="string">Market contract address.</ResponseField>
+    <ResponseField name="readable" type="boolean">Whether the market's implementation pointer could be read.</ResponseField>
+    <ResponseField name="currentImplementation" type="string">The implementation the market runs, or `null`.</ResponseField>
+    <ResponseField name="targetImplementation" type="string">The market implementation the factory serves, or `null` when it serves none or the market is not in the factory.</ResponseField>
+    <ResponseField name="upgradeAvailable" type="boolean">Whether the two differ, so an upgrade can be built.</ResponseField>
+    <ResponseField name="description" type="string">What the upgrade changes, in words, when one is available. Otherwise `null`.</ResponseField>
+    <ResponseField name="instrumented" type="boolean">Whether the current implementation can emit an on-demand history snapshot.</ResponseField>
+    <ResponseField name="stampsLoanTerms" type="boolean">Whether the current implementation stamps the grace period and term penalty onto each loan at signing. `null` when unreadable.</ResponseField>
+    <ResponseField name="feeShareGeneration" type="string">`FIXED_SHARES` when the current implementation pays the fixed 8 percent operator and 5 percent distributor shares, `OFFERED_SHARE` when it pays the share offered at deployment. `null` when unreadable.</ResponseField>
+    <ResponseField name="perimeter" type="object">
+      Present when the upgrade brings in a separate provider register and the pool is open to third-party providers. `null` otherwise, and when the current register could not be read.
+      <Expandable>
+        <ResponseField name="borrowerRegistry" type="string">The register borrowers are examined through after the upgrade, or `null`.</ResponseField>
+        <ResponseField name="providerRegistry" type="string">The register providers are examined through after the upgrade, or `null`.</ResponseField>
+        <ResponseField name="carried" type="boolean">`true` when the upgrade installs the current register on both sides in the same transaction, so every provider it admitted keeps depositing.</ResponseField>
+        <ResponseField name="note" type="string">What happens to third-party deposits, in words.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="feeModel" type="object">
+      Present when the upgrade moves the market onto the fixed fee shares. `null` otherwise.
+      <Expandable>
+        <ResponseField name="openPool" type="boolean">Whether third parties could provide liquidity directly before the upgrade. After it, they provide only through a vault.</ResponseField>
+        <ResponseField name="registeredVaults" type="array">Vaults registered on the market, lowercased.</ResponseField>
+        <ResponseField name="vaultsNeedReRegistration" type="boolean">Whether each registered vault must be deregistered and registered again after the upgrade, which [Upgrade Market](/endpoints/lending/upgrade-market) returns as `followUps`.</ResponseField>
+        <ResponseField name="acknowledgementRequired" type="boolean">`true` when providers hold shares or loans are open. The upgrade is then refused until you send `acknowledgeFeeModelImpact: true`.</ResponseField>
+        <ResponseField name="impact" type="object">`providersHoldShares`, `openLoans`, `outstandingPrincipal`, the borrow `asset`, `thirdPartyProviders` holding direct positions (each `provider`, `shares`, `value`), `thirdPartyProvidersComplete`, and `directProvidersKeepSlice`. `null` when the positions could not be read.</ResponseField>
+        <ResponseField name="impactMessage" type="string">What changes for the liquidity providers, in words. Tell them before you upgrade.</ResponseField>
+        <ResponseField name="vaultWarnings" type="array">Present when a registered vault runs an implementation from before distributor attribution. Each carries `code`, `vault` and `message`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="inFactory" type="boolean">Whether the factory holds a deployment record for this market. `null` when the factory could not be read.</ResponseField>
+    <ResponseField name="reason" type="string">`MARKET_NOT_IN_FACTORY` when `inFactory` is `false`, with the explanation in `reasonMessage`. Absent otherwise.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`DEFAULT_ADMIN_ROLE`: the market admin signs the market's upgrade.</ResponseField>
+    <ResponseField name="relayerAddress" type="string">The instance's registered wallet, or `null`.</ResponseField>
+    <ResponseField name="relayerIsAdmin" type="boolean">Whether that wallet holds `DEFAULT_ADMIN_ROLE` on the market.</ResponseField>
+    <ResponseField name="rateModel" type="object">
+      The interest rate model. `null` when it could not be resolved.
+      <Expandable>
+        <ResponseField name="address" type="string">The model's proxy address.</ResponseField>
+        <ResponseField name="readable" type="boolean">Whether its implementation pointer could be read.</ResponseField>
+        <ResponseField name="currentImplementation" type="string">The implementation it runs.</ResponseField>
+        <ResponseField name="targetImplementation" type="string">The implementation the factory serves, or `null`.</ResponseField>
+        <ResponseField name="upgradeAvailable" type="boolean">Whether an upgrade can be built.</ResponseField>
+        <ResponseField name="owner" type="string">Its owner, who signs the upgrade.</ResponseField>
+        <ResponseField name="pendingOwner" type="string">The owner nominated by the lender of record and not yet accepted, or `null`.</ResponseField>
+        <ResponseField name="ownedByMarket" type="boolean">`true` while the market or the factory still owns it. No wallet can upgrade it until the nominated owner accepts. See [Get Handover](/endpoints/lending/get-handover).</ResponseField>
+        <ResponseField name="requiredRole" type="string">`owner`.</ResponseField>
+        <ResponseField name="description" type="string">What the upgrade changes, when one is available.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="router" type="object">The liquidation router: `routerAddress`, `currentImplementation`, `targetImplementation`, `upgradeAvailable`, and `description` when an upgrade is available. The router admin signs its upgrade. `null` when it could not be resolved.</ResponseField>
+    <ResponseField name="insuranceFund" type="object">The insurance fund, with the same fields as `rateModel` plus `heldByFactory`, `true` while the deploying factory still owns it, and `carriesTopUp`, whether it already takes permissionless top-ups. `null` when it could not be resolved.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+When `inFactory` is `false`, `rateModel`, `router` and `insuranceFund` each carry `upgradeAvailable: false`, `targetImplementation: null` and `reason: "MARKET_NOT_IN_FACTORY"`.
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/upgrade" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/upgrade`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const pending = [
+  data.upgradeAvailable && 'market',
+  data.rateModel?.upgradeAvailable && 'rateModel',
+  data.router?.upgradeAvailable && 'router',
+  data.insuranceFund?.upgradeAvailable && 'insuranceFund'
+].filter(Boolean);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "marketId": "cmssh7p1k0001cghxq2m4v8rz",
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "readable": true,
+    "instrumented": true,
+    "stampsLoanTerms": true,
+    "currentImplementation": "0x894956CB1c7E0a5D2f3B8e4A6d9C1b7F0e2A5c83",
+    "targetImplementation": "0x1D5e7B9a3C0f2E4d6B8a0C2e4F6a8B0d2E4f6A81",
+    "upgradeAvailable": true,
+    "description": "Upgrade the market to implementation 0x1d5e...6a81: every loan signed from then on carries its own grace period and term penalty...",
+    "perimeter": null,
+    "feeModel": null,
+    "feeShareGeneration": "FIXED_SHARES",
+    "inFactory": true,
+    "requiredRole": "DEFAULT_ADMIN_ROLE",
+    "relayerAddress": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+    "relayerIsAdmin": true,
+    "rateModel": {
+      "address": "0x2c7e91d4a3b05f68e1c2a4b7d9f03e5a6c8b1d42",
+      "readable": true,
+      "currentImplementation": "0x6B2d4F8a0C1e3A5b7D9f1C3e5A7b9D1f3E5a7C09",
+      "targetImplementation": "0x6B2d4F8a0C1e3A5b7D9f1C3e5A7b9D1f3E5a7C09",
+      "upgradeAvailable": false,
+      "owner": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+      "pendingOwner": null,
+      "ownedByMarket": false,
+      "requiredRole": "owner"
+    },
+    "router": {
+      "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+      "currentImplementation": "0x3F5a7C9e1B3d5F7a9C1e3B5d7F9a1C3e5B7d9F12",
+      "targetImplementation": "0x3F5a7C9e1B3d5F7a9C1e3B5d7F9a1C3e5B7d9F12",
+      "upgradeAvailable": false
+    },
+    "insuranceFund": {
+      "address": "0x8f1a4c2e9b7d3056a1e8c4f29d0b7a3e5c619c22",
+      "readable": true,
+      "currentImplementation": "0x7A9c1E3b5D7f9A1c3E5b7D9f1A3c5E7b9D1f3A58",
+      "targetImplementation": "0x7A9c1E3b5D7f9A1c3E5b7D9f1A3c5E7b9D1f3A58",
+      "upgradeAvailable": false,
+      "owner": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+      "pendingOwner": null,
+      "ownedByMarket": false,
+      "heldByFactory": false,
+      "carriesTopUp": true,
+      "requiredRole": "owner"
+    }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

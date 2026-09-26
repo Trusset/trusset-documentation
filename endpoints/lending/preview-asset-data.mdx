@@ -1,0 +1,164 @@
+---
+title: 'Preview Asset Data'
+api: 'GET /lending-external-securities-v2/api/markets/asset-data/preview'
+description: 'Compute the asset data bundle and hash a market deployment would attest'
+---
+
+Returns the asset data bundle a market deployment would attest for a collateral token, and its hash, before anything is built or signed. Show both to the issuer beside the deployment form. The hash is what the deployment signature commits to, and the bundle is the text behind it.
+
+A market deployed through [Deploy Market](/endpoints/lending/deploy-market) is born attested. The hash travels inside the deployment transaction, so the wallet that deploys the market attests the bundle in the same signature. The factory stores only the hash. The bundle stays off chain, and no asset or counterparty data reaches the chain.
+
+No market exists yet, so there is no market access check. The token must be one this instance imported and holds as active, with a published profile. Otherwise the call is refused with `TOKEN_PROFILE_REQUIRED`, the same refusal a deployment gets. Import the token with [Import Token](/endpoints/tokenization/import-token) and fill its profile with [Update Profile](/endpoints/tokenization/update-profile).
+
+The preview stores nothing. Pass the same `mode`, `priceSource` and `borrowAssetAddress` the deployment will use, because each of them is part of the bundle. The deployment response carries its own `assetData.contentHash`, so compare the two before the issuer signs.
+
+## Query Parameters
+
+<ParamField query="collateralTokenAddress" type="string" required>
+  The collateral token, as a `0x`-prefixed 40-character hex address. It must be imported by this instance.
+</ParamField>
+
+<ParamField query="mode" type="string" default="FREEZE">
+  Collateral mode of the planned market: `FREEZE` or `CUSTODY`.
+</ParamField>
+
+<ParamField query="priceSource" type="string" default="NAV">
+  Price source of the planned market: `MARKET`, `NAV` or `ORACLE`.
+</ParamField>
+
+<ParamField query="borrowAssetAddress" type="string">
+  Settlement token (stablecoin) of the planned market. Omit it to use the USDC address configured for this instance's network, which is also the deployment's default. When given, it must be a deployed ERC-20 contract with 6 to 18 decimals.
+</ParamField>
+
+## What the bundle contains
+
+The bundle follows schema `1.0.0` and has four members. Its rules are fixed per schema version, so a stored bundle re-hashes to the same value for as long as it is kept.
+
+| Member | Contents |
+|---|---|
+| `schemaVersion` | `1.0.0` |
+| `market` | What the deployment fixes: `chainId`, `factory`, `family` (always `FUNGIBLE` on this surface), `borrowAsset`, `collateralMode` and `priceSource` |
+| `token` | The facts recorded when the token was imported: `tokenAddress`, `name`, `symbol`, `decimals`, `framework`, `assetType`, `totalSupply` |
+| `profile` | The issuer's published profile, limited to `issuerName`, `jurisdiction`, `sector`, `description`, `isin`, `lei`, `website`, `ammAddress`, `reserveURI`, `prospectusURI` and `documents`, each document reduced to `name` and `uri` |
+
+The market's own address is not a member. The first attestation travels inside the transaction that creates that address, and the factory's own record binds the hash to the market.
+
+`canonicalJson` is the bundle serialized under RFC 8785 (JSON Canonicalization Scheme): members sorted, no whitespace, addresses in lowercase, and empty members left out. `contentHash` is keccak256 over the UTF-8 bytes of `canonicalJson`. Anyone holding the bytes can recompute it with one hash call.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="contentHash" type="string">keccak256 over the UTF-8 bytes of `canonicalJson`. The value the deployment writes as its first attestation.</ResponseField>
+    <ResponseField name="schemaVersion" type="string">`1.0.0`.</ResponseField>
+    <ResponseField name="canonicalJson" type="string">The exact bytes the hash commits to.</ResponseField>
+    <ResponseField name="bundle" type="object">The same bundle as an object, for display.</ResponseField>
+    <ResponseField name="token" type="object">`address`, `name` and `symbol` of the imported token.</ResponseField>
+    <ResponseField name="factorySupport" type="boolean">`true` when the lending factory records asset data attestations. `false` when its implementation predates them, in which case a deployment is refused with `FACTORY_UPGRADE_REQUIRED` until the factory is upgraded. `null` when the factory could not be read.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/asset-data/preview?collateralTokenAddress=0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9&mode=FREEZE&priceSource=NAV" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const params = new URLSearchParams({
+  collateralTokenAddress: '0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9',
+  mode: 'FREEZE',
+  priceSource: 'NAV'
+});
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/asset-data/preview?${params}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+console.log(`The deployment will attest ${data.contentHash}`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "contentHash": "0x65ed3a41511863cfbeacd3617041f1ccfcf281ab1a29bd7c08002a15cb427ccb",
+    "schemaVersion": "1.0.0",
+    "canonicalJson": "{\"market\":{\"borrowAsset\":\"0x98ad0ca091552e23c564b41c74282e5343d03e8a\",\"chainId\":11155111,\"collateralMode\":\"FREEZE\",\"factory\":\"0xf1ad12f5698f58badd8a662acffccb067a2ddb8a\",\"family\":\"FUNGIBLE\",\"priceSource\":\"NAV\"},\"profile\":{\"documents\":[{\"name\":\"Annual report 2025\",\"uri\":\"https://acme-capital.example/nyf1/annual-report-2025.pdf\"}],\"isin\":\"DE000A0F5UF5\",\"issuerName\":\"ACME Capital AG\",\"jurisdiction\":\"DE\",\"prospectusURI\":\"https://acme-capital.example/nyf1/prospectus.pdf\",\"sector\":\"Real estate\",\"website\":\"https://acme-capital.example\"},\"schemaVersion\":\"1.0.0\",\"token\":{\"assetType\":\"REAL_ESTATE\",\"decimals\":18,\"framework\":\"erc3643\",\"name\":\"Nyala Fund I\",\"symbol\":\"NYF1\",\"tokenAddress\":\"0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9\",\"totalSupply\":\"250000.0\"}}",
+    "bundle": {
+      "schemaVersion": "1.0.0",
+      "market": {
+        "chainId": 11155111,
+        "factory": "0xf1ad12f5698f58badd8a662acffccb067a2ddb8a",
+        "family": "FUNGIBLE",
+        "borrowAsset": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+        "collateralMode": "FREEZE",
+        "priceSource": "NAV"
+      },
+      "token": {
+        "tokenAddress": "0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9",
+        "name": "Nyala Fund I",
+        "symbol": "NYF1",
+        "decimals": 18,
+        "framework": "erc3643",
+        "assetType": "REAL_ESTATE",
+        "totalSupply": "250000.0"
+      },
+      "profile": {
+        "issuerName": "ACME Capital AG",
+        "jurisdiction": "DE",
+        "sector": "Real estate",
+        "isin": "DE000A0F5UF5",
+        "website": "https://acme-capital.example",
+        "prospectusURI": "https://acme-capital.example/nyf1/prospectus.pdf",
+        "documents": [
+          {
+            "name": "Annual report 2025",
+            "uri": "https://acme-capital.example/nyf1/annual-report-2025.pdf"
+          }
+        ]
+      }
+    },
+    "token": {
+      "address": "0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9",
+      "name": "Nyala Fund I",
+      "symbol": "NYF1"
+    },
+    "factorySupport": true
+  }
+}
+```
+```json Error - No Profile
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TOKEN_PROFILE_REQUIRED",
+    "message": "NYF1 has no published profile, so there is no asset data to attest and no market can be created against it. Open the token in Assets, fill in the issuer, jurisdiction, identifiers and offering documents under its profile (PUT /external-tokens/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9/profile), then create the market: the issuer's own wallet attests that data inside the deployment signature.",
+    "details": {
+      "field": "profile",
+      "tokenAddress": "0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9",
+      "imported": true,
+      "editProfile": "/external-tokens/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9/profile"
+    }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+The asset data routes report a validation failure with the first failing rule as `message` and no `details` list.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `collateralTokenAddress` is missing or malformed, `mode` or `priceSource` is not an accepted value, or `borrowAssetAddress` is malformed |
+| `INVALID_BORROW_ASSET` | `400` | `borrowAssetAddress` fails the address checksum |
+| `BORROW_ASSET_NOT_CONTRACT` | `400` | No contract is deployed at `borrowAssetAddress` |
+| `BORROW_ASSET_NOT_ERC20` | `400` | `borrowAssetAddress` does not answer `decimals` and `balanceOf` |
+| `BORROW_ASSET_DECIMALS_UNSUPPORTED` | `400` | The settlement token (stablecoin) has fewer than 6 or more than 18 decimals |
+| `INVALID_ASSET_DATA` | `400` | A stored token fact or profile field cannot enter the bundle, for example an `ammAddress` that is not an address |
+| `TOKEN_PROFILE_REQUIRED` | `422` | The token is not imported and active on this instance, or its profile is empty. `details.imported` says which, and `details.editProfile` names the profile path |
+| `ASSET_DATA_PREVIEW_FAILED` | `500` | The preview could not be computed for a reason the service did not classify |

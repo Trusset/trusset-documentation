@@ -1,27 +1,27 @@
 ---
 title: 'Get Pending Liquidations'
-api: 'GET /lending-external-securities/api/liquidations/{marketId}/pending-liquidations'
+api: 'GET /lending-external-securities-v2/api/liquidations/{marketId}/pending-liquidations'
 description: 'List liquidations awaiting settlement'
 ---
 
-Returns liquidations whose collateral sits at the router and has not yet been settled or written off. This is the operator work queue for the manual settlement workflow.
+Returns the market's liquidation records that are neither settled nor written off. Most are router records whose collateral sits at the router awaiting the manual settlement workflow. A record whose Dutch auction is still open appears too, under a `venue-` ID, until the auction sells out or hands its remainder to the router.
 
-Before reading, the endpoint reconciles against the chain and adopts any on-chain liquidation the backend has not recorded, so a liquidation triggered outside this API still appears here.
+Before reading, the endpoint reconciles against the chain. It adopts any on-chain liquidation the backend has not recorded, so a liquidation triggered outside this API still appears here. It also closes records the router has settled since, when the confirm call for that settlement never arrived.
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>Market ID. At most 100 characters.</ParamField>
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="totalCount" type="integer">Number of records returned. Capped at 100.</ResponseField>
-    <ResponseField name="liquidationRouterAddress" type="string">Router holding the collateral for this market.</ResponseField>
+    <ResponseField name="totalCount" type="integer">Number of records returned. Capped at 100, newest first.</ResponseField>
+    <ResponseField name="liquidationRouterAddress" type="string">Router holding the collateral for this market, or `null` when it could not be resolved.</ResponseField>
     <ResponseField name="pendingLiquidations" type="array">
       <Expandable>
-        <ResponseField name="liquidationId" type="string">Global router liquidation ID. Pass this to every settlement endpoint.</ResponseField>
-        <ResponseField name="marketLiquidationId" type="string">Market-local liquidation ID. Used by [Handle Liquidation Timeout](/endpoints/lending/handle-timeout).</ResponseField>
+        <ResponseField name="liquidationId" type="string">Router liquidation ID. Pass this to every settlement endpoint. A record whose auction is still open reads `venue-{marketLiquidationId}`, and the router endpoints refuse it with `LIQUIDATION_ON_VENUE`.</ResponseField>
+        <ResponseField name="marketLiquidationId" type="string">The market's own record ID. The write-off in [Handle Liquidation Timeout](/endpoints/lending/handle-timeout) acts on this record.</ResponseField>
         <ResponseField name="marketId" type="string">Market ID.</ResponseField>
         <ResponseField name="loanId" type="string">Loan that was liquidated.</ResponseField>
         <ResponseField name="marketAddress" type="string">Market contract.</ResponseField>
@@ -29,10 +29,17 @@ Before reading, the endpoint reconciles against the chain and adopts any on-chai
         <ResponseField name="debtOwed" type="string">Debt the proceeds must cover.</ResponseField>
         <ResponseField name="tokenAddress" type="string">Collateral token.</ResponseField>
         <ResponseField name="borrower" type="string">Borrower whose loan was liquidated.</ResponseField>
+        <ResponseField name="termRealization" type="boolean">`true` when the loan was realized on its expired term rather than on its health.</ResponseField>
+        <ResponseField name="auctionId" type="string">The Dutch auction that sold or is selling this collateral, or `null` on the router path.</ResponseField>
         <ResponseField name="txHash" type="string">Liquidation transaction hash. Reads `chain-adopted` when the record was reconstructed from chain state and the original transaction could not be located.</ResponseField>
         <ResponseField name="status" type="string">`PENDING` for every record in this list.</ResponseField>
-        <ResponseField name="createdAt" type="string">ISO 8601 timestamp. Backdated to the on-chain liquidation time for adopted records.</ResponseField>
-        <ResponseField name="onChainData" type="object">Live router state, or null if the read failed.</ResponseField>
+        <ResponseField name="settledTxHash" type="string">`null`, except on a record the router administrator reopened after a settlement, where it keeps that settlement's hash.</ResponseField>
+        <ResponseField name="createdAt" type="string">ISO 8601 timestamp of the seizure. Adopted records are backdated to the time the router received the collateral.</ResponseField>
+        <ResponseField name="onChainData" type="object">Live router state, or `null` when the read failed and on every `venue-` record.</ResponseField>
+        <ResponseField name="proceedsHeld" type="string">Cash the auction venue forwarded for this record that the market holds until the record settles, in borrow asset units. `null` when unknown.</ResponseField>
+        <ResponseField name="proceedsForwarded" type="string">Cash the auction venue has forwarded for this record's auction in total. `null` without an auction.</ResponseField>
+        <ResponseField name="heldOnMarket" type="boolean">`true` when `proceedsHeld` is above zero. Such a record can settle at zero proceeds over the held cash.</ResponseField>
+        <ResponseField name="marketSettled" type="boolean">Whether the market has already settled or written off its own record. `null` when unknown.</ResponseField>
       </Expandable>
     </ResponseField>
   </Expandable>
@@ -49,10 +56,10 @@ Before reading, the endpoint reconciles against the chain and adopts any on-chai
     <ResponseField name="debtOwed" type="string">Debt to be covered, in borrow asset units.</ResponseField>
     <ResponseField name="proceedsCollected" type="string">Proceeds deposited so far, in borrow asset units. Increases with each reported partial sale.</ResponseField>
     <ResponseField name="borrower" type="string">Borrower address.</ResponseField>
-    <ResponseField name="lendingMarket" type="string">Market the liquidation came from.</ResponseField>
+    <ResponseField name="lendingMarket" type="string">Contract that delivered the collateral: the market, or its auction venue for the remainder of an expired auction.</ResponseField>
     <ResponseField name="token" type="string">Collateral token.</ResponseField>
     <ResponseField name="routerAddress" type="string">Router holding the position.</ResponseField>
-    <ResponseField name="timestamp" type="integer">Unix seconds the router received the collateral. This is when the 7 day write-off clock starts.</ResponseField>
+    <ResponseField name="timestamp" type="integer">Unix seconds the router received the collateral. This is when the 7 day write-off clock starts. For the remainder of an expired auction the clock started earlier, at the seizure into the auction.</ResponseField>
     <ResponseField name="settled" type="boolean">Whether the router considers the liquidation closed.</ResponseField>
     <ResponseField name="marketLiquidationId" type="string">Market-local ID.</ResponseField>
   </Expandable>
@@ -63,17 +70,17 @@ Before reading, the endpoint reconciles against the chain and adopts any on-chai
 </Warning>
 
 <Note>
-  Track progress with `collateralRemaining` and `proceedsCollected` rather than `status`. Withdrawing collateral for sale and reporting partial sales both leave `status` at `PENDING`. Only settlement or write-off changes it.
+  Track progress with `collateralRemaining` and `proceedsCollected` rather than `status`. Withdrawing collateral for sale and reporting partial sales both leave `status` at `PENDING`. Only settlement, a router close or a write-off changes it.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/liquidations/{marketId}/pending-liquidations" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/liquidations/{marketId}/pending-liquidations" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/liquidations/${marketId}/pending-liquidations`,
+  `https://api.trusset.org/lending-external-securities-v2/api/liquidations/${marketId}/pending-liquidations`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
@@ -85,6 +92,8 @@ const overdue = data.pendingLiquidations.filter(l => {
 ```
 </RequestExample>
 
+The filter above reads the router's clock, which can start later than the market's for an auction remainder. The `eligibleAt` that [Handle Liquidation Timeout](/endpoints/lending/handle-timeout) returns when it refuses is exact.
+
 <ResponseExample>
 ```json Response
 {
@@ -94,33 +103,40 @@ const overdue = data.pendingLiquidations.filter(l => {
       {
         "id": "secliq_004",
         "liquidationId": "14",
-        "marketLiquidationId": "2",
+        "marketLiquidationId": "14",
         "marketId": "clx_secmarket_001",
         "loanId": "7",
         "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
-        "collateralAmount": "220.000000000000000000",
-        "debtOwed": "21159.200000",
-        "tokenAddress": "0xabc...def",
-        "borrower": "0xabc...def",
-        "txHash": "0xabc...def",
+        "collateralAmount": "220.0",
+        "debtOwed": "21159.2",
+        "tokenAddress": "0x9c41e7b2d05f38a61c4e0b7d93a2f15e68c3d7a4",
+        "borrower": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+        "termRealization": false,
+        "auctionId": null,
+        "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
         "status": "PENDING",
         "usdcProceeds": null,
         "settledTxHash": null,
-        "createdAt": "2025-06-14T09:12:00.000Z",
+        "createdAt": "2026-06-14T09:12:00.000Z",
+        "updatedAt": "2026-06-14T09:12:04.000Z",
         "settledAt": null,
         "onChainData": {
           "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
-          "token": "0xabc...def",
-          "collateralAmount": "220.000000000000000000",
-          "collateralRemaining": "120.000000000000000000",
-          "debtOwed": "21159.200000",
-          "proceedsCollected": "9800.000000",
-          "borrower": "0xabc...def",
+          "token": "0x9c41e7b2d05f38a61c4e0b7d93a2f15e68c3d7a4",
+          "collateralAmount": "220.0",
+          "collateralRemaining": "120.0",
+          "debtOwed": "21159.2",
+          "proceedsCollected": "9800.0",
+          "borrower": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
           "lendingMarket": "0x70A0E25c7b768B87e658348B3b577678A173E038",
-          "timestamp": 1718355120,
+          "timestamp": 1781428320,
           "settled": false,
-          "marketLiquidationId": "2"
-        }
+          "marketLiquidationId": "14"
+        },
+        "proceedsHeld": "0.0",
+        "proceedsForwarded": null,
+        "heldOnMarket": false,
+        "marketSettled": false
       }
     ],
     "totalCount": 1,
@@ -129,3 +145,12 @@ const overdue = data.pendingLiquidations.filter(l => {
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+
+A failed database read answers `200` with an empty list rather than an error.

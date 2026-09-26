@@ -1,0 +1,151 @@
+---
+title: 'List Liquidation Bots'
+api: 'GET /lending-external-securities-v2/api/liquidation-bots'
+description: 'List the liquidation bots of this instance with their on-chain state'
+---
+
+Returns the instance's liquidation bots, newest first, with each bot's state read from the chain. It also returns the instance's deployed markets, which are the markets a bot can be connected to. Archived bots are left out unless `includeArchived` is set.
+
+A liquidation bot is a contract the operator deploys and owns, which holds `LIQUIDATOR_ROLE` on the markets it is connected to so that any caller can trigger a liquidation through it. The owner wallet signs every change to a bot. Trusset holds no key to it and never calls it. [Deploy Liquidation Bot](/endpoints/lending/deploy-bot) explains what it does and who calls it.
+
+Chain reads are cached for up to 15 seconds. A read that fails is marked `readFailed`, never reported as a disconnected market.
+
+## Query Parameters
+
+<ParamField query="includeArchived" type="boolean" default="false">
+  `true` or `1` includes archived bots. Any other value counts as `false`.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="bots" type="array">
+      Bot records ordered by `createdAt`, newest first.
+      <Expandable>
+        <ResponseField name="id" type="string">Bot ID.</ResponseField>
+        <ResponseField name="instanceId" type="string">Instance that recorded the bot.</ResponseField>
+        <ResponseField name="botAddress" type="string">The bot contract's address.</ResponseField>
+        <ResponseField name="ownerWallet" type="string">The wallet that deployed the bot, recorded at confirmation.</ResponseField>
+        <ResponseField name="label" type="string | null">Display label.</ResponseField>
+        <ResponseField name="archived" type="boolean">Whether the bot is hidden from the default list.</ResponseField>
+        <ResponseField name="deployTxHash" type="string">Hash of the deployment transaction.</ResponseField>
+        <ResponseField name="createdAt" type="string">When the deployment was confirmed.</ResponseField>
+        <ResponseField name="updatedAt" type="string">Last change to the record.</ResponseField>
+        <ResponseField name="onChain" type="object | null">
+          The bot's live state, or `null` for a record without a contract address. When even the owner cannot be read, this is only `{ "readFailed": true, "isOnChain": null }`.
+          <Expandable>
+            <ResponseField name="isOnChain" type="boolean">`true` when the contract answered.</ResponseField>
+            <ResponseField name="readFailed" type="boolean">`false` when the contract answered.</ResponseField>
+            <ResponseField name="owner" type="string">The contract's current owner. It differs from `ownerWallet` only if ownership was transferred on-chain outside this API.</ResponseField>
+            <ResponseField name="paused" type="boolean | null">Whether the owner paused every trigger.</ResponseField>
+            <ResponseField name="maxRefundPerCallerPerBlock" type="string | null">Most wei refunded to one caller within one block. `0` disables refunds.</ResponseField>
+            <ResponseField name="maxRefundGasPrice" type="string | null">Gas price ceiling for refunds, in wei. `0` means no ceiling.</ResponseField>
+            <ResponseField name="balance" type="string | null">The bot's float, in the network's native coin, as a decimal string.</ResponseField>
+            <ResponseField name="connections" type="array">
+              One entry per deployed, active market of the instance, whether connected or not.
+              <Expandable>
+                <ResponseField name="marketId" type="string">Market ID.</ResponseField>
+                <ResponseField name="marketAddress" type="string">Market contract address.</ResponseField>
+                <ResponseField name="marketName" type="string | null">Collateral token name.</ResponseField>
+                <ResponseField name="marketSymbol" type="string | null">Collateral token symbol.</ResponseField>
+                <ResponseField name="settlementSymbol" type="string | null">Borrow asset symbol.</ResponseField>
+                <ResponseField name="enabled" type="boolean | null">Whether the owner enabled this market on the bot.</ResponseField>
+                <ResponseField name="roleGranted" type="boolean | null">Whether the market granted the bot `LIQUIDATOR_ROLE`.</ResponseField>
+                <ResponseField name="connected" type="boolean">`true` only when both `enabled` and `roleGranted` are `true`. Either alone leaves the bot unable to liquidate on this market.</ResponseField>
+                <ResponseField name="readFailed" type="boolean">Present and `true` when either read failed. `connected` is then `false` without being a verdict.</ResponseField>
+              </Expandable>
+            </ResponseField>
+          </Expandable>
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="markets" type="array">
+      The instance's deployed, active markets, newest first. Each has `id`, `marketAddress`, `collateralTokenName`, `collateralTokenSymbol` and `borrowAssetSymbol`.
+    </ResponseField>
+    <ResponseField name="includeArchived" type="boolean">The filter applied.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/liquidation-bots?includeArchived=true" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/lending-external-securities-v2/api/liquidation-bots',
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const covering = data.bots.filter((bot) =>
+  bot.onChain?.connections?.some((c) => c.connected)
+);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "bots": [
+      {
+        "id": "clx_bot_001",
+        "instanceId": "inst_abc123",
+        "botAddress": "0xc40dea7387a290e7ce71784a65ae0ed6bb1ae555",
+        "ownerWallet": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+        "label": "Primary keeper",
+        "archived": false,
+        "deployTxHash": "0x1a2531f9e02d8b3660364d25a982585f822fbe8689e811e7b967cbd1d670ba7b",
+        "createdAt": "2026-09-20T10:00:00.000Z",
+        "updatedAt": "2026-09-20T10:00:00.000Z",
+        "onChain": {
+          "isOnChain": true,
+          "readFailed": false,
+          "owner": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+          "paused": false,
+          "maxRefundPerCallerPerBlock": "2000000000000000",
+          "maxRefundGasPrice": "30000000000",
+          "balance": "0.25",
+          "connections": [
+            {
+              "marketId": "clx_secmarket_001",
+              "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+              "marketName": "Nyala Fund I",
+              "marketSymbol": "NYF1",
+              "settlementSymbol": "USDC",
+              "enabled": true,
+              "roleGranted": true,
+              "connected": true
+            }
+          ]
+        }
+      }
+    ],
+    "markets": [
+      {
+        "id": "clx_secmarket_001",
+        "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "collateralTokenName": "Nyala Fund I",
+        "collateralTokenSymbol": "NYF1",
+        "borrowAssetSymbol": "USDC"
+      }
+    ],
+    "includeArchived": true
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-09-25T12:00:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `BOT_READ_FAILED` | `500` | The bot records could not be read. The message is generic; retry |

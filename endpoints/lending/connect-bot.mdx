@@ -1,0 +1,164 @@
+---
+title: 'Connect Bot to Market'
+api: 'POST /lending-external-securities-v2/api/liquidation-bots/{botId}/connect'
+description: 'Build the transactions that connect a liquidation bot to a market or disconnect it'
+---
+
+Builds the transactions that connect a bot to one of the instance's markets, or disconnect it. A connection has two halves held by two parties, so the answer can hold two steps for two different signers. The API reads both halves first and returns only the ones not already in the requested state.
+
+| Half | Transaction | Signer, as `authority` |
+|---|---|---|
+| Bot side | `setMarketEnabled(market, true)` or `false`, on the bot | `BOT_OWNER`: the bot's owner wallet |
+| Market side | `grantRole` or `revokeRole` of `LIQUIDATOR_ROLE` for the bot, on the market | `MARKET_ADMIN`: the market admin, holder of `DEFAULT_ADMIN_ROLE` on the market |
+
+Trusset holds no key and signs neither step. The bot step comes first in both directions. The two are independent transactions, so neither has to be mined before the other. Either half alone stops the bot acting on a market, and the bot step is the one the owner can take without the market admin.
+
+A market still seeking a lender of record has no market admin, so its market step cannot succeed. This call does not check for that. A lender of record can instead grant the role while taking it, by naming the bot as `liquidator` on [Accept Lender Role](/endpoints/lending/accept-lender-role). [Set Liquidator Role](/endpoints/lending/set-liquidator-role) grants it too.
+
+## Path Parameters
+
+<ParamField path="botId" type="string" required>Bot ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="marketId" type="string" required>
+  ID of one of your instance's markets, 1 to 100 characters. The market must have an on-chain address.
+</ParamField>
+
+<ParamField body="connect" type="boolean" required>
+  `true` to connect, `false` to disconnect.
+</ParamField>
+
+## Response Fields
+
+When both halves already match the request, `data` is `{ success: true, alreadyInState: true, connected, marketId }` and there is nothing to sign. Otherwise:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="steps" type="array">
+      One or two transactions. They are bare, without the `action` and `transaction` wrappers of other multi-step answers.
+      <Expandable>
+        <ResponseField name="to" type="string">The bot for the bot step, the market for the market step.</ResponseField>
+        <ResponseField name="data" type="string">Calldata.</ResponseField>
+        <ResponseField name="value" type="string">`"0"`.</ResponseField>
+        <ResponseField name="chainId" type="integer">Chain the transaction is built for.</ResponseField>
+        <ResponseField name="description" type="string">What the step does.</ResponseField>
+        <ResponseField name="authority" type="string">`BOT_OWNER` or `MARKET_ADMIN`, the party that must sign.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="functionName" type="string">`connectMarket` or `disconnectMarket`. A label for the operation, not a contract function.</ResponseField>
+    <ResponseField name="marketId" type="string">Market ID.</ResponseField>
+    <ResponseField name="marketAddress" type="string">Market contract address.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ "endpoint": "confirm-tx", "txHash": true }`. See [Confirm Bot Transaction](/endpoints/lending/confirm-bot-transaction).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+Confirming a step is optional. The connection is read from the chain every time, and confirming only clears the cached read so [Get Liquidation Bot](/endpoints/lending/get-bot) shows the change at once.
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidation-bots/{botId}/connect" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"marketId": "clx_secmarket_001", "connect": true}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/liquidation-bots/${botId}/connect`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ marketId, connect: true })
+  }
+);
+const { data } = await res.json();
+
+if (!data.alreadyInState) {
+  for (const step of data.steps) {
+    const signer = step.authority === 'BOT_OWNER' ? botOwnerWallet : marketAdminWallet;
+    const tx = await signer.sendTransaction({
+      to: step.to,
+      data: step.data,
+      value: step.value,
+      chainId: step.chainId
+    });
+    await tx.wait();
+  }
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "steps": [
+      {
+        "to": "0xc40dea7387a290e7ce71784a65ae0ed6bb1ae555",
+        "data": "0x...",
+        "description": "Allow the bot to act on NYF1",
+        "authority": "BOT_OWNER",
+        "chainId": 11155111,
+        "value": "0"
+      },
+      {
+        "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "data": "0x...",
+        "description": "Grant the bot the liquidator role on the market",
+        "authority": "MARKET_ADMIN",
+        "chainId": 11155111,
+        "value": "0"
+      }
+    ],
+    "functionName": "connectMarket",
+    "marketId": "clx_secmarket_001",
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "confirmWith": { "endpoint": "confirm-tx", "txHash": true }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-09-20T10:10:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Already Connected
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "alreadyInState": true,
+    "connected": true,
+    "marketId": "clx_secmarket_001"
+  }
+}
+```
+```json Error - Chain Unreadable
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "CHAIN_READ_FAILED",
+    "message": "The bot or the market could not be read just now, so no step is offered. Retry in a moment."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `marketId` is missing, empty or longer than 100 characters, or `connect` is not a boolean |
+| `BOT_NOT_FOUND` | `404` | No bot with this ID belongs to your instance |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID belongs to your instance, or it has no on-chain address |
+| `BOT_NOT_DEPLOYED` | `409` | The bot record has no contract address |
+| `CHAIN_READ_FAILED` | `503` | The bot or the market could not be read, so no step is offered. Retry |
+| `BOT_CONNECT_FAILED` | `500` | An unexpected failure. The message is generic; retry |

@@ -1,0 +1,212 @@
+---
+title: 'Get Queued Market'
+api: 'GET /lending-external-securities-v2/api/markets/queued/{marketAddress}/details'
+description: 'Review a market seeking a lender of record before taking the role'
+---
+
+Returns everything a candidate reads before taking a market's lender-of-record role. That covers the market and its offering, and the collateral token as the chain answers and as the issuer described it. It also covers the asset data the issuer attested, the terms status and a deterministic review. See [Lender of record](/endpoints/lending/introduction#lender-of-record).
+
+The market is keyed by its contract address, because a candidate usually does not record the market yet. The address is proven against the v2 lending factory first. This instance may read the market when one of these holds:
+
+- One of its verified wallets is nominated on the market.
+- It records the market itself, for example because it deployed it.
+- The market is open to claimants beyond its candidates, and Trusset approved this account as a lender of record.
+
+The collateral token is described twice, and the two descriptions are never merged. `collateralToken.onchain` is what the chain answers right now. `collateralToken.issuerProvided` and `instrument` are what the importing issuer chose to publish. Where the sources disagree, `disagreements` lists the field and every value.
+
+<Warning>
+  `assessment` measures how well the market and its collateral are evidenced: what the issuer stated, what a machine could check, and what the chain answers. It is not a credit rating, not a view on the issuer's ability to pay, and not advice. The credit decision stays with the lender of record.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketAddress" type="string" required>
+  Market contract address, `0x` followed by 40 hex characters.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="market" type="object">
+      The market as a queue row, with the fields [List Queued Markets](/endpoints/lending/list-queued-markets) returns. It omits `nominator` and `collateralImageUri` and adds the fields below.
+      <Expandable>
+        <ResponseField name="generation" type="string">`TWO_REGISTERS` on the current market implementation, `SINGLE_REGISTER` on the earlier one, `null` when the implementation could not be read. A `SINGLE_REGISTER` market takes no `providerRegistry`, `liquidator` or `vault` at adoption.</ResponseField>
+        <ResponseField name="proposedProviderRegistry" type="string">The provider register the deployer proposed at deployment, or `null`. The factory recorded it and installed nothing: the adoption terms decide.</ResponseField>
+        <ResponseField name="standingPolicy" type="object">The standing policy of this instance that matches the market, or `null`. Always `null` when this account is not an approved lender of record or reads its own market.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="isBank" type="boolean">Whether this account may act as a lender of record on this market. `false` whenever the market is this instance's own.</ResponseField>
+    <ResponseField name="wallets" type="array">This instance's verified wallets, lowercased.</ResponseField>
+    <ResponseField name="termsStatus" type="object">Terms of use state, `{ status, version, contentHash, curatorAddress, reason }`. `status` reads `PUBLISHED` when terms exist. Before adoption it reads `AWAITING_LENDER`, since the terms are the lender of record's own document.</ResponseField>
+    <ResponseField name="assetData" type="object">
+      The factory's asset data record, or `null` when unreadable.
+      <Expandable>
+        <ResponseField name="status" type="string">One of `NONE`, `ATTESTED`, `ACKNOWLEDGED` or `DIVERGED`. A market reads `DIVERGED` when a lender of record approved one version and the issuer attested another since.</ResponseField>
+        <ResponseField name="attested" type="string">The hash the issuer's wallet attested, or `null`. This is the value to name as `assetDataHash` in the adoption terms once reviewed.</ResponseField>
+        <ResponseField name="acknowledged" type="string">The hash a lender of record acknowledged, or `null`.</ResponseField>
+        <ResponseField name="version" type="integer">Attestation version. `1` for the attestation made at deployment.</ResponseField>
+        <ResponseField name="attestor" type="string">The wallet that made the standing attestation.</ResponseField>
+        <ResponseField name="attestedAt" type="string">When the standing attestation was made.</ResponseField>
+        <ResponseField name="acknowledgedAt" type="string">When the acknowledgement was made, or `null`.</ResponseField>
+        <ResponseField name="diverged" type="boolean">The factory's own divergence flag. It also reads `true` on an `ATTESTED` market where nothing was acknowledged yet, so branch on `status` instead.</ResponseField>
+        <ResponseField name="schemaVersion" type="string">Schema of the stored bundle, or `null` when no bundle is stored.</ResponseField>
+        <ResponseField name="bundleAvailable" type="boolean">Whether the exact bytes behind `attested` are stored. [Get Asset Data Bundle](/endpoints/lending/get-asset-data-bundle) returns them.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="offering" type="object">
+      The market's live offering, read from the market and its interest model. `null` when it could not be read.
+      <Expandable>
+        <ResponseField name="rateMode" type="string">`CURVE`, `CLAMPED` or `FIXED`.</ResponseField>
+        <ResponseField name="curve" type="object">`{ baseRateBps, multiplierBps, jumpMultiplierBps, kinkBps }`.</ResponseField>
+        <ResponseField name="rateFloorBps" type="integer">Clamp floor.</ResponseField>
+        <ResponseField name="rateCapBps" type="integer">Clamp cap.</ResponseField>
+        <ResponseField name="fixedStampRateBps" type="integer">The rate a loan opened now would be stamped with, or `null`.</ResponseField>
+        <ResponseField name="maxFixedRateBps" type="integer">The recorded ceiling on fixed rates, or `null` when none is recorded.</ResponseField>
+        <ResponseField name="reserveRatioBps" type="integer">Share of the pool held back from borrowing.</ResponseField>
+        <ResponseField name="risk" type="object">`{ collateralFactorBps, liquidationThresholdBps, liquidationPenaltyBps, protocolFeeBps, closeFactorBps, minBorrowAmount }`. `minBorrowAmount` is in the borrow asset's smallest unit.</ResponseField>
+        <ResponseField name="terms" type="object">`{ maxLoanDuration, termGracePeriod, terminalDueDate, termPenaltyBps, allowExtension }`. Durations are seconds as strings.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="feeSplit" type="object">How repaid interest splits on this market, in the shape [Get Fee Split](/endpoints/lending/get-fee-split) returns. `null` when it could not be read.</ResponseField>
+    <ResponseField name="externalOracle" type="object">For an `ORACLE` market, the feed being underwritten: `{ feedAddress, stale, price, updatedAt, history }`. `history` holds recent rounds as `points` of `{ t, price }`. `null` on every other price source.</ResponseField>
+    <ResponseField name="instrument" type="object">The instrument record the importing issuer published, projected for a counterparty. `null` when there is none.</ResponseField>
+    <ResponseField name="collateralToken" type="object">`{ address, onchain, issuerProvided }`. `onchain` is the live token read and marks a failed read rather than filling it in. `issuerProvided` is the deploying issuer's import: `name`, `symbol`, `framework`, `assetType`, `imageURI`, `importedAt` and the published `profile`, or `null`.</ResponseField>
+    <ResponseField name="disagreements" type="array">Fields where the sources above disagree, each `{ field, values }`.</ResponseField>
+    <ResponseField name="assessment" type="object">The evidence review: `overall` and `cards` scores with a band and a confidence, `dimensions`, `findings` ranked by severity (`CRITICAL`, `WARNING`, `INFO`), `counts` and the `disclaimer`. `null` when it could not be computed.</ResponseField>
+    <ResponseField name="liquidationFlow" type="object">A chart of how a position on this market is realized and what the buyer then holds, as `lanes`, `nodes`, `edges` and `notes`. `null` when it could not be built.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/queued/0x1c74f9a2b0e63d581a47c02f9b8de3517a604c2b/details" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/queued/${marketAddress}/details`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const reviewedHash = data.assetData?.attested ?? null;
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "market": {
+      "marketAddress": "0x1c74f9a2b0e63d581a47c02f9b8de3517a604c2b",
+      "collateralTokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+      "collateralTokenSymbol": "ACME",
+      "collateralMode": "FREEZE",
+      "priceSource": "NAV",
+      "identityRegistryAddress": null,
+      "borrowAssetAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "borrowAssetSymbol": "USDC",
+      "borrowAssetDecimals": 6,
+      "seekingCurator": true,
+      "curator": null,
+      "realizationMode": "UNDECLARED",
+      "openToAnyCurator": false,
+      "operatorShareBps": "800",
+      "marketDeployer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "candidates": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+      "identityGate": { "shape": "none", "usable": true, "note": null },
+      "origin": "NOMINATED",
+      "canAccept": true,
+      "nominatedWallets": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+      "eligibleWallets": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+      "recordedMarketId": null,
+      "standingPolicy": null,
+      "generation": "TWO_REGISTERS",
+      "proposedProviderRegistry": null
+    },
+    "isBank": true,
+    "wallets": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+    "termsStatus": {
+      "status": "AWAITING_LENDER",
+      "version": null,
+      "contentHash": null,
+      "curatorAddress": null,
+      "reason": "The terms of use are the lender of record's own document. An unadopted market has no admin, issuer or curator, so nobody can write them yet."
+    },
+    "assetData": {
+      "status": "ATTESTED",
+      "attested": "0xa93f4d51d67f4f88cb447fd06bccff45483fb5a9f04fa67dd1c8cdcd1127ae90",
+      "acknowledged": null,
+      "version": 1,
+      "attestor": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "attestedAt": "2026-09-24T10:02:11.000Z",
+      "acknowledgedAt": null,
+      "diverged": true,
+      "schemaVersion": "1.0.0",
+      "bundleAvailable": true
+    },
+    "offering": {
+      "generation": "v2",
+      "curve": { "baseRateBps": 200, "multiplierBps": 1000, "jumpMultiplierBps": 10000, "kinkBps": 8000 },
+      "rateMode": "CLAMPED",
+      "rateFloorBps": 200,
+      "rateCapBps": 1200,
+      "fixedStampRateBps": null,
+      "maxFixedRateBps": null,
+      "reserveRatioBps": 0,
+      "risk": {
+        "collateralFactorBps": 7500,
+        "liquidationThresholdBps": 8500,
+        "liquidationPenaltyBps": 500,
+        "protocolFeeBps": 0,
+        "closeFactorBps": 5000,
+        "minBorrowAmount": "100000000"
+      },
+      "terms": {
+        "maxLoanDuration": "15552000",
+        "termGracePeriod": "259200",
+        "terminalDueDate": null,
+        "termPenaltyBps": 0,
+        "allowExtension": false
+      }
+    },
+    "feeSplit": null,
+    "externalOracle": null,
+    "instrument": null,
+    "collateralToken": {
+      "address": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+      "onchain": null,
+      "issuerProvided": null
+    },
+    "disagreements": [],
+    "assessment": null,
+    "liquidationFlow": null
+  }
+}
+```
+```json Error - Not Nominated
+{
+  "success": false,
+  "error": {
+    "code": "NOT_NOMINATED",
+    "message": "No verified wallet of this instance is nominated to take this market"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `marketAddress` is not `0x` followed by 40 hex characters |
+| `CURATOR_NOT_APPROVED` | `403` | The market is open to claimants beyond its candidates, and this account is not approved as a lender of record |
+| `NOT_NOMINATED` | `403` | No verified wallet of this instance is nominated, this instance does not record the market, and the market is not open to this account |
+| `MARKET_NOT_V2` | `404` | The address is not a market of the v2 lending factory this instance deploys to |
+| `MARKET_NOT_DEPLOYED` | `404` | No deployment for this market could be read from the lending factory |
+| `WALLET_NOT_CONFIGURED` | `412` | The market is open to any approved lender of record, but this instance has no verified wallet that could take it |
+| `QUEUE_DETAILS_FAILED` | `500` | The review could not be assembled for a reason that carries no code of its own |
+| `MARKET_VERIFICATION_UNAVAILABLE` | `503` | The address could not be checked against the v2 factory. Retry shortly |
+| `FACTORY_UNREADABLE` | `503` | The factory could not be read to confirm the nomination. Nothing is known to be wrong with the access. Retry shortly |
+| `FACTORY_READ_FAILED` | `503` | The market's deployment record could not be read. Retry shortly |

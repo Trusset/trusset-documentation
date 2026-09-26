@@ -1,0 +1,112 @@
+---
+title: 'Get Rate Mode'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/rate-mode'
+description: 'Read how the market prices borrowing and who can change it'
+---
+
+Reads the market's interest model live from the chain. It returns the rate mode, the clamp or fixed rate, the fixed-rate ceiling, the jump-rate curve underneath, and the model's owner. The owner is the only party that can change the mode with [Set Rate Mode](/endpoints/lending/set-rate-mode) or tighten the ceiling with [Set Max Fixed Rate](/endpoints/lending/set-max-fixed-rate).
+
+At adoption the model passes to the `issuer` the lender of record named. Ownership moves afterwards only by a two-step transfer, so `modelOwner` is the answer to read, not an assumption.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="interestModelAddress" type="string">The market's interest model, lowercased. Rate-mode transactions target this contract, not the market.</ResponseField>
+    <ResponseField name="rateMode" type="string">`CURVE`, `CLAMPED` or `FIXED`.</ResponseField>
+    <ResponseField name="rateFloorBps" type="integer">Lower bound of the clamp in `CLAMPED`, the fixed rate in `FIXED`, `0` in `CURVE`.</ResponseField>
+    <ResponseField name="rateCapBps" type="integer">Upper bound of the clamp in `CLAMPED`, the fixed rate in `FIXED`, `0` in `CURVE`.</ResponseField>
+    <ResponseField name="fixedStampRateBps" type="integer">The rate a loan opened right now would be stamped with. `0` unless the mode is `FIXED`.</ResponseField>
+    <ResponseField name="stampsFixedRate" type="boolean">Whether new loans are stamped with a fixed rate.</ResponseField>
+    <ResponseField name="maxFixedRateBps" type="integer">Ceiling on any fixed rate the owner can set. It moves down only. `null` when no ceiling is recorded.</ResponseField>
+    <ResponseField name="creatorRateCeilingBps" type="integer">The factory's ceiling on the rates a market creator may deploy with. It binds new deployments only and places no limit on this model's owner. `null` when it could not be read.</ResponseField>
+    <ResponseField name="termsEnabled" type="boolean">Whether the market runs loan terms, through a maximum duration, a terminal due date, or both. `null` when the term configuration could not be read.</ResponseField>
+    <ResponseField name="modelOwner" type="string">The wallet that owns the model and signs every rate-mode change. `null` when it could not be read.</ResponseField>
+    <ResponseField name="handoverPending" type="boolean">`true` when an ownership transfer is waiting for the new owner to accept. Present only then.</ResponseField>
+    <ResponseField name="pendingOwner" type="string">The wallet that has to accept that transfer. Present only when `handoverPending` is.</ResponseField>
+    <ResponseField name="curve" type="object">
+      The jump-rate curve, all in basis points. `null` when it could not be read.
+      <Expandable>
+        <ResponseField name="baseRateBps" type="integer">Annual rate at zero utilization.</ResponseField>
+        <ResponseField name="multiplierBps" type="integer">Slope below the kink.</ResponseField>
+        <ResponseField name="jumpMultiplierBps" type="integer">Additional slope above the kink.</ResponseField>
+        <ResponseField name="kinkBps" type="integer">Utilization at which the jump slope starts.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## What Each Mode Charges
+
+| `rateMode` | Variable-rate loans already open | New loans |
+|---|---|---|
+| `CURVE` | The raw curve | Variable, on the raw curve |
+| `CLAMPED` | The curve held between `rateFloorBps` and `rateCapBps` | Variable, on the clamped curve |
+| `FIXED` | The raw curve, unclamped | Stamped with `fixedStampRateBps` for their whole life |
+
+A clamp is a price bound, not a volume bound. Once the raw curve crosses `rateCapBps` the rate stays at the cap, and no borrow is ever refused because of it. Liquidity alone limits the borrow.
+
+A loan stamped under `FIXED` keeps its rate through every later mode change. `FIXED` also needs a maximum loan duration: a market whose terms rest on a terminal due date alone reads `termsEnabled: true` and still cannot switch to it.
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/rate-mode" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/rate-mode`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+console.log(`${data.rateMode}, changed only by ${data.modelOwner}`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "interestModelAddress": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+    "rateMode": "CLAMPED",
+    "rateFloorBps": 300,
+    "rateCapBps": 1200,
+    "fixedStampRateBps": 0,
+    "maxFixedRateBps": 1500,
+    "creatorRateCeilingBps": 50000,
+    "stampsFixedRate": false,
+    "termsEnabled": true,
+    "modelOwner": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "curve": {
+      "baseRateBps": 200,
+      "multiplierBps": 1000,
+      "jumpMultiplierBps": 10000,
+      "kinkBps": 8000
+    }
+  }
+}
+```
+```json Error - Model Unresolved
+{
+  "success": false,
+  "error": {
+    "code": "MODEL_UNRESOLVED",
+    "message": "The market interest rate model could not be resolved. Retry shortly."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The `marketId` path segment is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `INTERNAL_ERROR` | `500` | A view on the interest model could not be read. Retry shortly |
+| `MODEL_UNRESOLVED` | `503` | The market's interest model address could not be resolved. Retry shortly |

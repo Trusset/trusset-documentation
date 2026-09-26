@@ -1,0 +1,244 @@
+---
+title: 'Get Asset Data'
+api: 'GET /lending-external-securities-v2/api/markets/{market}/asset-data'
+description: 'Read the asset data attestation and acknowledgement standing on a market'
+---
+
+Returns a market's asset data record: the hash of the bundle the issuer side attested and the hash the lender of record acknowledged. It also says who may write each one next, and whether this instance can. A lender of record adopting a market underwrites an asset it did not issue, described by data no contract can read. The factory makes that description attributable and tamper-evident. It does not verify it.
+
+The record lives on the lending factory as two hashes per market. The attested hash is written only by the attestor's own transaction and the acknowledged hash only by the lender of record's or its admin's own transaction. The bundle itself never goes on chain. Read its exact bytes with [Get Asset Data Bundle](/endpoints/lending/get-asset-data-bundle).
+
+This endpoint takes the market's **contract address**, not its market ID.
+
+## Who can read it
+
+The market must be registered on the v2 lending factory this instance deploys to, or the call is refused with `MARKET_NOT_V2`. Access then follows the lender-of-record queue, and `origin` in the response says which rule admitted the caller.
+
+| `origin` | Admitted because |
+|---|---|
+| `NOMINATED` | A verified wallet of this instance is nominated on the market as candidate lender of record |
+| `OWN` | This instance holds an active record of the market, as the issuer instance that deployed it does, and the lender of record's instance does once its adoption is confirmed |
+| `OPEN` | The market is still seeking a lender of record and is open to any. Trusset has approved this account to act as a lender of record, and the instance has a verified wallet |
+
+Every other caller is refused with `NOT_NOMINATED`. On an open market the refusal names what is missing instead: `WALLET_NOT_CONFIGURED` or `CURATOR_NOT_APPROVED`. The write routes check their own authority on top of this one.
+
+## Status
+
+| `status` | Meaning |
+|---|---|
+| `NONE` | Nothing attested. `version` is `0` and both hashes are zero |
+| `ATTESTED` | The issuer side attested a bundle, and no lender of record has acknowledged any version |
+| `ACKNOWLEDGED` | The lender of record acknowledged the version that stands now |
+| `DIVERGED` | The lender of record acknowledged a version, and the issuer re-attested since, so the two hashes differ |
+
+`status` is `null` when the factory record could not be read. `factorySupport` then says why: `false` for a factory implementation that predates asset data attestation, `null` for a read that failed.
+
+`DIVERGED` is the signal a lender of record watches. The description moved after approval, and a re-attestation never removes the earlier acknowledgement. Neither the market contracts nor this API act on a divergence. Whether the new version still supports the credit already extended is the lender of record's decision, and [Acknowledge Asset Data](/endpoints/lending/acknowledge-asset-data) records a new approval.
+
+`diverged` is the factory's own `assetDataDiverged` answer, which compares the two hashes. It also reads `true` on `ATTESTED`, where nothing was acknowledged. Branch on `status`.
+
+## Who writes next
+
+The attestor follows who answers for the data at that point in the market's life. While the market seeks a lender of record it is the wallet that deployed it (`attestorRole: DEPLOYER`). Once a lender of record adopts it, it is the issuer wallet that lender named in its adoption terms (`ISSUER`). A market whose deployer the factory never recorded has no attestor, and nobody can attest on it.
+
+The acknowledgers are the wallet that took the lender-of-record role and the admin it named. Before adoption there are none. A lender of record can also acknowledge inside the adoption itself, by naming the reviewed hash in its adoption terms on [Accept Lender Role](/endpoints/lending/accept-lender-role).
+
+## Path Parameters
+
+<ParamField path="market" type="string" required>
+  The market contract address, as 40 hex characters with a `0x` prefix.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="marketAddress" type="string">The market, lowercased.</ResponseField>
+    <ResponseField name="family" type="string">`FUNGIBLE` on this surface.</ResponseField>
+    <ResponseField name="factory" type="string">The lending factory that holds the record, lowercased.</ResponseField>
+    <ResponseField name="factorySupport" type="boolean">`true` when the factory records asset data attestations, `false` when its implementation predates them, `null` when it could not be read.</ResponseField>
+    <ResponseField name="status" type="string">`NONE`, `ATTESTED`, `ACKNOWLEDGED` or `DIVERGED`. `null` when the record could not be read.</ResponseField>
+    <ResponseField name="record" type="object">
+      The factory's answer, unprocessed. `null` when it could not be read.
+      <Expandable>
+        <ResponseField name="attested" type="string">Standing attested hash. The zero hash when nothing was attested.</ResponseField>
+        <ResponseField name="acknowledged" type="string">Acknowledged hash. The zero hash when nothing was acknowledged.</ResponseField>
+        <ResponseField name="attestor" type="string">Wallet that wrote the standing attestation, lowercased. `null` when there is none.</ResponseField>
+        <ResponseField name="version" type="integer">Number of attestations made on the market. `0` when none.</ResponseField>
+        <ResponseField name="attestedAt" type="integer">Unix seconds of the standing attestation. `null` when there is none.</ResponseField>
+        <ResponseField name="acknowledgedAt" type="integer">Unix seconds of the acknowledgement. `null` when there is none.</ResponseField>
+        <ResponseField name="diverged" type="boolean">The factory's `assetDataDiverged`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="diverged" type="boolean">Same as `record.diverged`. `null` when the record could not be read.</ResponseField>
+    <ResponseField name="attested" type="object">
+      The standing attestation. `null` when there is none.
+      <Expandable>
+        <ResponseField name="contentHash" type="string">The attested hash.</ResponseField>
+        <ResponseField name="version" type="integer">Its version.</ResponseField>
+        <ResponseField name="attestor" type="string">Wallet that attested it.</ResponseField>
+        <ResponseField name="attestedAt" type="string">ISO 8601 time of the attestation.</ResponseField>
+        <ResponseField name="txHash" type="string">Transaction that wrote it, when a platform record or the index knows it. Otherwise `null`.</ResponseField>
+        <ResponseField name="schemaVersion" type="string">Bundle schema of the stored bytes. `null` without them.</ResponseField>
+        <ResponseField name="bundleAvailable" type="boolean">`true` when the platform stores the exact bytes behind this hash. A hash attested with bytes prepared elsewhere has none.</ResponseField>
+        <ResponseField name="storedAt" type="string">When the bytes were stored. `null` without them.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="acknowledged" type="object">
+      The acknowledgement. `null` when there is none. Carries `contentHash`, `version`, `acknowledgedAt`, `txHash`, `schemaVersion`, `bundleAvailable` and `storedAt`, read the same way as `attested`. `version` is the attestation version of the acknowledged bundle as the platform recorded it, and `null` when it has no record of it.
+    </ResponseField>
+    <ResponseField name="authority" type="object">
+      <Expandable>
+        <ResponseField name="attestor" type="string">Wallet the factory admits as attestor right now. `null` when nobody can attest.</ResponseField>
+        <ResponseField name="attestorRole" type="string">`DEPLOYER` while the market seeks a lender of record, `ISSUER` after adoption.</ResponseField>
+        <ResponseField name="acknowledgers" type="array">Wallets that may acknowledge: the lender of record and the admin it named. Empty before adoption.</ResponseField>
+        <ResponseField name="seekingCurator" type="boolean">Whether the market is still seeking a lender of record.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="viewer" type="object">
+      <Expandable>
+        <ResponseField name="wallets" type="array">This instance's verified wallets, lowercased.</ResponseField>
+        <ResponseField name="canAttest" type="boolean">`true` when one of them is the attestor.</ResponseField>
+        <ResponseField name="canAcknowledge" type="boolean">`true` when one of them is an acknowledger.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="profile" type="object">
+      Whether the token profile this instance holds still hashes to the standing attestation. `null` when this instance holds no active import of the collateral token.
+      <Expandable>
+        <ResponseField name="available" type="boolean">`false` when the profile is empty or no bundle could be built from it.</ResponseField>
+        <ResponseField name="currentHash" type="string">The hash the profile would attest now. `null` when unavailable.</ResponseField>
+        <ResponseField name="schemaVersion" type="string">Present when `available` is `true`.</ResponseField>
+        <ResponseField name="changedSinceAttestation" type="boolean">`true` when an attestation stands and `currentHash` differs from it.</ResponseField>
+        <ResponseField name="reason" type="string">Why the profile is unavailable. Present when `available` is `false`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="origin" type="string">`NOMINATED`, `OWN` or `OPEN`. See [Who can read it](#who-can-read-it).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+`profile` is built from this instance's own import of the collateral token. On the issuer instance whose profile was attested, `changedSinceAttestation: true` means the profile was edited since and a re-attestation is due. On any other instance that imported the same token, it compares a profile the issuer never attested.
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/0x70a0e25c7b768b87e658348b3b577678a173e038/asset-data" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketAddress}/asset-data`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+
+if (data.status === 'DIVERGED' && data.viewer.canAcknowledge) {
+  console.log(`Version ${data.attested.version} (${data.attested.contentHash}) awaits review`);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - Diverged
+{
+  "success": true,
+  "data": {
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "family": "FUNGIBLE",
+    "factory": "0xf1ad12f5698f58badd8a662acffccb067a2ddb8a",
+    "factorySupport": true,
+    "status": "DIVERGED",
+    "record": {
+      "attested": "0xba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a",
+      "acknowledged": "0x65ed3a41511863cfbeacd3617041f1ccfcf281ab1a29bd7c08002a15cb427ccb",
+      "attestor": "0x511f527bcee080ac9b88afbf24386baedf393948",
+      "version": 2,
+      "attestedAt": 1789899340,
+      "acknowledgedAt": 1789398168,
+      "diverged": true
+    },
+    "diverged": true,
+    "attested": {
+      "contentHash": "0xba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a",
+      "version": 2,
+      "attestor": "0x511f527bcee080ac9b88afbf24386baedf393948",
+      "attestedAt": "2026-09-20T10:15:40.000Z",
+      "txHash": "0x94c206e7614a93e3194caffa428756827f9c0f4d042de189439ffe2f225f822f",
+      "schemaVersion": "1.0.0",
+      "bundleAvailable": true,
+      "storedAt": "2026-09-20T10:14:02.000Z"
+    },
+    "acknowledged": {
+      "contentHash": "0x65ed3a41511863cfbeacd3617041f1ccfcf281ab1a29bd7c08002a15cb427ccb",
+      "version": 1,
+      "acknowledgedAt": "2026-09-14T15:02:48.000Z",
+      "txHash": "0xb5968bce29317b97e5a3df1a4b5aeef2867ceef13147c8e1aab443eb541ff8ad",
+      "schemaVersion": "1.0.0",
+      "bundleAvailable": true,
+      "storedAt": "2026-09-12T08:31:05.000Z"
+    },
+    "authority": {
+      "attestor": "0x511f527bcee080ac9b88afbf24386baedf393948",
+      "attestorRole": "ISSUER",
+      "acknowledgers": [
+        "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "0x89b1dc3d25b4fbd80e4b2bdb7ed01c4560325c52"
+      ],
+      "seekingCurator": false
+    },
+    "viewer": {
+      "wallets": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+      "canAttest": false,
+      "canAcknowledge": true
+    },
+    "profile": null,
+    "origin": "OWN"
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-09-20T11:02:17.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Not Nominated
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "NOT_NOMINATED",
+    "message": "No verified wallet of this instance is nominated to take this market"
+  }
+}
+```
+```json Error - Not a v2 Market
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "MARKET_NOT_V2",
+    "message": "This market is not registered in the external securities lending v2 factory this instance deploys to (0xf1aD12F5698F58badd8a662AcfFcCb067A2Ddb8a). A market deployed through an earlier factory generation cannot be operated here; deploy it again through the current factory."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+The asset data routes report a validation failure with the first failing rule as `message` and no `details` list.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `market` is not a `0x`-prefixed 40-character hex address |
+| `CURATOR_NOT_APPROVED` | `403` | The market is open to any lender of record, and this account is not approved to act as one |
+| `NOT_NOMINATED` | `403` | No verified wallet of this instance is nominated on the market, and the instance holds no record of it |
+| `MARKET_NOT_DEPLOYED` | `404` | The lending factory returns no deployment for this address |
+| `MARKET_NOT_V2` | `404` | The address is not a market on the v2 factory this instance deploys to |
+| `WALLET_NOT_CONFIGURED` | `412` | The market is open to any lender of record, but this instance has no verified wallet |
+| `MARKET_ACCESS_FAILED` | `500` | The access check failed for a reason the service did not classify |
+| `ASSET_DATA_READ_FAILED` | `500` | The record could not be assembled for a reason the service did not classify |
+| `FACTORY_READ_FAILED` | `503` | The lending factory could not be reached to resolve the market. Retry shortly |
+| `FACTORY_UNREADABLE` | `503` | The factory could not be read to confirm the nomination. Retry shortly |
+| `MARKET_VERIFICATION_UNAVAILABLE` | `503` | The market could not be checked against the v2 factory. Retry shortly |
+
+A `403` or `412` is a statement about this instance's access to this market. A `503` says a read failed, and nothing about the market or the caller.

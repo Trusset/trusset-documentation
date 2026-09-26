@@ -1,0 +1,155 @@
+---
+title: 'List Bot Transactions'
+api: 'GET /lending-external-securities-v2/api/liquidation-bots/{botId}/transactions'
+description: 'Read the on-chain activity of a liquidation bot'
+---
+
+Returns the bot's activity, read from its own contract events: liquidations through it, the refunds it paid, funding, withdrawals, and the owner's changes to its settings. Entries come newest first, and the deployment is appended as the last entry.
+
+Each call first reads new events from the chain, at most once every 20 seconds per bot. An event appears once its block is six blocks deep. One read covers at most 200,000 blocks and 400 events, so a bot with a long gap catches up over several calls. When the chain cannot be read, the call still answers from the events already stored.
+
+There is no offset. The newest 200 events are the furthest back this endpoint reaches.
+
+## Path Parameters
+
+<ParamField path="botId" type="string" required>Bot ID.</ParamField>
+
+## Query Parameters
+
+<ParamField query="limit" type="integer" default="50">
+  Events to return, 1 to 200. A value outside that range, or not an integer, returns `VALIDATION_ERROR`. The deployment entry comes on top, so a response can hold `limit + 1` entries.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="transactions" type="array">
+      Events ordered by block and log index, newest first, then the deployment entry.
+      <Expandable>
+        <ResponseField name="id" type="string">Entry ID. The deployment entry's ID is `deploy:` followed by the bot ID.</ResponseField>
+        <ResponseField name="txType" type="string">What happened. See the table below.</ResponseField>
+        <ResponseField name="txHash" type="string">Transaction that emitted the event.</ResponseField>
+        <ResponseField name="blockNumber" type="integer | null">Block of the event. `null` on the deployment entry.</ResponseField>
+        <ResponseField name="logIndex" type="integer | null">Position of the event in its block. `null` on the deployment entry.</ResponseField>
+        <ResponseField name="marketAddress" type="string | null">Market the event concerns, when it concerns one.</ResponseField>
+        <ResponseField name="counterparty" type="string | null">The other address involved: caller, funder, recipient or owner.</ResponseField>
+        <ResponseField name="amount" type="string">An amount of the native coin as a decimal string: the sum moved for funding, refunds and withdrawals, or the refund cap on `REFUND_POLICY_SET`. `"0"` when the event carries none.</ResponseField>
+        <ResponseField name="reference" type="string | null">Loan ID, auction ID or gas price, depending on `txType`.</ResponseField>
+        <ResponseField name="timestamp" type="string">Block time of the event. On the deployment entry, when the deployment was confirmed.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="total" type="integer">Stored events for this bot, plus one for the deployment entry.</ResponseField>
+    <ResponseField name="syncedBlock" type="integer | null">Last block the log covered before this request's read, or `null` before the first read.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Entry types
+
+| `txType` | Event | Fields that carry it |
+|---|---|---|
+| `DEPLOYED` | The deployment, added by the API rather than read from an event | `counterparty` is the owner wallet |
+| `MARKET_ENABLED` | The owner enabled a market on the bot | `marketAddress` |
+| `MARKET_DISABLED` | The owner disabled a market on the bot | `marketAddress` |
+| `PAUSED` | The owner paused every trigger | None |
+| `RESUMED` | The owner lifted the pause | None |
+| `REFUND_POLICY_SET` | The owner set the refund policy | `amount` is the per-caller-per-block cap in the native coin, `reference` the gas price ceiling in gwei |
+| `LIQUIDATION` | A caller liquidated a loan through the bot | `marketAddress`, `counterparty` is the caller, `reference` the loan ID |
+| `AUCTION_SETTLED` | A caller settled an expired auction through the bot. Only an older lending module that settles auctions itself can produce it | `marketAddress`, `counterparty` is the caller, `reference` the auction ID |
+| `REFUND_PAID` | The bot refunded a caller's gas | `counterparty` is the caller, `amount` the refund |
+| `REFUND_SKIPPED` | A refund transfer failed and was skipped; the liquidation stood | `counterparty` is the caller, `amount` the refund owed |
+| `FUNDED` | The bot received native coin | `counterparty` is the sender, `amount` |
+| `WITHDRAWN` | The owner withdrew float | `counterparty` is the recipient, `amount` |
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/liquidation-bots/{botId}/transactions?limit=20" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/liquidation-bots/${botId}/transactions?limit=20`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const refunded = data.transactions
+  .filter((t) => t.txType === 'REFUND_PAID')
+  .reduce((sum, t) => sum + Number(t.amount), 0);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "transactions": [
+      {
+        "id": "clx_bottx_003",
+        "txType": "REFUND_PAID",
+        "txHash": "0x3708bf7927965ce95c5bf8c315f8294092e31c93a35d4e958af5be0c47723257",
+        "blockNumber": 9412290,
+        "logIndex": 14,
+        "marketAddress": null,
+        "counterparty": "0x0fcd5a9a4bdcadd6d54c501a318d1caa3a2d7152",
+        "amount": "0.000412",
+        "reference": null,
+        "timestamp": "2026-09-24T14:02:12.000Z"
+      },
+      {
+        "id": "clx_bottx_002",
+        "txType": "LIQUIDATION",
+        "txHash": "0x3708bf7927965ce95c5bf8c315f8294092e31c93a35d4e958af5be0c47723257",
+        "blockNumber": 9412290,
+        "logIndex": 12,
+        "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "counterparty": "0x0fcd5a9a4bdcadd6d54c501a318d1caa3a2d7152",
+        "amount": "0",
+        "reference": "5",
+        "timestamp": "2026-09-24T14:02:12.000Z"
+      },
+      {
+        "id": "clx_bottx_001",
+        "txType": "FUNDED",
+        "txHash": "0xcbfb61d2331852c7538a41faf5f670cf5e3508626901bd56a3fc6993bfabe30f",
+        "blockNumber": 9398811,
+        "logIndex": 3,
+        "marketAddress": null,
+        "counterparty": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+        "amount": "0.25",
+        "reference": null,
+        "timestamp": "2026-09-20T10:05:24.000Z"
+      },
+      {
+        "id": "deploy:clx_bot_001",
+        "txType": "DEPLOYED",
+        "txHash": "0x1a2531f9e02d8b3660364d25a982585f822fbe8689e811e7b967cbd1d670ba7b",
+        "blockNumber": null,
+        "logIndex": null,
+        "marketAddress": null,
+        "counterparty": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+        "amount": "0",
+        "reference": null,
+        "timestamp": "2026-09-20T10:00:00.000Z"
+      }
+    ],
+    "total": 4,
+    "syncedBlock": 9412296
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-09-25T12:00:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `limit` is not an integer from 1 to 200 |
+| `BOT_NOT_FOUND` | `404` | No bot with this ID belongs to your instance |
+| `BOT_ACTIVITY_READ_FAILED` | `500` | The stored activity could not be read. The message is generic; retry |

@@ -1,0 +1,257 @@
+---
+title: 'Get Cashflows'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/cashflows'
+description: 'What each fee leg of a market has accrued, what was swept, and what is still pending'
+---
+
+Returns, for every fee leg of the market, what has accrued over its life, what has been swept out and what is still waiting on the market. It also itemises the liquidity providers' part of each split and totals the interest and fixed transaction fees collected.
+
+Two sources feed the figures. Accrued and paid amounts come from the market's own fee events, which Trusset reads into a ledger up to a settled block. Pending amounts are the market's payable balances. When the ledger is complete, both are read at the same block, and each leg reconciles to the smallest unit.
+
+The figures trail the chain. Nothing newer than the settled block appears, so a repayment or a sweep mined a moment ago shows here once its block is final. [How finality affects the figures](#how-finality-affects-the-figures) explains what a partial answer looks like.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+Every amount is an object `{ raw, value }`: `raw` in the borrow asset's smallest unit, `value` as a decimal string at its decimals.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="marketAddress" type="string">Market contract, lowercased.</ResponseField>
+    <ResponseField name="asset" type="object">The borrow asset every amount is denominated in: `address`, `symbol`, `decimals`.</ResponseField>
+    <ResponseField name="split" type="object">The market's split of repaid interest, exactly as [Get Fee Split](/endpoints/lending/get-fee-split) returns it.</ResponseField>
+    <ResponseField name="legs" type="object">
+      One entry per recipient. `accrued` is what was booked to the leg, `paid` what was swept out, and `pending` what the market still holds for it.
+      <Expandable>
+        <ResponseField name="infrastructure" type="object">Trusset's infrastructure fee. `recipient` is the Trusset wallet fixed in the contract. `fromInterest` is the 15 percent of repaid interest, `fromTransactionFees` the 87 percent of each fixed transaction fee, and `accrued` their sum. `paid` and `pending` follow. Swept by [Sweep Infrastructure Fees](/endpoints/lending/sweep-infrastructure-fees).</ResponseField>
+        <ResponseField name="operator" type="object">The operator's share. `recipient` is the operator wallet. `fromInterest` is its 8 percent of post-infrastructure interest, `fromTransactionFees` its 8 percent of each fixed transaction fee. `fromUnallocatedDistributorLeg` is distributor share realized while no provider held pool shares, which the market books to the operator; it is computed only on a complete history and reads zero otherwise. `accrued`, `paid` and `pending` follow. Swept by [Sweep Operator Fees](/endpoints/lending/sweep-operator-fees).</ResponseField>
+        <ResponseField name="distributors" type="object">The distributor leg. `recipient` is `VAULT_DISTRIBUTORS` when the split's `generation` is `FIXED_SHARES`, and `null` on `OFFERED_SHARE`. `fromInterest` and `fromTransactionFees` split what it was credited, and `accrued` excludes the part booked to the operator. `paidToVaults` counts slices paid to the provider that earned them when that provider is not an operator wallet, which is where registered vaults collecting their own land. `paidToOperatorWallet` counts the rest: slices paid to a current or former operator wallet, including a provider's slice the earlier fee implementation paid to the operator wallet. `paid` is their sum and `pending` the market's `distributorFeesPayable` across every provider. Swept per provider by [Sweep Distributor Fees](/endpoints/lending/sweep-distributor-fees).</ResponseField>
+        <ResponseField name="insuranceFund" type="object">The insurance-fund rate's share. `recipient` is the market's insurance fund. `accrued`, `paid` and `pending` follow, and `pending` is the same figure [Get Insurance Status](/endpoints/lending/get-insurance-status) reports as earmarked. Swept by [Sweep Protocol Fees](/endpoints/lending/sweep-protocol-fees).</ResponseField>
+        <ResponseField name="liquidityProviders" type="object">
+          What stays in the pool.
+          <Expandable>
+            <ResponseField name="creditedFromSplits" type="object">The providers' part of every itemised split: the interest of each repayment or liquidation recovery, less the four legs booked in the same transaction.</ResponseField>
+            <ResponseField name="interestRepaid" type="object">Interest borrowers repaid, from `LoanRepaid`.</ResponseField>
+            <ResponseField name="interestRecovered" type="object">Interest recovered through liquidation, from `LiquidationDebtApplied`: the amount applied less the principal it paid.</ResponseField>
+            <ResponseField name="unitemisedSplits" type="integer">Liquidation settlements that split interest without a repayment record. The providers' part of those is in the pool value and is not itemised in `creditedFromSplits`.</ResponseField>
+            <ResponseField name="note" type="string">States the same in words when `unitemisedSplits` is above zero. `null` otherwise.</ResponseField>
+          </Expandable>
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="totals" type="object">`interestCollected` is `interestRepaid` plus `interestRecovered`. `transactionFees` is every fixed transaction fee charged, split into `openFees` and `repayFees`. `realizationSplits` is the same count as `unitemisedSplits`.</ResponseField>
+    <ResponseField name="reconciliation" type="object">
+      `null` unless `history.complete` is `true`. Otherwise one entry per leg: `infrastructure`, `operator`, `distributors` and `insuranceFund`.
+      <Expandable>
+        <ResponseField name="outstandingRaw" type="string">`accrued` less `paid` less `pending`, in the smallest unit.</ResponseField>
+        <ResponseField name="balanced" type="boolean">`true` when `outstandingRaw` is zero, so the ledger and the market agree to the smallest unit.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="history" type="object">
+      How far the ledger behind `accrued` and `paid` has been read.
+      <Expandable>
+        <ResponseField name="source" type="string">Always `MARKET_EVENTS`.</ResponseField>
+        <ResponseField name="complete" type="boolean">`true` when every block from the market's deployment to the settled head has been read.</ResponseField>
+        <ResponseField name="syncedBlock" type="integer">The last block read into the ledger. `null` before the first read lands.</ResponseField>
+        <ResponseField name="latestBlock" type="integer">The settled head this read aimed for. `null` when the read was interrupted.</ResponseField>
+        <ResponseField name="balancesAtBlock" type="integer">The block the `pending` balances were read at, equal to `syncedBlock` on a complete history. `null` when they were read live at the chain head.</ResponseField>
+        <ResponseField name="basis" type="string">`FINALIZED` when the settled head is the chain's finalized block, `CONFIRMATIONS` when the node reports no finality and the head less five blocks stands in for it.</ResponseField>
+        <ResponseField name="events" type="integer">Fee events counted.</ResponseField>
+        <ResponseField name="pendingFinality" type="boolean">Present, and `true`, only when the market's deployment block is not final yet.</ResponseField>
+        <ResponseField name="deployedInBlock" type="integer">The market's deployment block. Present only with `pendingFinality`.</ResponseField>
+        <ResponseField name="note" type="string">Why the history is partial, in words. `null` when `complete` is `true`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## How finality affects the figures
+
+The ledger reads fee events only up to a settled block, never to the chain head. That block is the chain's finalized block, or five blocks behind the head where the node reports no finality.
+
+On a complete history, `pending` is read at that same block. Accrued, paid and pending then describe one moment, and `reconciliation` checks each leg against it. A sweep that mined after that block appears in neither `paid` nor `pending` until its block is final.
+
+A partial history is flagged, never presented as complete. `complete` is `false`, `reconciliation` and `balancesAtBlock` are `null`, and `pending` is read live while `accrued` and `paid` cover only the blocks read so far. Three situations cause it:
+
+| Situation | What the response shows |
+|---|---|
+| The ledger is still catching up, or a read was interrupted | Each request reads at most 120,000 blocks, so a market with a long history completes over several requests. `note` says the figures cover the blocks read so far |
+| The deployment block is not final yet | `pendingFinality: true` and `deployedInBlock`. The history starts once that block is final |
+| The deployment block could not be established | `note` says the history is not read. `pending` is still live |
+
+A market deployed moments ago returns a history like this until its deployment block is final.
+
+```json History Pending Finality
+{
+  "source": "MARKET_EVENTS",
+  "complete": false,
+  "syncedBlock": null,
+  "latestBlock": 9281702,
+  "balancesAtBlock": null,
+  "basis": "FINALIZED",
+  "events": 0,
+  "pendingFinality": true,
+  "deployedInBlock": 9281735,
+  "note": "This market was deployed in block 9281735, which the chain has not finalized yet. Its fee history is read from that block once it is final, usually within 15 minutes; the pending balances are read live from the market meanwhile."
+}
+```
+
+A complete read is reused for up to 60 seconds, so two calls in quick succession return the same figures.
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/cashflows" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/cashflows`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+
+if (!data.history.complete) {
+  console.log(`Partial history: ${data.history.note}`);
+} else {
+  const { operator } = data.legs;
+  console.log(`Operator accrued ${operator.accrued.value}, paid ${operator.paid.value}, pending ${operator.pending.value}`);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "asset": {
+      "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "symbol": "USDC",
+      "decimals": 6
+    },
+    "split": {
+      "readFailed": false,
+      "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "generation": "FIXED_SHARES",
+      "fixedShares": true,
+      "basis": "REPAID_INTEREST",
+      "legs": [
+        { "key": "INFRASTRUCTURE", "recipient": "0x65ff3a731366472d40cf458332457403168c2bea", "rateE18": "150000000000000000", "rateBps": 1500, "ofBase": "REPAID_INTEREST", "perHundred": "15", "effectiveBps": 1500 },
+        { "key": "OPERATOR", "recipient": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52", "rateE18": "80000000000000000", "rateBps": 800, "ofBase": "AFTER_INFRASTRUCTURE", "perHundred": "6.8", "effectiveBps": 680 },
+        { "key": "DISTRIBUTOR", "recipient": null, "rateE18": "50000000000000000", "rateBps": 500, "ofBase": "AFTER_INFRASTRUCTURE", "perHundred": "4.25", "effectiveBps": 425 },
+        { "key": "INSURANCE_FUND", "recipient": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2", "rateE18": "0", "rateBps": 0, "ofBase": "AFTER_SHARES", "perHundred": "0", "effectiveBps": 0 },
+        { "key": "LIQUIDITY_PROVIDERS", "recipient": null, "rateE18": null, "rateBps": null, "ofBase": "REMAINDER", "perHundred": "73.95", "effectiveBps": 7395 }
+      ],
+      "operatorWallet": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "operatorWalletRecorded": true,
+      "seekingCurator": false,
+      "distributorRecipients": "VAULT_DISTRIBUTORS",
+      "transactionFees": {
+        "openFeeRaw": "0",
+        "repayFeeRaw": "0",
+        "openFee": "0.0",
+        "repayFee": "0.0",
+        "capBps": 50,
+        "enabled": false,
+        "shares": { "operatorBps": 800, "distributorBps": 500, "infrastructureBps": 8700 }
+      },
+      "sources": {
+        "infrastructure": "interest model getSupplyRate(1e18, 1e18, 0)",
+        "operator": "factory OPERATOR_SHARE()",
+        "distributor": "factory DISTRIBUTOR_SHARE()",
+        "insuranceFund": "market config().protocolFeeRate"
+      }
+    },
+    "legs": {
+      "infrastructure": {
+        "recipient": "0x65ff3a731366472d40cf458332457403168c2bea",
+        "fromInterest": { "raw": "150000000", "value": "150.0" },
+        "fromTransactionFees": { "raw": "0", "value": "0.0" },
+        "accrued": { "raw": "150000000", "value": "150.0" },
+        "paid": { "raw": "100000000", "value": "100.0" },
+        "pending": { "raw": "50000000", "value": "50.0" }
+      },
+      "operator": {
+        "recipient": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+        "fromInterest": { "raw": "68000000", "value": "68.0" },
+        "fromTransactionFees": { "raw": "0", "value": "0.0" },
+        "fromUnallocatedDistributorLeg": { "raw": "0", "value": "0.0" },
+        "accrued": { "raw": "68000000", "value": "68.0" },
+        "paid": { "raw": "68000000", "value": "68.0" },
+        "pending": { "raw": "0", "value": "0.0" }
+      },
+      "distributors": {
+        "recipient": "VAULT_DISTRIBUTORS",
+        "fromInterest": { "raw": "42500000", "value": "42.5" },
+        "fromTransactionFees": { "raw": "0", "value": "0.0" },
+        "accrued": { "raw": "42500000", "value": "42.5" },
+        "paidToVaults": { "raw": "30000000", "value": "30.0" },
+        "paidToOperatorWallet": { "raw": "0", "value": "0.0" },
+        "paid": { "raw": "30000000", "value": "30.0" },
+        "pending": { "raw": "12500000", "value": "12.5" }
+      },
+      "insuranceFund": {
+        "recipient": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+        "accrued": { "raw": "0", "value": "0.0" },
+        "paid": { "raw": "0", "value": "0.0" },
+        "pending": { "raw": "0", "value": "0.0" }
+      },
+      "liquidityProviders": {
+        "creditedFromSplits": { "raw": "739500000", "value": "739.5" },
+        "interestRepaid": { "raw": "1000000000", "value": "1000.0" },
+        "interestRecovered": { "raw": "0", "value": "0.0" },
+        "unitemisedSplits": 0,
+        "note": null
+      }
+    },
+    "totals": {
+      "interestCollected": { "raw": "1000000000", "value": "1000.0" },
+      "transactionFees": { "raw": "0", "value": "0.0" },
+      "openFees": { "raw": "0", "value": "0.0" },
+      "repayFees": { "raw": "0", "value": "0.0" },
+      "realizationSplits": 0
+    },
+    "reconciliation": {
+      "infrastructure": { "outstandingRaw": "0", "balanced": true },
+      "operator": { "outstandingRaw": "0", "balanced": true },
+      "distributors": { "outstandingRaw": "0", "balanced": true },
+      "insuranceFund": { "outstandingRaw": "0", "balanced": true }
+    },
+    "history": {
+      "source": "MARKET_EVENTS",
+      "complete": true,
+      "syncedBlock": 9281702,
+      "latestBlock": 9281702,
+      "balancesAtBlock": 9281702,
+      "basis": "FINALIZED",
+      "events": 15,
+      "note": null
+    }
+  }
+}
+```
+```json Error - Balances Unreadable
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_STATE_UNAVAILABLE",
+    "message": "The fee balances could not be read from the network. Retry shortly."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The market ID in the path is longer than 100 characters |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The split or the payable balances could not be read from the chain, so no cashflow is shown. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read at all. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | The fee ledger could not be reached. Retry shortly |

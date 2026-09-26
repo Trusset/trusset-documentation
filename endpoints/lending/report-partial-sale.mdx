@@ -1,12 +1,12 @@
 ---
 title: 'Report Partial Sale'
-api: 'POST /lending-external-securities/api/liquidations/report-partial-sale/{liquidationId}'
+api: 'POST /lending-external-securities-v2/api/liquidations/report-partial-sale/{liquidationId}'
 description: 'Deposit interim sale proceeds into the router'
 ---
 
 Records proceeds from a partial sale of seized collateral and transfers them from the signing wallet into the liquidation router. Use it when a position is being sold down in tranches and you want proceeds banked as they arrive, rather than held off-platform until the final settlement.
 
-The endpoint is repeatable. Each call increases the router's `proceedsCollected`.
+The endpoint is repeatable. Each call increases the router's `proceedsCollected`. Once deposited, the proceeds can leave the router only through [Settle Liquidation](/endpoints/lending/settle-liquidation): the router's emergency withdrawal refuses the borrow asset.
 
 <Warning>
   The signing wallet must be holding the proceeds. This call pulls the borrow asset from that wallet into the router, so fund it before broadcasting. An insufficient balance reverts on-chain.
@@ -21,23 +21,23 @@ The endpoint is repeatable. Each call increases the router's `proceedsCollected`
 ## Body Parameters
 
 <ParamField body="marketId" type="string">
-  Names the market whose liquidation you mean. Every market runs its own liquidation router and IDs restart at `1` on each of them, so the same `liquidationId` can exist on several markets in one instance. Supply this when it does, otherwise the call is refused with `AMBIGUOUS_LIQUIDATION_ID` and the response lists the candidates.
+  Names the market whose liquidation you mean. Every market runs its own liquidation router and IDs restart at `1` on each of them, so the same `liquidationId` can exist on several markets in one instance. Supply this when it does, otherwise the call is refused with `AMBIGUOUS_LIQUIDATION_ID` and the response lists the candidates. Also accepted as a query parameter. At most 100 characters.
 </ParamField>
 
 <ParamField body="collateralSold" type="string" required>
-  Collateral disposed of in this tranche, as a decimal string in collateral token units. Must be greater than zero.
+  Collateral disposed of in this tranche, as a decimal string in collateral token units, at most as many decimals as the collateral token has. Must be greater than zero. Required on the confirm call too.
 </ParamField>
 
 <ParamField body="usdcProceeds" type="string" required>
-  Proceeds realised, as a decimal string in the market's borrow asset. Must be greater than zero.
+  Proceeds realised, as a decimal string in the market's borrow asset, at most as many decimals as that asset has. Must be greater than zero. Required on the confirm call too.
 </ParamField>
 
 <ParamField body="txHash" type="string">
-  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+  Hash of the `reportPartialSale` transaction you broadcast, not of the approval. Send it with the same body to confirm the transaction and record the result. Omit it to receive the calldata. A value that is not a `0x`-prefixed 64-character hex string is ignored.
 </ParamField>
 
 <Note>
-  The signing wallet must hold `OPERATOR_ROLE` on the router. If it does not, the calldata is not returned: the response carries `ROUTER_OPERATOR_ROLE_MISSING` along with the `calldata` that grants the role.
+  The wallet that signs must hold `OPERATOR_ROLE` on the router. This endpoint checks the role against your instance's primary verified wallet, since it takes no signer address. If that wallet lacks the role, the calldata is not returned: the response carries `ROUTER_OPERATOR_ROLE_MISSING` along with the `calldata` that grants it.
 </Note>
 
 ## Response Fields
@@ -45,12 +45,12 @@ The endpoint is repeatable. Each call increases the router's `proceedsCollected`
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="liquidationId" type="string">Liquidation ID, echoed back.</ResponseField>
-    <ResponseField name="collateralSold" type="string">Collateral reported, echoed back.</ResponseField>
-    <ResponseField name="usdcProceeds" type="string">Proceeds deposited.</ResponseField>
-    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
     <ResponseField name="success" type="boolean">Nested inside `data` on the calldata response.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="steps" type="array">Ordered `approve` on the borrow asset, then `reportPartialSale`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="steps" type="array">Ordered `approve` on the borrow asset for the router, then `reportPartialSale`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="collateralSold" type="string">Collateral reported, echoed from the request. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="usdcProceeds" type="string">Proceeds deposited, read from the mined transaction. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -60,61 +60,93 @@ The endpoint is repeatable. Each call increases the router's `proceedsCollected`
 
 Proceeds deposited here stay in the router until [Settle Liquidation](/endpoints/lending/settle-liquidation) forwards the cumulative total to the market. Reporting partial sales alone never closes a liquidation, and the record stays `PENDING`.
 
-## Settling After Partial Sales
+## Settle After Partial Sales
 
-Once every tranche has been reported, call [Settle Liquidation](/endpoints/lending/settle-liquidation) with `usdcProceeds` of `"0"`. Settlement forwards the full `proceedsCollected` balance already sitting at the router, so a zero final payment is valid and expected in this flow.
+Once every unit of collateral has left the router and every tranche has been reported, call [Settle Liquidation](/endpoints/lending/settle-liquidation) with `usdcProceeds` of `"0"`. Settlement forwards the full `proceedsCollected` balance already sitting at the router, so a zero final payment is valid and expected in this flow. Settlement is refused with `COLLATERAL_UNSOLD` while any collateral is still on the router.
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidations/report-partial-sale/14" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidations/report-partial-sale/14" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{
+    "marketId": "clx_secmarket_001",
     "collateralSold": "100",
     "usdcProceeds": "9800.00"
   }'
 ```
 ```typescript TypeScript
-for (const tranche of tranches) {
-  await fetch(
-    `https://api.trusset.org/lending-external-securities/api/liquidations/report-partial-sale/${liquidationId}`,
-    {
-      method: 'POST',
-      headers: {
-        'X-API-Key': 'trusset_your_key_here',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        collateralSold: tranche.units,
-        usdcProceeds: tranche.proceeds
-      })
-    }
-  );
-}
+const base = 'https://api.trusset.org/lending-external-securities-v2/api/liquidations';
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
 
-await fetch(
-  `https://api.trusset.org/lending-external-securities/api/liquidations/settle/${liquidationId}`,
-  {
+for (const tranche of tranches) {
+  const body = { marketId, collateralSold: tranche.units, usdcProceeds: tranche.proceeds };
+  const res = await fetch(`${base}/report-partial-sale/${liquidationId}`, {
     method: 'POST',
-    headers: {
-      'X-API-Key': 'trusset_your_key_here',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ usdcProceeds: "0" })
+    headers,
+    body: JSON.stringify(body)
+  });
+  const { data } = await res.json();
+  let reportHash = '';
+  for (const step of data.steps) {
+    const tx = await wallet.sendTransaction(step.transaction);
+    await tx.wait();
+    reportHash = tx.hash;
   }
-);
+  await fetch(`${base}/report-partial-sale/${liquidationId}`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...body, txHash: reportHash })
+  });
+}
 ```
 </RequestExample>
 
 <ResponseExample>
-```json Response
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "liquidationId": "14",
+    "action": "SIGN_TRANSACTIONS",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "approve",
+        "description": "Approve the router to pull USDC"
+      },
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "reportPartialSale"
+      }
+    ]
+  }
+}
+```
+```json Confirmed Response
 {
   "success": true,
   "data": {
     "liquidationId": "14",
     "collateralSold": "100",
-    "usdcProceeds": "9800.00",
-    "txHash": "0xabc...def"
+    "usdcProceeds": "9800.0",
+    "txHash": "0x4b8e2f71c09a53d6e8b1f47c2a9d05e36b7c18f4a2d9e0b53c6f17a84e2d9b06"
   }
 }
 ```
@@ -133,14 +165,17 @@ await fetch(
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | `collateralSold` or `usdcProceeds` is not a positive decimal string |
+| `VALIDATION_ERROR` | `400` | `collateralSold` or `usdcProceeds` is not a positive decimal string, `collateralSold` has more decimals than the collateral token, or `marketId` is longer than 100 characters |
 | `AMBIGUOUS_LIQUIDATION_ID` | `400` | This ID exists on more than one market in your instance. The error carries `candidates`; resend with `marketId` |
 | `ALREADY_SETTLED` | `400` | The liquidation is settled or written off |
 | `WALLET_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance to resolve the signer against |
-| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | The resolved wallet lacks `OPERATOR_ROLE`. The error carries grant `calldata` |
-| `ROUTER_NOT_CONFIGURED` | `400` | No liquidation router resolved for this market |
+| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | Your instance's primary verified wallet lacks `OPERATOR_ROLE`. The error carries grant `calldata` |
 | `TX_NOT_VERIFIED` | `400` | The confirmed transaction targets a different liquidation |
-| `PARTIAL_SALE_TX_REVERTED` | `400` | The report reverted. `error.txHash` carries the hash when one exists |
-| `PARTIAL_SALE_FAILED` | `400` | The report could not be prepared and no more specific code applied |
+| `PARTIAL_SALE_TX_REVERTED` | `400` | The report could not be prepared or recorded, for example because `usdcProceeds` has more decimals than the borrow asset or a chain read failed. `error.txHash` carries the hash when one exists |
 | `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
 | `MARKET_NOT_FOUND` | `404` | `marketId` was supplied but names no market on your instance |
+| `LIQUIDATION_ON_VENUE` | `409` | The record's Dutch auction is still open, so the router holds none of its collateral |
+| `ROUTER_UNRESOLVED` | `503` | The market's liquidation router could not be read. Retry shortly |
+| `ROLE_UNVERIFIABLE` | `503` | The role check could not read the router. Nothing was built. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction). A report that reverted on-chain is refused there with `TX_REVERTED`.

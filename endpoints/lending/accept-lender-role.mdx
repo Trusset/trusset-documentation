@@ -1,0 +1,396 @@
+---
+title: 'Accept Lender Role'
+api: 'POST /lending-external-securities-v2/api/markets/queued/{marketAddress}/accept'
+description: 'Build the transaction that takes a market lender-of-record role'
+---
+
+Returns the transaction that takes a market's lender-of-record role. The adopting institution names every party on the market, declares how seized collateral is realized, and approves the asset data version it reviewed. The factory does all of it in one transaction, signed by one of this instance's verified wallets, and either every part lands or none does. See [Lender of record](/endpoints/lending/introduction#lender-of-record).
+
+<Warning>
+  Adoption is final: no path returns the market to seeking a lender of record. Every address in the terms receives its role in the same transaction. Check each one before signing. The `saleRecipient` is the fixed destination for seized collateral, and rotating it is not available through this API. Even the router admin can only rotate it through an announced, one-hour-delayed flow that is refused while any realization is in flight.
+</Warning>
+
+Three conditions must hold before anything is built:
+
+- Trusset approved this account to act as a lender of record. Otherwise `403 CURATOR_NOT_APPROVED`.
+- One of this instance's verified wallets is nominated on the market, or the market is open to claimants beyond its candidates. A claim on an open market takes two calls, see [Claim an open market](#claim-an-open-market).
+- The market still seeks a lender of record.
+
+Every condition the factory enforces on adoption is checked first, so a refusal here replaces a reverted transaction. Review the market with [Get Queued Market](/endpoints/lending/get-queued-market) before building. After the transaction mines, record it with [Confirm Lender Role](/endpoints/lending/confirm-lender-role).
+
+Sign with the wallet in `signer`. It becomes the market's operator wallet: it receives the fixed operator share of repaid interest and is one of the two kinds of depositor the market accepts directly. [Rotate Operator Wallet](/endpoints/lending/rotate-operator-wallet) changes it later.
+
+## Path Parameters
+
+<ParamField path="marketAddress" type="string" required>
+  Market contract address, `0x` followed by 40 hex characters. It must be a market of the v2 lending factory.
+</ParamField>
+
+## Body Parameters
+
+### Parties
+
+Seven parties are required. Each is a checksum-valid address that is not the zero address. One wallet may hold several of them.
+
+<ParamField body="admin" type="string" required>
+  Receives `DEFAULT_ADMIN_ROLE` on the market and on its liquidation router, and owns the insurance fund.
+</ParamField>
+
+<ParamField body="issuer" type="string" required>
+  Receives `ISSUER_ROLE` on the market and owns the interest rate model, so it governs the rate and term offering from here on. It also becomes the wallet that attests the market's asset data.
+</ParamField>
+
+<ParamField body="collateralAgent" type="string" required>
+  Recorded as the pledgee on every collateral lock the market's adapter makes. It carries no capability on the market, the adapter or the router.
+</ParamField>
+
+<ParamField body="saleRecipient" type="string" required>
+  Where seized collateral goes when it is withdrawn for sale. The collateral token must permit the delivery from the market's router to this address, or the call is refused with `SALE_RECIPIENT_NOT_ELIGIBLE`.
+</ParamField>
+
+<ParamField body="liquidationOperator" type="string" required>
+  Receives `OPERATOR_ROLE` on the market's liquidation router, which drives settlement. Naming a wallet this instance holds lets settlement run through this API.
+</ParamField>
+
+<ParamField body="oracleOwner" type="string" required>
+  Owns the market's price oracle.
+</ParamField>
+
+<ParamField body="priceSigner" type="string" required>
+  Authorized as the oracle's price signer. It is the only one: a market seeking a lender of record has no signer at all.
+</ParamField>
+
+### Realization and commitment
+
+<ParamField body="realizationMode" type="string" required>
+  How seized collateral is turned into money on default: `EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION`.
+
+  The price source limits the choice. `EXCHANGE_SALE` is available only on a `MARKET`-priced market, and `AUCTION` is refused there because such a market cannot run Dutch auctions. The declaration puts the path on the record before any loan exists. No contract logic branches on it.
+</ParamField>
+
+<ParamField body="liquidityCommitment" type="string" default="0">
+  Liquidity the lender of record declares for the market, as a decimal amount of the borrow asset. Parsed at the borrow asset's decimals. The factory records it and emits it with the adoption. Nothing in the contracts enforces it.
+</ParamField>
+
+<ParamField body="maxFixedRateBps" type="integer">
+  Ceiling on any fixed borrower rate the rate model owner can set later, in basis points. Integer, 1 to 50000. Once recorded it can only move down. Omit it to record no ceiling.
+
+  On a `FIXED` market the ceiling must not be below the rate new loans are stamped with, or the adoption reverts on-chain. The API does not check this before building.
+</ParamField>
+
+### Registers and provisioning
+
+<ParamField body="identityRegistry" type="string">
+  Borrower register for a market that has none. Only a nominated wallet may bring one. It is ignored when the deployer already installed a register, which stands. A `MARKET`-priced market must end up with one.
+
+  It must answer `isVerified(address)`, as an ERC-3643 identity registry, an ONCHAINID-based register and the Trusset register all do. Omit it, or send the zero address, to adopt without one where the price source allows.
+</ParamField>
+
+<ParamField body="providerRegistry" type="string">
+  The register every vault on the market examines its depositors against. Installed when the market carries none. The deployer's `proposedProviderRegistry` is a suggestion only: this field decides.
+</ParamField>
+
+<ParamField body="liquidator" type="string">
+  Wallet granted `LIQUIDATOR_ROLE` on the market in the same transaction. It can trigger a seizure and configure nothing. Omitted or zero on a `TWO_REGISTERS` market, the API names the signing wallet.
+</ParamField>
+
+<ParamField body="vault" type="string">
+  One of this instance's own vaults, registered on the market as a just-in-time liquidity source with vault liquidity switched on. The vault must settle in the market's borrow asset and be operated by the signing wallet. The vault's own draw cap remains the one step left, signed by the vault operator.
+</ParamField>
+
+`providerRegistry`, `liquidator` and `vault` need the current market implementation. A market on the earlier implementation, reported as `SINGLE_REGISTER` by [Get Queued Market](/endpoints/lending/get-queued-market), refuses them with `MARKET_UPGRADE_REQUIRED`. It also needs a borrower register whatever its price source.
+
+### Asset data and open-market claims
+
+<ParamField body="assetDataHash" type="string">
+  The hash of the asset data version you reviewed, `0x` followed by 64 hex characters. It must equal the issuer's standing attestation, `assetData.attested` on [Get Queued Market](/endpoints/lending/get-queued-market). The adoption then records the approval of exactly that version.
+</ParamField>
+
+<ParamField body="acknowledgeAssetData" type="boolean">
+  Send `false` to adopt without acknowledging any version. It takes effect only when `assetDataHash` is omitted.
+</ParamField>
+
+<ParamField body="claimSalt" type="string">
+  Salt for an open-market claim, `0x` followed by 64 hex characters. Omit it on the first call and the API generates one. Send the returned value, with identical terms, on the second call. A nominee does not need it.
+</ParamField>
+
+## Approve the asset data
+
+A market that carries an issuer attestation cannot be adopted silently. Without `assetDataHash`, the call is refused with `422 ASSET_DATA_ACKNOWLEDGEMENT_REQUIRED`, and `error.details` names the standing hash and version. Read the bundle with [Get Asset Data Bundle](/endpoints/lending/get-asset-data-bundle), then send the hash you read. Send `acknowledgeAssetData: false` instead only if the adoption should approve no version.
+
+A hash that no longer stands is refused with `409 ASSET_DATA_STALE`, with `details.reviewed`, `details.standing` and `details.standingVersion`. The issuer can still re-attest after the transaction is built. The factory then refuses the whole adoption on-chain, so a stale approval can never pass.
+
+## Claim an open market
+
+When no wallet of this instance is nominated and the market is open, the first call returns a `commitCuratorClaim` transaction instead of the adoption. It announces a hash of the exact adoption call, so the terms stay private and transaction ordering cannot decide who takes the market. Only the wallet in `signer` can complete the claim.
+
+<Steps>
+  <Step title="Announce">
+    Broadcast the returned `commitCuratorClaim` transaction. Keep `claimSalt`.
+  </Step>
+  <Step title="Wait">
+    Wait `claimDelaySeconds` (10 minutes) from the announcement. Calling earlier returns `409 CLAIM_PENDING` with the moment it becomes actionable.
+  </Step>
+  <Step title="Complete">
+    Call this endpoint again with identical terms and the same `claimSalt`. It returns the `acceptCuratorRole` transaction. Broadcast it with `signer`, then confirm it.
+  </Step>
+</Steps>
+
+The announcement lapses after `claimWindowSeconds` (72 hours) and its hash stays consumed. A later call returns `409 CLAIM_EXPIRED`. Start again without `claimSalt` to receive a fresh one.
+
+Any change to the terms changes the announced hash, including a newly attested asset data version. The API then answers with a new `commitCuratorClaim` for the new terms, and the wait starts again.
+
+An open-market claimant is admitted by the borrower register the deployer installed. The API picks the first of this instance's wallets, up to five, that the register verifies. None verified is `403 CANDIDATE_NOT_VERIFIED`. A market with no borrower register cannot be claimed without a nomination (`403 NOMINATION_REQUIRED`), and a claimant cannot bring its own register.
+
+## Response Fields
+
+The adoption transaction:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, addressed to the lending factory.</ResponseField>
+    <ResponseField name="functionName" type="string">`acceptCuratorRole`.</ResponseField>
+    <ResponseField name="marketAddress" type="string">Market address, lowercased.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet that must sign: the nominated wallet, or on an open-market claim the wallet the register verified.</ResponseField>
+    <ResponseField name="identityRegistry" type="string">The borrower register the market will carry, or `null` for none.</ResponseField>
+    <ResponseField name="borrowerRegistry" type="string">The same value as `identityRegistry`.</ResponseField>
+    <ResponseField name="providerRegistry" type="string">The provider register the terms install, or `null`.</ResponseField>
+    <ResponseField name="borrowAsset" type="object">`{ address, symbol, decimals }` of the market's settlement asset, or `null` when it could not be read.</ResponseField>
+    <ResponseField name="generation" type="string">`TWO_REGISTERS` or `SINGLE_REGISTER`.</ResponseField>
+    <ResponseField name="installedRegister" type="object">The borrower register the deployer installed, `{ address, shape, usable, note }`, or `null`.</ResponseField>
+    <ResponseField name="terms" type="object">The terms as encoded: the seven parties, `identityRegistry`, `providerRegistry`, `liquidator`, `vault`, `liquidityCommitment` in the borrow asset's smallest unit, `realizationMode`, `claimSalt`, `maxFixedRateBps` and `assetDataHash`. Absent optional values read `null`.</ResponseField>
+    <ResponseField name="assetData" type="object">`{ acknowledged, contentHash, version, attestor, factorySupport, note }`. `acknowledged` says whether this adoption approves a version.</ResponseField>
+    <ResponseField name="handoverNote" type="string">What the transaction hands over. On a `TWO_REGISTERS` market the oracle, rate model and insurance fund pass to their named owners inside the transaction. On a `SINGLE_REGISTER` market each named owner must accept ownership afterwards.</ResponseField>
+    <ResponseField name="warnings" type="array">Present only when there is something to say, each `{ code, vault, message }`. `VAULT_PREDATES_DISTRIBUTOR` flags a vault that cannot yet collect the distributor share this market books for it.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint: "confirm-accept", txHash: true }`. See [Confirm Lender Role](/endpoints/lending/confirm-lender-role).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+The claim announcement, on the first call of an open-market claim:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, addressed to the lending factory.</ResponseField>
+    <ResponseField name="functionName" type="string">`commitCuratorClaim`.</ResponseField>
+    <ResponseField name="claimFlow" type="boolean">Always `true`. Branch on it.</ResponseField>
+    <ResponseField name="commitment" type="string">The announced hash of the signer and the exact adoption call.</ResponseField>
+    <ResponseField name="claimSalt" type="string">The salt inside the terms. Send it back unchanged on the second call.</ResponseField>
+    <ResponseField name="claimDelaySeconds" type="integer">Wait before completing, read from the factory. `600`.</ResponseField>
+    <ResponseField name="claimWindowSeconds" type="integer">How long the announcement stays usable. `259200`.</ResponseField>
+    <ResponseField name="marketAddress" type="string">Market address, lowercased.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet the announcement binds. Only it can complete the claim.</ResponseField>
+    <ResponseField name="description" type="string">The next step in words.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint: "accept", retryWith: { claimSalt } }`. There is nothing to confirm: call this endpoint again.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/queued/0x1c74f9a2b0e63d581a47c02f9b8de3517a604c2b/accept" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "admin": "0x5a3c9e71b0d24f86a1c7e5039b2d84f6c1a0e7d3",
+    "issuer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "collateralAgent": "0x8b17e4d90c3a25f6e1d09b7c4a3f52e86d1c0b94",
+    "saleRecipient": "0x2f6a0d83c5e19b47d2a8c6f1e03b95d74a2c8e16",
+    "liquidationOperator": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+    "oracleOwner": "0x5a3c9e71b0d24f86a1c7e5039b2d84f6c1a0e7d3",
+    "priceSigner": "0x9c4d27e1a5b8f03d6e2c71a49b0f58d3e6a1c2b7",
+    "realizationMode": "ISSUER_REDEMPTION",
+    "liquidityCommitment": "250000",
+    "maxFixedRateBps": 1500,
+    "providerRegistry": "0x9e3c8a15f4d70b2681c5a3f9027d4be8115c7d21",
+    "assetDataHash": "0xa93f4d51d67f4f88cb447fd06bccff45483fb5a9f04fa67dd1c8cdcd1127ae90"
+  }'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/queued/${marketAddress}/accept`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+const terms = {
+  admin, issuer, collateralAgent, saleRecipient,
+  liquidationOperator, oracleOwner, priceSigner,
+  realizationMode: 'ISSUER_REDEMPTION',
+  liquidityCommitment: '250000',
+  assetDataHash: reviewedHash
+};
+
+let res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(terms) });
+let { data } = await res.json();
+
+if (data.claimFlow) {
+  const announce = await wallet.sendTransaction(data.transaction);
+  await announce.wait();
+  await new Promise((resolve) => setTimeout(resolve, data.claimDelaySeconds * 1000));
+  res = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...terms, claimSalt: data.claimSalt })
+  });
+  ({ data } = await res.json());
+}
+
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0xf1ad12f5698f58badd8a662acffccb067a2ddb8a",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "acceptCuratorRole",
+    "marketAddress": "0x1c74f9a2b0e63d581a47c02f9b8de3517a604c2b",
+    "signer": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+    "identityRegistry": null,
+    "borrowerRegistry": null,
+    "providerRegistry": "0x9e3c8a15f4d70b2681c5a3f9027d4be8115c7d21",
+    "borrowAsset": {
+      "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "symbol": "USDC",
+      "decimals": 6
+    },
+    "generation": "TWO_REGISTERS",
+    "installedRegister": null,
+    "terms": {
+      "admin": "0x5a3c9e71b0d24f86a1c7e5039b2d84f6c1a0e7d3",
+      "issuer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "collateralAgent": "0x8b17e4d90c3a25f6e1d09b7c4a3f52e86d1c0b94",
+      "saleRecipient": "0x2f6a0d83c5e19b47d2a8c6f1e03b95d74a2c8e16",
+      "liquidationOperator": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+      "oracleOwner": "0x5a3c9e71b0d24f86a1c7e5039b2d84f6c1a0e7d3",
+      "priceSigner": "0x9c4d27e1a5b8f03d6e2c71a49b0f58d3e6a1c2b7",
+      "identityRegistry": null,
+      "providerRegistry": "0x9e3c8a15f4d70b2681c5a3f9027d4be8115c7d21",
+      "liquidator": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+      "vault": null,
+      "liquidityCommitment": "250000000000",
+      "realizationMode": "ISSUER_REDEMPTION",
+      "claimSalt": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "maxFixedRateBps": 1500,
+      "assetDataHash": "0xa93f4d51d67f4f88cb447fd06bccff45483fb5a9f04fa67dd1c8cdcd1127ae90"
+    },
+    "assetData": {
+      "acknowledged": true,
+      "contentHash": "0xa93f4d51d67f4f88cb447fd06bccff45483fb5a9f04fa67dd1c8cdcd1127ae90",
+      "version": 1,
+      "attestor": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "factorySupport": true,
+      "note": "This adoption records your approval of asset data version 1 (0xa93f4d51d67f4f88cb447fd06bccff45483fb5a9f04fa67dd1c8cdcd1127ae90). The factory refuses the whole adoption if the issuer re-attests before it mines."
+    },
+    "handoverNote": "Adoption assigns every regulated role on the market and its router, authorizes the price signer, installs the registers you name, grants the liquidator and connects the vault, and hands the oracle, the rate model and the reserve to the owners you name, all inside this one transaction. Nothing is left for anyone to accept afterwards; the vault's own draw cap is the only step that follows, signed by the vault operator.",
+    "confirmWith": {
+      "endpoint": "confirm-accept",
+      "txHash": true
+    }
+  }
+}
+```
+```json Claim Announcement
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0xf1ad12f5698f58badd8a662acffccb067a2ddb8a",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "commitCuratorClaim",
+    "claimFlow": true,
+    "commitment": "0x3f9e1c7a5b2d8046e1f9a3c7d5b20e8f4a6c1d9b7e3f5a2c8d0b4e6f1a9c3d7e",
+    "claimSalt": "0x7c2e9a4f1b6d3e8c5a0f7b2d9e4c1a6f3b8d5e0c7a2f9b4d1e6c3a8f5b0d2e7c",
+    "claimDelaySeconds": 600,
+    "claimWindowSeconds": 259200,
+    "marketAddress": "0x1c74f9a2b0e63d581a47c02f9b8de3517a604c2b",
+    "signer": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+    "description": "Announce the claim on this open market. After 10 minutes, call accept again with the identical terms and this claimSalt to receive the acceptCuratorRole transaction; the announcement lapses after 72 hours.",
+    "confirmWith": {
+      "endpoint": "accept",
+      "retryWith": {
+        "claimSalt": "0x7c2e9a4f1b6d3e8c5a0f7b2d9e4c1a6f3b8d5e0c7a2f9b4d1e6c3a8f5b0d2e7c"
+      }
+    }
+  }
+}
+```
+```json Error - Acknowledgement Required
+{
+  "success": false,
+  "error": {
+    "code": "ASSET_DATA_ACKNOWLEDGEMENT_REQUIRED",
+    "message": "The issuer attested asset data for this market (version 1, 0xa93f4d51d67f4f88cb447fd06bccff45483fb5a9f04fa67dd1c8cdcd1127ae90). Read the bundle, then name the hash you reviewed as assetDataHash in the adoption terms so the adoption records your approval of that version; pass acknowledgeAssetData: false to adopt without acknowledging any version.",
+    "details": {
+      "standing": "0xa93f4d51d67f4f88cb447fd06bccff45483fb5a9f04fa67dd1c8cdcd1127ae90",
+      "standingVersion": 1
+    }
+  }
+}
+```
+```json Error - Claim Pending
+{
+  "success": false,
+  "error": {
+    "code": "CLAIM_PENDING",
+    "message": "The claim was announced and becomes actionable at 2026-09-26T10:24:00.000Z. Call accept again with the identical terms and claimSalt after that moment."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+A malformed body is refused by its first offending field. The four `INVALID_` codes below carry `error.details` naming that field.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `marketAddress`, `maxFixedRateBps` or `claimSalt` failed validation |
+| `INVALID_CURATOR_TERMS` | `400` | A party address, `identityRegistry`, `providerRegistry`, `liquidator` or `vault` is missing where required, malformed, the zero address where a party is required, or fails its checksum |
+| `INVALID_REALIZATION_MODE` | `400` | `realizationMode` is missing or not `EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION` |
+| `INVALID_LIQUIDITY_COMMITMENT` | `400` | `liquidityCommitment` is not a non-negative decimal, or carries more decimal places than the borrow asset |
+| `INVALID_CONTENT_HASH` | `400` | `assetDataHash` is not a 32-byte hex hash, or `acknowledgeAssetData` is not a boolean |
+| `ACCEPT_FAILED` | `400` | The transaction could not be built for a reason that carries no code of its own |
+| `CURATOR_NOT_APPROVED` | `403` | Trusset has not approved this account to act as a lender of record |
+| `NOT_NOMINATED` | `403` | No verified wallet of this instance is nominated, and the market is not open |
+| `NOMINATION_REQUIRED` | `403` | A claimant nobody nominated brought a borrower register, or the open market has no borrower register to admit one |
+| `CANDIDATE_NOT_VERIFIED` | `403` | None of the wallets checked is verified on the register the open market admits claimants through |
+| `MARKET_NOT_V2` | `404` | The address is not a market of the v2 lending factory this instance deploys to |
+| `MARKET_NOT_DEPLOYED` | `404` | No deployment for this market could be read from the lending factory |
+| `VAULT_NOT_FOUND` | `404` | `vault` is not a vault of this instance, or it is archived |
+| `NOT_SEEKING_CURATOR` | `409` | The market already has a lender of record. The message names it |
+| `REALIZATION_MODE_UNAVAILABLE` | `409` | `AUCTION` was declared on a `MARKET`-priced market |
+| `REALIZATION_BASIS_UNAVAILABLE` | `409` | `EXCHANGE_SALE` was declared on a `NAV` or `ORACLE` market |
+| `SIGNER_SET_NOT_CLEAN` | `409` | The market's oracle reports a different number of authorized signers than adoption requires |
+| `MARKET_UPGRADE_REQUIRED` | `409` | `providerRegistry`, `liquidator` or `vault` was sent for a market on the earlier implementation |
+| `ASSET_MISMATCH` | `409` | `vault` settles in a different asset than the market |
+| `VAULT_NOT_OPERATORS` | `409` | `vault` is operated by a different wallet than the one signing the adoption |
+| `ASSET_DATA_STALE` | `409` | `assetDataHash` is no longer the standing attestation. `details` carries `reviewed`, `standing`, `standingVersion` and `attestedAt` |
+| `ASSET_DATA_NONE` | `409` | `assetDataHash` was sent but the issuer attested no asset data for this market |
+| `FACTORY_UPGRADE_REQUIRED` | `409` | `assetDataHash` was sent but the factory records no asset data attestation |
+| `CLAIM_PENDING` | `409` | The open-market claim was announced less than `claimDelaySeconds` ago. The message names the moment it becomes actionable |
+| `CLAIM_EXPIRED` | `409` | The announcement lapsed. Start again without `claimSalt` |
+| `WALLET_NOT_CONFIGURED` | `412` | This instance has no verified wallet |
+| `IDENTITY_REGISTRY_REQUIRED` | `422` | The market ends up without a borrower register where one is required: a `MARKET`-priced market, or a market on the earlier implementation |
+| `IDENTITY_REGISTRY_INCOMPATIBLE` | `422` | A register named in the terms does not answer `isVerified(address)` in a shape the market reads |
+| `SALE_RECIPIENT_NOT_ELIGIBLE` | `422` | The collateral token refuses delivery from the market's router to `saleRecipient`. The message names the blocked party and the remedy |
+| `ORACLE_FEED_UNUSABLE` | `422` | On an `ORACLE` market, the feed cannot answer a price inside the staleness window right now |
+| `ASSET_DATA_ACKNOWLEDGEMENT_REQUIRED` | `422` | The market carries an attestation and neither `assetDataHash` nor `acknowledgeAssetData: false` was sent. `details` carries `standing` and `standingVersion` |
+| `MARKET_VERIFICATION_UNAVAILABLE` | `503` | The address could not be checked against the v2 factory. Retry shortly |
+| `ORACLE_STATE_UNREADABLE` | `503` | The market's oracle could not be read to check its signer set. Retry shortly |
+| `IDENTITY_REGISTRY_UNREADABLE` | `503` | The market's borrower register, or a register named in the terms, could not be reached. Retry shortly |
+| `MARKET_IMPLEMENTATION_UNREADABLE` | `503` | The market implementation could not be read. Retry shortly |
+| `FACTORY_READ_FAILED` | `503` | The factory could not be read for the market, its asset data record or the claim record. Retry shortly |

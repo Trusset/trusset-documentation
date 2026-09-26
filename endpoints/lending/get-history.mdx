@@ -1,12 +1,12 @@
 ---
 title: 'Get Market History'
-api: 'GET /lending-external-securities/api/markets/{marketId}/history'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/history'
 description: 'Read indexed time series of pool state, rates and volumes'
 ---
 
-Returns a bucketed time series for the market, built from on-chain snapshots read through the subgraph. Use it to chart liquidity, utilization, rates and collateral price over time.
+Returns a bucketed time series for the market, built from on-chain snapshots read through the event index. Use it to chart liquidity, utilization, rates and collateral price over time.
 
-History is an enhancement rather than a dependency, so an indexing outage never fails the request. The call returns `200` with `available: false` and a `reason` instead, and callers should branch on `available` before reading `points`.
+History is an enhancement rather than a dependency, so an indexing outage never fails the request. The call returns `200` with `available: false` and a `reason` instead, and callers should branch on `available` before reading `points`. A series is cached for up to a minute.
 
 ## Path Parameters
 
@@ -15,7 +15,7 @@ History is an enhancement rather than a dependency, so an indexing outage never 
 ## Query Parameters
 
 <ParamField query="range" type="string" default="30d">
-  Window to cover. One of `24h`, `7d`, `30d`, `90d`, `1y`, `all`. Any other value is rejected with `VALIDATION_ERROR`.
+  Window to cover. One of `24h`, `7d`, `30d`, `90d`, `1y`, `all`, lowercase. Any other value is rejected with `VALIDATION_ERROR`.
 </ParamField>
 
 <ParamField query="resolution" type="string">
@@ -32,18 +32,23 @@ History is an enhancement rather than a dependency, so an indexing outage never 
     <ResponseField name="collateralTokenSymbol" type="string">Collateral token symbol, or null.</ResponseField>
     <ResponseField name="available" type="boolean">Whether indexed history could be read at all. When `false`, only `reason` and `message` accompany it.</ResponseField>
     <ResponseField name="indexed" type="boolean">Whether this market has produced at least one snapshot.</ResponseField>
-    <ResponseField name="reason" type="string">`MARKET_NOT_INDEXED` or `AWAITING_FIRST_SNAPSHOT` when `indexed` is false, otherwise null. When `available` is false, one of `NOT_CONFIGURED`, `NO_MARKET_ADDRESS`, `INDEX_STALE`, `INDEXING_ERRORS`, `UPSTREAM_ERROR`, `QUERY_ERROR`, `EMPTY_RESPONSE`.</ResponseField>
+    <ResponseField name="reason" type="string">`MARKET_NOT_INDEXED` or `AWAITING_FIRST_SNAPSHOT` when `indexed` is false, otherwise null. When `available` is false, one of `NOT_CONFIGURED`, `NO_MARKET_ADDRESS`, `INDEX_NOT_DEPLOYED`, `UPSTREAM_ERROR`, `QUERY_ERROR`, `EMPTY_RESPONSE`, `TIMEOUT`, `NETWORK_ERROR`.</ResponseField>
     <ResponseField name="message" type="string">Human-readable explanation accompanying `reason`, otherwise null.</ResponseField>
     <ResponseField name="range" type="string">Applied range.</ResponseField>
     <ResponseField name="resolution" type="string">Applied resolution.</ResponseField>
+    <ResponseField name="borrowAsset" type="string">Borrow asset address, as the index records it.</ResponseField>
     <ResponseField name="borrowAssetDecimals" type="integer">Decimals used to format settlement amounts.</ResponseField>
+    <ResponseField name="collateralToken" type="string">Collateral token address, as the index records it.</ResponseField>
     <ResponseField name="collateralDecimals" type="integer">Decimals used to format collateral amounts.</ResponseField>
     <ResponseField name="snapshotCount" type="integer">Total snapshots recorded for this market.</ResponseField>
     <ResponseField name="firstIndexedAt" type="string">ISO 8601 timestamp of the first point returned, or null.</ResponseField>
     <ResponseField name="lastIndexedAt" type="string">ISO 8601 timestamp of the most recent snapshot, or null.</ResponseField>
-    <ResponseField name="truncated" type="boolean">`true` when the window held more than 1000 buckets and the series was cut.</ResponseField>
+    <ResponseField name="truncated" type="boolean">`true` when the index returned its cap of 1000 buckets for the window, so the series is incomplete. Narrow the range or use `day` resolution.</ResponseField>
+    <ResponseField name="rateMode" type="string">The market's rate mode as recorded: `CURVE`, `CLAMPED` or `FIXED`.</ResponseField>
+    <ResponseField name="fixedStampRateBps" type="integer">The fixed rate new loans are stamped with, or null when the market stamps none.</ResponseField>
+    <ResponseField name="supplyRateBasis" type="string">`FIXED_STAMP` when supply rates were derived from `fixedStampRateBps`, `BORROW_RATE` when from each point's borrow rate.</ResponseField>
     <ResponseField name="points" type="array">
-      Buckets ordered oldest first.
+      Buckets ordered oldest first. The series is capped at the most recent 1000 points after gaps are filled.
       <Expandable>
         <ResponseField name="timestamp" type="integer">Bucket start, milliseconds since epoch.</ResponseField>
         <ResponseField name="date" type="string">Bucket start as an ISO 8601 timestamp.</ResponseField>
@@ -56,20 +61,25 @@ History is an enhancement rather than a dependency, so an indexing outage never 
         <ResponseField name="collateralValue" type="string">Collateral locked, valued in the borrow asset.</ResponseField>
         <ResponseField name="collateralPrice" type="string">Collateral price at the bucket.</ResponseField>
         <ResponseField name="utilizationRate" type="integer">Utilization in basis points.</ResponseField>
-        <ResponseField name="borrowRate" type="integer">Borrow rate in basis points.</ResponseField>
-        <ResponseField name="supplyRate" type="integer">Supply rate in basis points.</ResponseField>
-        <ResponseField name="exchangeRate" type="string">LP share exchange rate, 18 decimals.</ResponseField>
+        <ResponseField name="borrowRate" type="integer">The interest model's curve rate in basis points, as indexed. On a `FIXED` market this is the reference curve, not the stamped rate.</ResponseField>
+        <ResponseField name="supplyRate" type="number">Supply rate in basis points, derived from the applied borrow rate, the utilization and the market's fee split. It can carry up to four decimal places.</ResponseField>
+        <ResponseField name="exchangeRate" type="string">LP share exchange rate.</ResponseField>
         <ResponseField name="openLiquidity" type="string">Liquidity at bucket open. `highLiquidity` and `lowLiquidity` accompany it.</ResponseField>
         <ResponseField name="openBorrowed" type="string">Borrowings at bucket open. `highBorrowed` and `lowBorrowed` accompany it.</ResponseField>
         <ResponseField name="depositVolume" type="string">Flow during the bucket. `withdrawVolume`, `borrowVolume`, `repayVolume` and `liquidationVolume` accompany it.</ResponseField>
         <ResponseField name="carriedForward" type="boolean">Present and `true` on a synthesized opening point that carries pre-window state onto the left edge. Its flow volumes are zeroed because they belong to an earlier window.</ResponseField>
+        <ResponseField name="interpolated" type="boolean">Present and `true` on a point that fills a gap between buckets. It repeats the previous bucket's state with zero flow volumes.</ResponseField>
       </Expandable>
     </ResponseField>
     <ResponseField name="totals" type="object">
-      Lifetime aggregates for the market, or null before the first snapshot. Carries `totalLiquidity`, `totalBorrowed`, `poolValue`, `pendingLiquidationDebt`, `totalCollateral`, `collateralValue`, `collateralPrice`, `utilizationRate`, `borrowRate`, `supplyRate`, `cumulativeDeposited`, `cumulativeWithdrawn`, `cumulativeBorrowed`, `cumulativePrincipalRepaid`, `cumulativeInterestPaid`, `cumulativeBadDebt`, `loanCount`, `activeLoanCount`, `liquidationCount` and `liquidityProviderCount`.
+      Lifetime aggregates for the market, or null before the first snapshot. Carries `totalLiquidity`, `totalBorrowed`, `poolValue`, `pendingLiquidationDebt`, `totalCollateral`, `collateralValue`, `collateralPrice`, `utilizationRate`, `borrowRate`, `supplyRate`, `cumulativeDeposited`, `cumulativeWithdrawn`, `cumulativeBorrowed`, `cumulativePrincipalRepaid`, `cumulativeInterestPaid`, `cumulativeBadDebt`, `cumulativeBadDebtCovered`, `loanCount`, `activeLoanCount`, `liquidationCount` and `liquidityProviderCount`.
     </ResponseField>
   </Expandable>
 </ResponseField>
+
+<Warning>
+  Supply rates are derived with today's figures, not the ones in force at each point. The fee split is read from the market now, and on a `FIXED` market the stamp is the rate the market stamps today. Points from before a change of either are restated at the current values.
+</Warning>
 
 <Note>
   Buckets exist only where something happened. Gaps are filled by carrying the previous bucket forward, which is exact for pool state because balances genuinely do not change between mutations.
@@ -77,12 +87,12 @@ History is an enhancement rather than a dependency, so an indexing outage never 
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/history?range=7d&resolution=hour" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/history?range=7d&resolution=hour" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/history?range=30d`,
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/history?range=30d`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
@@ -97,10 +107,10 @@ if (data.available && data.indexed) {
 {
   "success": true,
   "data": {
-    "marketId": "clx_secmarket_001",
+    "marketId": "cmssh7p1k0001cghxq2m4v8rz",
     "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
     "borrowAssetSymbol": "USDC",
-    "collateralTokenSymbol": "ACME",
+    "collateralTokenSymbol": "NYF1",
     "available": true,
     "indexed": true,
     "reason": null,
@@ -112,56 +122,60 @@ if (data.available && data.indexed) {
     "collateralToken": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
     "collateralDecimals": 18,
     "snapshotCount": 412,
-    "firstIndexedAt": "2025-06-08T12:00:00.000Z",
-    "lastIndexedAt": "2025-06-15T11:00:00.000Z",
+    "firstIndexedAt": "2026-09-18T12:00:00.000Z",
+    "lastIndexedAt": "2026-09-25T11:00:00.000Z",
     "truncated": false,
+    "rateMode": "CLAMPED",
+    "fixedStampRateBps": null,
+    "supplyRateBasis": "BORROW_RATE",
     "points": [
       {
-        "timestamp": 1749384000000,
-        "date": "2025-06-08T12:00:00.000Z",
-        "totalLiquidity": "250000.000000",
-        "totalBorrowed": "112500.000000",
-        "availableLiquidity": "137500.000000",
-        "poolValue": "250412.881000",
-        "pendingLiquidationDebt": "0.000000",
-        "totalCollateral": "1500.000000000000000000",
-        "collateralValue": "157230.000000",
-        "collateralPrice": "104.820000",
+        "timestamp": 1789732800000,
+        "date": "2026-09-18T12:00:00.000Z",
+        "totalLiquidity": "250000.0",
+        "totalBorrowed": "112500.0",
+        "availableLiquidity": "137500.0",
+        "poolValue": "250412.881",
+        "pendingLiquidationDebt": "0.0",
+        "totalCollateral": "1500.0",
+        "collateralValue": "157230.0",
+        "collateralPrice": "104.82",
         "utilizationRate": 4500,
         "borrowRate": 620,
-        "supplyRate": 279,
-        "exchangeRate": "1.001651524000000000",
-        "openLiquidity": "250000.000000",
-        "highLiquidity": "250000.000000",
-        "lowLiquidity": "250000.000000",
-        "openBorrowed": "112500.000000",
-        "highBorrowed": "112500.000000",
-        "lowBorrowed": "112500.000000",
-        "depositVolume": "0.000000",
-        "withdrawVolume": "0.000000",
-        "borrowVolume": "0.000000",
-        "repayVolume": "0.000000",
-        "liquidationVolume": "0.000000",
+        "supplyRate": 206.3205,
+        "exchangeRate": "1.001651",
+        "openLiquidity": "250000.0",
+        "highLiquidity": "250000.0",
+        "lowLiquidity": "250000.0",
+        "openBorrowed": "112500.0",
+        "highBorrowed": "112500.0",
+        "lowBorrowed": "112500.0",
+        "depositVolume": "0",
+        "withdrawVolume": "0",
+        "borrowVolume": "0",
+        "repayVolume": "0",
+        "liquidationVolume": "0",
         "carriedForward": true
       }
     ],
     "totals": {
-      "totalLiquidity": "250000.000000",
-      "totalBorrowed": "112500.000000",
-      "poolValue": "250412.881000",
-      "pendingLiquidationDebt": "0.000000",
-      "totalCollateral": "1500.000000000000000000",
-      "collateralValue": "157230.000000",
-      "collateralPrice": "104.820000",
+      "totalLiquidity": "250000.0",
+      "totalBorrowed": "112500.0",
+      "poolValue": "250412.881",
+      "pendingLiquidationDebt": "0.0",
+      "totalCollateral": "1500.0",
+      "collateralValue": "157230.0",
+      "collateralPrice": "104.82",
       "utilizationRate": 4500,
       "borrowRate": 620,
-      "supplyRate": 279,
-      "cumulativeDeposited": "400000.000000",
-      "cumulativeWithdrawn": "150000.000000",
-      "cumulativeBorrowed": "212500.000000",
-      "cumulativePrincipalRepaid": "100000.000000",
-      "cumulativeInterestPaid": "412.881000",
-      "cumulativeBadDebt": "0.000000",
+      "supplyRate": 206.3205,
+      "cumulativeDeposited": "400000.0",
+      "cumulativeWithdrawn": "150000.0",
+      "cumulativeBorrowed": "212500.0",
+      "cumulativePrincipalRepaid": "100000.0",
+      "cumulativeInterestPaid": "412.881",
+      "cumulativeBadDebt": "0.0",
+      "cumulativeBadDebtCovered": "0.0",
       "loanCount": 9,
       "activeLoanCount": 3,
       "liquidationCount": 1,
@@ -174,10 +188,10 @@ if (data.available && data.indexed) {
 {
   "success": true,
   "data": {
-    "marketId": "clx_secmarket_002",
+    "marketId": "cmsv2q8n30007cghx5t1b4k9m",
     "marketAddress": "0x1c74f9a2b0e63d581a47c02f9b8de3517a604c2b",
     "borrowAssetSymbol": "USDC",
-    "collateralTokenSymbol": "ACME",
+    "collateralTokenSymbol": "NYF1",
     "available": true,
     "indexed": false,
     "reason": "MARKET_NOT_INDEXED",
@@ -188,7 +202,10 @@ if (data.available && data.indexed) {
     "collateralDecimals": 18,
     "snapshotCount": 0,
     "points": [],
-    "totals": null
+    "totals": null,
+    "rateMode": "CURVE",
+    "fixedStampRateBps": null,
+    "supplyRateBasis": "BORROW_RATE"
   }
 }
 ```
@@ -196,10 +213,10 @@ if (data.available && data.indexed) {
 {
   "success": true,
   "data": {
-    "marketId": "clx_secmarket_001",
+    "marketId": "cmssh7p1k0001cghxq2m4v8rz",
     "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
     "borrowAssetSymbol": "USDC",
-    "collateralTokenSymbol": "ACME",
+    "collateralTokenSymbol": "NYF1",
     "available": false,
     "reason": "NOT_CONFIGURED",
     "message": "Historical indexing is not configured for this network"
@@ -213,4 +230,5 @@ if (data.available && data.indexed) {
 | Code | HTTP | Cause |
 |---|---|---|
 | `VALIDATION_ERROR` | `400` | `range` or `resolution` is not one of the accepted values |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

@@ -1,0 +1,118 @@
+---
+title: 'Nominate Candidate'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/nominations'
+description: 'Nominate a wallet to take a market lender-of-record role'
+---
+
+Returns the factory transaction that nominates one more candidate for a market still seeking a lender of record. A nomination admits exactly one wallet: the candidate must later take the role with that address, through [Accept Lender Role](/endpoints/lending/accept-lender-role). See [Lender of record](/endpoints/lending/introduction#lender-of-record).
+
+Nominating is the deploying side's act. Two checks decide whether it lands, and they are not the same check:
+
+- The API builds the transaction only when this instance's registered wallet is the factory owner or sits on the factory's deployer register, which the factory owner maintains. Otherwise it answers `403 DEPLOYER_NOT_AUTHORIZED`.
+- The factory accepts the transaction only from the wallet that deployed this market, or from the factory owner. A wallet that passes the API check but did not deploy this market has its transaction reverted.
+
+Sign with the wallet in `signer`, and make sure it is the wallet that deployed the market. There is no confirm call. Once the transaction mines, [Get Nominations](/endpoints/lending/get-nominations) lists the candidate.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="candidate" type="string" required>
+  Wallet to nominate. A checksum-valid address that is not the zero address. Nominate the exact wallet the institution will sign the adoption with: a nomination names an address, not an institution.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, addressed to the lending factory.</ResponseField>
+    <ResponseField name="functionName" type="string">`nominateCurator`.</ResponseField>
+    <ResponseField name="marketAddress" type="string">Market contract address, lowercased.</ResponseField>
+    <ResponseField name="candidate" type="string">The nominated wallet, lowercased.</ResponseField>
+    <ResponseField name="signer" type="string">This instance's registered wallet, which the transaction expects to be signed by.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/nominations" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "candidate": "0xb27d0f6a91c458e307b2d4f8916ac05e73128b64" }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/nominations`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ candidate: '0xb27d0f6a91c458e307b2d4f8916ac05e73128b64' })
+  }
+);
+const { data } = await res.json();
+
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0xf1ad12f5698f58badd8a662acffccb067a2ddb8a",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "nominateCurator",
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "candidate": "0xb27d0f6a91c458e307b2d4f8916ac05e73128b64",
+    "signer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52"
+  }
+}
+```
+```json Error - Not An Authorized Deployer
+{
+  "success": false,
+  "error": {
+    "code": "DEPLOYER_NOT_AUTHORIZED",
+    "message": "This issuer wallet is not authorized to nominate on the lending factory. Ask the factory owner to authorize 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52."
+  }
+}
+```
+```json Error - Already Nominated
+{
+  "success": false,
+  "error": {
+    "code": "ALREADY_NOMINATED",
+    "message": "This candidate is already nominated for this market"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `candidate` is missing, malformed, the zero address, or fails its EIP-55 checksum |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address |
+| `NOMINATE_FAILED` | `400` | The transaction could not be built for a reason that carries no code of its own |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `DEPLOYER_NOT_AUTHORIZED` | `403` | This instance's registered wallet is neither the factory owner nor on the factory's deployer register. A factory that could not be read for this check answers the same code |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_NOT_DEPLOYED` | `404` | The lending factory holds no deployment for this market |
+| `ALREADY_NOMINATED` | `409` | The candidate is already nominated on this market |
+| `NOT_SEEKING_CURATOR` | `409` | The market already has a lender of record. The message names it |
+| `WALLET_NOT_CONFIGURED` | `412` | This instance has no verified wallet to sign the nomination |
+| `FACTORY_READ_FAILED` | `503` | The factory could not be reached to read the market. Retry shortly |

@@ -1,0 +1,206 @@
+---
+title: 'Get Insurance Status'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/insurance/status'
+description: 'What the market insurance fund holds, has paid and can cover, and what the market has lost'
+---
+
+Returns the market's insurance fund: what it holds and has paid out, whether it covers this market, and what the market has booked for it but not yet swept. It also reports the losses the market has taken, and states in words when the reserve is drawn on this market's generation.
+
+The fund reports only what it paid. Read `marketBadDebt` beside it, because a fund that covered nothing and a market that never took a loss otherwise look the same.
+
+## When the reserve pays
+
+Where the market draws on it, the reserve absorbs a shortfall ahead of the liquidity providers, but only up to what it holds. A draw larger than the balance pays the balance, and the pool books the rest. A fund whose owner has withdrawn this market's authorization pays nothing and blocks nothing, so the whole loss lands on the pool.
+
+Which events draw on the reserve depends on the market implementation, reported as `generation.settlementDrawsReserve`.
+
+| `settlementDrawsReserve` | The market draws on the reserve |
+|---|---|
+| `true` | On every first settlement that retains less than the record's claim, whether through the liquidation router, a batch settlement or the auction venue's closing fill. Also on the write-off after the 7-day window, and for the residual of an instant whole-position realization |
+| `false` | Only on the write-off after the 7-day window and for the residual of an instant whole-position realization. A sale settled below the debt books its shortfall on the pool without consulting the reserve |
+| `null` | Could not be read. Retry shortly |
+
+A later recovery on a record the reserve advanced against is shared differently too. With `true`, the recovery makes the pool whole on the record's claim first, and only what is left above the claim repays the reserve. With `false`, the recovery repays the reserve before anything becomes pool income. `disclosure` states all of this in words, chosen for this market.
+
+The reserve is funded two ways. [Sweep Protocol Fees](/endpoints/lending/sweep-protocol-fees) deposits the insurance-fund rate's share of interest, and [Top Up Insurance Fund](/endpoints/lending/top-up-insurance) lets any wallet add capital. Apart from coverage paid to an authorized market, only the fund owner can take money out, through [Withdraw from Insurance Fund](/endpoints/lending/withdraw-insurance).
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="configured" type="boolean">Always `true` on a successful response.</ResponseField>
+    <ResponseField name="fundAddress" type="string">The insurance fund contract, lowercased.</ResponseField>
+    <ResponseField name="owner" type="string">The fund owner, the only wallet that can withdraw from it. After adoption this is the admin the lender of record named. Before it, the market or the deploying factory holds the fund. The zero address when the owner could not be read.</ResponseField>
+    <ResponseField name="marketAuthorized" type="boolean">Whether the fund authorizes this market. An unauthorized market gets no coverage, and its protocol-fee sweep reverts. `false` also when the read failed.</ResponseField>
+    <ResponseField name="stats" type="object">
+      Lifetime figures, as decimal strings.
+      <Expandable>
+        <ResponseField name="totalDeposits" type="string">Everything the fund booked as a deposit: protocol-fee sweeps, top-ups, and coverage a later recovery paid back. A plain transfer to the fund is not counted.</ResponseField>
+        <ResponseField name="badDebtCovered" type="string">Coverage paid to authorized markets. A later recovery never reduces it.</ResponseField>
+        <ResponseField name="totalWithdrawn" type="string">What the owner has withdrawn.</ResponseField>
+        <ResponseField name="currentBalance" type="string">The fund's balance of the borrow asset, which is what it can pay today.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="generation" type="object">`settlementDrawsReserve`, described above, and `topUpBooked`. `topUpBooked` is `true` when the fund books a top-up as a deposit and `null` when unreadable. It is `false` on the earlier fund implementation, which only accepts a plain transfer it does not book.</ResponseField>
+    <ResponseField name="earmarkedProtocolFees" type="string">Protocol fee the market has booked for the fund and not yet swept. The fund does not hold it until [Sweep Protocol Fees](/endpoints/lending/sweep-protocol-fees) runs, so an empty fund can still have money waiting. `null` when unreadable.</ResponseField>
+    <ResponseField name="earmarkedProtocolFeesRaw" type="string">The same in the borrow asset's smallest unit.</ResponseField>
+    <ResponseField name="earmarkedProtocolFeesSweepable" type="boolean">`true` when something is booked and the market names a fund. It does not check `marketAuthorized`.</ResponseField>
+    <ResponseField name="marketBadDebt" type="object">
+      The market's losses, read from the lending index. `null` when the index read failed outright.
+      <Expandable>
+        <ResponseField name="available" type="boolean">`false` when the index could not be read. `reason` and `message` then say why, and no other figure is present.</ResponseField>
+        <ResponseField name="indexed" type="boolean">`false` when the index holds no record of the market. Every figure is then `null`.</ResponseField>
+        <ResponseField name="drawsIndexed" type="boolean">Whether individual draws on the reserve were read. When `false`, every loss is treated as presented to the reserve and `settledOnPool` reads zero.</ResponseField>
+        <ResponseField name="requested" type="string">What the market asked the reserve to cover.</ResponseField>
+        <ResponseField name="covered" type="string">What the reserve paid.</ResponseField>
+        <ResponseField name="uncovered" type="string">What the reserve was asked for and could not pay.</ResponseField>
+        <ResponseField name="settledOnPool" type="string">Losses booked on the pool without the reserve being asked.</ResponseField>
+        <ResponseField name="borneByProviders" type="string">`uncovered` plus `settledOnPool`: the loss the liquidity providers carried.</ResponseField>
+        <ResponseField name="totalLosses" type="string">Every loss the index recorded on the market.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="disclosure" type="object">Plain-language statements chosen for this market's generation, written to be shown to liquidity providers as they are. `draws` says when the reserve is drawn, `repayment` how a later recovery is shared, and `topUp` whether a top-up is booked. The two `generation` flags are repeated beside them.</ResponseField>
+    <ResponseField name="fundImplementation" type="object">
+      The fund's upgrade position. `implementation` carries the same object.
+      <Expandable>
+        <ResponseField name="current" type="string">The implementation behind the fund proxy. `null` when unreadable.</ResponseField>
+        <ResponseField name="target" type="string">The fund implementation the factory deploys today. `null` when unreadable.</ResponseField>
+        <ResponseField name="upgradeAvailable" type="boolean">`true` when the two differ. `null` when either is unknown.</ResponseField>
+        <ResponseField name="owner" type="string">The fund owner, who signs an upgrade. `null` when unreadable.</ResponseField>
+        <ResponseField name="ownedByMarket" type="boolean">`true` while the market itself or the deploying factory owns the fund. No wallet can withdraw from it or upgrade it in that state.</ResponseField>
+        <ResponseField name="heldByFactory" type="boolean">`true` when the deploying factory owns it.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="insuranceFundAddress" type="string">The fund address as recorded on the market.</ResponseField>
+    <ResponseField name="borrowAssetAddress" type="string">The borrow asset every figure is denominated in. `usdcAddress` carries the same value for older clients.</ResponseField>
+    <ResponseField name="borrowAssetSymbol" type="string">Its symbol.</ResponseField>
+    <ResponseField name="borrowAssetDecimals" type="integer">Its decimals.</ResponseField>
+    <ResponseField name="settlementCurrency" type="string">`USD` or `EUR` for a known settlement token (stablecoin) on this network. `null` for any other borrow asset.</ResponseField>
+    <ResponseField name="recentTopUps" type="array">Up to 20 recorded top-ups, newest first. Each carries `txType`, `userAddress` (the source), `amount`, `txHash`, `timestamp`, and `booked`: `true` when the fund booked it as a deposit, `false` for a plain transfer.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  On a fund that books top-ups, reading this endpoint also records top-ups nobody recorded through [Record Insurance Top-Up](/endpoints/lending/record-insurance-top-up). It looks back 50,000 blocks, runs at most once a minute per market, and skips deposits from markets the fund authorizes, which are protocol-fee sweeps.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/insurance/status" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/insurance/status`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+
+if (!data.marketAuthorized) {
+  console.warn('The insurance fund does not cover this market. Losses land on the pool.');
+}
+console.log(`Reserve balance ${data.stats.currentBalance} ${data.borrowAssetSymbol}, ${data.earmarkedProtocolFees} waiting to be swept`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "configured": true,
+    "fundAddress": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+    "owner": "0x3f9c1e7a2b5d48e06c1a9f3b7d2e5a8c0f4b6d13",
+    "marketAuthorized": true,
+    "stats": {
+      "totalDeposits": "5036.975",
+      "badDebtCovered": "0.0",
+      "totalWithdrawn": "0.0",
+      "currentBalance": "5036.975"
+    },
+    "generation": {
+      "settlementDrawsReserve": true,
+      "topUpBooked": true
+    },
+    "implementation": {
+      "current": "0x2b7e4c19a05d3f86e1c9b0a7d4f2e5c8a1b3d6f0",
+      "target": "0x2b7e4c19a05d3f86e1c9b0a7d4f2e5c8a1b3d6f0",
+      "upgradeAvailable": false,
+      "owner": "0x3f9c1e7a2b5d48e06c1a9f3b7d2e5a8c0f4b6d13",
+      "ownedByMarket": false,
+      "heldByFactory": false
+    },
+    "earmarkedProtocolFees": "12.5",
+    "earmarkedProtocolFeesRaw": "12500000",
+    "earmarkedProtocolFeesSweepable": true,
+    "marketBadDebt": {
+      "available": true,
+      "indexed": true,
+      "drawsIndexed": true,
+      "requested": "0.0",
+      "covered": "0.0",
+      "uncovered": "0.0",
+      "settledOnPool": "0.0",
+      "borneByProviders": "0.0",
+      "totalLosses": "0.0"
+    },
+    "disclosure": {
+      "draws": "The reserve is drawn by the market on every first settlement that retains less than the record's claim, whether the sale settled through the liquidation router, a batch settlement or the auction venue's closing fill, on the write-off after the seven-day liquidation timeout, and for the residual of an instant whole-position realization. The pool books only what the reserve could not pay, on whichever route the realization took.",
+      "repayment": "Recovery on a record the reserve advanced against makes the pool whole on the record's claim first; only what it leaves above the claim repays the reserve, ahead of the penalty becoming pool income and ahead of recovery on debt the position still carries.",
+      "topUp": "A top-up pulls the settlement asset through topUp(amount) and the fund books it as a deposit with the source recorded, so Lifetime Deposits counts protocol-fee sweeps and top-ups alike, and the balance is what it can pay.",
+      "settlementDrawsReserve": true,
+      "topUpBooked": true
+    },
+    "fundImplementation": {
+      "current": "0x2b7e4c19a05d3f86e1c9b0a7d4f2e5c8a1b3d6f0",
+      "target": "0x2b7e4c19a05d3f86e1c9b0a7d4f2e5c8a1b3d6f0",
+      "upgradeAvailable": false,
+      "owner": "0x3f9c1e7a2b5d48e06c1a9f3b7d2e5a8c0f4b6d13",
+      "ownedByMarket": false,
+      "heldByFactory": false
+    },
+    "insuranceFundAddress": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+    "usdcAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+    "borrowAssetAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+    "borrowAssetSymbol": "USDC",
+    "borrowAssetDecimals": 6,
+    "settlementCurrency": "USD",
+    "recentTopUps": [
+      {
+        "id": "cmt4q2r8x0001ab12cd34ef56",
+        "marketId": "clx_secmarket_001",
+        "positionId": null,
+        "txType": "INSURANCE_TOPUP_BOOKED",
+        "userAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+        "amount": "5000",
+        "txHash": "0x4a8e2c6f1b3d57e09a2c4f6e8b1d3a5c7e9f0b2d4a6c8e1f3b5d7a9c0e2f4b68",
+        "timestamp": "2026-09-24T10:12:00.000Z",
+        "booked": true
+      }
+    ]
+  }
+}
+```
+```json Error - No Fund
+{
+  "success": false,
+  "error": {
+    "code": "NO_INSURANCE_FUND",
+    "message": "No insurance fund configured for this market"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The market ID in the path is longer than 100 characters |
+| `NO_INSURANCE_FUND` | `400` | The market records no insurance fund |
+| `FUND_NOT_READABLE` | `400` | The fund could not be read on chain. A network failure answers this way too, so retry before treating it as a configuration problem |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

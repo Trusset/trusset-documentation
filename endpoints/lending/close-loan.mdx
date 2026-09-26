@@ -1,12 +1,18 @@
 ---
 title: 'Close Loan'
-api: 'POST /lending-external-securities/api/positions/{marketId}/close-loan'
-description: 'Close a fully repaid loan and release the collateral'
+api: 'POST /lending-external-securities-v2/api/positions/{marketId}/close-loan'
+description: 'Close a debt-free loan and release the collateral'
 ---
 
-Closes a loan whose debt is zero and releases the pledged collateral. In `FREEZE` markets the tokens are unfrozen in the borrower's wallet. In `CUSTODY` markets they are transferred back from the adapter.
+Closes an active loan whose debt is zero and releases the pledged collateral. In `FREEZE` markets the tokens are unfrozen in the borrower's wallet. In `CUSTODY` markets they are transferred back from the adapter. Only the loan's borrower can sign it, and closing moves no settlement money and charges no fee.
 
-The endpoint validates loan state on-chain before doing anything, so a loan with any outstanding balance is rejected with a clear reason rather than an opaque revert.
+A repayment that clears the whole debt already closes the loan in the same transaction. A loan repaid through [Repay Loan](/endpoints/lending/repay) with `all: true` therefore needs no close call, and closing it again returns `LOAN_ALREADY_CLOSED`.
+
+<Warning>
+  On a `CUSTODY` market whose collateral token refuses the return, closing does not revert. The adapter escrows the collateral instead, so the borrower signs a transaction that confirms and delivers nothing. The calldata response then carries `collateralRelease` and `warning`. Show them before the borrower signs, and reclaim the collateral through [Claim Escrowed Collateral](/endpoints/lending/claim-escrowed-collateral) once the restriction is lifted.
+</Warning>
+
+The endpoint validates loan state on-chain before offering a transaction, so a loan with any outstanding balance is refused with a clear reason rather than an opaque revert.
 
 ## Path Parameters
 
@@ -26,30 +32,58 @@ The endpoint validates loan state on-chain before doing anything, so a loan with
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="loanId" type="integer">Loan ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION` when `txHash` is omitted.</ResponseField>
     <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, for the `closeLoan` call. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="functionName" type="string">`closeLoan`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="collateralRelease" type="object">Present on a `CUSTODY` market when the collateral token would refuse to return the collateral to the borrower. Closing still succeeds; the adapter escrows the balance instead of reverting, and the borrower reclaims it through [Claim Escrowed Collateral](/endpoints/lending/claim-escrowed-collateral).</ResponseField>
+    <ResponseField name="collateralRelease" type="object">Present on a `CUSTODY` market when the collateral token would refuse to return the collateral to the borrower, or when its verdict cannot be read before signing. `willEscrow` is `true` in the first case, and `null` with `verdictUnreadable: true` in the second. Also carries `holder`, `code`, `reason`, `message`, `adapterAddress`, `marketId` and `claimAction`.</ResponseField>
     <ResponseField name="warning" type="string">Human-readable form of `collateralRelease`, present alongside it.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="loanId" type="integer">Loan ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="collateralReturned" type="string">Collateral the close released, read from the `LoanClosed` event. Present when the loan held collateral. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="collateralReturnEscrowed" type="boolean">`true` when that return was escrowed on the adapter instead of delivered. Returned alongside `collateralReturned`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Warning>
-  Interest accrues until the moment of repayment, so a loan repaid with a stale quote almost always carries a small residual balance. `DEBT_OUTSTANDING` reports the exact remainder. Repay that amount, then close.
+  Interest accrues until the moment of repayment, so a loan repaid with a stale quote almost always carries a small residual balance. `DEBT_OUTSTANDING` reports the exact remainder. Repay the rest with `all: true`, which closes the loan itself.
 </Warning>
 
 <Note>
-  A successful close on confirm also marks the Trusset position `REPAID` with a `closedAt` timestamp, unless the position was already `LIQUIDATED`. When `txHash` is omitted the position is reconciled on the next sync rather than at broadcast.
+  A confirmed close also marks the Trusset position with a `closedAt` timestamp and the status `REPAID`, or `LIQUIDATED` when the position was liquidated and nothing was repaid since. A position already marked `LIQUIDATED` keeps that status. Without a confirm call, the position is reconciled on the next sync.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/close-loan" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/close-loan" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{"loanId": 5}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/close-loan`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ loanId: 5 })
+});
+const { data } = await res.json();
+if (data.collateralRelease) {
+  console.warn(data.warning);
+}
+
+const tx = await borrowerWallet.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ loanId: 5, txHash: tx.hash })
+});
 ```
 </RequestExample>
 
@@ -59,7 +93,12 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTION",
-    "transaction": { "to": "0x70A0...", "data": "0x..." },
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
     "functionName": "closeLoan"
   }
 }
@@ -68,8 +107,10 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
 {
   "success": true,
   "data": {
-    "txHash": "0xabc...def",
-    "loanId": 5
+    "txHash": "0x3b7d9e1f5a2c4086b8e0d6f4a2c1e9b7d5f3a1c0e8b6d4f2a0c9e7b5d3f1a2c4",
+    "loanId": 5,
+    "collateralReturned": "1000.0",
+    "collateralReturnEscrowed": false
   }
 }
 ```
@@ -98,9 +139,12 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
 | Code | HTTP | Cause |
 |---|---|---|
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `VALIDATION_ERROR` | `400` | `loanId` is not a positive integer |
 | `DEBT_OUTSTANDING` | `400` | Principal or accrued interest remains. The message states the exact amount |
-| `LOAN_ALREADY_CLOSED` | `400` | The loan is no longer active |
+| `LOAN_ALREADY_CLOSED` | `400` | The loan is no longer active, for example because a full repayment already closed it |
 | `LOAN_NOT_FOUND` | `404` | No loan with that ID exists on this market |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `LOAN_STATE_UNAVAILABLE` | `503` | The loan could not be read from the network, so no transaction was prepared. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

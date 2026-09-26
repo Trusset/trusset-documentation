@@ -1,13 +1,13 @@
 ---
 title: 'List Transactions'
-api: 'GET /lending-external-securities/api/vaults/{vaultId}/transactions'
-description: 'Recorded vault activity, newest first'
+api: 'GET /lending-external-securities-v2/api/vaults/{vaultId}/transactions'
+description: 'Recorded vault activity, newest first, plus the vault''s net deposit flows'
 ---
 
-Every confirmed vault transaction the backend has recorded: deposits, redemptions, and the operator's own actions. Each row passed receipt verification before it was written.
+Every vault transaction the backend has recorded: deposits, redemptions, the operator's own actions and the distributor fee flows. Each row was either confirmed from its receipt or recovered from the vault's own events.
 
 <Warning>
-  What you see depends on whose vault it is. On your own vault this is the full ledger, every action by every wallet. On a vault another institution operates it is one wallet's own deposits and redemptions and nothing else, and `address` is what names that wallet. Without `address`, `transactions` on someone else's vault comes back as an empty array rather than an error.
+  What you see depends on whose vault it is. On your own vault this is the full ledger, every action by every wallet. On a vault another operator runs it is one wallet's own deposits and redemptions and nothing else, and `address` is what names that wallet. Without a valid `address`, `transactions` on someone else's vault comes back as an empty array rather than an error.
 </Warning>
 
 ## Path Parameters
@@ -16,7 +16,7 @@ Every confirmed vault transaction the backend has recorded: deposits, redemption
 
 ## Query Parameters
 
-<ParamField query="limit" type="integer" default="50">Rows to return, newest first. Between 1 and 200.</ParamField>
+<ParamField query="limit" type="integer" default="50">Rows to return, newest first. Clamped to 1 to 200. A value that does not parse as an integer, or `0`, falls back to 50.</ParamField>
 
 <ParamField query="address" type="string">
   Wallet whose rows to return. Ignored on your own vault, where the whole ledger is served. Required to see anything on a vault you do not operate.
@@ -27,11 +27,13 @@ Every confirmed vault transaction the backend has recorded: deposits, redemption
 <ResponseField name="data.transactions" type="array">
   <Expandable>
     <ResponseField name="id" type="string">Record ID.</ResponseField>
-    <ResponseField name="txType" type="string">One of `CREATE`, `DEPOSIT`, `REDEEM`, `ALLOCATE`, `DEALLOCATE`, `PAUSE_DEPOSITS`, `RESUME_DEPOSITS`, `SET_FEE`, `COLLECT_FEE`.</ResponseField>
-    <ResponseField name="userAddress" type="string">The wallet that signed.</ResponseField>
-    <ResponseField name="amount" type="string">Settlement-asset amount read from the transaction's events. `"0"` for actions that move no value, such as a pause. Skip the amount for those rows instead of showing a zero-value transfer.</ResponseField>
-    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
-    <ResponseField name="timestamp" type="string">When the confirmation was recorded, ISO 8601.</ResponseField>
+    <ResponseField name="txType" type="string">
+      Investor rows are `DEPOSIT` and `REDEEM`. Operator rows are `CREATE`, `REGISTER_GATE`, `ALLOCATE`, `DEALLOCATE`, `REBALANCE`, `JIT_DRAW`, `SET_MARKET_DRAW_CAP`, `PAUSE_DEPOSITS`, `RESUME_DEPOSITS`, `SET_FEE`, `PROPOSE_FEE_COLLECTION`, `CANCEL_FEE_COLLECTION`, `COLLECT_FEE`, `PROPOSE_UPGRADE`, `CANCEL_UPGRADE`, `UPGRADE_VAULT`, `PROPOSE_EVICTION`, `CANCEL_EVICTION` and `EVICT_MARKET`. Distributor rows are `COLLECT_DISTRIBUTOR_FEES`, `PAY_DISTRIBUTOR`, `SET_DISTRIBUTOR_WALLET`, `SET_DISTRIBUTOR_APPROVAL` and `PAY_OPERATOR_FEES`.
+    </ResponseField>
+    <ResponseField name="userAddress" type="string">The address the row belongs to. On a deposit or redemption it is the investor, and on a distributor approval the distributor. Other confirmed rows name the signer. Rows recovered from the chain name the operator wallet on record for operator actions, or the address the event names, such as the market on a `JIT_DRAW`.</ResponseField>
+    <ResponseField name="amount" type="string">Amount in the vault's asset, read from the transaction's events. `"0"` for actions that move no value, such as a pause. Skip the amount for those rows instead of showing a zero-value transfer.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. The ledger holds one row per transaction.</ResponseField>
+    <ResponseField name="timestamp" type="string">Time of the block the transaction was mined in, ISO 8601. A row whose block time could not be read when it was confirmed carries the confirmation time until a later read corrects it.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -40,21 +42,22 @@ Every confirmed vault transaction the backend has recorded: deposits, redemption
 </ResponseField>
 
 <Note>
-  A transaction broadcast but never reported to [Confirm Transaction](/endpoints/vaults/confirm-transaction) is on-chain but missing here until the record reconciles. Each read does run a ledger sync from the chain first, so a confirmed transaction that never reached the API still appears once that sync picks it up.
+  Each read first brings the ledger up to date from the vault's events, at most once a minute per vault. That sync stops at the last settled block: the finalized block, or five blocks behind the head on a chain that reports no finality. A transaction nobody confirmed therefore appears once its block is final. Report your own transactions to [Confirm Transaction](/endpoints/vaults/confirm-transaction) to see them sooner.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/vaults/{vaultId}/transactions?limit=50" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd/transactions?limit=50&address=0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
+const params = new URLSearchParams({ limit: '50', address: wallet });
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/vaults/${vaultId}/transactions?limit=50`,
+  `https://api.trusset.org/lending-external-securities-v2/api/vaults/${vaultId}/transactions?${params}`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
-console.log(`${data.transactions.length} recorded`);
+console.log(`${data.transactions.length} recorded, ${data.netDeposits.length} flows`);
 ```
 </RequestExample>
 
@@ -67,8 +70,8 @@ console.log(`${data.transactions.length} recorded`);
       {
         "id": "cmssh9aaa0001cghx11112222",
         "txType": "DEPOSIT",
-        "userAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
-        "amount": "1000",
+        "userAddress": "0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b",
+        "amount": "1000.0",
         "txHash": "0x8f3b2c1d4e5f60718293a4b5c6d7e8f9012345678901234567890123456789ab",
         "timestamp": "2026-08-14T09:12:00.000Z"
       },
@@ -80,8 +83,20 @@ console.log(`${data.transactions.length} recorded`);
         "txHash": "0xc50c3139253c883994b46965f5d1ff15f632968b999008ff6f95123780954817",
         "timestamp": "2026-08-13T21:10:00.000Z"
       }
+    ],
+    "netDeposits": [
+      { "txType": "DEPOSIT", "amount": "1000.0", "timestamp": "2026-08-14T09:12:00.000Z" }
     ]
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VAULT_NOT_FOUND` | `404` | No such vault, or it is not visible to your instance |
+| `VAULT_STATE_UNAVAILABLE` | `503` | Whether your instance is a distributor of record in an unpublished vault could not be read from the chain. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | The vault records or your instance's verified wallets could not be read. Retry shortly |
+| `VAULT_READ_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |

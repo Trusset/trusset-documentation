@@ -1,0 +1,182 @@
+---
+title: 'Configure Market'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/configure'
+description: 'Build the calldata for one outstanding configuration step, or for all of them'
+---
+
+Returns unsigned calldata for the wiring and authorization steps a market still needs, with the authority that must sign each one. Nothing is signed or sent by Trusset: the party named on each step signs and broadcasts it, then records it with [Confirm Configuration](/endpoints/lending/confirm-configuration).
+
+Omit `action` to receive every outstanding step at once, exactly as [Get Configuration Status](/endpoints/lending/get-configuration-status) offers them. Name an `action` to receive that one step. A step that is already complete on-chain comes back with nothing to sign rather than an error.
+
+The steps have different signers. The collateral token steps are signed by the token's own authorities: its agent administrator, its compliance administrator, or an agent of its identity registry. None of those is a role the market assigns, so they never wait for a lender of record. Every other step names the market admin, the router admin or the oracle owner, and is refused with `MARKET_PENDING_CURATOR` until a lender of record has taken the market.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="action" type="string">
+  The step to build. Omit it for every outstanding step. See the table below for the supported values.
+</ParamField>
+
+<ParamField body="identityAddress" type="string">
+  `verifyAdapterAsHolder`, `verifyRouterAsHolder` and `verifyVenueAsHolder` only. The ONCHAINID an ERC-3643 identity registry should register the subject under. It must be a deployed contract carrying a valid claim for every topic the registry requires, or the step is refused.
+</ParamField>
+
+<ParamField body="country" type="integer">
+  The same three actions only. Country code for the ERC-3643 registration, an integer from 0 to 65535. Defaults to `0`.
+</ParamField>
+
+<ParamField body="acknowledgeFeeModelImpact" type="boolean">
+  `upgradeMarket` only. Must be `true` to build an upgrade that moves the market onto the fixed fee shares while providers hold shares or loans are open. See [Upgrade Market](/endpoints/lending/upgrade-market).
+</ParamField>
+
+## Actions
+
+| `action` | What it builds | Signed by | Waits for a lender of record |
+|---|---|---|---|
+| `setInsuranceFund` | Sets the recorded insurance fund on the market | The market admin | Yes |
+| `grantAgentRoleToAdapter` | `FREEZE`: grants the freeze adapter the agent role on the token | The token's agent administrator | No |
+| `authorizeAdapterOnToken` | Allow-lists the custody adapter on the token | The token's compliance administrator | No |
+| `authorizeRouterOnToken` | Allow-lists the liquidation router on the token | The token's compliance administrator | No |
+| `authorizeVenueOnToken` | Allow-lists the auction venue on the token | The token's compliance administrator | No |
+| `verifyAdapterAsHolder` | `CUSTODY`: registers the custody adapter on the token's identity registry, then the router once the adapter is done | An agent of that registry | No |
+| `verifyRouterAsHolder` | Registers the liquidation router on the token's identity registry | An agent of that registry | No |
+| `verifyVenueAsHolder` | Registers the auction venue on the token's identity registry | An agent of that registry | No |
+| `authorizeRelayerOnOracle` | Authorizes the instance's wallet as a price signer on the oracle | The oracle owner | Yes |
+| `grantLiquidatorRole` | Grants `LIQUIDATOR_ROLE` to the instance's wallet | The market admin | Yes |
+| `authorizeOnRouter` | Authorizes the market on its liquidation router | The router admin | Yes |
+| `upgradeMarket` | Moves the market onto the implementation the factory serves, plus a snapshot poke | The market admin | Yes |
+| `upgradeRouter` | Moves the liquidation router onto the implementation the factory serves | The router admin | Yes |
+
+`upgradeMarket` and `upgradeRouter` build the same transactions as [Upgrade Market](/endpoints/lending/upgrade-market), which also covers the interest rate model and the insurance fund.
+
+<Note>
+  `verifyAdapterAsHolder` checks the router as well. Once the adapter is registered it returns the router's registration, keyed `verifyRouterAsHolder`. On a token that gates holders through a contract allow-list, `verifyAdapterAsHolder` and `verifyRouterAsHolder` return the allow-list call instead of a registration. Confirm a transaction under the action that matches the function it calls, because [Confirm Configuration](/endpoints/lending/confirm-configuration) checks the function and the subject.
+</Note>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">The action built. Absent when `action` was omitted.</ResponseField>
+    <ResponseField name="requiresUserAction" type="boolean">`true` when there is a transaction to sign.</ResponseField>
+    <ResponseField name="configurationCalldata" type="object">
+      The transactions to sign, keyed by step. Each entry carries `to`, `data`, `value` (`"0"`), `chainId` and `description`. Entries built from the configuration status also carry `requiredAuthority`, `heldByThisInstance` and `note`, as on [Get Configuration Status](/endpoints/lending/get-configuration-status).
+    </ResponseField>
+    <ResponseField name="message" type="string">Who should sign, in words.</ResponseField>
+    <ResponseField name="blockedSteps" type="object">When `action` is omitted: steps that cannot be built, keyed by step, each `{ code, message }`.</ResponseField>
+    <ResponseField name="waitingForCurator" type="array">When `action` is omitted: step keys withheld until a lender of record takes the market.</ResponseField>
+    <ResponseField name="pendingCurator" type="boolean">When `action` is omitted: whether the market still has no lender of record.</ResponseField>
+    <ResponseField name="pendingCuratorMessage" type="string">When `action` is omitted: the explanation accompanying `pendingCurator`, or `null`.</ResponseField>
+    <ResponseField name="alreadyConfigured" type="boolean">`true` when the named step is already complete on-chain and `configurationCalldata` is empty. The router, liquidator, upgrade, allow-list and registry actions answer `alreadyAuthorized`, `alreadyGranted`, `alreadyUpgraded` or `alreadyVerified` instead.</ResponseField>
+    <ResponseField name="subject" type="string">On the allow-list and venue actions, the address the step authorizes.</ResponseField>
+    <ResponseField name="feeModel" type="object">`upgradeMarket` only. What the upgrade changes for providers. See [Upgrade Market](/endpoints/lending/upgrade-market).</ResponseField>
+    <ResponseField name="followUps" type="object">`upgradeMarket` only, when registered vaults must be registered again after the upgrade. See [Upgrade Market](/endpoints/lending/upgrade-market).</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`. `endpoint` is Confirm Configuration for this market, and `body` carries `txHash: null` and the `action` you named, or `null`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/configure" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "action": "grantLiquidatorRole" }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/configure`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'grantLiquidatorRole' })
+  }
+);
+const { data } = await res.json();
+
+for (const [key, tx] of Object.entries(data.configurationCalldata ?? {})) {
+  const sent = await adminWallet.sendTransaction({ to: tx.to, data: tx.data, value: 0 });
+  await sent.wait();
+  console.log(`Confirm ${key} with`, data.confirmWith.endpoint, sent.hash);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "grantLiquidatorRole",
+    "requiresUserAction": true,
+    "configurationCalldata": {
+      "grantLiquidatorRole": {
+        "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "data": "0x2f2ff15d5e17fc5225d4a099df75359ce1f405503ca79498a8dc46a7d583235a0ee45c16...",
+        "description": "Grant LIQUIDATOR_ROLE to issuer wallet 0x4e91...4e93 (requires market DEFAULT_ADMIN_ROLE)",
+        "value": "0",
+        "chainId": 11155111
+      }
+    },
+    "message": "Execute this transaction from the market admin wallet",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/cmssh7p1k0001cghxq2m4v8rz/confirm-configuration",
+      "field": "txHash",
+      "body": { "txHash": null, "action": "grantLiquidatorRole" }
+    }
+  }
+}
+```
+```json Response - Already Configured
+{
+  "success": true,
+  "data": {
+    "action": "setInsuranceFund",
+    "alreadyConfigured": true,
+    "configurationCalldata": {},
+    "message": "This configuration step is already complete on-chain; there is nothing to sign.",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/cmssh7p1k0001cghxq2m4v8rz/confirm-configuration",
+      "field": "txHash",
+      "body": { "txHash": null, "action": "setInsuranceFund" }
+    }
+  }
+}
+```
+```json Error - Pending Curator
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_PENDING_CURATOR",
+    "message": "This market has no lender of record yet, so configuring it is not possible. A nominated candidate must take the role before the market has an admin that can sign this."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `UNSUPPORTED_CONFIGURE_ACTION` | `400` | `action` is not one of the supported values. The error carries `supportedActions` |
+| `INVALID_IDENTITY_ADDRESS` | `400` | `identityAddress` is not an address |
+| `INVALID_COUNTRY` | `400` | `country` is not an integer from 0 to 65535 |
+| `MARKET_PENDING_CURATOR` | `409` | The action needs the market admin, the router admin or the oracle owner, and no lender of record has taken the market |
+| `NO_COLLATERAL_TOKEN` | `400` | Allow-list actions: the market has no collateral token recorded |
+| `NO_ADAPTER` | `400` | The market has no collateral adapter |
+| `NOT_CUSTODY_MODE` | `400` | `verifyAdapterAsHolder` on a `FREEZE` market |
+| `ROUTER_NOT_CONFIGURED` | `400` | No liquidation router is configured for the market |
+| `AUCTION_MODULE_NOT_SET` | `409` | A venue action on a market with no auction venue wired |
+| `ACTION_NOT_APPLICABLE` | `400` | The token authorizes that subject the other way: through the agent role, an identity registry or a contract allow-list. The message names the action to use |
+| `IDENTITY_REGISTRY_UNKNOWN` | `400` | A registry action, but the collateral token exposes no identity registry |
+| `ONCHAINID_REQUIRED` and the other blocked-step codes | `400` or `422` | A registry step cannot be built. The adapter and router actions answer `400`, the venue action `422`. See [Blocked Step Codes](/endpoints/lending/get-configuration-status#blocked-step-codes), plus `ONCHAINID_INVALID`, `ONCHAINID_NOT_CONTRACT` and `ONCHAINID_CLAIMS_MISSING` for a supplied `identityAddress` |
+| `AUTHORIZATION_FAILED` | `400` | `authorizeOnRouter`: the router could not be read |
+| `GRANT_LIQUIDATOR_ROLE_FAILED` | `400` | `grantLiquidatorRole`: the grant could not be prepared |
+| `FEE_MODEL_IMPACT_UNACKNOWLEDGED` | `409` | `upgradeMarket` without `acknowledgeFeeModelImpact` where providers are affected. The error carries `details.feeModel` |
+| Upgrade refusals | `400` to `503` | `upgradeMarket` and `upgradeRouter` answer the refusals listed on [Upgrade Market](/endpoints/lending/upgrade-market). Through this endpoint an `upgradeRouter` refusal always answers `400` |
+| `ROUTER_UNRESOLVED` | `503` | The market's router could not be read. Retry |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

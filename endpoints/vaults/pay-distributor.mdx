@@ -1,0 +1,155 @@
+---
+title: 'Pay Distributor'
+api: 'POST /lending-external-securities-v2/api/vaults/{vaultId}/distributor-fees/pay'
+description: 'Calldata that pays a distributor''s credit in the vault to its payout wallet'
+---
+
+Builds `payDistributor(distributor)` on the vault. It pays everything the vault holds for one distributor to that distributor's payout wallet. The payout wallet is the distributor's own address until it is moved with [Set Distributor Wallet](/endpoints/vaults/set-distributor-wallet).
+
+Any wallet may sign. The vault pays the distributor's payout wallet, never the signer. Only fees already collected into the vault are payable: run [Collect Distributor Fees](/endpoints/vaults/collect-distributor-fees) for each market first. `claimable` on [Get Earnings](/endpoints/vaults/get-earnings) shows the amount.
+
+The API builds a payout for one of your instance's own distributor wallets. The instance that operates the vault may also build one for any other distributor, which still pays that distributor's own payout wallet.
+
+## Path Parameters
+
+<ParamField path="vaultId" type="string" required>Vault ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="distributor" type="string">
+  The distributor wallet to pay out, as a `0x` address. Defaults to your instance's distributor wallet: its primary verified wallet, or its earliest when none is primary. A `distributor` that is not a verified wallet of your instance answers `DISTRIBUTOR_NOT_OWNED`, unless your instance operates the vault.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined payout, `0x` and 64 hex characters. Send it to confirm and record the result; nothing else is needed then. Omit it to receive the calldata.
+</ParamField>
+
+The route validates every field of the schema it shares with the other distributor actions, even where this action ignores it.
+
+## Response Fields
+
+The calldata response:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">`to` (the vault), `data`, `value` (`"0"`) and `chainId`.</ResponseField>
+    <ResponseField name="functionName" type="string">`payDistributor`.</ResponseField>
+    <ResponseField name="permissionless" type="boolean">Always `true`: any wallet may sign.</ResponseField>
+    <ResponseField name="distributor" type="string">The distributor being paid.</ResponseField>
+    <ResponseField name="payoutWallet" type="string">The wallet the vault pays.</ResponseField>
+    <ResponseField name="amount" type="string">What the vault holds for the distributor when the calldata was built, formatted at the vault's asset decimals.</ResponseField>
+    <ResponseField name="amountRaw" type="string">The same amount in base units.</ResponseField>
+    <ResponseField name="description" type="string">The transaction in words.</ResponseField>
+    <ResponseField name="note" type="string">States that the vault pays the payout wallet, never the signer.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`endpoint`, this route with the vault ID filled in, and `field`, always `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+The confirmation response, after the backend has verified the receipt:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">The verified hash.</ResponseField>
+    <ResponseField name="action" type="string">`pay`.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet that signed.</ResponseField>
+    <ResponseField name="amount" type="string">What the vault paid, from its `DistributorFeePaid` event.</ResponseField>
+    <ResponseField name="amountRaw" type="string">The same amount in base units.</ResponseField>
+    <ResponseField name="events" type="array">The distributor events the vault emitted in the transaction, here `PAID`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  The payout reaches `paid` on [Get Earnings](/endpoints/vaults/get-earnings) once its block is final, because the earnings history is read only from settled blocks.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd/distributor-fees/pay" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/vaults/${vaultId}/distributor-fees/pay`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({}) });
+const { data } = await res.json();
+
+const tx = await signer.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch(url, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.hash }) });
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+      "data": "0x3d819b82...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "payDistributor",
+    "permissionless": true,
+    "distributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+    "payoutWallet": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+    "amount": "3.75",
+    "amountRaw": "3750000",
+    "description": "Pay 3.75 USDC of distributor fees to 0x83fd50068b2fc776bbf237f8163495b2247408c1",
+    "note": "Any wallet may sign this transaction. The vault pays the distributor's own payout wallet, never the signer.",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd/distributor-fees/pay",
+      "field": "txHash"
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0xc81c17ec39fe6e79069a8e1d0d83b821e300aec67ed7912627cbc33cd3b36e05",
+    "action": "pay",
+    "signer": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+    "amount": "3.75",
+    "amountRaw": "3750000",
+    "events": ["PAID"]
+  }
+}
+```
+```json Error - Nothing Accrued
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "NOTHING_ACCRUED",
+    "message": "Nothing is claimable for this distributor in the vault yet. Collect the vault's slice from its markets first."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A body field is malformed |
+| `DISTRIBUTOR_NOT_OWNED` | `403` | `distributor` is not a verified wallet of your instance, and your instance does not operate the vault |
+| `VAULT_NOT_FOUND` | `404` | No such vault, or it is not visible to your instance |
+| `NO_DISTRIBUTOR_WALLET` | `409` | Your instance has no verified wallet, so it has no distributor identity in any vault |
+| `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address on record |
+| `VAULT_UPGRADE_REQUIRED` | `409` | The vault runs an implementation from before distributor attribution |
+| `NOTHING_ACCRUED` | `409` | Nothing is payable to this distributor yet. Collect the vault's slice from its markets first |
+| `VAULT_STATE_UNAVAILABLE` | `503` | The vault implementation, the distributor's balance or payout wallet, or your standing in an unpublished vault could not be read. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read, so nothing was decided. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | The vault records or your instance's verified wallets could not be read. Retry shortly |
+| `VAULT_DISTRIBUTOR_ACTION_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |
+
+Confirming with `txHash` can also return `TX_NOT_FOUND` (`404`), `TX_REVERTED`, `TX_WRONG_TARGET` or `TX_WRONG_FUNCTION` (`400`), and `TX_NOT_VERIFIED` (`400`) when the transaction carries no payout on this vault. See [transaction verification errors](/endpoints/introduction#confirm-a-transaction).

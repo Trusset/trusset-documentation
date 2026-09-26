@@ -1,0 +1,159 @@
+---
+title: 'Save Terms'
+api: 'PUT /lending-external-securities-v2/api/markets/{marketId}/terms'
+description: 'Write and publish the terms of use for a market'
+---
+
+Writes the market's terms of use and, by default, publishes them. The saved document is what [Get Terms](/endpoints/lending/get-terms) serves to every instance that holds the market, so an integrator presents the terms exactly as the author wrote them. This is a database write, not a transaction: nothing is signed and nothing goes on chain.
+
+Authority is read from the chain at the moment of the save. One of this instance's verified wallets must be the lender of record recorded on the factory, or hold the market's admin role or issuer role. Before a lender of record takes the market nobody holds any of these, so every save is refused with `NOT_CURATOR`.
+
+Every save that changes something writes a new version and keeps the old ones, so the history stays readable through [List Terms Versions](/endpoints/lending/list-terms-versions). A save identical to the current record in text, title, publication state and template binding writes nothing and answers `changed: false`.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+Send `content`, or `templateId`, or both. A request with neither is refused with `VALIDATION_ERROR`.
+
+<ParamField body="content" type="string">
+  The document as markdown, at most 262,144 characters. Stored verbatim apart from Windows line endings, which become `\n`. The stored text must also fit in 262,144 bytes of UTF-8, must not be blank, and must not contain control characters other than tab, newline and carriage return.
+</ParamField>
+
+<ParamField body="title" type="string">
+  Document title, at most 200 characters after trimming, with no control characters. A blank title is stored as `null`. With a template and no title, the template's title is used.
+</ParamField>
+
+<ParamField body="published" type="boolean" default="true">
+  Set to `false` to save a draft. A draft is invisible to Get Terms until a later save publishes it.
+</ParamField>
+
+<ParamField body="templateId" type="string">
+  A template from this instance's terms library, 1 to 100 characters. When present, the template's text is saved and `content` is ignored. Templates are managed in the issuer app, and only the instance that authored a template can bind it.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="terms" type="object">
+      The saved record in the markdown form of [Get Terms](/endpoints/lending/get-terms), plus two fields.
+      <Expandable>
+        <ResponseField name="changed" type="boolean">`false` when the save matched the current record and no version was written.</ResponseField>
+        <ResponseField name="authority" type="string">Why the save was admitted: `CURATOR` for the lender of record's wallet, `MARKET_ADMIN` or `MARKET_ISSUER` for a wallet holding that role on the market.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+`curatorAddress` records the wallet that passed the check, which is not always the lender of record's own. After a template bind, a later save with different text keeps the binding and sets `customised: true`.
+
+<RequestExample>
+```bash cURL
+curl -X PUT "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/terms" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "ACME Secured Lending Facility: Terms of Use",
+    "content": "# Terms of Use\n\n## 1. Parties\n\nACME Bank AG acts as lender of record for this market.\n\n## 2. Collateral\n\n- Pledged tokens stay frozen in the wallet of the borrower.\n- A loan below the liquidation threshold can be liquidated.\n"
+  }'
+```
+```typescript TypeScript
+import { readFile } from 'node:fs/promises';
+
+const content = await readFile('./terms-of-use.md', 'utf8');
+
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/terms`,
+  {
+    method: 'PUT',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      title: 'ACME Secured Lending Facility: Terms of Use',
+      content
+    })
+  }
+);
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+console.log(`Version ${data.terms.version}, ${data.terms.contentHash}`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "terms": {
+      "id": "secterms_001",
+      "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "title": "ACME Secured Lending Facility: Terms of Use",
+      "version": 3,
+      "contentHash": "0xf0b3379e4102181f66822fd86cd5c1f93e448e5bdfd3f8961151b05c5feacc5a",
+      "curatorAddress": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+      "published": true,
+      "publishedAt": "2026-09-10T09:12:44.000Z",
+      "createdAt": "2026-08-28T14:03:07.000Z",
+      "updatedAt": "2026-09-10T09:12:44.000Z",
+      "templateId": null,
+      "templateVersion": null,
+      "customised": false,
+      "contentBytes": 225,
+      "format": "markdown",
+      "content": "# Terms of Use\n\n## 1. Parties\n\nACME Bank AG acts as lender of record for this market.\n\n## 2. Collateral\n\n- Pledged tokens stay frozen in the wallet of the borrower.\n- A loan below the liquidation threshold can be liquidated.\n",
+      "plainText": "ACME SECURED LENDING FACILITY: TERMS OF USE\n===========================================\n\nTERMS OF USE\n------------\n\n1. Parties\n\nACME Bank AG acts as lender of record for this market.\n\n2. Collateral\n\n  - Pledged tokens stay frozen in the wallet of the borrower.\n  - A loan below the liquidation threshold can be liquidated.\n",
+      "changed": true,
+      "authority": "CURATOR"
+    }
+  }
+}
+```
+```json Error - Not Authorized
+{
+  "success": false,
+  "error": {
+    "code": "NOT_CURATOR",
+    "message": "Only the lender of record (0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93) or a party it named as market admin or issuer may author the terms of use for this market."
+  }
+}
+```
+```json Error - Validation
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Invalid request parameters",
+    "details": [
+      {
+        "field": "content",
+        "message": "Provide content, or templateId to bind a template from the instance terms library"
+      }
+    ]
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
+| `VALIDATION_ERROR` | `400` | Neither `content` nor `templateId` was sent, or a field breaks its type or length rule |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address |
+| `INVALID_TERMS_CONTENT` | `400` | The document is blank, or contains control characters other than tab, newline and carriage return |
+| `INVALID_TERMS_TITLE` | `400` | The title is over 200 characters after trimming, or contains control characters |
+| `TERMS_SAVE_FAILED` | `400` | The save failed for a reason the service did not classify |
+| `NOT_CURATOR` | `403` | No verified wallet of this instance is the lender of record or holds the market's admin or issuer role. Before adoption the message says the market has no lender of record yet |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `TEMPLATE_NOT_FOUND` | `404` | `templateId` names no template of this instance |
+| `TEMPLATE_ARCHIVED` | `409` | The template is archived. Restore it or bind another |
+| `WALLET_NOT_CONFIGURED` | `412` | This instance has no verified wallet |
+| `TERMS_TOO_LARGE` | `413` | The document exceeds 262,144 bytes of UTF-8 |
+| `MARKET_UNREADABLE` | `503` | The market's roles could not be read on chain, so authority could not be established. Retry shortly |

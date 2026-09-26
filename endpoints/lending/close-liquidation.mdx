@@ -1,0 +1,169 @@
+---
+title: 'Close Liquidation'
+api: 'POST /lending-external-securities-v2/api/liquidations/close/{liquidationId}'
+description: 'Close a router record that collected nothing once the market has closed its own'
+---
+
+Closes a liquidation's record on the router after the market has already settled or written off its own record, when nothing is left to sell or forward. It calls the router's `writeOffLiquidation`, which only the router administrator, the holder of `DEFAULT_ADMIN_ROLE` on the router, may sign.
+
+Close is not a settlement. It moves no collateral and no cash, and it books no loss, because the market has already recognized the outcome. It only releases the router's record, so the router's count of open records falls and its quiet-state check can pass again. Despite its on-chain name, `writeOffLiquidation` writes nothing off: the market-side write-off is [Handle Liquidation Timeout](/endpoints/lending/handle-timeout), and the leg that forwards proceeds is [Settle Liquidation](/endpoints/lending/settle-liquidation).
+
+## When It Applies
+
+A router record stays open until something closes it on the router side. When the market's own record is already closed, the router record collected nothing, and it holds no collateral, there is nothing left to settle. The typical case is a record the router administrator reopened, whose collateral then left the router without a sale being reported.
+
+Each condition below must hold, and each is checked before any calldata is built. The second column names the refusal when it does not.
+
+| Condition | Refused with |
+|---|---|
+| The record reads neither `SETTLED` nor `WRITTEN_OFF` here | `ALREADY_SETTLED` |
+| The router has not closed the record yet | `ALREADY_SETTLED` |
+| The router collected no proceeds for it | `PROCEEDS_COLLECTED`. Settle it instead, so the cash reaches the market |
+| No collateral remains on the router | `COLLATERAL_UNSOLD`. Withdraw it for sale first |
+| The market has settled or written off its own record | `MARKET_SETTLEMENT_PENDING` |
+| Your instance's primary verified wallet holds `DEFAULT_ADMIN_ROLE` on the router | `ROUTER_ADMIN_ROLE_MISSING` |
+
+<Note>
+  A record this API has marked `WRITTEN_OFF` is refused with `ALREADY_SETTLED`, even when its router record is still open. That router record then stays open through this API.
+</Note>
+
+## Path Parameters
+
+<ParamField path="liquidationId" type="string" required>
+  Liquidation ID on the market's router.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="marketId" type="string">
+  Names the market whose liquidation you mean. Every market runs its own liquidation router and IDs restart at `1` on each of them, so the same `liquidationId` can exist on several markets in one instance. Supply this when it does, otherwise the call is refused with `AMBIGUOUS_LIQUIDATION_ID` and the response lists the candidates. Also accepted as a query parameter. A value longer than 100 characters is ignored.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata. A value that is not a `0x`-prefixed 64-character hex string is ignored.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="liquidationId" type="string">Liquidation ID, echoed back.</ResponseField>
+    <ResponseField name="success" type="boolean">Nested inside `data` on the calldata response.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the liquidation router. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`writeOffLiquidation`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="confirmWith" type="object">How to record the mined transaction: `endpoint` is this route, `field` is `txHash`, and `body` carries `marketId` with a `txHash` to fill in. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="status" type="string">`SETTLED`, the record's status after the close. Returned when confirming with `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+Confirming moves every open record under this ID on the market to `SETTLED`. A reopened record keeps the hash of its earlier settlement in `settledTxHash`.
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidations/close/16" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"marketId": "clx_secmarket_001"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/liquidations/close/${liquidationId}`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+
+const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ marketId }) });
+const { data, error } = await res.json();
+if (error) throw new Error(`${error.code}: ${error.message}`);
+
+const tx = await adminWallet.sendTransaction(data.transaction);
+await tx.wait();
+await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ ...data.confirmWith.body, txHash: tx.hash })
+});
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "liquidationId": "16",
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "writeOffLiquidation",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/liquidations/close/16",
+      "field": "txHash",
+      "body": {
+        "txHash": null,
+        "marketId": "clx_secmarket_001"
+      }
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "liquidationId": "16",
+    "txHash": "0x5c08e3a7f21d94b6c3e5a17d08f2b94c61e3d7a05b8c2f4e9d16a73b0c5e28f4",
+    "status": "SETTLED"
+  }
+}
+```
+```json Error - Market Record Open
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_SETTLEMENT_PENDING",
+    "message": "The market has not settled record 16 yet, so the router refuses to close its own: settle it with the sale proceeds, or write it off on the market after the seven-day timeout.",
+    "txHash": null
+  }
+}
+```
+```json Error - Proceeds Collected
+{
+  "success": false,
+  "error": {
+    "code": "PROCEEDS_COLLECTED",
+    "message": "Liquidation 16 collected 2500.0 of proceeds on the router; settle it so they reach the market instead of closing the record.",
+    "txHash": null
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `AMBIGUOUS_LIQUIDATION_ID` | `400` | This ID exists on more than one market in your instance. The error carries `candidates`; resend with `marketId` |
+| `ALREADY_SETTLED` | `400` | The record is settled or written off here, or the router has already closed it |
+| `WALLET_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance to resolve the signer against |
+| `ROUTER_ADMIN_ROLE_MISSING` | `400` | Your instance's primary verified wallet lacks `DEFAULT_ADMIN_ROLE` on the router. No grant calldata is offered |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction closes a different liquidation |
+| `CLOSE_TX_REVERTED` | `400` | The close could not be prepared or recorded, for example because a chain read failed. `error.txHash` carries the hash when one exists |
+| `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
+| `MARKET_NOT_FOUND` | `404` | `marketId` was supplied but names no market on your instance |
+| `PROCEEDS_COLLECTED` | `409` | The router collected proceeds for the record. Settle it instead |
+| `COLLATERAL_UNSOLD` | `409` | Collateral is still on the router. Withdraw it for sale first |
+| `MARKET_SETTLEMENT_PENDING` | `409` | The market has not settled or written off its own record yet |
+| `LIQUIDATION_ON_VENUE` | `409` | The record belongs to a Dutch auction, and the router holds none of its collateral |
+| `ROUTER_UNRESOLVED` | `503` | The market's liquidation router could not be read. Retry shortly |
+| `ROUTER_UNREADABLE` | `503` | The router's record could not be read, so nothing was built. Retry shortly |
+| `ROLE_UNVERIFIABLE` | `503` | The role check could not read the router. Nothing was built. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction). A close that reverted on-chain is refused there with `TX_REVERTED`.

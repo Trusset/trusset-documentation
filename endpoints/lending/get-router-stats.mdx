@@ -1,17 +1,17 @@
 ---
 title: 'Get Router Stats'
-api: 'GET /lending-external-securities/api/liquidations/router-stats'
+api: 'GET /lending-external-securities-v2/api/liquidations/router-stats'
 description: 'Lifetime counters from a liquidation router'
 ---
 
-Returns cumulative totals from a liquidation router: how many liquidations it has received and settled, how much collateral has passed through it, and how much in proceeds it has routed back to markets.
+Returns cumulative totals from a liquidation router. They cover how many liquidation records it has received and closed, how much collateral has passed through it, and what it has routed back to its market.
 
 Every market carries its own liquidation router, so `marketId` names which router to read and there is no aggregate to fall back on. Omitting it returns `MARKET_REQUIRED`.
 
 ## Query Parameters
 
 <ParamField query="marketId" type="string" required>
-  Market whose router to read. Maximum 100 characters.
+  Market whose router to read. Maximum 100 characters. A longer value is treated as omitted.
 </ParamField>
 
 ## Response Fields
@@ -19,11 +19,11 @@ Every market carries its own liquidation router, so `marketId` names which route
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="routerAddress" type="string">Router the figures came from.</ResponseField>
-    <ResponseField name="totalReceived" type="string">Liquidations received over the router's lifetime.</ResponseField>
-    <ResponseField name="totalSettled" type="string">Liquidations settled. The difference against `totalReceived` is the outstanding count.</ResponseField>
-    <ResponseField name="totalCollateralProcessed" type="string">Collateral handled, formatted at the collateral token's decimals.</ResponseField>
+    <ResponseField name="totalReceived" type="string">Records received over the router's lifetime: seizures, and the unsold remainders of expired auctions.</ResponseField>
+    <ResponseField name="totalSettled" type="string">Records closed, by settlement or by the router administrator's close. A reopen takes one back off. The difference against `totalReceived` is the number of open records.</ResponseField>
+    <ResponseField name="totalCollateralProcessed" type="string">Collateral received, formatted at the collateral decimals recorded for the market, or at 18 when none are recorded.</ResponseField>
     <ResponseField name="totalCollateralProcessedRaw" type="string">The same figure in base units.</ResponseField>
-    <ResponseField name="totalProceedsRouted" type="string">Proceeds routed back to markets, formatted at the borrow asset's decimals.</ResponseField>
+    <ResponseField name="totalProceedsRouted" type="string">Proceeds the router forwarded to the market, formatted at the borrow asset's decimals. Cash an auction venue paid the market directly is not included.</ResponseField>
     <ResponseField name="totalProceedsRoutedRaw" type="string">The same figure in base units.</ResponseField>
   </Expandable>
 </ResponseField>
@@ -32,22 +32,24 @@ Every market carries its own liquidation router, so `marketId` names which route
   A router serves one market, so these totals are market-level rather than protocol-level. To read across an instance, call this once per market from [List Markets](/endpoints/lending/list-markets) and add the figures yourself.
 </Note>
 
+The router counts as quiet only while `totalSettled` equals `totalReceived`. Its administrator can rotate the sale recipient only from a quiet router, and this API does not expose that rotation.
+
 ## Error Codes
 
 | Code | HTTP | Cause |
 |---|---|---|
 | `MARKET_REQUIRED` | `400` | `marketId` was omitted. Every market runs its own router, so there is no shared router to read |
-| `STATS_UNAVAILABLE` | `400` | The router could not be reached, or it returned nothing readable |
+| `STATS_UNAVAILABLE` | `400` | The router could not be resolved or read, or it returned nothing readable |
 | `MARKET_NOT_FOUND` | `404` | `marketId` names no market on your instance |
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/liquidations/router-stats?marketId=clx_secmarket_001" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/liquidations/router-stats?marketId=clx_secmarket_001" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/liquidations/router-stats?marketId=${marketId}`,
+  `https://api.trusset.org/lending-external-securities-v2/api/liquidations/router-stats?marketId=${marketId}`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
@@ -63,9 +65,9 @@ const outstanding = Number(data.totalReceived) - Number(data.totalSettled);
     "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
     "totalReceived": "5",
     "totalSettled": "4",
-    "totalCollateralProcessed": "1140.000000000000000000",
+    "totalCollateralProcessed": "1140.0",
     "totalCollateralProcessedRaw": "1140000000000000000000",
-    "totalProceedsRouted": "104820.500000",
+    "totalProceedsRouted": "104820.5",
     "totalProceedsRoutedRaw": "104820500000"
   }
 }
@@ -79,12 +81,12 @@ const outstanding = Number(data.totalReceived) - Number(data.totalSettled);
   }
 }
 ```
-```json Error - Market Not Found
+```json Error - Market Required
 {
   "success": false,
   "error": {
-    "code": "MARKET_NOT_FOUND",
-    "message": "Market not found"
+    "code": "MARKET_REQUIRED",
+    "message": "Every v2 market carries its own liquidation router, so there is no shared router to read. Pass marketId to name the market whose router you mean."
   }
 }
 ```

@@ -1,0 +1,168 @@
+---
+title: 'Reopen Liquidation'
+api: 'POST /lending-external-securities-v2/api/liquidations/reopen/{liquidationId}'
+description: 'Reopen a settled router record that collected nothing, to recover collateral left on the router'
+---
+
+Reopens a liquidation the router settled without collecting any proceeds, so collateral that settlement left on the router can move again. It calls the router's `reopenLiquidation`, which only the router administrator, the holder of `DEFAULT_ADMIN_ROLE` on the router, may sign. Afterwards the record reads `PENDING` and the ordinary legs apply to it again: [Withdraw Collateral for Sale](/endpoints/lending/withdraw-collateral-for-sale), [Report Partial Sale](/endpoints/lending/report-partial-sale) and [Settle Liquidation](/endpoints/lending/settle-liquidation).
+
+<Warning>
+  A settlement closes the router's record for good, and collateral still on the router at that moment is stranded: it can no longer be withdrawn. Reopening is the only way back, and the router allows it only while the record collected nothing. A record whose settlement routed any cash to the market can never be reopened, and its stranded collateral stays on the router.
+</Warning>
+
+## When It Applies
+
+Find candidates on [List Settled Liquidations](/endpoints/lending/list-settled-liquidations), where they read `reopenable: true`. This API refuses to settle a record while collateral is on the router, so such records come from settlements made outside it, for example directly against the router.
+
+Each condition below must hold, and each is checked before any calldata is built. The second column names the refusal when it does not.
+
+| Condition | Refused with |
+|---|---|
+| The record reads `SETTLED` here, not `WRITTEN_OFF` or still open | `LIQUIDATION_NOT_SETTLED` |
+| The router has settled the record | `LIQUIDATION_NOT_SETTLED` |
+| The router collected no proceeds for it | `REOPEN_UNAVAILABLE` |
+| Collateral remains on the router for it | `NOTHING_TO_RECOVER` |
+| Your instance's primary verified wallet holds `DEFAULT_ADMIN_ROLE` on the router | `ROUTER_ADMIN_ROLE_MISSING` |
+
+Reopening touches the router's record only. The market's own record keeps its state: still open when the earlier settlement never reached it, settled when it did. Cash a later settlement brings to an already settled market record counts as late proceeds, which make the pool whole on the claim before repaying the insurance fund. The router's settled count falls by one, so the router is no longer quiet until the record closes again.
+
+## Path Parameters
+
+<ParamField path="liquidationId" type="string" required>
+  Liquidation ID on the market's router.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="marketId" type="string">
+  Names the market whose liquidation you mean. Every market runs its own liquidation router and IDs restart at `1` on each of them, so the same `liquidationId` can exist on several markets in one instance. Supply this when it does, otherwise the call is refused with `AMBIGUOUS_LIQUIDATION_ID` and the response lists the candidates. Also accepted as a query parameter. A value longer than 100 characters is ignored.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata. A value that is not a `0x`-prefixed 64-character hex string is ignored.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="liquidationId" type="string">Liquidation ID, echoed back.</ResponseField>
+    <ResponseField name="success" type="boolean">Nested inside `data` on the calldata response.</ResponseField>
+    <ResponseField name="collateralRemaining" type="string">Collateral on the router that the reopen makes movable again, in collateral token units. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the liquidation router. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`reopenLiquidation`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="confirmWith" type="object">How to record the mined transaction: `endpoint` is this route, `field` is `txHash`, and `body` carries `marketId` with a `txHash` to fill in. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="status" type="string">`PENDING`, the record's status after the reopen. Returned when confirming with `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+Confirming moves every `SETTLED` record under this ID on the market back to `PENDING`. The record keeps the hash of its earlier settlement in `settledTxHash`.
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidations/reopen/16" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"marketId": "clx_secmarket_001"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/liquidations/reopen/${liquidationId}`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+
+const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ marketId }) });
+const { data, error } = await res.json();
+if (error) throw new Error(`${error.code}: ${error.message}`);
+
+const tx = await adminWallet.sendTransaction(data.transaction);
+await tx.wait();
+await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ ...data.confirmWith.body, txHash: tx.hash })
+});
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "liquidationId": "16",
+    "collateralRemaining": "90.0",
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "reopenLiquidation",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/liquidations/reopen/16",
+      "field": "txHash",
+      "body": {
+        "txHash": null,
+        "marketId": "clx_secmarket_001"
+      }
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "liquidationId": "16",
+    "txHash": "0xa41f6c3e8d27b05e91c4d6a38f2b7e05c9d13a64b8e2f07c5d9a16b3e48c72f0",
+    "status": "PENDING"
+  }
+}
+```
+```json Error - Cash Already Routed
+{
+  "success": false,
+  "error": {
+    "code": "REOPEN_UNAVAILABLE",
+    "message": "Liquidation 14 routed 21400.0 of proceeds when it settled, and the router refuses to reopen a record that already delivered cash.",
+    "txHash": null
+  }
+}
+```
+```json Error - Not Settled
+{
+  "success": false,
+  "error": {
+    "code": "LIQUIDATION_NOT_SETTLED",
+    "message": "Liquidation 16 is still open; only a settled record that collected nothing can be reopened"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `AMBIGUOUS_LIQUIDATION_ID` | `400` | This ID exists on more than one market in your instance. The error carries `candidates`; resend with `marketId` |
+| `WALLET_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance to resolve the signer against |
+| `ROUTER_ADMIN_ROLE_MISSING` | `400` | Your instance's primary verified wallet lacks `DEFAULT_ADMIN_ROLE` on the router. No grant calldata is offered |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction reopens a different liquidation |
+| `REOPEN_TX_REVERTED` | `400` | The reopen could not be prepared or recorded, for example because a chain read failed. `error.txHash` carries the hash when one exists |
+| `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
+| `MARKET_NOT_FOUND` | `404` | `marketId` was supplied but names no market on your instance |
+| `LIQUIDATION_NOT_SETTLED` | `409` | The record is written off or still open here, or still open on the router |
+| `REOPEN_UNAVAILABLE` | `409` | The settlement routed proceeds, and the router never reopens a record that delivered cash |
+| `NOTHING_TO_RECOVER` | `409` | No collateral of the record remains on the router |
+| `LIQUIDATION_ON_VENUE` | `409` | The record belongs to a Dutch auction, and the router holds none of its collateral |
+| `ROUTER_UNRESOLVED` | `503` | The market's liquidation router could not be read. Retry shortly |
+| `ROUTER_UNREADABLE` | `503` | The router's record could not be read, so nothing was built. Retry shortly |
+| `ROLE_UNVERIFIABLE` | `503` | The role check could not read the router. Nothing was built. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction). A reopen that reverted on-chain is refused there with `TX_REVERTED`.

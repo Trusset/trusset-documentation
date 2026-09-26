@@ -1,12 +1,14 @@
 ---
 title: 'List Terms Versions'
-api: 'GET /lending-external-securities/api/markets/{marketId}/terms/versions'
-description: 'List superseded versions of the terms of use for a market'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/terms/versions'
+description: 'List every saved version of the terms of use for a market'
 ---
 
-Returns the version history of the market's terms of use, newest first. Every save keeps the superseded text as a version, so the terms a market presented at any point stay recoverable and auditable.
+Returns the version history of the market's terms of use, newest first. Every save that changes the document writes a version, and the current one is listed with the rest. The terms a market presented at any point stay recoverable and auditable.
 
-Version bodies are not included here. This endpoint answers what changed and when.
+Version bodies are not included here. This endpoint answers what changed and when. Read one version in full with [Get Terms Version](/endpoints/lending/get-terms-version).
+
+Drafts are listed too, whatever their publication state. Unpublishing writes no version, so after [Unpublish Terms](/endpoints/lending/unpublish-terms) the newest entry still reads `published: true` while the terms are down. [Get Terms](/endpoints/lending/get-terms) is the authority on whether terms are live.
 
 ## Path Parameters
 
@@ -15,7 +17,7 @@ Version bodies are not included here. This endpoint answers what changed and whe
 ## Query Parameters
 
 <ParamField query="limit" type="integer" default="25">
-  Versions to return. Minimum 1, maximum 100.
+  Versions to return. Clamped to between 1 and 100 rather than refused. `0` or a value that is not a number falls back to 25.
 </ParamField>
 
 ## Response Fields
@@ -23,25 +25,33 @@ Version bodies are not included here. This endpoint answers what changed and whe
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="versions" type="array">
-      Versions ordered by `version` descending. Empty when the market has no terms.
+      Versions ordered by `version` descending, the current one first. Empty when the market has no terms.
       <Expandable>
         <ResponseField name="id" type="string">Version record ID.</ResponseField>
         <ResponseField name="version" type="integer">Version number.</ResponseField>
-        <ResponseField name="title" type="string">Document title at that version.</ResponseField>
-        <ResponseField name="contentHash" type="string">Hash of the content at that version.</ResponseField>
-        <ResponseField name="curatorAddress" type="string">Address of the lender of record that saved it.</ResponseField>
-        <ResponseField name="published" type="boolean">Whether that version was published rather than left as a draft.</ResponseField>
-        <ResponseField name="createdAt" type="string">ISO 8601 timestamp.</ResponseField>
+        <ResponseField name="title" type="string">Document title at that version. `null` when none was set.</ResponseField>
+        <ResponseField name="contentHash" type="string">keccak256 over the UTF-8 bytes of the markdown at that version.</ResponseField>
+        <ResponseField name="curatorAddress" type="string">The wallet that saved it: the lender of record, or a wallet holding the market's admin or issuer role.</ResponseField>
+        <ResponseField name="published" type="boolean">Whether that save published the document or kept it as a draft.</ResponseField>
+        <ResponseField name="createdAt" type="string">ISO 8601 time of the save.</ResponseField>
       </Expandable>
     </ResponseField>
-    <ResponseField name="current" type="integer">The market's current version number, or null when no terms exist.</ResponseField>
+    <ResponseField name="current" type="integer">The market's current version number, or `null` when no terms exist.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/terms/versions?limit=10" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/terms/versions?limit=10" \
   -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/terms/versions?limit=10`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const drafts = data.versions.filter((v: { published: boolean }) => !v.published);
 ```
 </RequestExample>
 
@@ -53,21 +63,30 @@ curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}
     "versions": [
       {
         "id": "sectermsv_003",
-        "version": 2,
+        "version": 3,
         "title": "ACME Secured Lending Facility: Terms of Use",
-        "contentHash": "0x51ab7c206e94d38f1c0b7ae5390d24c68f1b0537ad92e4c6108b53f7d420ae19",
+        "contentHash": "0xf0b3379e4102181f66822fd86cd5c1f93e448e5bdfd3f8961151b05c5feacc5a",
         "curatorAddress": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
         "published": true,
-        "createdAt": "2025-06-02T16:41:09.000Z"
+        "createdAt": "2026-09-10T09:12:44.000Z"
       },
       {
         "id": "sectermsv_002",
+        "version": 2,
+        "title": "ACME Secured Lending Facility: Terms of Use",
+        "contentHash": "0x5d4b74a6814f6236b5572f4165ae340dfd276faf02d78da3f5672a452ee9f289",
+        "curatorAddress": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "published": false,
+        "createdAt": "2026-09-02T16:41:09.000Z"
+      },
+      {
+        "id": "sectermsv_001",
         "version": 1,
         "title": "ACME Secured Lending Facility: Terms of Use",
         "contentHash": "0xc06e3f9145b8a27d0e5347fb1c9820a6d4738e5107ba2c9df6410a83e27b5cd4",
         "curatorAddress": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
         "published": true,
-        "createdAt": "2025-05-28T14:03:07.000Z"
+        "createdAt": "2026-08-28T14:03:07.000Z"
       }
     ],
     "current": 3
@@ -89,5 +108,6 @@ curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}
 
 | Code | HTTP | Cause |
 |---|---|---|
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

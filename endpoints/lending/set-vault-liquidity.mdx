@@ -1,0 +1,152 @@
+---
+title: 'Set Vault Liquidity'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/vault-liquidity'
+description: 'Switch just-in-time vault liquidity on or off for a market'
+---
+
+Builds the `setVaultLiquidity` transaction that turns just-in-time vault liquidity on or off. While it is on, a borrow the pool cannot fund draws the shortfall from the market's registered vaults inside the borrower's transaction. The market admin, the wallet holding `DEFAULT_ADMIN_ROLE`, signs it.
+
+A draw needs no decision per loan. Within the caps each vault operator set for this market, vault money moves into the pool whenever a borrower needs it. From then on, the vault's exit from this market depends on the market's utilization.
+
+Off is the default. Turning the switch on draws on nobody until a vault is registered with [Register Vault](/endpoints/lending/register-vault) and its operator has set a draw cap for this market. [Get Vault Liquidity](/endpoints/lending/get-vault-liquidity) shows every leg and explains the draw.
+
+Turning it off makes every registered vault inert, and every borrow is bounded by the pool alone again. Nothing already drawn moves. A vault's position stays ordinary pool liquidity and leaves the way any provider's does.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="enabled" type="boolean" required>
+  `true` lets the market draw on its registered vaults, `false` stops it. The current setting is not checked, so sending the value the market already has still builds a transaction.
+</ParamField>
+
+## Check the result
+
+This API has no confirm call for the switch. A `txHash` in the body is ignored and the call answers with calldata again, so sending one confirms nothing. Once the transaction is mined, read `useVaultLiquidity` from [Get Vault Liquidity](/endpoints/lending/get-vault-liquidity).
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction targeting the market contract, carrying `to` and `data` only.</ResponseField>
+    <ResponseField name="to" type="string">The market contract, repeated at the top level.</ResponseField>
+    <ResponseField name="data" type="string">The encoded `setVaultLiquidity` call, repeated at the top level.</ResponseField>
+    <ResponseField name="value" type="string">`"0"`. On this call it sits on `data` itself, not inside `transaction`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain your instance resolves to. On this call it sits on `data` itself, not inside `transaction`, so pass it to the wallet explicitly.</ResponseField>
+    <ResponseField name="functionName" type="string">`setVaultLiquidity`.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`DEFAULT_ADMIN_ROLE`, the market role the signing wallet must hold.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction does, in words.</ResponseField>
+    <ResponseField name="heldByThisInstance" type="boolean">Whether a wallet registered on your instance holds `DEFAULT_ADMIN_ROLE` on this market. `null` when the roles could not be read.</ResponseField>
+    <ResponseField name="signerAddress" type="string">The instance wallet that holds the role, when one does. `null` otherwise.</ResponseField>
+    <ResponseField name="requiredSigner" type="string">Always `null` on this call. It names a wallet only on setters signed by the oracle or interest model owner.</ResponseField>
+    <ResponseField name="note" type="string">Set when no instance wallet holds the role, or when that could not be read. `null` otherwise. Show it to whoever must sign.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  A market still seeking a lender of record has no admin, so this call is refused with `MARKET_PENDING_CURATOR` before any calldata is built. When `heldByThisInstance` is `false`, a transaction signed by an instance wallet reverts on-chain. Hand the calldata to the wallet the lender of record placed `DEFAULT_ADMIN_ROLE` with.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/vault-liquidity" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/vault-liquidity`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ enabled: true })
+  }
+);
+const { data } = await res.json();
+
+if (data.heldByThisInstance === false) {
+  throw new Error(data.note);
+}
+
+const tx = await adminWallet.sendTransaction({
+  ...data.transaction,
+  value: data.value,
+  chainId: data.chainId
+});
+await tx.wait();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x..."
+    },
+    "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "data": "0x...",
+    "functionName": "setVaultLiquidity",
+    "requiredRole": "DEFAULT_ADMIN_ROLE",
+    "description": "Enable just-in-time vault liquidity: registered, capped vaults fund borrow-time deficits by becoming ordinary LPs in the same transaction (requires DEFAULT_ADMIN_ROLE)",
+    "requiredSigner": null,
+    "heldByThisInstance": true,
+    "signerAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "note": null,
+    "chainId": 11155111,
+    "value": "0"
+  }
+}
+```
+```json Calldata Response (Role Not Held Here)
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x..."
+    },
+    "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "data": "0x...",
+    "functionName": "setVaultLiquidity",
+    "requiredRole": "DEFAULT_ADMIN_ROLE",
+    "description": "Enable just-in-time vault liquidity: registered, capped vaults fund borrow-time deficits by becoming ordinary LPs in the same transaction (requires DEFAULT_ADMIN_ROLE)",
+    "requiredSigner": null,
+    "heldByThisInstance": false,
+    "signerAddress": null,
+    "note": "No wallet registered on this instance holds DEFAULT_ADMIN_ROLE on this market, so a transaction signed here reverts NotAuthorized. The wallet the lender of record placed that role with must sign it.",
+    "chainId": 11155111,
+    "value": "0"
+  }
+}
+```
+```json Error - Pending Lender of Record
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_PENDING_CURATOR",
+    "message": "This market has no lender of record yet, so switching vault liquidity is not possible. A nominated candidate must take the role before the market has an admin that can sign this."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `enabled` is missing or not a boolean. `error.details` names the field |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so no admin exists to sign. See [Lender of record](/endpoints/lending/introduction#lender-of-record) |

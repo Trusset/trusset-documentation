@@ -1,10 +1,10 @@
 ---
 title: 'Borrow More'
-api: 'POST /lending-external-securities/api/positions/{marketId}/borrow-more'
+api: 'POST /lending-external-securities-v2/api/positions/{marketId}/borrow-more'
 description: 'Draw additional funds against an existing loan'
 ---
 
-Increases the borrowed amount on an active loan without posting more collateral. The contract reverts if the resulting debt would exceed what the existing collateral supports at the current price.
+Increases the borrowed amount on an active loan without posting more collateral. Only the loan's borrower can sign it: the contract reverts for any other sender. It also reverts if the resulting debt would exceed what the existing collateral supports at the current price.
 
 Single transaction in both modes. No approval is involved because funds move out of the pool, not in.
 
@@ -22,12 +22,12 @@ Single transaction in both modes. No approval is involved because funds move out
   On-chain loan ID. A positive integer. Accepted as a JSON number or as a numeric string, so the value [Get Loan](/endpoints/lending/get-loan) returns passes straight back.
 </ParamField>
 
-<ParamField body="amount" type="string" required>
-  Additional amount to borrow, as a decimal string in borrow asset units.
+<ParamField body="amount" type="string">
+  Additional amount to borrow, as a positive decimal string in borrow asset units. The loan's debt grows by this amount. Required when building calldata, not needed on the confirm call.
 </ParamField>
 
 <ParamField body="signedPrice" type="object">
-  EIP-712 signed price from [Sign Price](/endpoints/lending/sign-price). Omit to price against the stored oracle value.
+  EIP-712 signed price from [Sign Price](/endpoints/lending/sign-price). Omit to price against the stored oracle value. A market that prices from an external feed refuses a signed price with `EXTERNAL_FEED_ACTIVE`.
   <Expandable>
     <ParamField body="price" type="string">Price in base units.</ParamField>
     <ParamField body="timestamp" type="integer">Signing timestamp.</ParamField>
@@ -40,17 +40,25 @@ Single transaction in both modes. No approval is involved because funds move out
   Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
 </ParamField>
 
+## Opening fee and vault draws
+
+A market that charges an opening fee charges it on every draw, this one included. The debt grows by `amount` and the borrower receives `amount` less the fee, which is the flat fee or 0.5 percent of `amount`, whichever is smaller. The calldata response then carries `transactionFee`, shaped as on [Open Loan](/endpoints/lending/open-loan#what-the-loan-will-cost-and-when-it-is-due), and its message in `warnings`.
+
+On a market that draws on vault liquidity, a draw larger than the pool's borrowable liquidity pulls the shortfall from the registered vaults in the same transaction. The API does not refuse such a draw for liquidity, because the market itself is the final gate there. The confirm response lists each vault draw in `vaultDraws`.
+
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="loanId" type="integer">Loan ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="additionalBorrow" type="string">Amount borrowed, echoed back. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION` when `txHash` is omitted.</ResponseField>
     <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, for the `borrowMore` call. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="functionName" type="string">`borrowMore`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="warnings" type="array">Present when a preflight found something that does not block the draw: the collateral instrument's recorded maturity, or a market whose lender of record has published no terms of use. Same shape and same `kind` values as on [Open Loan](/endpoints/lending/open-loan#warnings).</ResponseField>
+    <ResponseField name="transactionFee" type="object">The opening fee on this draw, present only when it is not zero. Carries `kind: "OPEN"`, `fee`, `feeRaw`, `borrowed`, `netDisbursed`, `netDisbursedRaw` and `message`.</ResponseField>
+    <ResponseField name="warnings" type="array">Present when a preflight found something that does not block the draw. That is the collateral instrument's recorded maturity, or a market whose lender of record has published no terms of use. Same object shape and `kind` values as on [Open Loan](/endpoints/lending/open-loan#warnings). An opening fee adds its message as a plain string.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="loanId" type="integer">Loan ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="additionalBorrow" type="string">The amount the loan's debt grew by, read from the mined transaction. With an opening fee, the borrower received this less the fee. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="vaultDraws" type="array">Present when the transaction drew on vault liquidity. Each entry carries `vault` (the vault address) and `amount` (in borrow asset units).</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -59,15 +67,40 @@ Single transaction in both modes. No approval is involved because funds move out
 </Warning>
 
 <Note>
-  Capacity is checked before any transaction is offered. An amount past what the collateral supports is refused with `EXCEEDS_MAX_BORROW`, and one the pool cannot fund with `INSUFFICIENT_LIQUIDITY`. That check is skipped when a `signedPrice` is supplied, because the contract then prices against the signature rather than the stored value. In that case the amount reverts on-chain instead. Compute headroom from [Get Max Borrow](/endpoints/lending/get-max-borrow) against the loan's collateral, less outstanding principal and accrued interest.
+  Capacity is checked before any transaction is offered. An amount past what the collateral supports is refused with `EXCEEDS_MAX_BORROW`. On a market without vault liquidity, one the pool cannot fund is refused with `INSUFFICIENT_LIQUIDITY`. Both checks are skipped when a `signedPrice` is supplied, because the contract then prices against the signature rather than the stored value. An out-of-range amount then reverts on-chain instead. Compute headroom from [Get Max Borrow](/endpoints/lending/get-max-borrow) against the loan's collateral, less outstanding principal and accrued interest.
 </Note>
+
+While a Dutch auction is open against the loan, the contract reverts the draw. The API does not check for an open auction before offering calldata.
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/borrow-more" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/borrow-more" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{"loanId": 5, "amount": "10000"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/borrow-more`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ loanId: 5, amount: '10000' })
+});
+const { data } = await res.json();
+
+const tx = await borrowerWallet.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ loanId: 5, txHash: tx.hash })
+});
 ```
 </RequestExample>
 
@@ -77,8 +110,25 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTION",
-    "transaction": { "to": "0x70A0...", "data": "0x..." },
-    "functionName": "borrowMore"
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "borrowMore",
+    "transactionFee": {
+      "kind": "OPEN",
+      "fee": "2.0",
+      "feeRaw": "2000000",
+      "borrowed": "10000.0",
+      "netDisbursed": "9998.0",
+      "netDisbursedRaw": "9998000000",
+      "message": "This market charges a loan opening fee of 2.0 USDC on this draw, withheld from the amount paid out: the debt grows by 10000.0 USDC and the borrower receives 9998.0 USDC."
+    },
+    "warnings": [
+      "This market charges a loan opening fee of 2.0 USDC on this draw, withheld from the amount paid out: the debt grows by 10000.0 USDC and the borrower receives 9998.0 USDC."
+    ]
   }
 }
 ```
@@ -86,9 +136,18 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
 {
   "success": true,
   "data": {
-    "txHash": "0xabc...def",
+    "txHash": "0x5c8e1a7f9b3d2046e1c7a9f08b4d6e2317c5a0f9e8d7b6c5a4f3e2d1c0b9a8f7",
     "loanId": 5,
-    "additionalBorrow": "10000"
+    "additionalBorrow": "10000.0"
+  }
+}
+```
+```json Error - Fixed Rate Loan
+{
+  "success": false,
+  "error": {
+    "code": "FIXED_RATE_LOAN",
+    "message": "Loan 5 carries a stamped fixed rate of 800 bps, and additional draws on a stamped loan are refused by the market. Open a new loan at current terms instead."
   }
 }
 ```
@@ -99,17 +158,21 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
 | Code | HTTP | Cause |
 |---|---|---|
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
-| `VALIDATION_ERROR` | `400` | `loanId` is not a positive integer, or `amount` carries more decimal places than the borrow asset supports |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `VALIDATION_ERROR` | `400` | `loanId` is not a positive integer, or `amount` is missing on the build call, not a positive decimal string, or carries more decimal places than the borrow asset supports |
 | `LOAN_NOT_ACTIVE` | `400` | The loan is closed and can no longer be modified |
 | `MARKET_PAUSED` | `400` | The market is paused. Its admin must unpause it |
-| `PRICE_STALE` | `400` | The oracle price is outside the market's `maxPriceAge`. Push a NAV with [Sync Oracle Price](/endpoints/lending/sync-oracle), or supply a `signedPrice` |
+| `IDENTITY_NOT_VERIFIED` | `400` | The borrower is no longer verified on the market's borrower register. `borrowMore` runs the same gate as `openLoan`, so a registration that lapsed mid-loan is refused here |
+| `PRICE_STALE` | `400` | The price is older than the oracle's staleness window. On an attested market, push a price with [Sync Oracle Price](/endpoints/lending/sync-oracle) or supply a `signedPrice`. On an external-feed market, wait for the feed to publish |
 | `EXCEEDS_MAX_BORROW` | `400` | The request would take the loan past what its collateral supports. Skipped when a `signedPrice` is supplied |
-| `INSUFFICIENT_LIQUIDITY` | `400` | The pool holds less available liquidity than the request needs |
-| `IDENTITY_NOT_VERIFIED` | `400` | The borrower is no longer verified on the market's identity registry. `borrowMore` runs the same gate as `openLoan`, so a registration that lapsed mid-loan is refused here |
+| `INSUFFICIENT_LIQUIDITY` | `400` | The market draws on no vault liquidity and holds less borrowable liquidity than the request, after its reserve earmark. Skipped when a `signedPrice` is supplied |
 | `LOAN_NOT_FOUND` | `404` | No loan with that ID exists on this market |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet. See [Lender of record](/endpoints/lending/introduction#lender-of-record) |
 | `FIXED_RATE_LOAN` | `409` | The loan carries a stamped fixed rate, so the market refuses an additional draw |
 | `COLLATERAL_MATURED` | `409` | The collateral instrument passed its recorded maturity, and the record was asserted by a party to this market |
-| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to run a check. Retry shortly |
-| `LOAN_STATE_UNAVAILABLE` | `503` | The loan could not be read from the network. Retry shortly |
+| `EXTERNAL_FEED_ACTIVE` | `409` | A `signedPrice` was sent to a market that prices from an external feed. Retry without it |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to check whether it is paused, its price, or its transaction fees. Retry shortly |
+| `LOAN_STATE_UNAVAILABLE` | `503` | The loan or its borrow limit could not be read from the network. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

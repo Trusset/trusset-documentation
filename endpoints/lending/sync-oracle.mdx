@@ -1,17 +1,17 @@
 ---
 title: 'Sync Oracle Price'
-api: 'POST /lending-external-securities/api/markets/{marketId}/sync-oracle'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/sync-oracle'
 description: 'Push a NAV price on-chain'
 ---
 
-Writes a new price to the market's oracle. This is how external securities markets are priced: the issuer publishes a net asset value and pushes it here.
+Writes a new price to the market's oracle. This is how a `NAV`- or `MARKET`-priced market moves its stored price: the market's price authority publishes a value and pushes it here. Between pushes, the price moves only when a transaction carries a [signed price](/endpoints/lending/sign-price).
 
-There is no automatic price feed for these markets. `price` is required on every call. If you omit it or send a non-positive value the request is rejected.
+An `ORACLE`-priced market reads an external feed instead, and its oracle refuses every attested price. This endpoint refuses it with `EXTERNAL_FEED_ACTIVE`.
 
-Like every other write on this surface, nothing is submitted for you. The call returns the unsigned `updatePrice` transaction, you broadcast it from your own wallet, then confirm it with `txHash`.
+Like every other write on this surface, nothing is submitted for you. The call returns the unsigned transaction, you broadcast it, then confirm it with `txHash`. `price` is required on both calls.
 
 <Warning>
-  The wallet that signs must be an authorized signer on the oracle, which the oracle owner grants. The API checks the resolved signer before building the calldata and refuses with `SIGNER_NOT_AUTHORIZED` if it is not authorized. Check `signerAuthorized` and `priceSignerAuthorized` on [Get Oracle Status](/endpoints/lending/get-oracle-status) first.
+  `updatePrice` is authorized against the wallet that sends it, which must be an authorized signer on the oracle or its owner. The API checks the resolved signer before building the calldata and refuses with `SIGNER_NOT_AUTHORIZED` if it is not authorized. Broadcast from the wallet named in `signer`. Check `signerAuthorized` and `priceSignerAuthorized` on [Get Oracle Status](/endpoints/lending/get-oracle-status) first.
 </Warning>
 
 Price authority does not have to be your instance's primary wallet. When the lender of record took the role it declared a `priceSigner`, and that address is what this endpoint resolves to when you name none. Pass `signerAddress` to check against a different key.
@@ -23,67 +23,79 @@ Price authority does not have to be your instance's primary wallet. When the len
 ## Body Parameters
 
 <ParamField body="price" type="number" required>
-  Net asset value per collateral token, denominated in the market's borrow asset. Must be greater than zero.
+  Net asset value per collateral token, denominated in the market's borrow asset. Must be greater than zero, and a numeric string is accepted too. Required on the confirm call as well, where the value recorded comes from the mined transaction instead. More decimal places than the borrow asset carries fail with `SYNC_FAILED`.
 </ParamField>
 
 <ParamField body="signerAddress" type="string">
-  Wallet the authorization check runs against. Omit it and the market's declared `priceSigner` is used; when the market declares none, the instance's registered wallet is. Ignored when confirming with `txHash`, where the signer is taken from the receipt.
+  Wallet the authorization check runs against. Omit it and the market's declared `priceSigner` is used. When the market declares none, the instance's first verified wallet is. A value that is not a 0x-prefixed 40-character hex address is ignored. Not used when confirming with `txHash`, or when a recorded attestation is submitted.
 </ParamField>
 
 <ParamField body="txHash" type="string">
-  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+  Hash of the mined transaction, sent together with `price` to confirm it and record the push. Omit it to receive the calldata. A value that is not a 0x-prefixed 64-character hex string is ignored, and the call builds calldata instead.
 </ParamField>
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
+    <ResponseField name="success" type="boolean">Nested inside `data` on the calldata response.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the oracle. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="functionName" type="string">`updatePrice`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="signer" type="string">The wallet the authorization check was run against. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="success" type="boolean">Nested inside `data` on the calldata response.</ResponseField>
+    <ResponseField name="functionName" type="string">`updatePrice`, or `updatePriceWithSignature` when a recorded attestation is carried. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet the authorization check ran against, or the key that signed the carried attestation. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="attestationId" type="string">The recorded attestation being submitted. Present only with `updatePriceWithSignature`.</ResponseField>
     <ResponseField name="previousPrice" type="string">The on-chain price before this write. Null when confirming, because the prior value is no longer readable from the receipt.</ResponseField>
-    <ResponseField name="newPrice" type="string">The price written. Read from the mined transaction when confirming.</ResponseField>
+    <ResponseField name="newPrice" type="string">The price to be written, as sent. Read from the mined transaction when confirming.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
 
+## Submit a Recorded Attestation
+
+A price signer that keeps its key outside this instance can sign the payload from [Sign Price](/endpoints/lending/sign-price) and post the signature to [Record Price Attestation](/endpoints/lending/record-price-attestation). A later push of exactly that price returns `updatePriceWithSignature` carrying the attestation. The oracle authorizes the key that signed, so any wallet may broadcast it and no authorization check runs on the sender.
+
+The attestation is used only while it is unexpired, not yet pushed, and recorded through this instance. It must also be dated after the oracle's current price, be at most 15 minutes old, and still pass the oracle's own signature check. Otherwise the call falls back to a plain `updatePrice`. An attested price is dated at its signed timestamp, so its age runs from signing, not from broadcast.
+
 ## Circuit Breaker
 
-The oracle rejects a price that deviates from the current price by more than `maxDeviationBps`, defaulting to 5000 basis points, which is 50 percent. This guards against a fat-fingered NAV wiping out healthy loans in one transaction.
+The oracle rejects a price that deviates from the current price by more than `maxDeviationBps`, defaulting to 5000 basis points, which is 50 percent. This guards against a fat-fingered NAV wiping out healthy loans in one transaction. The same limit also bounds the total movement within a rolling one-hour window, measured from the price that opened the window.
 
-The check is skipped when the oracle has never been priced, so the first push after deployment can be any positive value. When the breaker trips, the error carries `currentPrice`, `newPrice`, and `maxDeviationPercent` so you can present the comparison.
+Every push-mode oracle is initialized with a positive price at deployment, so even the first push is measured against it. The API runs the step check before building calldata and refuses with `PRICE_DEVIATION_TOO_LARGE`. It does not run the window check, so a push inside the step limit can still revert on-chain after earlier moves in the same hour.
 
-A genuine repricing beyond the limit requires the oracle owner to widen `maxDeviationBps`, or a sequence of smaller steps. Do not retry a rejected push unchanged. Surface the deviation to an operator, because a retry sends the same price into the same breaker.
+The refusal names the on-chain price, the new price and the allowed percentage in `message` only. The error object carries no separate fields for them.
+
+A genuine repricing beyond the limit requires the oracle owner to widen `maxDeviationBps`, or a sequence of smaller steps. Steps that land within one hour count against the same window. Do not retry a rejected push unchanged. Surface the deviation to an operator, because a retry sends the same price into the same breaker.
 
 <Note>
-  Successful pushes are recorded on the market as an `ORACLE_SYNC` transaction, visible through [List Transactions](/endpoints/lending/list-transactions), and update `lastOracleUpdate` on the market record.
+  A confirmed push is recorded on the market as an `ORACLE_SYNC` transaction, visible through [List Transactions](/endpoints/lending/list-transactions), and updates `lastOracleUpdate` on the market record. A push that is broadcast but never confirmed still appears in the `pushed` list on [Get Oracle History](/endpoints/lending/get-oracle-history), which mirrors the oracle's events.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/sync-oracle" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/sync-oracle" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{"price": 105.40}'
 ```
 ```typescript TypeScript
-const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/sync-oracle`,
-  {
-    method: 'POST',
-    headers: {
-      'X-API-Key': 'trusset_your_key_here',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ price: 105.40 })
-  }
-);
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/sync-oracle`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ price: 105.40 }) });
 const { success, data, error } = await res.json();
-if (!success && error.code === 'PRICE_DEVIATION_TOO_LARGE') {
-  await notifyOperator(error.message);
+if (!success) {
+  if (error.code === 'PRICE_DEVIATION_TOO_LARGE') await notifyOperator(error.message);
+  throw new Error(error.code);
 }
+const tx = await priceSignerWallet.sendTransaction(data.transaction);
+await tx.wait();
+await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ price: 105.40, txHash: tx.hash })
+});
 ```
 </RequestExample>
 
@@ -97,13 +109,33 @@ if (!success && error.code === 'PRICE_DEVIATION_TOO_LARGE') {
     "transaction": {
       "to": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
       "data": "0x...",
-      "value": "0",
-      "chainId": 11155111
+      "chainId": 11155111,
+      "value": "0"
     },
     "functionName": "updatePrice",
-    "previousPrice": "104.820000",
+    "previousPrice": "104.82",
     "newPrice": "105.4",
     "signer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52"
+  }
+}
+```
+```json Calldata Response - Attested
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+      "data": "0x...",
+      "chainId": 11155111,
+      "value": "0"
+    },
+    "functionName": "updatePriceWithSignature",
+    "previousPrice": "104.82",
+    "newPrice": "105.4",
+    "signer": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70",
+    "attestationId": "clx4k2p9e0001m8tq3v7h5z2a"
   }
 }
 ```
@@ -112,7 +144,7 @@ if (!success && error.code === 'PRICE_DEVIATION_TOO_LARGE') {
   "success": true,
   "data": {
     "previousPrice": null,
-    "newPrice": "105.400000",
+    "newPrice": "105.4",
     "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b"
   }
 }
@@ -122,7 +154,7 @@ if (!success && error.code === 'PRICE_DEVIATION_TOO_LARGE') {
   "success": false,
   "error": {
     "code": "SIGNER_NOT_AUTHORIZED",
-    "message": "Wallet 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 is not authorized on oracle 0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423. The oracle owner must call setAuthorizedSigner."
+    "message": "Wallet 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 is not authorized on oracle 0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423. The oracle owner must call setAuthorizedSigner, or the declared price signer can attest the price and anyone may then submit that attestation."
   }
 }
 ```
@@ -131,7 +163,16 @@ if (!success && error.code === 'PRICE_DEVIATION_TOO_LARGE') {
   "success": false,
   "error": {
     "code": "PRICE_DEVIATION_TOO_LARGE",
-    "message": "Price deviation exceeds circuit breaker. On-chain: $104.820000, new: $250. Max allowed: 50%"
+    "message": "Price deviation exceeds circuit breaker. On-chain: $104.82, new: $250. Max allowed: 50%"
+  }
+}
+```
+```json Error - External Feed
+{
+  "success": false,
+  "error": {
+    "code": "EXTERNAL_FEED_ACTIVE",
+    "message": "This oracle prices from the external feed 0x6e2f41c8a93b07d5e1f4a2c6b8d03e97f5a1c42d and refuses attested updates. There is nothing to sign or sync: the market reads the feed directly."
   }
 }
 ```
@@ -150,10 +191,14 @@ if (!success && error.code === 'PRICE_DEVIATION_TOO_LARGE') {
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `MISSING_PRICE` | `400` | `price` absent, non-numeric, or not greater than zero |
+| `MISSING_PRICE` | `400` | `price` absent, non-numeric, or not greater than zero, on the calldata call and the confirm call alike |
 | `NO_ORACLE` | `400` | The market has no oracle recorded |
-| `SIGNER_NOT_AUTHORIZED` | `403` | The registered wallet is not an authorized signer on the oracle. Checked before the calldata is built, and skipped when confirming with `txHash` |
-| `WALLET_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance |
-| `PRICE_DEVIATION_TOO_LARGE` | `400` | The change exceeds the oracle circuit breaker. The error carries `currentPrice`, `newPrice` and `maxDeviationPercent` |
-| `SYNC_FAILED` | `400` | The update could not be prepared or confirmed and no more specific code applied |
+| `EXTERNAL_FEED_ACTIVE` | `400` | The market's oracle reads an external feed and refuses pushed prices |
+| `WALLET_NOT_CONFIGURED` | `400` | No `signerAddress` was given, the market declared no price signer, this instance has no verified wallet, and no recorded attestation matched |
+| `PRICE_DEVIATION_TOO_LARGE` | `400` | The step from the on-chain price exceeds `maxDeviationBps` |
+| `SYNC_FAILED` | `400` | The update could not be prepared, or the confirm call failed verification. `message` carries the reason |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `SIGNER_NOT_AUTHORIZED` | `403` | The resolved signer is neither an authorized signer nor the owner. Checked before the calldata is built; skipped when a recorded attestation is carried and when confirming |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+
+Confirming does not return the typed [transaction verification codes](/endpoints/introduction#confirm-a-transaction). A receipt that is missing, reverted, sent to another contract or calling another function answers `SYNC_FAILED`, with the verification message such as `Transaction not found or not yet mined`.

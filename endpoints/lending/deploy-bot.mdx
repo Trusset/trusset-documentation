@@ -1,0 +1,122 @@
+---
+title: 'Deploy Liquidation Bot'
+api: 'POST /lending-external-securities-v2/api/liquidation-bots'
+description: 'Build the transaction that deploys a liquidation bot owned by the signing wallet'
+---
+
+Builds the transaction that deploys a liquidation bot through the liquidation bot factory. The wallet that signs it becomes the bot's owner. Broadcast it, then record the bot with [Confirm Bot Deployment](/endpoints/lending/confirm-bot-deployment).
+
+<Warning>
+  The owner is whichever wallet signs the transaction, not the `ownerWallet` this call returns. `ownerWallet` only names the wallet the call expects to sign. Ownership decides who can withdraw the bot's float, so sign with the wallet that should hold it.
+</Warning>
+
+## What a liquidation bot does
+
+A liquidation bot is a liquidation shim: a small contract that holds `LIQUIDATOR_ROLE` on the markets connected to it, so no wallet has to. Its `liquidate(market, loanId, signedPrice)` is open to any caller. It forwards the call to the lending module, which checks the bot's role, the price and whether the loan is liquidatable, and reverts otherwise. Seized collateral goes where the market sends it, never to the caller.
+
+After a liquidation succeeds, the bot refunds the caller's gas from its float of the network's native coin, within the refund policy set with [Bot Action](/endpoints/lending/bot-action). A reverted liquidation pays nothing. A refund transfer that fails is skipped rather than undoing the liquidation.
+
+The bot also forwards `settleExpiredAuction(market, auctionId)`. The lending module deployed today has no such function, because its auction module settles expired auctions for any caller, so this path reverts on those markets.
+
+## Who calls it
+
+Trusset has no signer and never calls a bot. A liquidation through a bot is a transaction someone else sends: a keeper the operator runs, or any third party. The API builds no calldata for the bot's `liquidate`. [Liquidate Loan](/endpoints/lending/liquidate) builds a direct market call for a wallet that holds the role itself, so encode the bot call from the bot contract's ABI.
+
+## Who controls it
+
+Only the owner can enable or disable markets on the bot, pause it, set its refund policy and withdraw its float. The factory keeps no role on a bot it deploys, and Trusset holds no key to it. The bot is not upgradeable: replacing one means deploying another and moving the market roles to it.
+
+A bot does nothing until it is connected. [Connect Bot](/endpoints/lending/connect-bot) enables a market on the bot and has the market grant it `LIQUIDATOR_ROLE`. [Fund Bot](/endpoints/lending/fund-bot) adds the float that pays refunds.
+
+## Body Parameters
+
+<ParamField body="signerAddress" type="string">
+  Wallet expected to sign, returned as `ownerWallet`. It does not enter the calldata, since the owner is whoever signs. Omit it to name the instance's registered wallet.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned `deployShim()` call on the factory: `to`, `data`, `value` and `chainId`.</ResponseField>
+    <ResponseField name="functionName" type="string">`deployShim`.</ResponseField>
+    <ResponseField name="ownerWallet" type="string">`signerAddress` lowercased, or the instance's registered wallet.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ "endpoint": "confirm-deploy", "txHash": true }`. Send the mined hash to [Confirm Bot Deployment](/endpoints/lending/confirm-bot-deployment).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidation-bots" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"signerAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52"}'
+```
+```typescript TypeScript
+const base = 'https://api.trusset.org/lending-external-securities-v2/api/liquidation-bots';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(base, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ signerAddress: await wallet.getAddress() })
+});
+const { data } = await res.json();
+
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
+
+const confirm = await fetch(`${base}/confirm-deploy`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ txHash: tx.hash, label: 'Primary keeper' })
+});
+const { data: confirmed } = await confirm.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0xd4300263bbe96f12c6c53b3ad24fcda4648cda5a",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "deployShim",
+    "ownerWallet": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "confirmWith": { "endpoint": "confirm-deploy", "txHash": true }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-09-20T09:58:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Not Configured
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "SHIM_NOT_CONFIGURED",
+    "message": "Liquidation bots are not configured for this network"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `signerAddress` is not a `0x`-prefixed 40-hex address |
+| `WALLET_NOT_CONFIGURED` | `412` | No `signerAddress` was sent and the instance has no verified wallet |
+| `SHIM_NOT_CONFIGURED` | `503` | No liquidation bot factory is configured for the instance's network |
+| `BOT_DEPLOY_FAILED` | `500` | An unexpected failure. The message is generic; retry |

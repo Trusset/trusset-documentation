@@ -1,12 +1,14 @@
 ---
 title: 'Get Max Borrow'
-api: 'GET /lending-external-securities/api/markets/{marketId}/max-borrow'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/max-borrow'
 description: 'Quote the maximum borrowable amount for a collateral size'
 ---
 
-Returns the largest amount the market will lend against a given quantity of collateral, computed by the contract at the current oracle price and collateral factor. Use it to drive a borrow slider before calling [Open Loan](/endpoints/lending/open-loan).
+Returns the largest debt the market will allow against a given quantity of collateral, computed by the contract from the stored oracle price and the collateral factor. Use it to drive a borrow slider before calling [Open Loan](/endpoints/lending/open-loan).
 
-The response also reports oracle freshness, because a quote against a stale price will not be honoured by the contract.
+The quote is the collateral bound alone. It does not check the pool's liquidity, the supply caps, the minimum borrow, or whether the price is fresh. [Open Loan](/endpoints/lending/open-loan) checks each of those before it returns calldata. On a market that charges an open fee, the borrower receives the loan amount less that fee and owes the full amount.
+
+The response also reports oracle freshness, because the contract refuses a new loan against a stale price.
 
 ## Path Parameters
 
@@ -15,7 +17,7 @@ The response also reports oracle freshness, because a quote against a stale pric
 ## Query Parameters
 
 <ParamField query="collateralAmount" type="string" required>
-  Collateral quantity as a decimal string, for example `"1000"`. Parsed at the collateral token's decimals. Must be greater than zero.
+  Collateral quantity as a decimal string, for example `"1000"`. Must be greater than zero, and is parsed at the collateral token's decimals, so it may carry no more decimal places than the token has.
 </ParamField>
 
 ## Response Fields
@@ -24,26 +26,27 @@ The response also reports oracle freshness, because a quote against a stale pric
   <Expandable>
     <ResponseField name="collateralAmount" type="string">The quantity you supplied, echoed back.</ResponseField>
     <ResponseField name="maxBorrow" type="string">Maximum borrowable amount, in borrow asset units.</ResponseField>
-    <ResponseField name="isStale" type="boolean">Whether the oracle price is older than the market's `maxPriceAge`. `null` when the market has no oracle or the read failed.</ResponseField>
+    <ResponseField name="isStale" type="boolean">Whether the oracle price is older than the oracle's `maxPriceAge`. `null` when the market has no oracle or the read failed.</ResponseField>
     <ResponseField name="priceAge" type="integer">Seconds since the last oracle update. `null` when unavailable.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Warning>
-  When `isStale` is `true`, opening a loan against the stored price will revert. Either push a fresh NAV with [Sync Oracle Price](/endpoints/lending/sync-oracle) or attach a `signedPrice` from [Sign Price](/endpoints/lending/sign-price) to the borrow call.
+  When `isStale` is `true`, opening a loan against the stored price reverts. On a `NAV` or `MARKET` market, push a fresh price with [Sync Oracle Price](/endpoints/lending/sync-oracle). Or attach a `signedPrice` from [Sign Price](/endpoints/lending/sign-price) to the borrow call. An `ORACLE` market takes neither: its price moves only when the external feed it reads updates.
 </Warning>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/max-borrow?collateralAmount=1000" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/max-borrow?collateralAmount=1000" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/max-borrow?collateralAmount=1000`,
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/max-borrow?collateralAmount=1000`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
+if (data.isStale !== false) console.warn('Price is stale or unknown; attach a signed price');
 ```
 </RequestExample>
 
@@ -53,7 +56,7 @@ const { data } = await res.json();
   "success": true,
   "data": {
     "collateralAmount": "1000",
-    "maxBorrow": "78615.000000",
+    "maxBorrow": "78615.0",
     "isStale": false,
     "priceAge": 1200
   }
@@ -68,4 +71,26 @@ const { data } = await res.json();
   }
 }
 ```
+```json Error - Too Many Decimals
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Invalid request parameters",
+    "details": [
+      { "field": "collateralAmount", "message": "Amount must be a number with at most 18 decimal places" }
+    ]
+  }
+}
+```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_AMOUNT` | `400` | `collateralAmount` is missing, not a number, or not greater than zero |
+| `VALIDATION_ERROR` | `400` | `collateralAmount` is not a plain decimal, or carries more decimal places than the collateral token supports |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

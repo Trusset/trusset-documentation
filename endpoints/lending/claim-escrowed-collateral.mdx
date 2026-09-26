@@ -1,16 +1,18 @@
 ---
 title: 'Claim Escrowed Collateral'
-api: 'POST /lending-external-securities/api/positions/{marketId}/claim-escrowed-collateral'
+api: 'POST /lending-external-securities-v2/api/positions/{marketId}/claim-escrowed-collateral'
 description: 'Reclaim collateral held in escrow after a blocked return transfer'
 ---
 
-Withdraws collateral that the custody adapter could not return automatically. This applies to `CUSTODY` markets only.
+Builds the transaction that releases escrowed collateral from the custody adapter to its holder. This applies to `CUSTODY` markets only.
 
-When a loan closes or collateral is withdrawn, the adapter attempts to transfer the tokens back to the holder. ERC-3643 tokens enforce compliance at transfer time, so that return can fail: an expired KYC record, a suspended identity, or a jurisdiction restriction will all block it. Rather than reverting the whole operation, the adapter records the amount as escrowed. Once the holder's compliance status is restored, this endpoint releases it.
+The adapter returns collateral when a repaid loan closes, when the borrower withdraws collateral, and when a liquidation releases the part it did not seize. The collateral token enforces its own compliance rules on that transfer, so the return can be refused. Typical causes are a holder no longer verified on the token's register, a frozen address, a compliance module rejection, or a paused token. Rather than reverting the whole operation, the adapter escrows the amount against the holder's address.
 
-<Note>
-  The transaction targets the custody adapter, not the market contract. The claim is scoped to the caller, so the wallet that signs must be the holder whose collateral is escrowed. Signing with any other wallet claims nothing. `holderAddress` only decides whose escrow is checked before the calldata is handed back; it does not appear in the transaction and cannot redirect the claim.
-</Note>
+<Warning>
+  A claim is subject to the same token rules that blocked the original return. While the restriction stands, the claim reverts after the holder has paid gas. The `compliance` block on [Get Loan](/endpoints/lending/get-loan#compliance) names what the token currently blocks for the borrower. Lift that restriction first, then claim.
+</Warning>
+
+The transaction targets the custody adapter, not the market contract. `claimEscrowedCollateral()` takes no arguments and pays out the escrow of the wallet that signs it. Signing with any other wallet claims that wallet's own escrow, or reverts when it has none. `holderAddress` only decides whose escrow is checked before the calldata is handed back. It does not appear in the transaction and cannot redirect the claim.
 
 ## Path Parameters
 
@@ -19,12 +21,12 @@ When a loan closes or collateral is withdrawn, the adapter attempts to transfer 
 ## Body Parameters
 
 <ParamField body="holderAddress" type="string">
-  Address whose escrow you intend to claim. When supplied, the adapter's escrow is read first. An empty escrow is refused with `NO_ESCROWED_COLLATERAL`, rather than handing back a transaction that reverts once paid for. `escrowedCollateral` is populated only when this is given.
+  Address whose escrow is to be claimed, `0x` followed by 40 hex characters. When supplied, the adapter's escrow is read first. An empty escrow is refused with `NO_ESCROWED_COLLATERAL`, rather than handing back a transaction that reverts once paid for. If the escrow cannot be read, the calldata is still returned and `escrowedCollateral` is null.
 </ParamField>
 
 ## Response Fields
 
-This endpoint always returns calldata. There is nothing to confirm, because the claim is recorded on-chain against the adapter rather than in a Trusset position record. Read the resulting balance with [Get Escrowed Collateral](/endpoints/lending/get-escrowed-collateral).
+This endpoint always returns calldata. There is no confirm call, and the claim adds no row to the position's history in Trusset. Read the adapter balance afterwards with [Get Escrowed Collateral](/endpoints/lending/get-escrowed-collateral) to see that the claim went through.
 
 <ResponseField name="data" type="object">
   <Expandable>
@@ -32,20 +34,37 @@ This endpoint always returns calldata. There is nothing to confirm, because the 
     <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the custody adapter.</ResponseField>
     <ResponseField name="functionName" type="string">`claimEscrowedCollateral`.</ResponseField>
     <ResponseField name="adapterAddress" type="string">Custody adapter the transaction targets.</ResponseField>
-    <ResponseField name="escrowedCollateral" type="string">Amount currently escrowed for `holderAddress`, as a decimal string. Null when `holderAddress` was not supplied.</ResponseField>
+    <ResponseField name="escrowedCollateral" type="string">Amount currently escrowed for `holderAddress`, as a decimal string in collateral token units. Null when `holderAddress` was not supplied or the escrow could not be read.</ResponseField>
   </Expandable>
 </ResponseField>
 
-<Warning>
-  Claiming fails while the underlying compliance block is still in force, because the transfer out of the adapter is subject to the same rules that blocked the original return. Resolve the holder's identity status first, then claim.
-</Warning>
+<Note>
+  The claim also reverts when the adapter holds less of the collateral token than the escrow records. The escrow entry stays intact on any revert, so the holder can retry once the cause is resolved.
+</Note>
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/claim-escrowed-collateral" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/claim-escrowed-collateral" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{"holderAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/claim-escrowed-collateral`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ holderAddress: await wallet.getAddress() })
+  }
+);
+const { data } = await res.json();
+
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
 ```
 </RequestExample>
 
@@ -57,13 +76,13 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
     "action": "SIGN_TRANSACTION",
     "transaction": {
       "to": "0x4d2b93f70e18c6a5d34b027fe95c81a6730d77ae",
-      "data": "0x...",
+      "data": "0x2bd4442e",
       "value": "0",
       "chainId": 11155111
     },
     "functionName": "claimEscrowedCollateral",
     "adapterAddress": "0x4d2b93f70e18c6a5d34b027fe95c81a6730d77ae",
-    "escrowedCollateral": "250.000000000000000000"
+    "escrowedCollateral": "250.0"
   }
 }
 ```
@@ -94,6 +113,7 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
 | `NOT_CUSTODY_MODE` | `400` | The market runs in `FREEZE` mode, where collateral never leaves the borrower's wallet |
 | `NO_ADAPTER` | `400` | The market records no custody adapter |
+| `VALIDATION_ERROR` | `400` | `holderAddress` is not `0x` followed by 40 hex characters |
 | `NO_ESCROWED_COLLATERAL` | `400` | `holderAddress` was supplied and the adapter holds nothing for it. Claiming would revert |
-| `VALIDATION_ERROR` | `400` | `holderAddress` is not a valid address |
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

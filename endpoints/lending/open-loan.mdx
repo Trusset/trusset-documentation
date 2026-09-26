@@ -1,12 +1,12 @@
 ---
 title: 'Open Loan'
-api: 'POST /lending-external-securities/api/positions/{marketId}/open-loan'
+api: 'POST /lending-external-securities-v2/api/positions/{marketId}/open-loan'
 description: 'Pledge security tokens as collateral and borrow the settlement asset'
 ---
 
-Opens an overcollateralized loan. The borrower pledges security tokens and receives the market's borrow asset. How the collateral is secured depends on the market's mode: `FREEZE` locks the tokens in the borrower's own wallet, `CUSTODY` escrows them in the adapter.
+Opens an overcollateralized loan. The borrower pledges security tokens and receives the market's borrow asset, and the borrower's wallet signs every step. How the collateral is secured depends on the market's mode: `FREEZE` locks the tokens in the borrower's own wallet, `CUSTODY` escrows them in the adapter.
 
-The maximum borrow is the collateral value multiplied by the market's collateral factor. Quote it first with [Get Max Borrow](/endpoints/lending/get-max-borrow).
+The maximum borrow is the collateral value multiplied by the market's collateral factor. Quote it first with [Get Max Borrow](/endpoints/lending/get-max-borrow). On a market that charges an opening fee, the borrower receives the borrow amount less the fee and owes the full borrow amount.
 
 ## Path Parameters
 
@@ -14,26 +14,36 @@ The maximum borrow is the collateral value multiplied by the market's collateral
 
 ## Body Parameters
 
-<ParamField body="collateralAmount" type="string" required>
-  Security tokens to pledge, as a decimal string. Parsed at the collateral token's decimals.
+<ParamField body="collateralAmount" type="string">
+  Security tokens to pledge, as a positive decimal string. Parsed at the collateral token's decimals. Required when building calldata. Not needed on the confirm call, where the pledge is read from the mined transaction.
 </ParamField>
 
-<ParamField body="borrowAmount" type="string" required>
-  Amount to borrow, as a decimal string. Parsed at the borrow asset's decimals. Must be at least the market's `minBorrowAmount`.
+<ParamField body="borrowAmount" type="string">
+  Amount to borrow, as a positive decimal string. Parsed at the borrow asset's decimals. Must be at least the market's `minBorrowAmount`. This is the debt the loan records, before any opening fee is withheld from the payout. Required when building calldata, not needed on the confirm call.
 </ParamField>
 
-<ParamField body="borrowerAddress" type="string" required>
+<ParamField body="borrowerAddress" type="string">
   Wallet that will sign the loan and hold the collateral. Required when building calldata. Every collateral, identity and supply-cap check runs against this address, and there is no loan to resolve it from yet. Omitting it returns `BORROWER_ADDRESS_REQUIRED`. Not needed on the confirm call, where the borrower is taken from the mined transaction.
 </ParamField>
 
 <ParamField body="signedPrice" type="object">
-  EIP-712 signed price from [Sign Price](/endpoints/lending/sign-price), applied atomically with the loan. Omit to price against the stored oracle value, which must not be stale.
+  EIP-712 signed price from [Sign Price](/endpoints/lending/sign-price), applied atomically with the loan. Omit to price against the stored oracle value, which must not be stale. A market that prices from an external feed refuses a signed price with `EXTERNAL_FEED_ACTIVE`.
   <Expandable>
     <ParamField body="price" type="string">Price in base units.</ParamField>
     <ParamField body="timestamp" type="integer">Signing timestamp.</ParamField>
     <ParamField body="validUntil" type="integer">Signature expiry.</ParamField>
     <ParamField body="signature" type="string">EIP-712 signature.</ParamField>
   </Expandable>
+</ParamField>
+
+<ParamField body="clientReference" type="string">
+  The client this loan is for, as the customer's `referenceKey`, its `externalId` or its customer ID. Up to 120 characters, matched against the customers of your instance that are not archived. Create the record first with [Create Customer](/endpoints/customers/create).
+
+  The attribution is recorded on the confirm call, so send `clientReference` there. On the build call it is only resolved and echoed back with `confirmWithClientReference: true`. The fields `customerId`, `clientId`, `clientReferenceKey` and `externalId` are refused with `CLIENT_REFERENCE_FIELD`, and `onBehalfOf` with `KEY_MATERIAL_REJECTED`.
+</ParamField>
+
+<ParamField body="reattribute" type="boolean">
+  Set `true` on the confirm call to move a loan that is already attributed to another client of your instance. Without it that confirm is refused with `CLIENT_REFERENCE_CONFLICT`. The change is recorded against both clients with the time it was made.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -52,30 +62,53 @@ Both shapes carry `confirmStepIndex` and `confirmWith: "openLoan"`, naming the s
 
 ## What the loan will cost and when it is due
 
-The calldata response carries an `offering` block whenever the market runs loan terms or a fixed rate. A market on the default curve with no term returns no `offering` at all. Show it before the borrower signs: it is the only place the due date and the stamped rate appear ahead of the loan existing.
+The calldata response carries an `offering` block whenever the market runs loan terms or stamps a fixed rate. A market on the default curve with no term returns no `offering` at all. Show it before the borrower signs: it is the only place the due date and the stamped rate appear ahead of the loan existing.
 
 <ResponseField name="offering" type="object">
   <Expandable>
     <ResponseField name="approximateDueAt" type="string">Unix seconds when this loan would fall due, computed at build time from the market's term config. Present only when the market runs terms. It is approximate because the clock starts when the transaction mines, not when the payload was built.</ResponseField>
-    <ResponseField name="termGracePeriodSeconds" type="string">Seconds after the due date before the term penalty applies.</ResponseField>
+    <ResponseField name="termGracePeriodSeconds" type="string">Seconds after the due date before the term penalty applies. Present only when the market runs terms.</ResponseField>
+    <ResponseField name="termPenaltyBps" type="integer">The term penalty in basis points. Present only when the market runs terms.</ResponseField>
     <ResponseField name="fixedRateBps" type="integer">The rate this loan would be stamped with, in basis points. Present only when the market's interest model stamps a fixed rate. A stamped rate does not move with utilization for the life of the loan.</ResponseField>
-    <ResponseField name="newLoansOnly" type="boolean">Always `true`. These figures describe the loan this payload would open, not any loan already outstanding.</ResponseField>
+    <ResponseField name="stampedAtSigning" type="array">The figures stamped onto the loan when the transaction mines. Always `dueAt`, plus `fixedRate` when a fixed rate is stamped. A market that stamps terms per loan adds `termGracePeriod` and `termPenalty`.</ResponseField>
+    <ResponseField name="termStamping" type="string">`PER_LOAN` when the market stamps the grace period and term penalty onto each loan at signing. `MARKET_CONFIG` when open loans follow the live term configuration instead. `UNKNOWN` when that could not be read.</ResponseField>
+    <ResponseField name="appliesToOpenLoans" type="array">Term settings a later configuration change would still reach on this loan. Empty on a `PER_LOAN` market, `termGracePeriod` and `termPenalty` otherwise.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+The opening fee is the other cost fixed at signing. A market may carry a flat opening fee, stamped when it was deployed and never changeable afterwards. Read it from `transactionFees` on [Get Fee Split](/endpoints/lending/get-fee-split). Each charge is the flat fee or 0.5 percent of the amount borrowed, whichever is smaller. When it is not zero, the calldata response carries a `transactionFee` block.
+
+<ResponseField name="transactionFee" type="object">
+  <Expandable>
+    <ResponseField name="kind" type="string">`OPEN`.</ResponseField>
+    <ResponseField name="fee" type="string">The fee this loan would pay, in borrow asset units.</ResponseField>
+    <ResponseField name="feeRaw" type="string">The same fee in the borrow asset's smallest unit.</ResponseField>
+    <ResponseField name="borrowed" type="string">The debt the loan records, equal to `borrowAmount`.</ResponseField>
+    <ResponseField name="netDisbursed" type="string">What the borrower receives: `borrowed` less `fee`.</ResponseField>
+    <ResponseField name="netDisbursedRaw" type="string">The same amount in the smallest unit.</ResponseField>
+    <ResponseField name="message" type="string">Plain-language statement of the fee, the debt and the payout.</ResponseField>
   </Expandable>
 </ResponseField>
 
 ## Warnings
 
-The calldata response carries a `warnings` array when a preflight found something the borrower should see but that does not block the loan. The array is absent when there is nothing to say. Every entry carries `kind`, `enforcement`, `message` and `note`.
+The calldata response carries a `warnings` array when a preflight found something the borrower should see but that does not block the loan. The array is absent when there is nothing to say. Object entries carry `kind`, `enforcement`, `message` and `note`.
 
 | `kind` | What it means |
 |---|---|
 | `TERMS_NOT_PUBLISHED` | The lender of record has published no terms of use, so the loan is governed by none |
-| `MATURITY_APPROACHING` | The collateral instrument's recorded maturity falls inside the warning window. Carries `maturityDate` and `daysRemaining` |
-| `MATURITY_RECORDED` | The instrument has a recorded maturity further out. Carries `maturityDate` and `daysRemaining` |
+| `MATURITY_APPROACHING` | The collateral instrument's recorded maturity falls inside the warning window. Carries `maturityDate`, `daysRemaining`, `windowDays` and `assertedBy` |
+| `MATURITY_RECORDED` | The instrument has a recorded maturity further out. Carries the same fields |
 | `MATURITY_PASSED_FOREIGN_RECORD` | The recorded maturity has passed, but it was asserted by an instance that is not a party to this market, so the loan is not refused on it |
 | `MATURITY_UNCHECKED` | The recorded maturity could not be read, so this preflight did not check it |
 
-`enforcement` is `OFF_CHAIN` on every one of these. The contract does not know about them, so acting on a warning is the caller's decision.
+`enforcement` is `OFF_CHAIN` on every one of these. The contract does not know about them, so acting on a warning is the caller's decision. When the market charges an opening fee, the array also carries `transactionFee.message` as a plain string rather than an object.
+
+## Vault draws
+
+Some markets draw on vault liquidity, shown as `useVaultLiquidity` on [Get Market Metrics](/endpoints/lending/get-metrics). There, a borrow larger than the pool's borrowable liquidity pulls the shortfall from the registered vaults inside the borrower's own transaction. The draw is the smallest amount that covers the shortfall with the reserve earmark intact. The confirm response lists each draw in `vaultDraws`.
+
+The API refuses such a loan only when no draw could fund it. `INSUFFICIENT_LIQUIDITY` then names what the connected vaults can draw right now. A market whose implementation still holds a draw into an empty pool to the first-deposit floor refuses a smaller draw with `FIRST_DRAW_BELOW_FLOOR`, and the message names the remedies.
 
 ## Response Fields
 
@@ -83,16 +116,30 @@ Confirming returns `201`.
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
-    <ResponseField name="loanId" type="string">On-chain loan ID, parsed from the `LoanOpened` event. Use this on every subsequent loan operation.</ResponseField>
-    <ResponseField name="positionId" type="string">Trusset position record ID, or null if the record could not be written.</ResponseField>
-    <ResponseField name="collateralAmount" type="string">Collateral pledged, echoed back.</ResponseField>
-    <ResponseField name="borrowAmount" type="string">Amount borrowed, echoed back.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="steps" type="array">Ordered transactions to broadcast. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">Index of the `openLoan` step. `1` in `CUSTODY`, `0` in `FREEZE`.</ResponseField>
+    <ResponseField name="confirmWith" type="string">`openLoan`.</ResponseField>
+    <ResponseField name="offering" type="object">See [What the loan will cost](#what-the-loan-will-cost-and-when-it-is-due).</ResponseField>
+    <ResponseField name="transactionFee" type="object">The opening fee, present only when it is not zero.</ResponseField>
+    <ResponseField name="warnings" type="array">See [Warnings](#warnings).</ResponseField>
+    <ResponseField name="confirmWithClientReference" type="boolean">`true` when `clientReference` resolved on the build call. Send it again on the confirm call.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming.</ResponseField>
+    <ResponseField name="loanId" type="string">On-chain loan ID, parsed from the `LoanOpened` event. Use this on every subsequent loan operation. Returned when confirming.</ResponseField>
+    <ResponseField name="positionId" type="string">Trusset position record ID, or `null` if the record could not be written. Returned when confirming.</ResponseField>
+    <ResponseField name="collateralAmount" type="string">Collateral the loan holds, read from the loan after the transaction mined. Returned when confirming.</ResponseField>
+    <ResponseField name="borrowAmount" type="string">The loan's principal, read after the transaction mined. It is the full debt, including any opening fee withheld from the payout. Returned when confirming.</ResponseField>
+    <ResponseField name="customerId" type="string">Customer the loan is attributed to, or `null`. On the build call, the customer `clientReference` resolved to.</ResponseField>
+    <ResponseField name="clientReference" type="string">The resolved client's `externalId`, else its `referenceKey`, else its customer ID. `null` on a confirm call that carried none.</ResponseField>
+    <ResponseField name="attribution" type="object">Returned when confirming. `customerId`, `attributedAt`, `changed` (whether this confirm attributed or moved the loan) and `previousCustomerId` (the client it moved from, when it moved).</ResponseField>
+    <ResponseField name="vaultDraws" type="array">Present when the transaction drew on vault liquidity. Each entry carries `vault` (the vault address) and `amount` (in borrow asset units).</ResponseField>
+    <ResponseField name="verifiedBy" type="string">`receipt-log` when the transaction reached the market through another contract and was verified from the market's `LoanOpened` event. Carries `outerTarget` and `outerSender` beside it. Absent otherwise.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Warning>
-  Loans cannot be opened until the market has a lender of record and its collateral adapter is authorized on the token. A market still seeking a lender of record is refused on that ground first, with `MARKET_PENDING_CURATOR`. The token-side authorizations are that party's to arrange, so naming them as the obstacle would send the borrower to the wrong place. Once the role is taken, an unauthorized adapter rejects with `COLLATERAL_ADAPTER_NOT_AUTHORIZED` or `FREEZE_MODE_UNSUPPORTED_TOKEN`. See [Get Setup Steps](/endpoints/lending/get-setup-steps).
+  Loans cannot be opened until the market has a lender of record and its collateral adapter is authorized on the token. A market still seeking a lender of record is refused on that ground first, with `MARKET_PENDING_CURATOR`. The token-side authorizations are the register provider's to arrange, so naming them as the obstacle would send the borrower to the wrong party. Once the role is taken, an unauthorized adapter rejects with `COLLATERAL_ADAPTER_NOT_AUTHORIZED` or `FREEZE_MODE_UNSUPPORTED_TOKEN`. See [Get Setup Steps](/endpoints/lending/get-setup-steps).
 </Warning>
 
 <Note>
@@ -101,43 +148,54 @@ Confirming returns `201`.
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/open-loan" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/open-loan" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{
     "collateralAmount": "1000",
     "borrowAmount": "50000",
-    "borrowerAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"
+    "borrowerAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "clientReference": "CL-000417"
   }'
 ```
 ```typescript TypeScript
-const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/open-loan`,
-  {
-    method: 'POST',
-    headers: {
-      'X-API-Key': 'trusset_your_key_here',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      collateralAmount: '1000',
-      borrowAmount: '50000',
-      borrowerAddress: await wallet.getAddress(),
-      signedPrice: {
-        price: signed.price,
-        timestamp: signed.timestamp,
-        validUntil: signed.validUntil,
-        signature: signed.signature
-      }
-    })
-  }
-);
+const url = `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/open-loan`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({
+    collateralAmount: '1000',
+    borrowAmount: '50000',
+    borrowerAddress: await wallet.getAddress(),
+    clientReference: 'CL-000417',
+    signedPrice: {
+      price: signed.price,
+      timestamp: signed.timestamp,
+      validUntil: signed.validUntil,
+      signature: signed.signature
+    }
+  })
+});
 const { data } = await res.json();
 
+const hashes: string[] = [];
 for (const step of data.steps) {
   const tx = await wallet.sendTransaction(step.transaction);
   await tx.wait();
+  hashes.push(tx.hash);
 }
+
+const confirmed = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ txHash: hashes[data.confirmStepIndex], clientReference: 'CL-000417' })
+});
+const { data: loan } = await confirmed.json();
 ```
 </RequestExample>
 
@@ -148,9 +206,23 @@ for (const step of data.steps) {
   "data": {
     "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
     "loanId": "5",
-    "positionId": "secpos_014",
-    "collateralAmount": "1000",
-    "borrowAmount": "50000"
+    "positionId": "cmswb4n1e0021cghx9k2t6pdm",
+    "collateralAmount": "1000.0",
+    "borrowAmount": "50000.0",
+    "customerId": "cmt0k3b9x0004cghxw7r2d5ya",
+    "clientReference": "CL-000417",
+    "attribution": {
+      "customerId": "cmt0k3b9x0004cghxw7r2d5ya",
+      "attributedAt": "2026-09-26T10:14:07.000Z",
+      "changed": true,
+      "previousCustomerId": null
+    },
+    "vaultDraws": [
+      {
+        "vault": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+        "amount": "12500.0"
+      }
+    ]
   }
 }
 ```
@@ -159,7 +231,6 @@ for (const step of data.steps) {
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTIONS",
-    "mode": "CUSTODY",
     "steps": [
       {
         "action": "SIGN_TRANSACTION",
@@ -183,8 +254,32 @@ for (const step of data.steps) {
         "functionName": "openLoan"
       }
     ],
+    "mode": "CUSTODY",
     "confirmStepIndex": 1,
-    "confirmWith": "openLoan"
+    "confirmWith": "openLoan",
+    "offering": {
+      "approximateDueAt": "1797004800",
+      "termGracePeriodSeconds": "259200",
+      "termPenaltyBps": 200,
+      "stampedAtSigning": ["dueAt", "termGracePeriod", "termPenalty"],
+      "termStamping": "PER_LOAN",
+      "appliesToOpenLoans": []
+    },
+    "transactionFee": {
+      "kind": "OPEN",
+      "fee": "2.0",
+      "feeRaw": "2000000",
+      "borrowed": "50000.0",
+      "netDisbursed": "49998.0",
+      "netDisbursedRaw": "49998000000",
+      "message": "This market charges a loan opening fee of 2.0 USDC on this draw, withheld from the amount paid out: the debt grows by 50000.0 USDC and the borrower receives 49998.0 USDC."
+    },
+    "warnings": [
+      "This market charges a loan opening fee of 2.0 USDC on this draw, withheld from the amount paid out: the debt grows by 50000.0 USDC and the borrower receives 49998.0 USDC."
+    ],
+    "clientReference": "CL-000417",
+    "customerId": "cmt0k3b9x0004cghxw7r2d5ya",
+    "confirmWithClientReference": true
   }
 }
 ```
@@ -193,7 +288,6 @@ for (const step of data.steps) {
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTIONS",
-    "mode": "FREEZE",
     "steps": [
       {
         "action": "SIGN_TRANSACTION",
@@ -206,6 +300,7 @@ for (const step of data.steps) {
         "functionName": "openLoan"
       }
     ],
+    "mode": "FREEZE",
     "confirmStepIndex": 0,
     "confirmWith": "openLoan"
   }
@@ -225,7 +320,7 @@ for (const step of data.steps) {
   "success": false,
   "error": {
     "code": "EXCEEDS_MAX_BORROW",
-    "message": "That collateral supports at most 48250.000000 USDC of borrowing."
+    "message": "That collateral supports at most 48250.0 USDC of borrowing."
   }
 }
 ```
@@ -242,25 +337,35 @@ for (const step of data.steps) {
 
 ## Error Codes
 
-The calldata call runs the same checks the contract would, in the same order. A refusal therefore names the condition the borrower would otherwise have hit on-chain.
+The price, supply-cap, collateral-value and liquidity checks run in the order the contract reverts in. A refusal therefore names the condition the borrower would otherwise have hit on-chain.
 
 | Code | HTTP | Cause |
 |---|---|---|
 | `BORROWER_ADDRESS_REQUIRED` | `400` | `borrowerAddress` was omitted while building calldata |
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `VALIDATION_ERROR` | `400` | `collateralAmount` or `borrowAmount` is missing on the build call, not a positive decimal string, or carries more decimal places than its token supports. Also a malformed address, `txHash` or `clientReference` |
+| `CLIENT_REFERENCE_FIELD` | `400` | The body carries `customerId`, `clientId`, `clientReferenceKey` or `externalId`. Pass the value as `clientReference` |
+| `INVALID_CLIENT_REFERENCE` | `400` | `clientReference` is blank |
 | `COLLATERAL_ADAPTER_NOT_AUTHORIZED` | `400` | The adapter lacks the agent role (`FREEZE`) or allow-listed or verified holder status (`CUSTODY`) on the collateral token |
 | `FREEZE_MODE_UNSUPPORTED_TOKEN` | `400` | The token does not implement the ERC-3643 freeze interface. Use a `CUSTODY` market |
 | `MARKET_PAUSED` | `400` | The market is paused. Its admin must unpause it |
-| `IDENTITY_NOT_VERIFIED` | `400` | `borrowerAddress` is not verified on the market's identity registry |
+| `IDENTITY_NOT_VERIFIED` | `400` | `borrowerAddress` is not verified on the market's borrower register |
 | `BELOW_MIN_BORROW` | `400` | `borrowAmount` is under the market's `minBorrowAmount` |
-| `PRICE_STALE` | `400` | The oracle price is outside the market's `maxPriceAge`. Push a NAV with [Sync Oracle Price](/endpoints/lending/sync-oracle), or supply a `signedPrice` |
+| `PRICE_STALE` | `400` | The price is older than the oracle's staleness window. On an attested market, push a price with [Sync Oracle Price](/endpoints/lending/sync-oracle) or supply a `signedPrice`. On an external-feed market, wait for the feed to publish |
 | `SUPPLY_CAP_EXCEEDED` | `400` | The pledge would push total collateral past `maxTotalCollateral` |
 | `USER_SUPPLY_CAP_EXCEEDED` | `400` | The pledge would push this borrower past `maxUserCollateral` |
 | `EXCEEDS_MAX_BORROW` | `400` | `borrowAmount` exceeds what the collateral supports. Skipped when a `signedPrice` is supplied |
-| `INSUFFICIENT_LIQUIDITY` | `400` | The pool holds less uncommitted liquidity than the loan needs |
+| `INSUFFICIENT_LIQUIDITY` | `400` | The pool, after its reserve earmark and any vault draw it could make, holds less than the loan needs |
+| `FIRST_DRAW_BELOW_FLOOR` | `400` | The pool is empty and the vault draw that would fund this borrow is below the first-deposit floor this market's implementation applies to draws |
 | `COLLATERAL_TRANSFER_RESTRICTED` | `400` | The collateral token's compliance rules block moving this collateral into the custody adapter |
+| `CLIENT_REFERENCE_NOT_FOUND` | `404` | `clientReference` matches no customer of your instance |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet. See [Lender of record](/endpoints/lending/introduction#lender-of-record) |
+| `MARKET_TERM_EXPIRED` | `409` | The market's terminal due date has passed, so the contract refuses every new loan. Repayment and withdrawals stay open |
 | `COLLATERAL_MATURED` | `409` | The collateral instrument passed its recorded maturity, and the record was asserted by a party to this market. `error.details` carries `maturityDate` |
+| `EXTERNAL_FEED_ACTIVE` | `409` | A `signedPrice` was sent to a market that prices from an external feed. Retry without it |
+| `CLIENT_REFERENCE_CONFLICT` | `409` | On confirm, the loan is already attributed to another client and `reattribute` was not `true` |
 | `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to run a check, so no transaction was prepared. Retry shortly |
 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

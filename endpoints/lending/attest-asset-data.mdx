@@ -1,0 +1,205 @@
+---
+title: 'Attest Asset Data'
+api: 'POST /lending-external-securities-v2/api/markets/{market}/asset-data/attest'
+description: 'Build the transaction that re-attests a market asset data from the current token profile'
+---
+
+Returns the unsigned `attestAssetData` transaction that replaces the market's standing attestation with the bundle this instance's token profile produces now. The attestor signs it with its own wallet, then confirms it with [Confirm Asset Data Attestation](/endpoints/lending/confirm-asset-data-attestation).
+
+The first attestation needs no call here. It travels inside the deployment transaction. Use this endpoint after the issuer edited the token profile, which [Get Asset Data](/endpoints/lending/get-asset-data) reports as `profile.changedSinceAttestation: true`.
+
+<Warning>
+  Re-attesting never removes an acknowledgement. If the lender of record approved an earlier version, the two hashes differ once this transaction mines. The market then reads `DIVERGED` until the lender of record acknowledges the new version. `divergesAfter` in the response says so before anything is signed.
+</Warning>
+
+## Who can attest
+
+The caller must pass the market access check described on [Get Asset Data](/endpoints/lending/get-asset-data#who-can-read-it). One of this instance's verified wallets must also be the attestor the factory admits right now:
+
+- While the market seeks a lender of record, the wallet that deployed it.
+- Once a lender of record adopts it, the issuer wallet that lender named in its adoption terms.
+
+Any other instance is refused with `NOT_ATTESTOR`, and `details` names the wallet that can sign. A market whose deployer the factory never recorded is refused with `ATTESTOR_UNRECORDED`, because nobody can attest on it.
+
+The attestor is read when the transaction is built. If the market is adopted before the transaction mines, authority passes to the named issuer, and a transaction signed by the deployer reverts with `NotAttestor`.
+
+## What gets attested
+
+The bundle is built from this instance's import of the collateral token: the token facts and the published profile. It is combined with the market's collateral mode, price source and settlement asset as read from the chain. The rules are those described on [Preview Asset Data](/endpoints/lending/preview-asset-data#what-the-bundle-contains). A profile that is empty, or a token this instance has not imported, is refused with `TOKEN_PROFILE_REQUIRED`.
+
+The bytes are stored when the transaction is built, before anyone signs, so [Get Asset Data Bundle](/endpoints/lending/get-asset-data-bundle) can serve them by `contentHash` straight away. A bundle equal to the standing attestation is refused with `ATTESTATION_CURRENT`, because the transaction would change nothing.
+
+This call takes no body.
+
+## Path Parameters
+
+<ParamField path="market" type="string" required>
+  The market contract address, as 40 hex characters with a `0x` prefix.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the lending factory.</ResponseField>
+    <ResponseField name="functionName" type="string">`attestAssetData`.</ResponseField>
+    <ResponseField name="marketAddress" type="string">The market, lowercased.</ResponseField>
+    <ResponseField name="signer" type="string">The attestor wallet that must sign.</ResponseField>
+    <ResponseField name="signerRole" type="string">`DEPLOYER` or `ISSUER`.</ResponseField>
+    <ResponseField name="contentHash" type="string">The hash this transaction attests.</ResponseField>
+    <ResponseField name="schemaVersion" type="string">Bundle schema, `1.0.0`.</ResponseField>
+    <ResponseField name="canonicalJson" type="string">The exact bytes the hash commits to.</ResponseField>
+    <ResponseField name="bundle" type="object">The same bundle as an object.</ResponseField>
+    <ResponseField name="previousHash" type="string">The attestation this replaces. `null` when none stands.</ResponseField>
+    <ResponseField name="previousVersion" type="integer">The factory's version count before this transaction.</ResponseField>
+    <ResponseField name="nextVersion" type="integer">The version this attestation becomes.</ResponseField>
+    <ResponseField name="acknowledged" type="string">The version the lender of record acknowledged, as a hash. `null` when none.</ResponseField>
+    <ResponseField name="divergesAfter" type="boolean">`true` when an acknowledgement exists, so the market reads `DIVERGED` once this mines.</ResponseField>
+    <ResponseField name="note" type="string">What the transaction does to an existing acknowledgement, in plain language.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field }` naming the confirm route and the `txHash` field it takes.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/0x70a0e25c7b768b87e658348b3b577678a173e038/asset-data/attest" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const base = 'https://api.trusset.org/lending-external-securities-v2/api/markets';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const build = await fetch(`${base}/${marketAddress}/asset-data/attest`, { method: 'POST', headers });
+const { success, data, error } = await build.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+if (data.divergesAfter) console.warn(data.note);
+
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch(`${base}/${marketAddress}/asset-data/attest/confirm`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ txHash: tx.hash })
+});
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0xf1aD12F5698F58badd8a662AcfFcCb067A2Ddb8a",
+      "data": "0x434134e500000000000000000000000070a0e25c7b768b87e658348b3b577678a173e038ba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "attestAssetData",
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "signer": "0x511f527bcee080ac9b88afbf24386baedf393948",
+    "signerRole": "ISSUER",
+    "contentHash": "0xba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a",
+    "schemaVersion": "1.0.0",
+    "canonicalJson": "{\"market\":{\"borrowAsset\":\"0x98ad0ca091552e23c564b41c74282e5343d03e8a\",\"chainId\":11155111,\"collateralMode\":\"FREEZE\",\"factory\":\"0xf1ad12f5698f58badd8a662acffccb067a2ddb8a\",\"family\":\"FUNGIBLE\",\"priceSource\":\"NAV\"},\"profile\":{\"documents\":[{\"name\":\"Annual report 2025\",\"uri\":\"https://acme-capital.example/nyf1/annual-report-2025.pdf\"},{\"name\":\"Valuation report Q2 2026\",\"uri\":\"https://acme-capital.example/nyf1/valuation-2026-q2.pdf\"}],\"isin\":\"DE000A0F5UF5\",\"issuerName\":\"ACME Capital AG\",\"jurisdiction\":\"DE\",\"prospectusURI\":\"https://acme-capital.example/nyf1/prospectus.pdf\",\"sector\":\"Real estate\",\"website\":\"https://acme-capital.example\"},\"schemaVersion\":\"1.0.0\",\"token\":{\"assetType\":\"REAL_ESTATE\",\"decimals\":18,\"framework\":\"erc3643\",\"name\":\"Nyala Fund I\",\"symbol\":\"NYF1\",\"tokenAddress\":\"0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9\",\"totalSupply\":\"250000.0\"}}",
+    "bundle": {
+      "schemaVersion": "1.0.0",
+      "market": {
+        "chainId": 11155111,
+        "factory": "0xf1ad12f5698f58badd8a662acffccb067a2ddb8a",
+        "family": "FUNGIBLE",
+        "borrowAsset": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+        "collateralMode": "FREEZE",
+        "priceSource": "NAV"
+      },
+      "token": {
+        "tokenAddress": "0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9",
+        "name": "Nyala Fund I",
+        "symbol": "NYF1",
+        "decimals": 18,
+        "framework": "erc3643",
+        "assetType": "REAL_ESTATE",
+        "totalSupply": "250000.0"
+      },
+      "profile": {
+        "issuerName": "ACME Capital AG",
+        "jurisdiction": "DE",
+        "sector": "Real estate",
+        "isin": "DE000A0F5UF5",
+        "website": "https://acme-capital.example",
+        "prospectusURI": "https://acme-capital.example/nyf1/prospectus.pdf",
+        "documents": [
+          {
+            "name": "Annual report 2025",
+            "uri": "https://acme-capital.example/nyf1/annual-report-2025.pdf"
+          },
+          {
+            "name": "Valuation report Q2 2026",
+            "uri": "https://acme-capital.example/nyf1/valuation-2026-q2.pdf"
+          }
+        ]
+      }
+    },
+    "previousHash": "0x65ed3a41511863cfbeacd3617041f1ccfcf281ab1a29bd7c08002a15cb427ccb",
+    "previousVersion": 1,
+    "nextVersion": 2,
+    "acknowledged": "0x65ed3a41511863cfbeacd3617041f1ccfcf281ab1a29bd7c08002a15cb427ccb",
+    "divergesAfter": true,
+    "note": "The lender of record approved an earlier version. Re-attesting leaves that approval where it is: the two hashes will differ, the market reads as diverged, and the bank sees it that way until it approves this version again.",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/0x70a0e25c7b768b87e658348b3b577678a173e038/asset-data/attest/confirm",
+      "field": "txHash"
+    }
+  }
+}
+```
+```json Error - Not the Attestor
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "NOT_ATTESTOR",
+    "message": "Only the issuer wallet the lender of record named at adoption (0x511f527bcee080ac9b88afbf24386baedf393948) may attest asset data on this market, and no verified wallet of this instance is it.",
+    "details": {
+      "attestor": "0x511f527bcee080ac9b88afbf24386baedf393948",
+      "role": "ISSUER"
+    }
+  }
+}
+```
+```json Error - Nothing Changed
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ATTESTATION_CURRENT",
+    "message": "The asset data that stands on the factory (version 2, 0xba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a) already equals the bundle the current profile produces. Nothing has changed, so there is nothing to re-attest.",
+    "details": {
+      "contentHash": "0xba94f849b5852511dd4cc5a0d2cf10d2edbd51d27a69f4f434db122b5fbb0f1a",
+      "version": 2
+    }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+The asset data routes report a validation failure with the first failing rule as `message` and no `details` list. Every access code from [Get Asset Data](/endpoints/lending/get-asset-data#error-codes) applies here too.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `market` is not a `0x`-prefixed 40-character hex address |
+| `INVALID_ASSET_DATA` | `400` | A stored token fact or profile field cannot enter the bundle |
+| `NOT_ATTESTOR` | `403` | No verified wallet of this instance is the attestor. `details` carries `attestor` and `role` |
+| `MARKET_NOT_DEPLOYED` | `404` | The lending factory returns no deployment for this address |
+| `ATTESTOR_UNRECORDED` | `409` | The factory records no deployer for this market, so nobody can attest on it |
+| `ATTESTATION_CURRENT` | `409` | The standing attestation already equals the bundle the current profile produces |
+| `FACTORY_UPGRADE_REQUIRED` | `409` | The factory implementation predates asset data attestation. Nothing about the market itself changes when it is upgraded |
+| `TOKEN_PROFILE_REQUIRED` | `422` | This instance has not imported the collateral token as active, or its profile is empty |
+| `ATTEST_BUILD_FAILED` | `500` | The transaction could not be built for a reason the service did not classify |
+| `FACTORY_READ_FAILED` | `503` | The factory could not be read. Retry shortly |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market's settlement asset could not be read, so the bundle could not be built. Retry shortly |

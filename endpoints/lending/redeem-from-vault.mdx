@@ -1,0 +1,190 @@
+---
+title: 'Redeem from Vault'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/vaults/{vaultAddress}/redeem'
+description: 'Redemption calldata for shares of a vault connected to this market, and its confirmation'
+---
+
+Builds the `redeem` transaction that turns a holder's shares in one of this market's connected vaults back into the vault's asset, the market's settlement token (stablecoin). The holder's wallet signs it. No approval is needed, since the vault burns the holder's own shares.
+
+Any vault connected to this market can be redeemed through it, whether or not its operator has published it. Nothing on the vault can pause a redemption. Send the same call again with the transaction's hash to confirm it.
+
+<Warning>
+  A redemption fills only as far as liquidity allows. The vault pays from its idle funds first, then draws back what the markets it funds have free. When utilization blocks the rest, the redemption pays out part of the value and the unpaid shares stay in the wallet. This build carries no estimate of the fill, because it checks only the holder's share balance.
+</Warning>
+
+For a fill estimate, use [Redeem](/endpoints/vaults/redeem) on the vault surface for a vault visible to your instance. It returns `willFillFully` and `expectedPayout` before the signature. That call also checks the holder against the vault's register, which a vault on an earlier implementation still applies to redemptions. This call does not, so a redemption from such a vault by an unverified holder reverts on-chain.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+<ParamField path="vaultAddress" type="string" required>
+  A vault connected to this market, from [List Connected Vaults](/endpoints/lending/list-connected-vaults). `0x` followed by 40 hex characters. A mixed-case address must pass its EIP-55 checksum.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="shares" type="string">
+  Shares to redeem as a decimal string. Digits with an optional fraction, greater than zero, parsed at the vault's asset decimals, which are also its share decimals. A finer fraction answers `VALIDATION_ERROR`. Required when building calldata, ignored when confirming.
+</ParamField>
+
+<ParamField body="holderAddress" type="string">
+  The wallet that will sign. `redeem` burns the caller's own shares, so `shares` is checked against this wallet's balance before any calldata is built. Required when building calldata, and omitting it answers `VALIDATION_ERROR`. Ignored when confirming.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined redemption. Send it on its own to confirm and record the redemption. Omit it to receive the calldata.
+</ParamField>
+
+## Confirm the redemption
+
+Send the redemption's hash back to this same endpoint as `{ "txHash": "0x..." }`, as `confirmWith` names. The API verifies the receipt against the vault and reads what was paid from the vault's `Redeemed` event.
+
+`amount` on the confirm response is the assets actually paid, not the value of the shares requested. A partial fill shows as an `amount` below the value of the shares you redeemed. When the vault has a Trusset record, the redemption is written to the vault's transaction history, and `recorded` says so.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the vault. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`redeem`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="vault" type="object">`vaultAddress`, `name`, `symbol` and `assetDecimals` of the vault. The confirm response adds `id`, the vault's Trusset ID or `null`.</ResponseField>
+    <ResponseField name="position" type="object">The holder's position before this redemption: `shares` held and their `value` at the current share price, both decimal strings. Both `null` when the balance could not be read. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="note" type="string">The partial-fill rule, in words. Show it near the redeem control. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`endpoint`, `field: "txHash"` and `body`: this same call, carrying the redemption's hash. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="confirmed" type="boolean">`true`. Returned when confirming.</ResponseField>
+    <ResponseField name="txType" type="string">`REDEEM`. Returned when confirming.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that sent the transaction. Returned when confirming.</ResponseField>
+    <ResponseField name="investor" type="string">The holder named in the vault's `Redeemed` event. Returned when confirming.</ResponseField>
+    <ResponseField name="amount" type="string">Assets paid out, as a decimal string, read from the `Redeemed` event. Returned when confirming.</ResponseField>
+    <ResponseField name="at" type="string">ISO 8601 time of the block the redemption mined in. `null` when the block could not be read. Returned when confirming.</ResponseField>
+    <ResponseField name="recorded" type="boolean">Whether the redemption was written to the vault's transaction history. `false` for a vault with no Trusset record. Returned when confirming.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/vaults/{vaultAddress}/redeem" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"shares": "250", "holderAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/vaults/${vaultAddress}/redeem`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+const holderAddress = await holder.getAddress();
+
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ shares: '250', holderAddress })
+});
+const { success, data, error } = await res.json();
+if (!success) throw new Error(error.message);
+
+const tx = await holder.sendTransaction(data.transaction);
+await tx.wait();
+
+const confirm = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ txHash: tx.hash })
+});
+const { data: redeemed } = await confirm.json();
+console.log(`Paid out ${redeemed.amount}`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+      "data": "0xdb006a75...",
+      "chainId": 11155111,
+      "value": "0"
+    },
+    "functionName": "redeem",
+    "vault": {
+      "vaultAddress": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+      "name": "Trusset Prime Demo Vault",
+      "symbol": "TPV",
+      "assetDecimals": 6
+    },
+    "position": {
+      "shares": "976.25",
+      "value": "999.990447"
+    },
+    "note": "Redemptions draw idle vault funds first, then whatever unutilized market liquidity can be freed; when utilization blocks the rest the redemption fills partially and the unpaid shares stay in the wallet.",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/clx_secmarket_001/vaults/0x4d0cfe39a3431b145d1a1393d901a36d459a1b13/redeem",
+      "field": "txHash",
+      "body": { "txHash": null }
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "confirmed": true,
+    "txType": "REDEEM",
+    "txHash": "0x3c7e19a0d4b52f86e1a09c37d58b2f4e6a1d0c9b87f3e25a4d6c8b1f09e7a352",
+    "signedBy": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "investor": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "amount": "256.0795",
+    "at": "2026-09-26T11:02:12.000Z",
+    "vault": {
+      "id": "cmssh8t2u0003cghxkx1w1fwd",
+      "vaultAddress": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+      "name": "Trusset Prime Demo Vault",
+      "symbol": "TPV",
+      "assetDecimals": 6
+    },
+    "recorded": true
+  }
+}
+```
+```json Error - Insufficient Shares
+{
+  "success": false,
+  "error": {
+    "code": "INSUFFICIENT_SHARES",
+    "message": "Wallet 0x5ad87a0621175206b72d10e4b8577b192e7f40ab holds 976.25 TPV; 1200 is more than that, so the redemption would revert."
+  }
+}
+```
+```json Error - Not Connected
+{
+  "success": false,
+  "error": {
+    "code": "VAULT_NOT_CONNECTED",
+    "message": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13 is not a vault connected to this market: the lender of record has neither registered it as a liquidity source nor placed it as a provider here."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `shares` or `holderAddress` is missing or malformed, `shares` is finer than the vault's decimals, or `vaultAddress` or `txHash` is malformed. `error.details` names the field |
+| `INVALID_VAULT` | `400` | `vaultAddress` is the zero address, or a mixed-case address that fails its EIP-55 checksum |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `VAULT_NOT_CONNECTED` | `404` | The vault is neither registered on this market nor holding a provider position recorded here. Checked when building and when confirming |
+| `ASSET_MISMATCH` | `409` | The vault holds a different asset from the one the market lends |
+| `INSUFFICIENT_SHARES` | `409` | `holderAddress` holds no shares in this vault, or fewer than `shares`. Skipped when the balance cannot be read |
+| `VAULT_REDEEM_FAILED` | `500` | An unexpected failure with no more specific code. Quote `metadata.requestId` when reporting it |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read, so nothing was decided. Retry shortly |
+| `VAULTS_UNREADABLE` | `503` | The market's connected vaults, or this vault's asset, could not be read from the chain |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

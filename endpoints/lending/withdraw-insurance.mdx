@@ -1,0 +1,108 @@
+---
+title: 'Withdraw from Insurance Fund'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/insurance/withdraw-calldata'
+description: 'Calldata for the fund owner to withdraw from the market insurance fund'
+---
+
+Builds the fund's `emergencyWithdraw` transaction, which pays an amount out of the market's insurance fund to a recipient. Only the fund owner can sign it: the admin the lender of record named when it took the role.
+
+<Warning>
+  Every unit withdrawn is a unit the reserve can no longer pay toward this market's losses. Whatever the reserve cannot cover lands on the liquidity providers. [Get Insurance Status](/endpoints/lending/get-insurance-status) shows the balance, when the reserve is drawn on this market, and the losses it has absorbed so far.
+</Warning>
+
+The API checks the amount against the fund's balance when it builds the calldata, but it does not check who will sign. A transaction from any wallet other than `fundOwner` reverts. So does one whose amount exceeds the balance by the time it mines, for example after a draw in between.
+
+Before a lender of record takes the market, the market itself or the deploying factory owns the fund. Neither can call a withdrawal, so no wallet can sign one until adoption.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="amount" type="string" required>
+  Amount to withdraw as a positive decimal string, in the market's borrow asset. It may carry at most as many decimal places as the borrow asset supports, and must not exceed the fund's balance.
+</ParamField>
+
+<ParamField body="recipient" type="string" required>
+  The wallet that receives the withdrawal, as a 0x-prefixed 20-byte address. The fund reverts on the zero address.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="calldata" type="object">The unsigned transaction, `{ to, data, description, chainId, value }`, targeting the fund. `description` names the amount and a shortened recipient.</ResponseField>
+    <ResponseField name="fundOwner" type="string">The wallet that must sign. The zero address when the owner could not be read.</ResponseField>
+    <ResponseField name="fundAddress" type="string">The insurance fund.</ResponseField>
+    <ResponseField name="currentBalance" type="string">The fund's balance when the calldata was built, as a decimal string.</ResponseField>
+    <ResponseField name="requiredRole" type="string">Always `OWNER`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+The response has no `action` field and the route has no confirm step. The API does not record the withdrawal. Once it mines, `stats.totalWithdrawn` and `stats.currentBalance` on [Get Insurance Status](/endpoints/lending/get-insurance-status) reflect it.
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/insurance/withdraw-calldata" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": "500", "recipient": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/insurance/withdraw-calldata`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount: '500', recipient })
+  }
+);
+const { data } = await res.json();
+const owner = await fundOwnerWallet.getAddress();
+if (owner.toLowerCase() !== data.fundOwner) throw new Error(`Only ${data.fundOwner} can sign this withdrawal`);
+const tx = await fundOwnerWallet.sendTransaction({ to: data.calldata.to, data: data.calldata.data });
+await tx.wait();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "calldata": {
+      "to": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+      "data": "0x...",
+      "description": "Emergency withdraw 500 USDC to 0x5ad87a...7f40ab (requires fund owner)",
+      "chainId": 11155111,
+      "value": "0"
+    },
+    "fundOwner": "0x3f9c1e7a2b5d48e06c1a9f3b7d2e5a8c0f4b6d13",
+    "fundAddress": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+    "currentBalance": "5036.975",
+    "requiredRole": "OWNER"
+  }
+}
+```
+```json Error - Exceeds Balance
+{
+  "success": false,
+  "error": {
+    "code": "INSUFFICIENT_BALANCE",
+    "message": "Requested amount exceeds fund balance. Available: 5036.975 USDC"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `amount` is missing, not a positive decimal string, or carries more decimal places than the borrow asset supports, or `recipient` is missing or malformed |
+| `MISSING_MARKET_ID` | `400` | The market ID in the path is longer than 100 characters |
+| `NO_INSURANCE_FUND` | `400` | The market records no insurance fund |
+| `FUND_NOT_READABLE` | `400` | The fund could not be read on chain. A network failure answers this way too, so retry before treating it as a configuration problem |
+| `INSUFFICIENT_BALANCE` | `400` | `amount` exceeds the fund's balance. The message states what is available |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

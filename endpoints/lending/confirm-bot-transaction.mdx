@@ -1,0 +1,94 @@
+---
+title: 'Confirm Bot Transaction'
+api: 'POST /lending-external-securities-v2/api/liquidation-bots/{botId}/confirm-tx'
+description: 'Refresh the cached state of a bot after one of its transactions is mined'
+---
+
+Tells the API that a transaction affecting the bot has been mined, so it drops its cached reads of the bot and its activity. The next [Get Liquidation Bot](/endpoints/lending/get-bot) or [List Bot Transactions](/endpoints/lending/list-bot-transactions) goes to the chain. Use it after the steps of [Connect Bot to Market](/endpoints/lending/connect-bot), [Bot Owner Action](/endpoints/lending/bot-action) and [Fund Bot](/endpoints/lending/fund-bot).
+
+Nothing is recorded. The bot's state is read from the chain every time, so there is nothing a confirmation could store. Skipping it only means waiting out the caches: 15 seconds for state, 20 seconds between activity reads.
+
+The only checks are that the transaction was mined and did not revert. The API does not check which contract it targeted, what it called or who sent it, so a successful confirmation says nothing about the bot. Unlike other confirmations, an unreadable receipt answers `409 TX_NOT_FOUND`, not `404`.
+
+## Path Parameters
+
+<ParamField path="botId" type="string" required>Bot ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="txHash" type="string" required>
+  Hash of the mined transaction.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="success" type="boolean">Always `true`.</ResponseField>
+    <ResponseField name="txHash" type="string">The transaction hash, from the receipt.</ResponseField>
+    <ResponseField name="blockNumber" type="integer">Block the transaction was mined in.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidation-bots/{botId}/confirm-tx" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/liquidation-bots/${botId}/confirm-tx`,
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ txHash: tx.hash })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "blockNumber": 9398811
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-09-20T10:06:00.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Not Yet Readable
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_NOT_FOUND",
+    "message": "That transaction could not be read yet. Retry in a moment."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `txHash` is not a `0x`-prefixed 64-hex hash |
+| `TX_REVERTED` | `400` | The transaction was mined but reverted |
+| `BOT_NOT_FOUND` | `404` | No bot with this ID belongs to your instance |
+| `BOT_NOT_DEPLOYED` | `409` | The bot record has no contract address |
+| `TX_NOT_FOUND` | `409` | No receipt could be read: the transaction is unmined, dropped or on another network, or the chain did not answer. Retry |
+| `BOT_CONFIRM_FAILED` | `500` | An unexpected failure. The message is generic; retry |

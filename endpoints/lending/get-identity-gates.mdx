@@ -1,0 +1,154 @@
+---
+title: 'Get Identity Gates'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/identity-gates'
+description: 'Read the borrower and provider registers a market names and what each one gates'
+---
+
+Reports, read live from the chain, which identity registers the market names and what each one gates. Both registers are optional. Without a borrower register, the collateral token's own compliance alone governs borrowers. Without a provider register, each vault admits depositors through its own register alone.
+
+Change the registers with [Set Identity Gates](/endpoints/lending/set-identity-gates).
+
+## What Each Register Gates
+
+On a current market, the two registers gate different parties at different doors.
+
+The **borrower register** (`borrowerRegistry`) is examined by the market itself on every `openLoan` and `borrowMore`. Repaying, closing a loan, releasing collateral and claiming a surplus are never gated.
+
+The **provider register** (`providerRegistry`) is not examined by the market. The market takes direct deposits only from the operator wallet and the vaults its admin registered, and asks no register about either. Every registered vault reads the market's provider register, beside its own register, before it admits a depositor or a share transfer. With no provider register, each vault admits depositors through its own register alone. Redemptions are never gated.
+
+Every check is a live `isVerified(address)` call against the register, so a change on the register side takes effect on the next call. Registers answering a single `bool`, as ERC-3643 and ONCHAINID-based registers do, and registers answering `(bool, uint8)`, as the Trusset register does, are read alike. A register that cannot answer refuses every party.
+
+## Older Market Generations
+
+`generation: SINGLE_REGISTER` marks an earlier implementation that examines borrowers and providers against one register and offers no way to change it. `providerRegistry` then repeats `borrowerRegistry`, and `upgradeRequired` is `true`. The market admin moves it onto the current implementation with [Upgrade Market](/endpoints/lending/upgrade-market) before the registers can be chosen.
+
+A two-register market from before the current generation reports `vaultOnlyLiquidity: false` and `providerGateReadBy: MARKET`. When its pool is open to third-party providers (`operatorOnlyLiquidity: false`), the market itself examines those providers against the provider register, which must then stay installed (`providerGateRequired: true`).
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="marketAddress" type="string">The market, lowercased.</ResponseField>
+    <ResponseField name="generation" type="string">`TWO_REGISTERS` on an implementation with independent borrower and provider registers, `SINGLE_REGISTER` on the earlier one.</ResponseField>
+    <ResponseField name="adjustable" type="boolean">Whether the registers can be changed through [Set Identity Gates](/endpoints/lending/set-identity-gates). `true` exactly when `generation` is `TWO_REGISTERS`.</ResponseField>
+    <ResponseField name="upgradeRequired" type="boolean">`true` on a `SINGLE_REGISTER` market, which has to be upgraded before its registers can change.</ResponseField>
+    <ResponseField name="pendingCurator" type="boolean">`true` while the market has no lender of record, and so no admin who could change the registers.</ResponseField>
+    <ResponseField name="priceSource" type="string">`MARKET`, `NAV` or `ORACLE`.</ResponseField>
+    <ResponseField name="borrowerRegistry" type="string">The borrower register, lowercased, or `null` when none is installed.</ResponseField>
+    <ResponseField name="providerRegistry" type="string">The provider register, lowercased, or `null`. On a `SINGLE_REGISTER` market it repeats `borrowerRegistry`.</ResponseField>
+    <ResponseField name="operatorOnlyLiquidity" type="boolean">Whether the pool is closed to third-party providers. Always `true` on a current market.</ResponseField>
+    <ResponseField name="borrowerGateRequired" type="boolean">`true` on a `MARKET`-priced market, which must keep a borrower register. It cannot be cleared.</ResponseField>
+    <ResponseField name="providerGateRequired" type="boolean">`true` only on an older market whose pool is open to third-party providers. Always `false` on a current market.</ResponseField>
+    <ResponseField name="vaultOnlyLiquidity" type="boolean">`true` on the current generation, where the market takes direct deposits only from the operator wallet and registered vaults.</ResponseField>
+    <ResponseField name="providerGateReadBy" type="string">`VAULTS` when the registered vaults read the provider register, `MARKET` on an older market that reads it itself.</ResponseField>
+    <ResponseField name="borrower" type="object">
+      How the borrower register answers.
+      <Expandable>
+        <ResponseField name="address" type="string">The register, or `null`.</ResponseField>
+        <ResponseField name="shape" type="string">`none` with no register, otherwise `bool` or `tuple` for the answer shape it gives. `unknown` means it was reached but does not answer `isVerified(address)`; `unreadable` means it could not be reached.</ResponseField>
+        <ResponseField name="usable" type="boolean">Whether the register answers in a shape the current implementation reads. `true` for `none`, `bool` and `tuple`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="provider" type="object">The same three fields for the provider register. Identical to `borrower` when both name the same register.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/identity-gates" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/identity-gates`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "generation": "TWO_REGISTERS",
+    "adjustable": true,
+    "pendingCurator": false,
+    "priceSource": "NAV",
+    "borrowerRegistry": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
+    "providerRegistry": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+    "operatorOnlyLiquidity": true,
+    "borrowerGateRequired": false,
+    "providerGateRequired": false,
+    "vaultOnlyLiquidity": true,
+    "providerGateReadBy": "VAULTS",
+    "borrower": {
+      "address": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
+      "shape": "bool",
+      "usable": true
+    },
+    "provider": {
+      "address": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+      "shape": "tuple",
+      "usable": true
+    },
+    "upgradeRequired": false
+  }
+}
+```
+```json Response - Earlier Implementation
+{
+  "success": true,
+  "data": {
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "generation": "SINGLE_REGISTER",
+    "adjustable": false,
+    "pendingCurator": false,
+    "priceSource": "NAV",
+    "borrowerRegistry": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
+    "providerRegistry": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
+    "operatorOnlyLiquidity": true,
+    "borrowerGateRequired": false,
+    "providerGateRequired": false,
+    "vaultOnlyLiquidity": false,
+    "providerGateReadBy": "MARKET",
+    "borrower": {
+      "address": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
+      "shape": "tuple",
+      "usable": true
+    },
+    "provider": {
+      "address": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
+      "shape": "tuple",
+      "usable": true
+    },
+    "upgradeRequired": true
+  }
+}
+```
+```json Error - Unreadable
+{
+  "success": false,
+  "error": {
+    "code": "IDENTITY_GATES_UNREADABLE",
+    "message": "The market registers could not be read from the chain. Retry in a moment."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `IDENTITY_GATES_READ_FAILED` | `500` | The registers could not be read and no more specific code applied |
+| `IDENTITY_GATES_UNREADABLE` | `503` | The market's implementation or one of its register reads could not be answered by the chain. Retry |

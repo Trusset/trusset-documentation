@@ -1,0 +1,171 @@
+---
+title: 'Rotate Operator Wallet'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/operator-wallet'
+description: 'Move the market operator wallet to another verified wallet of this instance'
+---
+
+Builds the `setOperatorFeeRecipient` transaction, which moves the market's operator wallet to a new address. The operator wallet collects the operator share of repaid interest and is the one wallet, besides registered vaults, that may deposit liquidity directly. Both rights move together.
+
+Only the current operator wallet can sign it. The market admin cannot move the operator wallet, and neither can any other party.
+
+<Warning>
+  Once the rotation mines, only the new wallet can move the operator wallet again. The previous wallet loses that right, and no other party holds it. For that reason the API accepts only a new wallet this instance has registered and verified, which proves it controls the key.
+</Warning>
+
+## What moves and what stays
+
+The rotation changes one address on the market. It does not touch the lender-of-record roles, and it does not move liquidity the previous wallet already supplied.
+
+| Item | After the rotation |
+|---|---|
+| Operator share | Paid to the new wallet, including shares booked before the rotation and not yet swept |
+| Direct deposits | Accepted from the new wallet only |
+| Liquidity the previous wallet supplied | Stays the previous wallet's own. It can still withdraw it, but it cannot add more |
+| The previous wallet's distributor slice | Keeps accruing on the previous wallet's position. Sweep it with [Sweep Distributor Fees](/endpoints/lending/sweep-distributor-fees), passing the previous wallet as `provider`. The current market implementation pays it to the previous wallet, the earlier fee implementation to the new one |
+| Market roles, such as `DEFAULT_ADMIN_ROLE` and `ISSUER_ROLE` | Unchanged |
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="newRecipient" type="string">
+  The wallet that becomes the operator wallet, as a 0x-prefixed 20-byte address. Required when building calldata. It must be a verified wallet of this instance and must differ from the current operator wallet.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The wallet you intend to sign with. When supplied, the API refuses with `NOT_OPERATOR_WALLET` unless it is the current operator wallet, before any transaction is offered. Omit it to skip that check.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the rotation you broadcast. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the market. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`setOperatorFeeRecipient`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="requiredSigner" type="string">The current operator wallet, the only wallet the market accepts this transaction from. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="previous" type="string">The operator wallet before the rotation. On the confirm call, read from the `OperatorFeeRecipientUpdated` event.</ResponseField>
+    <ResponseField name="newRecipient" type="string">The wallet that becomes the operator wallet. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction does, in words. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="confirmWith" type="object">Where to send the hash: `endpoint` names this route and `field` is `txHash`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="txHash" type="string">Rotation transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that sent the rotation. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="operatorWallet" type="string">The operator wallet after the rotation, read from the `OperatorFeeRecipientUpdated` event. Returned when confirming with `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+Every refusal below is checked before a transaction is offered. [Get Fee Split](/endpoints/lending/get-fee-split) shows the current operator wallet as `operatorWallet`.
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/operator-wallet" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "newRecipient": "0x7e3a9c2f5b8d41e06a2c9f7b3d5e8a1c4f6b2d90",
+    "signerAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52"
+  }'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/operator-wallet`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const built = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ newRecipient, signerAddress: await operatorWallet.getAddress() })
+});
+const { success, data, error } = await built.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+
+const tx = await operatorWallet.sendTransaction(data.transaction);
+await tx.wait();
+
+const confirmed = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.hash }) });
+const { data: rotated } = await confirmed.json();
+console.log(`Operator wallet is now ${rotated.operatorWallet}`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "setOperatorFeeRecipient",
+    "requiredSigner": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "previous": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "newRecipient": "0x7e3a9c2f5b8d41e06a2c9f7b3d5e8a1c4f6b2d90",
+    "description": "Move the operator wallet of this market to 0x7e3a9c2f5b8d41e06a2c9f7b3d5e8a1c4f6b2d90: it collects the operator's fee shares and is the one wallet that may deposit directly",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/clx_secmarket_001/operator-wallet",
+      "field": "txHash"
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0x2f8c6e1a4b9d07e35c2a8f6d1b04e9c7a3f5d82b6e0c9a14d7f3b5e28c6a0d91",
+    "signedBy": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "previous": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "operatorWallet": "0x7e3a9c2f5b8d41e06a2c9f7b3d5e8a1c4f6b2d90"
+  }
+}
+```
+```json Error - Wallet Not Verified
+{
+  "success": false,
+  "error": {
+    "code": "WALLET_NOT_VERIFIED",
+    "message": "0x7e3a9c2f5b8d41e06a2c9f7b3d5e8a1c4f6b2d90 is not a verified wallet of this instance. The operator wallet collects the operator's shares and is the one wallet that may deposit directly, so it can only move to a wallet this instance proved it controls."
+  }
+}
+```
+```json Error - Wrong Signer
+{
+  "success": false,
+  "error": {
+    "code": "NOT_OPERATOR_WALLET",
+    "message": "Only the current operator wallet 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 can move it; 0x5ad87a0621175206b72d10e4b8577b192e7f40ab would be refused."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `newRecipient` is missing while building calldata, or an address or `txHash` is malformed |
+| `MISSING_MARKET_ID` | `400` | The market ID in the path is longer than 100 characters |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `INVALID_WALLET` | `400` | `newRecipient` is the zero address |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction moved no operator wallet on this market |
+| `WALLET_NOT_VERIFIED` | `403` | `newRecipient` is not a verified wallet of this instance |
+| `NOT_OPERATOR_INSTANCE` | `403` | The current operator wallet is not a verified wallet of this instance. The instance that holds it moves it |
+| `NOT_OPERATOR_WALLET` | `403` | `signerAddress` is not the current operator wallet, so the market would refuse it |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_NOT_ADOPTED` | `409` | No operator wallet is recorded yet, because no lender of record has taken the market |
+| `MARKET_UPGRADE_REQUIRED` | `409` | The market runs an implementation without operator wallet rotation. Upgrade it first |
+| `WALLET_UNCHANGED` | `409` | `newRecipient` is already the operator wallet |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market implementation or its operator wallet could not be read. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | The instance's verified wallets could not be read. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

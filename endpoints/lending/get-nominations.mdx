@@ -1,12 +1,16 @@
 ---
 title: 'Get Nominations'
-api: 'GET /lending-external-securities/api/markets/{marketId}/nominations'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/nominations'
 description: 'Read the candidates nominated to become a market lender of record'
 ---
 
-Returns the addresses nominated at deployment to take this market's lender-of-record role, together with whether the role has been taken and on what terms. See [Lender of record](/endpoints/lending/introduction#lender-of-record).
+Returns the addresses currently nominated to take this market's lender-of-record role, together with whether the role has been taken and on what realization path. See [Lender of record](/endpoints/lending/introduction#lender-of-record).
 
-Use it to tell an inert market apart from a live one before pointing borrowers or liquidity providers at it. While `seekingCurator` is `true`, opening a loan and providing liquidity are refused with `409 MARKET_PENDING_CURATOR`.
+The candidate list is read live from the lending factory, so it reflects every nomination made at deployment or later through [Nominate Candidate](/endpoints/lending/nominate-candidate), minus withdrawn ones. Adoption does not clear it: a market that has a lender of record still lists its candidates.
+
+`curator`, `seekingCurator` and `realizationMode` come from the market as this instance records it, not from the factory. A candidate takes the role from its own instance, so the deploying instance's record can lag an adoption. [Get Market](/endpoints/lending/get-market) and [Get Operator](/endpoints/lending/get-operator) reconcile the record with the factory, and this endpoint serves the reconciled values afterwards.
+
+Until a lender of record takes the role, opening a loan, borrowing more and providing liquidity are refused with `409 MARKET_PENDING_CURATOR`. That refusal reads the market contract itself, so it holds even while this record lags.
 
 ## Path Parameters
 
@@ -16,21 +20,21 @@ Use it to tell an inert market apart from a live one before pointing borrowers o
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="candidates" type="array">Nominated addresses, lowercased and deduplicated. Empty when the factory could not be read or the market predates the lender-of-record model.</ResponseField>
-    <ResponseField name="curator" type="string">Address that holds the lender-of-record role, or null while the market is still seeking one.</ResponseField>
-    <ResponseField name="seekingCurator" type="boolean">Whether the market is still seeking a lender of record.</ResponseField>
-    <ResponseField name="realizationMode" type="string">How seized collateral is realized once the role is taken. `EXCHANGE_SALE`, `ISSUER_REDEMPTION`, `AUCTION`, or `UNDECLARED` before adoption. Null when the market records none.</ResponseField>
+    <ResponseField name="candidates" type="array">Nominated addresses, lowercased and deduplicated. Empty when nobody is nominated, or when the factory could not be read.</ResponseField>
+    <ResponseField name="curator" type="string">Address that holds the lender-of-record role, as recorded on this instance. Null while the record shows the market seeking one.</ResponseField>
+    <ResponseField name="seekingCurator" type="boolean">Whether the recorded market is still seeking a lender of record.</ResponseField>
+    <ResponseField name="realizationMode" type="string">How seized collateral is realized, as the lender of record declared it: `EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION`. `UNDECLARED` before adoption, and null when the market records none.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/nominations" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/nominations" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/nominations`,
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/nominations`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
@@ -65,7 +69,7 @@ if (data.seekingCurator) {
     ],
     "curator": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
     "seekingCurator": false,
-    "realizationMode": "EXCHANGE_SALE"
+    "realizationMode": "ISSUER_REDEMPTION"
   }
 }
 ```
@@ -76,4 +80,5 @@ if (data.seekingCurator) {
 | Code | HTTP | Cause |
 |---|---|---|
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

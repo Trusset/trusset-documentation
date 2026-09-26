@@ -1,24 +1,20 @@
 ---
 title: 'Get Liquidatable Loans'
-api: 'GET /lending-external-securities/api/liquidations/{marketId}/liquidatable-loans'
-description: 'List loans whose health factor has fallen below 1.0'
+api: 'GET /lending-external-securities-v2/api/liquidations/{marketId}/liquidatable-loans'
+description: 'List loans that can be liquidated now, on health or on an expired term'
 ---
 
-Scans every active loan in the market and returns those whose health factor is strictly below `1.0`.
+Scans the market's active loans and returns every loan that [Liquidate Loan](/endpoints/lending/liquidate) would accept now. A loan qualifies on either of two triggers. Its health factor is below `1.0`, or its term has run past its effective due date plus the grace period, however healthy its collateral is. A market that makes open-ended loans has only the first trigger.
 
-This is a full scan of the market's loan book, so response time grows with the number of loans. Poll it on a schedule rather than per page view.
+The first scan reads every loan the market has ever opened. Later scans read only the loans still known to be active plus any opened since, so the cost grows with the active book. Poll it on a schedule rather than per page view.
 
 <Warning>
-  This list covers one of the two liquidation triggers. A market that runs loan terms can also liquidate a loan whose term has run out, past its grace period, however healthy its collateral is. Those loans are not in this list, and this endpoint does not report them.
-
-  A market's term offering is on `termConfig` from [Get Market Metrics](/endpoints/lending/get-metrics). A market whose `maxLoanDuration` and `terminalDueDate` are both `"0"` makes open-ended loans, and for it this list is complete.
-
-  For any other market, take the term side from [List Positions](/endpoints/lending/list-positions), where each open position carries a `term` block. A position with `term.enforceable: true` is liquidatable now whatever its health factor says. Poll both and act on the union.
+  A failed chain read is not reported as an error. If the market's loan counter cannot be read, the response carries `totalActiveLoans: 0` and empty lists. A loan whose own read fails is left out, and when the term reads fail, loans that qualify only on their term are missing too. An empty `liquidatableLoans` is therefore not proof that the book is healthy. `onChainError` appears only when composing the response fails after the reads.
 </Warning>
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>Market ID. At most 100 characters.</ParamField>
 
 ## Response Fields
 
@@ -26,39 +22,64 @@ This is a full scan of the market's loan book, so response time grows with the n
   <Expandable>
     <ResponseField name="totalActiveLoans" type="integer">Active loans scanned.</ResponseField>
     <ResponseField name="liquidatableLoans" type="array">
+      Loans that qualify now on either trigger. A loan with an open auction, running or expired but not yet settled, is listed under `auctionedLoans` instead.
       <Expandable>
-        <ResponseField name="loanId" type="integer">On-chain loan ID. Pass this to [Liquidate Loan](/endpoints/lending/liquidate).</ResponseField>
+        <ResponseField name="loanId" type="string">On-chain loan ID. Pass this to [Liquidate Loan](/endpoints/lending/liquidate).</ResponseField>
         <ResponseField name="borrower" type="string">Borrower address.</ResponseField>
         <ResponseField name="collateralAmount" type="string">Collateral pledged, in collateral token units.</ResponseField>
         <ResponseField name="principal" type="string">Outstanding principal, in borrow asset units.</ResponseField>
         <ResponseField name="accruedInterest" type="string">Accrued unpaid interest, in borrow asset units.</ResponseField>
-        <ResponseField name="healthFactor" type="string">Health factor at 18 decimal places. Always below `1.0` in this list.</ResponseField>
+        <ResponseField name="healthFactor" type="string">Health factor at 18 decimal places. At or above `1.0` when the loan qualifies on its term alone.</ResponseField>
+        <ResponseField name="trigger" type="string">`HEALTH`, `TERM` or `HEALTH_AND_TERM`. A loan realized on its term, whatever its health, is realized whole at the term penalty.</ResponseField>
+        <ResponseField name="term" type="object">The loan's term, present when it carries one. Same fields as the entries of `termedLoans`.</ResponseField>
       </Expandable>
     </ResponseField>
-    <ResponseField name="onChainError" type="string">Present when the scan failed. Both counters read zero in that case.</ResponseField>
+    <ResponseField name="termedLoans" type="array">
+      Every active loan that carries a term, enforceable or not. Empty on a market that runs no loan terms.
+      <Expandable>
+        <ResponseField name="loanId" type="string">On-chain loan ID.</ResponseField>
+        <ResponseField name="borrower" type="string">Borrower address.</ResponseField>
+        <ResponseField name="dueAt" type="string">Unix seconds the loan falls due under its own term.</ResponseField>
+        <ResponseField name="effectiveDueAt" type="string">Unix seconds of the effective due date: `dueAt`, or the market's due floor when that is later.</ResponseField>
+        <ResponseField name="graceEnd" type="string">Unix seconds the grace period ends. After this the loan is liquidatable whatever its health.</ResponseField>
+        <ResponseField name="enforceable" type="boolean">Whether the term can be enforced now.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="auctionedLoans" type="array">
+      Active loans with a Dutch auction still open on the market's auction venue. `liquidate` refuses these until the auction clears or is settled after expiry.
+      <Expandable>
+        <ResponseField name="loanId" type="string">On-chain loan ID.</ResponseField>
+        <ResponseField name="borrower" type="string">Borrower address.</ResponseField>
+        <ResponseField name="auctionId" type="string">The auction realizing this loan.</ResponseField>
+        <ResponseField name="endTime" type="integer">Unix seconds when bidding closes.</ResponseField>
+        <ResponseField name="expired" type="boolean">`true` once `endTime` has passed. Such an auction waits for [Settle Expired Auction](/endpoints/lending/settle-expired-auction).</ResponseField>
+        <ResponseField name="collateralRemaining" type="string">Collateral still for sale, in collateral token units.</ResponseField>
+        <ResponseField name="debtRemaining" type="string">Debt the auction has not yet discharged, in borrow asset units.</ResponseField>
+        <ResponseField name="healthFactor" type="string">The loan's health factor at 18 decimal places.</ResponseField>
+        <ResponseField name="reason" type="string">Why the loan is not offered for liquidation, in words.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="onChainError" type="string">Present only when composing the response failed. The counter then reads `0` and `liquidatableLoans` is empty. See the warning above.</ResponseField>
   </Expandable>
 </ResponseField>
 
-<Warning>
-  When the chain read fails the endpoint returns `200` with `totalActiveLoans: 0`, an empty `liquidatableLoans`, and an `onChainError` string. An empty list is therefore not proof that no loan is liquidatable. Always check for `onChainError` before concluding the book is healthy.
-</Warning>
-
 <Note>
-  Health factors are computed against the oracle's stored price. If the price is stale the figures here are stale too. Push a current NAV with [Sync Oracle Price](/endpoints/lending/sync-oracle) before acting on this list, or pass a `signedPrice` when liquidating so the contract prices against a fresh value.
+  Health factors are computed against the oracle's stored price, and term enforceability against the time of the read. If the price is stale the health figures are stale too, and [Liquidate Loan](/endpoints/lending/liquidate) refuses every loan with `PRICE_STALE` until a fresh price is on the oracle. Push a current NAV with [Sync Oracle Price](/endpoints/lending/sync-oracle) before acting on this list.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/liquidations/{marketId}/liquidatable-loans" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/liquidations/{marketId}/liquidatable-loans" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/liquidations/${marketId}/liquidatable-loans`,
+  `https://api.trusset.org/lending-external-securities-v2/api/liquidations/${marketId}/liquidatable-loans`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
 if (data.onChainError) throw new Error(`Scan failed: ${data.onChainError}`);
+const onTerm = data.liquidatableLoans.filter((loan) => loan.trigger !== 'HEALTH');
 ```
 </RequestExample>
 
@@ -70,25 +91,61 @@ if (data.onChainError) throw new Error(`Scan failed: ${data.onChainError}`);
     "totalActiveLoans": 12,
     "liquidatableLoans": [
       {
-        "loanId": 7,
-        "borrower": "0xabc...def",
-        "collateralAmount": "500.000000000000000000",
-        "principal": "42000.000000",
-        "accruedInterest": "318.400000",
-        "healthFactor": "0.942000000000000000"
+        "loanId": "7",
+        "borrower": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+        "collateralAmount": "500.0",
+        "principal": "42000.0",
+        "accruedInterest": "318.4",
+        "healthFactor": "0.942",
+        "trigger": "HEALTH"
+      },
+      {
+        "loanId": "9",
+        "borrower": "0x4e1b2c93d07a5f68e3b9d15c02a7f4e6b8d31a90",
+        "collateralAmount": "220.0",
+        "principal": "15000.0",
+        "accruedInterest": "96.25",
+        "healthFactor": "1.61",
+        "trigger": "TERM",
+        "term": {
+          "dueAt": "1780300800",
+          "effectiveDueAt": "1780300800",
+          "graceEnd": "1780560000",
+          "enforceable": true
+        }
       }
-    ]
+    ],
+    "termedLoans": [
+      {
+        "loanId": "9",
+        "borrower": "0x4e1b2c93d07a5f68e3b9d15c02a7f4e6b8d31a90",
+        "dueAt": "1780300800",
+        "effectiveDueAt": "1780300800",
+        "graceEnd": "1780560000",
+        "enforceable": true
+      }
+    ],
+    "auctionedLoans": []
   }
 }
 ```
-```json Response - Scan Failed
+```json Response - Nothing Read
 {
   "success": true,
   "data": {
     "totalActiveLoans": 0,
     "liquidatableLoans": [],
-    "onChainError": "could not detect network"
+    "termedLoans": [],
+    "auctionedLoans": []
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

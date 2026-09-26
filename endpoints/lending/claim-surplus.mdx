@@ -1,0 +1,142 @@
+---
+title: 'Claim Surplus'
+api: 'POST /lending-external-securities-v2/api/positions/{marketId}/claim-surplus'
+description: 'Withdraw a realization surplus the market escrowed after a blocked payout'
+---
+
+Builds the transaction that pays an escrowed realization surplus out of the market contract to the borrower, then confirms it once mined. The surplus is held in the settlement token (stablecoin).
+
+A liquidation's proceeds above the debt plus the penalty belong to the borrower, and the market pays them out during settlement. When the settlement token refuses that transfer, the market escrows the amount under the borrower's address rather than reverting the settlement. [Get Escrowed Surplus](/endpoints/lending/get-escrowed-surplus) reads the balance. This endpoint withdraws it, on `FREEZE` and `CUSTODY` markets alike.
+
+<Warning>
+  The claim repeats the refused transfer of the settlement asset, so it reverts while that asset still refuses the borrower, after the borrower has paid gas. The calldata is returned without checking whether the transfer would now be accepted. Lift the restriction on the borrower's address first, then claim.
+</Warning>
+
+`claimSurplus()` takes no arguments and pays the whole escrow of the wallet that signs it. The borrower must sign from the address the surplus was escrowed for. Signing with any other wallet claims that wallet's own escrow, or reverts when it has none. `holderAddress` only decides whose escrow is checked before the calldata is handed back. It does not appear in the transaction and cannot redirect the payout.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+Send `holderAddress` to build the transaction, or `txHash` to confirm one already mined. At least one is required. When both are sent, `txHash` wins and the call confirms.
+
+<ParamField body="holderAddress" type="string">
+  Address whose escrowed surplus is to be claimed, `0x` followed by 40 hex characters. The market's escrow for it is read first, and an empty escrow is refused with `NO_ESCROWED_SURPLUS` rather than handing back a transaction that reverts.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined claim, `0x` followed by 64 hex characters. Send it to confirm the claim and record it. Omit it to receive the calldata.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, calling `claimSurplus` on the market contract. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`claimSurplus`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="description" type="string">One sentence naming the amount, the asset symbol and the holder, and stating that the holder's wallet must sign. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="holderAddress" type="string">The holder whose escrow was read, lowercased. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="escrowedSurplus" type="string">The escrow the claim would pay out, as a decimal string in borrow asset units. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="confirmWith" type="string">`claimSurplus`, the function whose transaction hash confirms the claim. Send that hash back to this endpoint as `txHash`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="claimedBy" type="string">Address the surplus was paid to, lowercased, read from the market's `SurplusClaimed` event. Falls back to the transaction's sender when the event could not be read. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="amount" type="string">Amount paid out, as a decimal string in borrow asset units, read from the same event. Null when the event could not be read. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="verifiedBy" type="string">`receipt-log` when the claim ran through another contract, such as a smart account. The claim was then verified by the market's `SurplusClaimed` event rather than by the transaction's own target. Absent otherwise.</ResponseField>
+    <ResponseField name="outerTarget" type="string">The contract the outer transaction was sent to. Present with `verifiedBy`.</ResponseField>
+    <ResponseField name="outerSender" type="string">The wallet that sent the outer transaction. Present with `verifiedBy`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  A confirmed claim is recorded on the market's transaction ledger as `SURPLUS_CLAIMED`, which [List Transactions](/endpoints/lending/list-transactions) returns. It is not recorded against a single position, because the escrow belongs to the address and the market's `SurplusClaimed` event names no loan.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/claim-surplus" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"holderAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/claim-surplus`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+
+const built = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ holderAddress: await wallet.getAddress() })
+});
+const { data } = await built.json();
+
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
+
+const confirmed = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ txHash: tx.hash })
+});
+const { data: claim } = await confirmed.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x27ff02e3",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "claimSurplus",
+    "description": "Claim 1532.4 USDC of realization surplus escrowed on the market for 0xabc7f1093d5e26b804a1c3f78de025916b47c0d3. claimSurplus credits msg.sender, so it must be signed from that wallet.",
+    "holderAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "escrowedSurplus": "1532.4",
+    "confirmWith": "claimSurplus"
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0x3c7e9a15d2f04b86a1e5c3907db48f2e6a91c0d57b3e28f4a6d19c0e5b72a384",
+    "claimedBy": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "amount": "1532.4"
+  }
+}
+```
+```json Error - Nothing Escrowed
+{
+  "success": false,
+  "error": {
+    "code": "NO_ESCROWED_SURPLUS",
+    "message": "The market holds no escrowed surplus for 0xabc7f1093d5e26b804a1c3f78de025916b47c0d3; claimSurplus reverts InvalidAmount on an empty claim, so nothing is offered. A surplus is escrowed only when the settlement-asset transfer to the borrower fails at settlement."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `VALIDATION_ERROR` | `400` | Neither `holderAddress` nor `txHash` was sent, or one of them is malformed |
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `NO_ESCROWED_SURPLUS` | `409` | The market holds no escrowed surplus for `holderAddress`. Claiming would revert |
+| `SURPLUS_UNREADABLE` | `503` | The escrow could not be read from the network, so no transaction is offered. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

@@ -1,10 +1,16 @@
 ---
 title: 'Get Market Metrics'
-api: 'GET /lending-external-securities/api/markets/{marketId}/metrics'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/metrics'
 description: 'Read live pool metrics directly from the market contract'
 ---
 
-Returns current liquidity, borrows, utilization, rates, and liquidation counters read from the chain at request time. This is the endpoint to poll for a live market dashboard.
+Returns current liquidity, borrows, utilization, rates, fee balances and liquidation counters read from the chain at request time. This is the endpoint to poll for a live market dashboard. A healthy read is shared for up to 15 seconds, and any successful write request drops it, so the next poll after a write reads the chain again.
+
+<Warning>
+  When the chain is unavailable the endpoint returns `200` with `isOnChain: false` rather than an error status, and every figure is a placeholder: zeros, and a `borrowRate` of `"200"`. Branch on `isOnChain` before rendering any figure.
+
+  `paused` is `null`, never `false`, when the pause flag could not be read. Rendering the default told an operator that a paused market was live for a poll cycle.
+</Warning>
 
 ## Path Parameters
 
@@ -15,40 +21,41 @@ Returns current liquidity, borrows, utilization, rates, and liquidation counters
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="isOnChain" type="boolean">Whether the contract read succeeded. When `false`, every other field is a placeholder and must not be displayed as real data.</ResponseField>
-    <ResponseField name="paused" type="boolean">Whether the market contract is paused.</ResponseField>
+    <ResponseField name="paused" type="boolean">Whether the market contract is paused, or `null` when unreadable.</ResponseField>
     <ResponseField name="liquidationContract" type="string">Liquidation router the market is wired to, or `null` if unreadable.</ResponseField>
-    <ResponseField name="totalDeposits" type="string">Total supplied liquidity, in borrow asset units.</ResponseField>
+    <ResponseField name="priceSource" type="string">`NAV`, `MARKET` or `ORACLE`, read from the contract. `null` when unreadable.</ResponseField>
+    <ResponseField name="totalDeposits" type="string">Total pool liquidity, in borrow asset units.</ResponseField>
     <ResponseField name="totalBorrows" type="string">Total outstanding principal, in borrow asset units.</ResponseField>
-    <ResponseField name="availableLiquidity" type="string">Liquidity available for new borrows, in borrow asset units.</ResponseField>
+    <ResponseField name="availableLiquidity" type="string">Free liquidity, in borrow asset units: the pool's cash less every booked liability (fee balances, escrowed surplus, held sale proceeds), capped at liquidity minus borrows.</ResponseField>
     <ResponseField name="utilizationRate" type="string">Utilization in basis points. `2500` is 25 percent.</ResponseField>
-    <ResponseField name="borrowRate" type="string">Annualized borrow rate in basis points.</ResponseField>
-    <ResponseField name="supplyRate" type="string">Annualized supply rate in basis points, net of the 25 percent reserve factor.</ResponseField>
+    <ResponseField name="borrowRate" type="string">Annualized borrow rate in basis points. On a `FIXED` market it is the rate every new loan is stamped with. Otherwise it is the interest model's rate at the current utilization.</ResponseField>
+    <ResponseField name="curveBorrowRate" type="string">The interest model's rate at the current utilization, in basis points. On a `FIXED` market it prices only loans that carry no stamp, and `borrowRate` differs from it.</ResponseField>
+    <ResponseField name="supplyRate" type="string">Annualized supply rate in basis points, derived from `borrowRate` as described below. It can carry up to four decimal places.</ResponseField>
     <ResponseField name="totalShares" type="string">Total LP shares outstanding, always formatted at 18 decimals regardless of the borrow asset.</ResponseField>
     <ResponseField name="totalCollateral" type="string">Total collateral locked, in collateral token units.</ResponseField>
-    <ResponseField name="activeLoans" type="integer">Loans currently in `ACTIVE` status.</ResponseField>
+    <ResponseField name="activeLoans" type="integer">Loans Trusset's position records hold as `ACTIVE`.</ResponseField>
     <ResponseField name="totalLoansCreated" type="integer">Lifetime loan counter from the contract.</ResponseField>
-    <ResponseField name="activeAuctions" type="integer">Dutch auctions currently accepting bids.</ResponseField>
-    <ResponseField name="totalAuctions" type="integer">Lifetime auction counter from the contract.</ResponseField>
-    <ResponseField name="pendingLiquidations" type="integer">Liquidations seized but not yet settled or written off.</ResponseField>
-    <ResponseField name="pendingLiquidationDebt" type="string">Debt awaiting settlement proceeds, in borrow asset units.</ResponseField>
-    <ResponseField name="priceSource" type="string">`NAV`, `MARKET` or `ORACLE`, read from the contract. `null` when unreadable.</ResponseField>
-    <ResponseField name="auctionModule" type="string">The market's Dutch auction module, lowercased, or `null` when the market has none.</ResponseField>
-    <ResponseField name="readFailed" type="boolean">Present and `true` when one of the side reads failed. The named figures are still the contract's, but a counter may be short. Absent on a clean read.</ResponseField>
+    <ResponseField name="activeAuctions" type="integer">Dutch auctions currently accepting bids on the market's auction venue.</ResponseField>
+    <ResponseField name="totalAuctions" type="integer">Lifetime auction counter from the auction venue. `0` when the market has none.</ResponseField>
+    <ResponseField name="pendingLiquidations" type="integer">Recorded liquidations not yet settled or written off.</ResponseField>
+    <ResponseField name="pendingLiquidationDebt" type="string">Debt awaiting settlement proceeds, in borrow asset units, from the contract.</ResponseField>
+    <ResponseField name="auctionModule" type="string">The market's auction venue, lowercased, or `null` when the market has none.</ResponseField>
+    <ResponseField name="readFailed" type="boolean">Present and `true` when a side read failed. The named figures are still the contract's, but a counter may be short. Absent on a clean read.</ResponseField>
   </Expandable>
 </ResponseField>
 
 ### Rate offering
 
-Present when the market's interest model could be read. These describe how the market prices, not what it currently charges.
+Present when the market's interest model could be read. These describe how the market prices new loans.
 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="rateMode" type="string">`CURVE`, `CLAMPED` or `FIXED`.</ResponseField>
     <ResponseField name="rateFloor" type="string">Floor in basis points. `"0"` on `CURVE`.</ResponseField>
     <ResponseField name="rateCap" type="string">Cap in basis points. `"0"` on `CURVE`.</ResponseField>
-    <ResponseField name="maxFixedRate" type="string">Ceiling the lender of record may stamp a fixed rate at, in basis points, or `null` when none is set.</ResponseField>
+    <ResponseField name="maxFixedRate" type="string">Ceiling on any fixed rate the rate model owner can set, in basis points, or `null` when none is set. It can only move down.</ResponseField>
     <ResponseField name="fixedStampRateBps" type="integer">The rate a loan opened right now would be stamped with. `0` when the model stamps nothing.</ResponseField>
-    <ResponseField name="stampsFixedRate" type="boolean">Whether the model stamps a rate onto each loan. When `true`, `borrowRate` describes the pool while `fixedStampRateBps` describes the next loan.</ResponseField>
+    <ResponseField name="stampsFixedRate" type="boolean">Whether the model stamps a rate onto each new loan. When `true`, `borrowRate` equals `fixedStampRateBps`.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -56,54 +63,89 @@ Present when the market's interest model could be read. These describe how the m
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="termConfig" type="object">The market's term offering read from the contract, or `null` when unreadable. Carries `maxLoanDuration`, `termGracePeriod`, `terminalDueDate` and `marketDueFloor` as strings of seconds, `termPenaltyBps` as an integer, and `allowExtension` as a boolean. A market with `maxLoanDuration` and `terminalDueDate` both `"0"` makes open-ended loans.</ResponseField>
+    <ResponseField name="termConfig" type="object">
+      The market's term offering read from the contract, or `null` when unreadable. A market with `maxLoanDuration` and `terminalDueDate` both `"0"` makes open-ended loans.
+      <Expandable>
+        <ResponseField name="maxLoanDuration" type="string">Seconds a loan may run.</ResponseField>
+        <ResponseField name="termGracePeriod" type="string">Seconds after the due date before an unpaid loan can be liquidated on its term.</ResponseField>
+        <ResponseField name="terminalDueDate" type="string">Unix seconds every loan falls due by, `"0"` when unset.</ResponseField>
+        <ResponseField name="marketDueFloor" type="string">Market-wide extension floor in unix seconds, `"0"` when unset.</ResponseField>
+        <ResponseField name="termPenaltyBps" type="integer">Penalty on a term liquidation, in basis points.</ResponseField>
+        <ResponseField name="allowExtension" type="boolean">Whether a borrower may be granted more time.</ResponseField>
+        <ResponseField name="termStamping" type="string">`PER_LOAN` when the implementation stamps the grace period and term penalty onto each loan at signing, so a term change reaches new loans only. `MARKET_CONFIG` when open loans follow the live grace period and penalty. `UNKNOWN` when it could not be read.</ResponseField>
+      </Expandable>
+    </ResponseField>
     <ResponseField name="maxLoanDuration" type="string">Same value as `termConfig.maxLoanDuration`, flattened onto the response. `termGracePeriod`, `terminalDueDate`, `marketDueFloor`, `termPenalty` and `allowExtension` are flattened alongside it. `terminalDueDate` and `marketDueFloor` are `null` rather than `"0"` when unset here, and `termPenalty` is basis points.</ResponseField>
-    <ResponseField name="latestDueAt" type="string">Unix seconds of the furthest due date any outstanding loan carries. `"0"` when nothing is termed.</ResponseField>
-    <ResponseField name="exitHorizon" type="object">`{ horizon, bounded }`. `horizon` is seconds until the market could in principle be wound down, `bounded` says whether that horizon is finite. An unbounded horizon means at least one open-ended loan is outstanding.</ResponseField>
+    <ResponseField name="latestDueAt" type="string">Unix seconds of the furthest due date stamped on any loan so far. It only moves forward, so it can name a loan that has since closed. `"0"` when no loan has carried a term.</ResponseField>
+    <ResponseField name="exitHorizon" type="object">
+      When the book could in principle have turned liquid, absent new borrows. `null` when unreadable.
+      <Expandable>
+        <ResponseField name="horizon" type="string">Unix seconds: the latest due date plus the longest grace period. `null` when no loan carries a term.</ResponseField>
+        <ResponseField name="bounded" type="boolean">`false` while any open-ended principal is outstanding. No horizon exists then, and withdrawals depend on borrower repayment.</ResponseField>
+        <ResponseField name="applies" type="boolean">`true` when the horizon is bounded, set and the book holds loans.</ResponseField>
+        <ResponseField name="basis" type="string">Present when `applies` is `true`. `OPEN_LOANS` when the horizon was tightened to the open loans' own due dates, `HIGH_WATER_MARK` when it rests on `latestDueAt`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="newLoansClosed" type="boolean">`true` when the market's terminal due date has passed. The contract then refuses every new loan, while repayment, collateral release and withdrawals stay open. `null` when unreadable.</ResponseField>
+    <ResponseField name="newLoansClosedReason" type="string">Why, in words, when `newLoansClosed` is `true`. Otherwise `null`.</ResponseField>
   </Expandable>
 </ResponseField>
 
-### Liquidity routing and operator fees
+### Liquidity routing
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="useVaultLiquidity" type="boolean">Whether the market may draw on registered vaults when its own pool runs short. `null` when unreadable.</ResponseField>
-    <ResponseField name="borrowableLiquidity" type="string">What a new loan could actually draw right now, in borrow asset units. This is the figure to gate a borrow button on, not `availableLiquidity`: it already nets off the reserve ratio and adds whatever vault liquidity the market may pull.</ResponseField>
-    <ResponseField name="reserveRatio" type="string">Share of the pool held back from borrowing, in basis points.</ResponseField>
+    <ResponseField name="borrowableLiquidity" type="string">What a new loan can draw from the pool itself right now, in borrow asset units: `availableLiquidity` less the reserve earmark. Vault liquidity is not in this figure.</ResponseField>
+    <ResponseField name="useVaultLiquidity" type="boolean">Whether the market may draw on its registered vaults at the moment a loan opens and its own pool runs short. `null` when unreadable.</ResponseField>
+    <ResponseField name="vaultOnlyLiquidity" type="boolean">`true` on current markets, where only the operator wallet and the vaults the market admin registered may add liquidity directly. `false` on the earlier generation. `null` when unreadable.</ResponseField>
+    <ResponseField name="reserveRatio" type="string">Share of the pool's liquidity held back from borrowing, in basis points. Withdrawals may still consume it.</ResponseField>
     <ResponseField name="reserveRatioBps" type="integer">The same value as an integer.</ResponseField>
-    <ResponseField name="operatorFeesPayable" type="string">Interest accrued to the lender of record and not yet swept, in borrow asset units. `null` when unreadable.</ResponseField>
-    <ResponseField name="operatorFeesPayableRaw" type="string">The same figure in base units.</ResponseField>
   </Expandable>
 </ResponseField>
 
-<Warning>
-  When the RPC is unavailable the endpoint returns `200` with `isOnChain: false` rather than an error status. Branch on `isOnChain` before rendering any figure.
+<Note>
+  Gate a borrow control on `borrowableLiquidity` plus, on a market with `useVaultLiquidity`, what its vaults can still draw. [Open Loan](/endpoints/lending/open-loan) checks both before it returns calldata and refuses a loan neither can fund with `INSUFFICIENT_LIQUIDITY`.
+</Note>
 
-  `paused` is `null`, never `false`, when the pause flag could not be read. Rendering the default told an operator that a paused market was live for a poll cycle.
-</Warning>
+### Fees
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="feeShareGeneration" type="string">`FIXED_SHARES` on current markets, which pay the fixed 8 percent operator share and 5 percent distributor share. `OFFERED_SHARE` on the earlier generation, which pays the operator share offered at deployment and no distributor share. `null` when unreadable.</ResponseField>
+    <ResponseField name="distributorShare" type="string">The distributor share in basis points: `"500"` on `FIXED_SHARES`, `"0"` on `OFFERED_SHARE`, `null` when unreadable.</ResponseField>
+    <ResponseField name="operatorShare" type="string">Present only when the stored operator share had to be corrected from the factory on this read. [Get Market](/endpoints/lending/get-market) always carries it.</ResponseField>
+    <ResponseField name="operatorWallet" type="string">The wallet operator fees are paid to, lowercased, or `null` before a lender of record takes the market.</ResponseField>
+    <ResponseField name="operatorFeesPayable" type="string">Operator fees accrued and not yet swept, in borrow asset units. `null` when unreadable. `operatorFeesPayableRaw` carries the same figure in base units.</ResponseField>
+    <ResponseField name="distributorFeesPayable" type="string">Distributor fees accrued and not yet swept, in borrow asset units. `distributorFeesPayableRaw` carries base units.</ResponseField>
+    <ResponseField name="protocolFeesPayable" type="string">The insurance fund's share of interest, accrued and not yet swept into the fund, in borrow asset units. `protocolFeesPayableRaw` carries base units.</ResponseField>
+    <ResponseField name="infrastructureFeesPayable" type="string">Trusset infrastructure fees accrued and not yet swept, in borrow asset units. `infrastructureFeesPayableRaw` carries base units.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+These are balances waiting on the market, and anyone may sweep them. See [Sweep Operator Fees](/endpoints/lending/sweep-operator-fees), [Sweep Distributor Fees](/endpoints/lending/sweep-distributor-fees), [Sweep Protocol Fees](/endpoints/lending/sweep-protocol-fees) and [Sweep Infrastructure Fees](/endpoints/lending/sweep-infrastructure-fees). The split itself is on [Get Fee Split](/endpoints/lending/get-fee-split).
 
 ## Rate Derivation
 
-`borrowRate` is taken from the market's interest model when the contract reports a non-zero rate, and computed from the current utilization curve otherwise.
+The interest model's rate at the current utilization is `curveBorrowRate`. When the contract reports a zero rate, it is computed from a default curve instead. `borrowRate` is that figure, unless the model stamps a fixed rate onto new loans, in which case it is the stamp.
 
-`supplyRate` is `borrowRate * utilization * lpFactor`, where `lpFactor` is the share of borrow interest that reaches the liquidity providers. The chain answers for that share, as the product of three deductions: the Trusset infrastructure fee, the `operatorShare` the deployment offered the lender of record, and the market's own `protocolFeeRate`. A market that offers the operator nothing and charges no protocol fee passes almost all of it through.
+`supplyRate` is `borrowRate * utilization * lpFactor`, where `lpFactor` is the share of repaid interest that reaches the liquidity providers. The chain answers for that share. On a `FIXED_SHARES` market the 15 percent Trusset infrastructure fee comes off first. The 8 percent operator share and the 5 percent distributor share are taken from the remainder, and the market's `protocolFeeRate` from what is left after them. On an `OFFERED_SHARE` market the operator share offered at deployment takes the place of the two fixed shares.
 
-When the chain has never answered for the factor, the calculation falls back to a flat `0.75`. That is an estimate, not the market's economics, and it is the only case in which the historical 25 percent figure applies.
+When the chain has never answered for the factor, the calculation falls back to a flat `0.75`. That is an estimate, not the market's economics.
 
 All rates are basis points, so divide by 100 to get a percentage.
 
 <Note>
-  On a market whose model stamps a fixed rate, `borrowRate` still describes the pool as a whole. What a new loan would actually be charged is `fixedStampRateBps`, and what an existing loan is charged was stamped when it opened. The three can all differ.
+  On a `FIXED` market an outstanding loan pays the rate stamped when it opened. That can differ from today's stamp if the rate model owner has changed it since. `borrowRate` and `fixedStampRateBps` describe the loan that would open now.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}/metrics" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/metrics" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}/metrics`,
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/metrics`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
@@ -119,50 +161,69 @@ console.log(`Borrow APR ${(Number(data.borrowRate) / 100).toFixed(2)}%`);
   "data": {
     "isOnChain": true,
     "paused": false,
-    "liquidationContract": "0x067a3FeEA46649AdAd8e31c33B3a4D8774b8d8cF",
-    "totalDeposits": "1000000.000000",
-    "totalBorrows": "250000.000000",
-    "availableLiquidity": "750000.000000",
+    "liquidationContract": "0x067A3FeEA46649AdAd8e31c33B3a4D8774b8d8cF",
+    "priceSource": "NAV",
+    "totalDeposits": "1000000.0",
+    "totalBorrows": "250000.0",
+    "availableLiquidity": "750000.0",
     "utilizationRate": "2500",
     "borrowRate": "450",
-    "supplyRate": "84",
-    "totalShares": "1000000.000000000000000000",
-    "totalCollateral": "5000.000000000000000000",
+    "supplyRate": "83.1938",
+    "curveBorrowRate": "450",
+    "totalShares": "998712.4",
+    "totalCollateral": "5000.0",
     "activeLoans": 4,
     "totalLoansCreated": 11,
     "activeAuctions": 0,
     "totalAuctions": 0,
     "pendingLiquidations": 0,
-    "pendingLiquidationDebt": "0.000000",
-    "priceSource": "NAV",
+    "pendingLiquidationDebt": "0.0",
     "auctionModule": null,
     "useVaultLiquidity": true,
-    "operatorFeesPayable": "412.550000",
-    "operatorFeesPayableRaw": "412550000",
+    "operatorFeesPayable": "264.03",
+    "operatorFeesPayableRaw": "264030000",
+    "protocolFeesPayable": "0.0",
+    "protocolFeesPayableRaw": "0",
+    "infrastructureFeesPayable": "130.09",
+    "infrastructureFeesPayableRaw": "130090000",
+    "distributorFeesPayable": "22.43",
+    "distributorFeesPayableRaw": "22430000",
+    "operatorWallet": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+    "feeShareGeneration": "FIXED_SHARES",
+    "distributorShare": "500",
+    "vaultOnlyLiquidity": true,
     "rateMode": "CLAMPED",
     "rateFloor": "200",
     "rateCap": "1200",
     "maxFixedRate": null,
-    "fixedStampRateBps": 0,
-    "stampsFixedRate": false,
     "reserveRatio": "500",
-    "reserveRatioBps": 500,
-    "borrowableLiquidity": "712500.000000",
-    "latestDueAt": "1789516800",
-    "exitHorizon": { "horizon": "15552000", "bounded": true },
     "maxLoanDuration": "15552000",
     "termGracePeriod": "432000",
     "terminalDueDate": null,
     "termPenalty": "300",
     "marketDueFloor": null,
     "allowExtension": true,
+    "fixedStampRateBps": 0,
+    "stampsFixedRate": false,
+    "reserveRatioBps": 500,
+    "borrowableLiquidity": "700000.0",
+    "latestDueAt": "1805616000",
+    "exitHorizon": {
+      "horizon": "1806048000",
+      "bounded": true,
+      "applies": true,
+      "basis": "OPEN_LOANS"
+    },
+    "newLoansClosed": false,
+    "newLoansClosedReason": null,
     "termConfig": {
       "maxLoanDuration": "15552000",
       "termGracePeriod": "432000",
       "terminalDueDate": "0",
       "marketDueFloor": "0",
       "termPenaltyBps": 300,
-      "allowExtension": true
+      "allowExtension": true,
+      "termStamping": "PER_LOAN"
     }
   }
 }
@@ -179,7 +240,9 @@ console.log(`Borrow APR ${(Number(data.borrowRate) / 100).toFixed(2)}%`);
     "borrowRate": "200",
     "supplyRate": "0",
     "pendingLiquidations": 0,
-    "pendingLiquidationDebt": "0"
+    "pendingLiquidationDebt": "0",
+    "paused": null,
+    "readFailed": true
   }
 }
 ```
@@ -193,3 +256,11 @@ console.log(`Borrow APR ${(Number(data.borrowRate) / 100).toFixed(2)}%`);
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

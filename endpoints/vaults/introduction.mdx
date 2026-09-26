@@ -1,36 +1,56 @@
 ---
 title: 'Vaults'
-description: 'Deposit into a bank-operated earning vault and redeem shares'
+description: 'Deposit into a bank-operated earning vault, redeem shares, and collect distributor fees'
 icon: 'vault'
 ---
 
-An operator vault is a bank issuer's own earning product. Verified investors deposit the vault's settlement asset (a stablecoin such as USDC) and receive vault shares. The operator is the lender of record on its external-securities lending markets and allocates the pooled funds into those markets as the liquidity provider. Share price covers idle funds plus the vault's value across every market it funds, so it rises as the markets pay interest.
+An operator vault is a bank issuer's own earning product. Investors deposit the vault's settlement asset (a stablecoin such as USDC) and receive vault shares. The operator is the lender of record on its external-securities lending markets and places the pooled funds on those markets as their liquidity provider. It allocates funds itself. A market it consented to can also draw from the vault at the moment a loan needs the liquidity, up to a cap the operator set for that market. Share price covers idle funds plus the vault's value across every market it funds, so it rises as the markets pay interest.
 
-Trusset holds no role on any vault. Each vault belongs to the issuer operating it, and every response names that operator in `operatedBy`. Show the operator wherever you show the vault.
+The vault admits a depositor only when every register it reads verifies the wallet. That is the vault's own identity register, when the operator named one at creation, and the provider register of every market the vault funds or has consented to fund. Receiving shares from another holder is checked the same way. Redeeming is not.
 
-This API covers the investor side: discovering vaults, reading positions, depositing, and redeeming. Creating a vault, allocating into markets, pausing deposits, lowering the fee, and publishing are operator actions done in the Issuer Portal.
+Trusset holds no role on any vault. Each vault belongs to the issuer operating it, and every vault record names that operator in `operatedBy`. Show the operator wherever you show the vault.
+
+This API covers depositing, redeeming, reading positions, and paying out the distributor fees a vault earns. Creating a vault, allocating into markets, setting a market's draw cap, pausing deposits, lowering the fee, and publishing are operator actions done in the Issuer Portal.
 
 ## Base Path
 
 ```
-https://api.trusset.org/lending-external-securities/api/vaults
+https://api.trusset.org/lending-external-securities-v2/api/vaults
 ```
 
-Every request authenticates with an instance API key in the `X-API-Key` header. See [Authentication](/endpoints/authentication). The instance bound to your key determines which vaults you see: your own instance's vault, plus every vault a bank has published on your network.
+Every request authenticates with an instance API key in the `X-API-Key` header. See [Authentication](/endpoints/authentication). The instance bound to your key determines which vaults you see. You see your own vaults and every vault published on the same network and environment. You also see any unpublished vault in which your instance is a distributor of record. An instance runs at most three live vaults. A deposit into another operator's unpublished vault is refused with `VAULT_NOT_PUBLISHED`, and redemptions from it stay open.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| [List Vaults](/endpoints/vaults/list-vaults) | GET | Your vault first, then every published vault |
+| [List Vaults](/endpoints/vaults/list-vaults) | GET | Your vaults first, then every published vault, then vaults your instance distributes in |
 | [Get Vault](/endpoints/vaults/get-vault) | GET | Full record, live chain state, optional holder position |
 | [Get Position](/endpoints/vaults/get-position) | GET | One wallet's shares and value |
 | [List Transactions](/endpoints/vaults/list-vault-transactions) | GET | Recorded vault activity |
-| [Deposit](/endpoints/vaults/deposit) | POST | Approve-and-deposit calldata for a verified wallet |
+| [Deposit](/endpoints/vaults/deposit) | POST | Approve-and-deposit calldata that names your instance as the depositor's distributor |
 | [Redeem](/endpoints/vaults/redeem) | POST | Redemption calldata |
 | [Confirm Transaction](/endpoints/vaults/confirm-transaction) | POST | Records a broadcast deposit or redemption after receipt verification |
+| [Get Earnings](/endpoints/vaults/get-earnings) | GET | What your instance has earned as a distributor, and what is waiting |
+| [Collect Distributor Fees](/endpoints/vaults/collect-distributor-fees) | POST | Pulls the vault's distributor slice from one market |
+| [Pay Distributor](/endpoints/vaults/pay-distributor) | POST | Pays a distributor what the vault holds for it |
+| [Pay Operator Fees](/endpoints/vaults/pay-operator-fees) | POST | Pays the vault owner the slice no distributor earned |
+| [Set Distributor Wallet](/endpoints/vaults/set-distributor-wallet) | POST | Moves a distributor's payout wallet |
+| [Set Distributor Approval](/endpoints/vaults/set-distributor-approval) | POST | Lets the vault owner approve or withdraw a distributor |
+
+A lending market builds deposits into and redemptions from the vaults connected to it as well. See [Deposit to Vault](/endpoints/lending/deposit-to-vault) and [Redeem from Vault](/endpoints/lending/redeem-from-vault), which confirm on their own endpoint.
+
+Reads carry a limit of 100 requests per minute and writes one of 10 per minute. Each is counted per API key across every endpoint that carries it, inside the ceiling of 200 per minute per key. See [Rate Limits](/endpoints/rate-limits).
+
+## Distributor attribution
+
+The instance whose API key builds a depositor's first attributed deposit becomes that depositor's distributor. The deposit names the instance's primary verified wallet, and the vault binds the depositor to it once and never rebinds. Every share the holder has or later receives is attributed to that distributor.
+
+On the current vault implementation a deposit can bind a new holder only to the vault owner or to a distributor the operator approved. When your instance's wallet is not approved, the API names no distributor and the deposit still goes through. The `attribution` block on [Deposit](/endpoints/vaults/deposit) says which case applies before the depositor signs.
+
+Each market sets aside a distributor share: 5 percent of repaid interest after Trusset's 15 percent infrastructure fee, and 5 percent of each fixed transaction fee. The vault's slice reaches it through [Collect Distributor Fees](/endpoints/vaults/collect-distributor-fees), one market at a time. The part earned by attributed shares goes to their distributors through [Pay Distributor](/endpoints/vaults/pay-distributor), and the rest to the vault owner through [Pay Operator Fees](/endpoints/vaults/pay-operator-fees). Any wallet may send all three, and each pays a fixed destination, never the signer. Trusset holds none of it.
 
 ## Redemptions
 
-An operator can pause deposits. Nothing can pause a redemption. When market utilization blocks part of the vault's value, a redemption pays out what liquidity allows and the remaining shares stay in the wallet. See [Redeem](/endpoints/vaults/redeem).
+An operator can pause deposits. Nothing can pause a redemption. When market utilization blocks part of the vault's value, a redemption pays out what liquidity allows and the remaining shares stay in the wallet. On the current vault implementation no register examines a redemption, and the payout goes to the wallet that signs. See [Redeem](/endpoints/vaults/redeem).
 
 Size a redemption against `redeemableNow` on [Get Vault](/endpoints/vaults/get-vault), not against `idleAssets`. Idle funds are only the part the vault holds loose. `redeemableNow` adds, for each market the vault funds, whichever is smaller: what the vault holds there, and what that market has uncommitted. [Redeem](/endpoints/vaults/redeem) answers the same question for one specific redemption, with `willFillFully` and `expectedPayout`.
 
@@ -42,9 +62,13 @@ A market the vault funds can go dark. When that happens the vault cannot total i
 
 A vault can also end up with shares in issue against nothing. Deposits into it are refused with `VAULT_WIPED_OUT`, because they would be absorbed by the existing holders rather than buying a position. Such a vault cannot be recapitalized and the operator has to run a new one.
 
+These refusals read the vault's live state. When that read fails, the API still returns calldata, and the current vault implementation refuses the same cases on-chain.
+
 ## Failed reads
 
 The chain state on [Get Vault](/endpoints/vaults/get-vault) carries a `readFailed` flag. When it is `true` the figures are absent, not zero. Keep your last verified values on screen and retry. A vault whose read failed still holds every deposit it held a minute ago.
+
+A chain or database outage answers `503` with `CHAIN_UNAVAILABLE` or `SERVICE_UNAVAILABLE`. Both are retryable.
 
 ## Response envelope
 
@@ -61,8 +85,10 @@ The chain state on [Get Vault](/endpoints/vaults/get-vault) carries a `readFaile
 }
 ```
 
-On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. Schema failures use `VALIDATION_ERROR` with `error.details` listing each offending field. `metadata.requestId` always equals the `X-Request-Id` response header, so you can quote it when reporting a problem. Always branch on `success` rather than on the HTTP status alone.
+On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. Schema failures use `VALIDATION_ERROR`, and most carry `error.details` listing each offending field. `metadata.requestId` always equals the `X-Request-Id` response header, so you can quote it when reporting a problem. Always branch on `success` rather than on the HTTP status alone.
 
 ## Writes
 
-Every write endpoint returns unsigned transaction data for a wallet you control to sign and broadcast. Nothing is submitted on your behalf. After broadcasting, report the hash to [Confirm Transaction](/endpoints/vaults/confirm-transaction). The backend verifies the receipt on-chain before recording anything.
+Every write endpoint returns unsigned transaction data for a wallet you control to sign and broadcast. Nothing is submitted on your behalf. Each unsigned transaction carries `value: "0"` and the `chainId` your instance resolves to.
+
+Report a deposit or redemption hash to [Confirm Transaction](/endpoints/vaults/confirm-transaction). The distributor fee writes confirm on their own route instead: send the same request again with `{ "txHash": "0x..." }`, as each response's `confirmWith` names. Either way, the backend verifies the receipt on-chain before recording anything.

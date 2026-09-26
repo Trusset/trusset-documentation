@@ -1,12 +1,20 @@
 ---
 title: 'Add Liquidity'
-api: 'POST /lending-external-securities/api/positions/{marketId}/add-liquidity'
-description: 'Deposit the borrow asset into the pool and receive LP shares'
+api: 'POST /lending-external-securities-v2/api/positions/{marketId}/add-liquidity'
+description: 'Deposit the borrow asset into the pool directly and receive LP shares'
 ---
 
-Deposits the market's borrow asset into the lending pool. The depositor receives LP shares proportional to their contribution, and those shares accrue value as borrowers pay interest.
+Deposits the market's borrow asset into the lending pool directly. The depositor receives LP shares at the current share price, and those shares accrue value as borrowers pay interest.
 
-Two transactions are required: an ERC-20 approval, then the deposit. Both come back as ordered steps.
+Two transactions are required: an ERC-20 approval for exactly the amount, then the deposit. Both come back as ordered steps.
+
+## Who can deposit directly
+
+On current markets only two kinds of address can call `addLiquidity`: the market's operator wallet and the vaults the market admin registered. The operator wallet starts as the wallet that took the lender-of-record role and moves only through [Rotate Operator Wallet](/endpoints/lending/rotate-operator-wallet). Read it as `operatorWallet` on [Get Market Metrics](/endpoints/lending/get-metrics), where `vaultOnlyLiquidity: true` marks a market under this rule.
+
+Every other liquidity provider funds the market through one of the operator's vaults, with [Deposit](/endpoints/vaults/deposit) or [Deposit to Vault](/endpoints/lending/deposit-to-vault). The vault checks the depositor against its own register and the provider register of each market it funds. A direct deposit from any other wallet reverts on-chain, so the API refuses it first with `LIQUIDITY_VAULT_ONLY`.
+
+A market still running an implementation from before this rule answers with its own gate instead. `LIQUIDITY_OPERATOR_ONLY` means it takes liquidity only from its lender of record and the providers it admitted. `IDENTITY_REGISTRY_REQUIRED` means it is open to third parties but has no provider register yet. `IDENTITY_NOT_VERIFIED` means the wallet is not verified on the register the market checks.
 
 ## Path Parameters
 
@@ -15,11 +23,11 @@ Two transactions are required: an ERC-20 approval, then the deposit. Both come b
 ## Body Parameters
 
 <ParamField body="amount" type="string" required>
-  Amount to deposit as a decimal string, for example `"250000"`. Denominated in the market's borrow asset and parsed at its decimals.
+  Amount to deposit as a positive decimal string, for example `"250000"`. Denominated in the market's borrow asset and parsed at its decimals. Required on the confirm call too, where it is validated but not used: the recorded amount comes from the mined transaction.
 </ParamField>
 
 <ParamField body="provider" type="string">
-  Wallet that will sign the deposit. When supplied, the API checks it against the market's identity registry before offering a transaction and refuses with `IDENTITY_NOT_VERIFIED` if it would be rejected on-chain. Omit it to skip that check.
+  Wallet that will sign the deposit. Required when building calldata on a current market: without it the deposit cannot be checked against the operator wallet and the registered vaults, and the call returns `PROVIDER_REQUIRED`. On a market running an earlier implementation it is optional, and supplying it runs that market's own gate before a transaction is offered. Not needed on the confirm call, where the provider is taken from the mined transaction.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -31,7 +39,7 @@ Two transactions are required: an ERC-20 approval, then the deposit. Both come b
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` when `txHash` is omitted.</ResponseField>
-    <ResponseField name="steps" type="array">Ordered transactions to broadcast. Returned when `txHash` is omitted. The first approves the market to pull the borrow asset, the second calls `addLiquidity`.</ResponseField>
+    <ResponseField name="steps" type="array">Ordered transactions to broadcast. Returned when `txHash` is omitted. The first approves the market to pull exactly `amount` of the borrow asset, the second calls `addLiquidity`.</ResponseField>
     <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm with. Always `1`.</ResponseField>
     <ResponseField name="confirmWith" type="string">`addLiquidity`.</ResponseField>
     <ResponseField name="txHash" type="string">Deposit transaction hash. Returned when confirming with `txHash`.</ResponseField>
@@ -39,12 +47,14 @@ Two transactions are required: an ERC-20 approval, then the deposit. Both come b
   </Expandable>
 </ResponseField>
 
-<Info>
-  The first deposit into an empty pool must be at least 1,000,000,000 base units of the borrow asset. That is 1,000 USDC or USDT for a 6-decimal asset. The floor exists to prevent share price manipulation against an empty pool. Subsequent deposits have no minimum beyond the token's own precision.
-</Info>
+## First-deposit minimum
+
+The first deposit into an empty pool must be at least 1,000 whole units of the borrow asset, for example 1,000 USDC. Current markets expose the figure as `minInitialDeposit()`. A market first deployed before per-asset scaling existed applies 1,000,000,000 smallest units, which is 1,000 of a 6-decimal asset.
+
+The same floor applies to the deposit that recapitalises a pool whose value bad debt has fully consumed. It is a dust floor on the first share issue. Later deposits have no minimum beyond the token's own precision.
 
 <Warning>
-  The minimum deposit is checked when the calldata is built, not when you confirm. Broadcasting an undersized first deposit reverts on-chain rather than returning `BELOW_MIN_DEPOSIT`. Check the pool's `totalShares` through [Get Market Metrics](/endpoints/lending/get-metrics) if you need to detect an empty pool ahead of time.
+  The minimum is checked when the calldata is built, not when you confirm. Broadcasting an undersized first deposit reverts on-chain rather than returning `BELOW_MIN_DEPOSIT`. `totalShares` on [Get Market Metrics](/endpoints/lending/get-metrics) reads `0.0` on an empty pool.
 </Warning>
 
 <Note>
@@ -53,29 +63,37 @@ Two transactions are required: an ERC-20 approval, then the deposit. Both come b
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/add-liquidity" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/add-liquidity" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"amount": "250000"}'
+  -d '{"amount": "250000", "provider": "0x2b6ed29a95753c3ad948348e3e7b1a251080ffb9"}'
 ```
 ```typescript TypeScript
-const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/add-liquidity`,
-  {
-    method: 'POST',
-    headers: {
-      'X-API-Key': 'trusset_your_key_here',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ amount: '250000' })
-  }
-);
+const url = `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/add-liquidity`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ amount: '250000', provider: await operatorWallet.getAddress() })
+});
 const { data } = await res.json();
 
+const hashes: string[] = [];
 for (const step of data.steps) {
-  const tx = await wallet.sendTransaction(step.transaction);
+  const tx = await operatorWallet.sendTransaction(step.transaction);
   await tx.wait();
+  hashes.push(tx.hash);
 }
+
+await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ amount: '250000', txHash: hashes[data.confirmStepIndex] })
+});
 ```
 </RequestExample>
 
@@ -118,7 +136,16 @@ for (const step of data.steps) {
   "success": true,
   "data": {
     "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
-    "amount": "250000.000000"
+    "amount": "250000.0"
+  }
+}
+```
+```json Error - Vault Only
+{
+  "success": false,
+  "error": {
+    "code": "LIQUIDITY_VAULT_ONLY",
+    "message": "This market takes deposits only from its operator wallet (0x2b6ed29a95753c3ad948348e3e7b1a251080ffb9) and from the vaults its admin registered, so a deposit from 0x5ad87a0621175206b72d10e4b8577b192e7f40ab would revert. Deposit through one of the operator's connected vaults instead."
   }
 }
 ```
@@ -127,7 +154,7 @@ for (const step of data.steps) {
   "success": false,
   "error": {
     "code": "BELOW_MIN_DEPOSIT",
-    "message": "The first deposit into a market must be at least 1000000000 of the smallest USDC unit (1000.0 USDC at 6 decimals)."
+    "message": "The first deposit into a market must be at least 1000.0 USDC (1000000000 of its smallest unit at 6 decimals)."
   }
 }
 ```
@@ -138,10 +165,17 @@ for (const step of data.steps) {
 | Code | HTTP | Cause |
 |---|---|---|
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
-| `VALIDATION_ERROR` | `400` | `amount` is not a positive decimal string, or carries more decimal places than the borrow asset supports |
-| `BELOW_MIN_DEPOSIT` | `400` | This is the first deposit into an empty pool and it is under the floor |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `VALIDATION_ERROR` | `400` | `amount` is not a positive decimal string or carries more decimal places than the borrow asset supports, or `provider` or `txHash` is malformed |
+| `BELOW_MIN_DEPOSIT` | `400` | This is the first deposit into an empty or fully consumed pool and it is under the floor |
 | `MARKET_PAUSED` | `400` | The market is paused. Its admin must unpause it |
-| `IDENTITY_NOT_VERIFIED` | `400` | `provider` is not verified on the market's identity registry |
+| `PROVIDER_REQUIRED` | `400` | `provider` was omitted on a market that takes direct deposits only from its operator wallet and registered vaults |
+| `IDENTITY_NOT_VERIFIED` | `400` | Earlier implementations only. `provider` is not verified on the register the market checks |
+| `LIQUIDITY_VAULT_ONLY` | `403` | `provider` is neither the operator wallet nor a registered vault. Deposit through one of the operator's vaults |
+| `LIQUIDITY_OPERATOR_ONLY` | `403` | Earlier implementations only. The market takes liquidity only from its lender of record and the providers it admitted |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet. See [Lender of record](/endpoints/lending/introduction#lender-of-record) |
-| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to check the first-deposit minimum. Retry shortly |
+| `IDENTITY_REGISTRY_REQUIRED` | `409` | Earlier implementations only. The pool is open to third parties but carries no provider register yet |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to check the first-deposit minimum, whether it is paused, or who may deposit. Retry shortly |
+
+A deposit that reached the market through another contract, such as a multisig wallet, confirms from the market's `LiquidityAdded` event in the receipt. Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

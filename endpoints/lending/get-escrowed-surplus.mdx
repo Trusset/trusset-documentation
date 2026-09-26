@@ -1,0 +1,96 @@
+---
+title: 'Get Escrowed Surplus'
+api: 'GET /lending-external-securities-v2/api/positions/{marketId}/escrowed-surplus/{holderAddress}'
+description: 'Read the realization surplus a market holds in escrow for a borrower'
+---
+
+Returns the realization surplus the market contract holds in escrow for one address. The amount is in the settlement token (stablecoin) and covers every loan of that address on this market, not a single loan.
+
+A surplus arises when a liquidation's sale or auction proceeds exceed what the market may keep. The market keeps the debt the loan owed at seizure plus a penalty on it, and pays the rest to the borrower recorded on the liquidation. The penalty is the market's liquidation penalty on a health liquidation and the loan's term penalty on a term realization. If the settlement token refuses the payout, the market escrows the amount under the borrower's address instead of reverting the settlement. The borrower withdraws it with [Claim Surplus](/endpoints/lending/claim-surplus).
+
+This is not collateral escrow. A `CUSTODY` market's adapter escrows collateral tokens when their return is blocked, which [Get Escrowed Collateral](/endpoints/lending/get-escrowed-collateral) reads. A surplus is held by the market itself, in the borrow asset, on `FREEZE` and `CUSTODY` markets alike.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+<ParamField path="holderAddress" type="string" required>Address to read the escrow for, usually the borrower on a liquidation. `0x` followed by 40 hex characters.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="marketAddress" type="string">The market contract holding the escrow.</ResponseField>
+    <ResponseField name="holderAddress" type="string">The address queried, lowercased.</ResponseField>
+    <ResponseField name="escrowedRaw" type="string">Escrowed surplus in the borrow asset's smallest unit. `"0"` when nothing is held.</ResponseField>
+    <ResponseField name="escrowed" type="string">The same amount as a decimal string in borrow asset units. `"0.0"` when nothing is held.</ResponseField>
+    <ResponseField name="claimable" type="boolean">`true` when the escrow is above zero, so [Claim Surplus](/endpoints/lending/claim-surplus) has something to pay out.</ResponseField>
+    <ResponseField name="asset" type="object">
+      The market's borrow asset, in which the surplus is held.
+      <Expandable>
+        <ResponseField name="address" type="string">Token address.</ResponseField>
+        <ResponseField name="symbol" type="string">Token symbol.</ResponseField>
+        <ResponseField name="decimals" type="integer">Token decimals.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  `claimable: true` says an escrow exists, not that a claim will succeed. The claim repeats the refused transfer, so it reverts while the settlement asset still refuses the borrower.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/escrowed-surplus/0xabc7f1093d5e26b804a1c3f78de025916b47c0d3" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/escrowed-surplus/${holder}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+const owed = data.claimable ? `${data.escrowed} ${data.asset.symbol}` : null;
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "holderAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "escrowedRaw": "1532400000",
+    "escrowed": "1532.4",
+    "claimable": true,
+    "asset": {
+      "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "symbol": "USDC",
+      "decimals": 6
+    }
+  }
+}
+```
+```json Error - Surplus Unreadable
+{
+  "success": false,
+  "error": {
+    "code": "SURPLUS_UNREADABLE",
+    "message": "The escrowed surplus could not be read from the network right now."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `holderAddress` is not `0x` followed by 40 hex characters |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `SURPLUS_UNREADABLE` | `503` | The market's escrow could not be read from the network. Retry shortly |

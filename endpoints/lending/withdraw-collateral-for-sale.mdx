@@ -1,16 +1,18 @@
 ---
 title: 'Withdraw Collateral for Sale'
-api: 'POST /lending-external-securities/api/liquidations/withdraw-collateral/{liquidationId}'
+api: 'POST /lending-external-securities-v2/api/liquidations/withdraw-collateral/{liquidationId}'
 description: 'Move seized collateral out of the router to the designated sale recipient'
 ---
 
-Transfers seized collateral from the liquidation router to the market's sale recipient, so it can be sold off-platform. This is step one of the manual settlement workflow.
-
-External securities have no on-platform venue, so nothing sells automatically. The operator withdraws the collateral, arranges the sale through their own channel, and reports the proceeds back.
+Transfers seized collateral from the liquidation router to the market's sale recipient, so it can be sold off-platform. This is step one of the manual settlement workflow, signed by a holder of the router's `OPERATOR_ROLE`.
 
 <Warning>
-  The destination is not yours to choose. The lender of record fixed a sale recipient when it took the role, and the router has no setter for it. Sending seized collateral anywhere else is impossible; rotating the destination means deploying a new market.
+  Once collateral leaves the router, the record can only settle with sale proceeds reported against it. If the sale realizes nothing, the router refuses a settlement at zero. The market's record then waits for the 7 day write-off in [Handle Liquidation Timeout](/endpoints/lending/handle-timeout). Withdraw only what a sale is arranged for.
+
+  The destination is not yours to choose. The lender of record fixed the sale recipient when it adopted the market, and the router call carries no recipient at all. The router administrator can rotate it only through an announced change that takes effect after a one-hour delay and is refused while any record on the router is open. This API does not expose that rotation.
 </Warning>
+
+External securities have no automatic sale path through the router. The operator withdraws the collateral, arranges the sale through their own channel, and reports the proceeds back with [Report Partial Sale](/endpoints/lending/report-partial-sale) or [Settle Liquidation](/endpoints/lending/settle-liquidation).
 
 ## Path Parameters
 
@@ -21,7 +23,7 @@ External securities have no on-platform venue, so nothing sells automatically. T
 ## Body Parameters
 
 <ParamField body="amount" type="string" required>
-  Collateral to withdraw, as a decimal string in collateral token units. Must be greater than zero and no more than `collateralRemaining`.
+  Collateral to withdraw, as a decimal string in collateral token units, at most as many decimals as the collateral token has. Must be greater than zero. An amount above `collateralRemaining` is not refused here; the router reverts it. Required on the confirm call too.
 </ParamField>
 
 <ParamField body="recipientAddress" type="string">
@@ -29,15 +31,15 @@ External securities have no on-platform venue, so nothing sells automatically. T
 </ParamField>
 
 <ParamField body="marketId" type="string">
-  Names the market whose liquidation you mean. Every market runs its own liquidation router and IDs restart at `1` on each of them, so the same `liquidationId` can exist on several markets in one instance. Supply this when it does, otherwise the call is refused with `AMBIGUOUS_LIQUIDATION_ID` and the response lists the candidates.
+  Names the market whose liquidation you mean. Every market runs its own liquidation router and IDs restart at `1` on each of them, so the same `liquidationId` can exist on several markets in one instance. Supply this when it does, otherwise the call is refused with `AMBIGUOUS_LIQUIDATION_ID` and the response lists the candidates. Also accepted as a query parameter. At most 100 characters.
 </ParamField>
 
 <ParamField body="txHash" type="string">
-  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+  Hash of the transaction you broadcast for this operation. Send it together with `amount` to confirm the transaction and record the result. Omit it to receive the calldata. A value that is not a `0x`-prefixed 64-character hex string is ignored.
 </ParamField>
 
 <Note>
-  The signing wallet must hold `OPERATOR_ROLE` on the market's liquidation router. If it does not, the calldata is not returned: the response carries `ROUTER_OPERATOR_ROLE_MISSING` along with the `calldata` that grants the role.
+  The wallet that signs must hold `OPERATOR_ROLE` on the market's liquidation router. This endpoint checks the role against your instance's primary verified wallet, since it takes no signer address. If that wallet lacks the role, the calldata is not returned: the response carries `ROUTER_OPERATOR_ROLE_MISSING` along with the `calldata` that grants it.
 </Note>
 
 ## Response Fields
@@ -50,13 +52,13 @@ External securities have no on-platform venue, so nothing sells automatically. T
     <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the liquidation router. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="functionName" type="string">`withdrawCollateralForSale`. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="recipient" type="string">Address the collateral will reach. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="saleRecipient" type="string">The destination fixed for this market. Absent on older markets. Omitted when confirming.</ResponseField>
+    <ResponseField name="saleRecipient" type="string">The destination fixed for this market, the same address as `recipient`. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  Withdrawal is repeatable. Take the collateral out in tranches as sales are arranged. Each call reduces `collateralRemaining` on the router. The liquidation's `status` stays `PENDING` throughout, so track progress through `collateralRemaining` rather than status.
+  Withdrawal is repeatable. Take the collateral out in tranches as sales are arranged. Each call reduces `collateralRemaining` on the router. The liquidation's `status` stays `PENDING` throughout, so track progress through `collateralRemaining` rather than status. If the router administrator set a sale rate limit for the collateral token, a tranche above it reverts.
 </Note>
 
 <Tip>
@@ -65,26 +67,32 @@ External securities have no on-platform venue, so nothing sells automatically. T
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/liquidations/withdraw-collateral/14" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidations/withdraw-collateral/14" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"amount": "100"}'
+  -d '{"amount": "100", "marketId": "clx_secmarket_001"}'
 ```
 ```typescript TypeScript
-const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/liquidations/withdraw-collateral/${liquidationId}`,
-  {
-    method: 'POST',
-    headers: {
-      'X-API-Key': 'trusset_your_key_here',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ amount: '100', marketId })
-  }
-);
+const url = `https://api.trusset.org/lending-external-securities-v2/api/liquidations/withdraw-collateral/${liquidationId}`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ amount: '100', marketId })
+});
 const { data } = await res.json();
 const tx = await wallet.sendTransaction(data.transaction);
 await tx.wait();
+
+await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ amount: '100', marketId, txHash: tx.hash })
+});
 ```
 </RequestExample>
 
@@ -122,7 +130,8 @@ await tx.wait();
   "success": false,
   "error": {
     "code": "RECIPIENT_FIXED",
-    "message": "Seized collateral can only be sent to the sale recipient designated for this market (0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473). Rotating it means deploying a new market.",
+    "message": "Seized collateral can only be sent to the sale recipient designated for this market (0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473). The market admin can rotate it from a quiet router through the sale-recipient rotation flow.",
+    "txHash": null,
     "saleRecipient": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473"
   }
 }
@@ -133,11 +142,13 @@ await tx.wait();
   "error": {
     "code": "ROUTER_OPERATOR_ROLE_MISSING",
     "message": "Wallet 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 does not hold OPERATOR_ROLE on the liquidation router 0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+    "txHash": null,
     "calldata": {
       "to": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
       "data": "0x...",
       "description": "Grant OPERATOR_ROLE to 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 on the liquidation router (requires router DEFAULT_ADMIN_ROLE)"
-    }
+    },
+    "saleRecipient": null
   }
 }
 ```
@@ -147,18 +158,21 @@ await tx.wait();
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `MISSING_ID` | `400` | No liquidation ID in the path |
-| `VALIDATION_ERROR` | `400` | `amount` is not a positive decimal string, or `recipientAddress` is not a valid address |
+| `VALIDATION_ERROR` | `400` | `amount` is not a positive decimal string or has more decimals than the collateral token, `recipientAddress` is not a valid address, or `marketId` is longer than 100 characters |
 | `AMBIGUOUS_LIQUIDATION_ID` | `400` | This ID exists on more than one market in your instance. The error carries `candidates`; resend with `marketId` |
-| `ALREADY_SETTLED` | `400` | The liquidation is already settled |
+| `ALREADY_SETTLED` | `400` | The liquidation is settled or written off, here or on the router |
 | `RECIPIENT_FIXED` | `400` | `recipientAddress` is not the market's designated sale recipient. The error carries `saleRecipient` |
 | `SALE_RECIPIENT_NOT_SET` | `400` | The market has no lender of record yet, so no destination for seized collateral has been designated |
-| `SALE_RECIPIENT_TRANSFER_RESTRICTED` | `400` | The collateral token blocks the transfer to the designated recipient. The error carries `saleRecipient` and `saleDeliveryCode` |
+| `SALE_RECIPIENT_TRANSFER_RESTRICTED` | `400` | The collateral token blocks the transfer to the designated recipient. The error carries `saleRecipient` |
 | `WALLET_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance to resolve the signer against |
-| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | The resolved wallet lacks `OPERATOR_ROLE`. The error carries grant `calldata` for the router admin |
-| `ROUTER_NOT_CONFIGURED` | `400` | No liquidation router resolved for this market |
-| `ROUTER_UNREADABLE` | `503` | The router could not be read to resolve the sale recipient. Nothing was built. Retry shortly |
+| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | Your instance's primary verified wallet lacks `OPERATOR_ROLE`. The error carries grant `calldata` for the router admin |
 | `TX_NOT_VERIFIED` | `400` | The confirmed transaction targets a different liquidation |
-| `WITHDRAW_TX_REVERTED` | `400` | The withdrawal reverted. `error.txHash` carries the hash when one exists |
+| `WITHDRAW_TX_REVERTED` | `400` | The withdrawal could not be prepared or recorded, for example because a chain read failed. `error.txHash` carries the hash when one exists |
 | `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, and none could be adopted from chain |
 | `MARKET_NOT_FOUND` | `404` | `marketId` was supplied but names no market on your instance |
+| `LIQUIDATION_ON_VENUE` | `409` | The record's Dutch auction is still open, so the router holds none of its collateral |
+| `ROUTER_UNRESOLVED` | `503` | The market's liquidation router could not be read. Retry shortly |
+| `ROUTER_UNREADABLE` | `503` | The router could not be read to resolve the sale recipient. Nothing was built. Retry shortly |
+| `ROLE_UNVERIFIABLE` | `503` | The role check could not read the router. Nothing was built. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction). A withdrawal that reverted on-chain is refused there with `TX_REVERTED`.

@@ -1,25 +1,25 @@
 ---
 title: 'Get User Loans'
-api: 'GET /lending-external-securities/api/positions/{marketId}/user-loans/{userAddress}'
+api: 'GET /lending-external-securities-v2/api/positions/{marketId}/user-loans/{userAddress}'
 description: 'List a borrower active loans in a market'
 ---
 
-Returns every open loan held by one address in one market, read from the contract. Closed, repaid, and fully liquidated loans are excluded.
+Returns every open loan held by one address in one market, read from the contract. Closed, repaid, and fully liquidated loans are excluded. An open loan with no debt left is still listed, with `debtFree: true`, until it is closed.
 
-A borrower can hold several loans in the same market at once. Each is independent, with its own collateral, debt, and health factor, and each is liquidated separately.
+A borrower can hold several loans in the same market at once. Each is independent, with its own collateral, debt, health factor and due date, and each is liquidated separately.
 
 ## Path Parameters
 
 <ParamField path="marketId" type="string" required>Market ID.</ParamField>
-<ParamField path="userAddress" type="string" required>Borrower address, 0x-prefixed with 40 hex characters.</ParamField>
+<ParamField path="userAddress" type="string" required>Borrower address, `0x` followed by 40 hex characters.</ParamField>
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="userAddress" type="string">The address queried, echoed back.</ResponseField>
+    <ResponseField name="userAddress" type="string">The address queried, echoed back as sent.</ResponseField>
     <ResponseField name="loans" type="array">
-      Active loans. Each entry has the same shape as [Get Loan](/endpoints/lending/get-loan): `loanId`, `borrower`, `collateralAmount`, `principal`, `accruedInterest`, `healthFactor`, `active`.
+      Active loans. Each entry has the shape of [Get Loan](/endpoints/lending/get-loan) without the `compliance` block: `loanId`, `borrower`, `collateralAmount`, `principal`, `accruedInterest`, `healthFactor`, `active`, `debtFree`, `fixedRateBps`, `dueAt` and `term`. The last four come from a batched read and are absent from every entry when that read fails and each loan is read on its own.
     </ResponseField>
   </Expandable>
 </ResponseField>
@@ -30,12 +30,12 @@ A borrower can hold several loans in the same market at once. Each is independen
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/user-loans/0xabc...def" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/user-loans/0xabc7f1093d5e26b804a1c3f78de025916b47c0d3" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/user-loans/${address}`,
+  `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/user-loans/${address}`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
@@ -43,6 +43,7 @@ const totalDebt = data.loans.reduce(
   (sum, l) => sum + Number(l.principal) + Number(l.accruedInterest),
   0
 );
+const pastGrace = data.loans.filter(l => l.term?.enforceable === true);
 ```
 </RequestExample>
 
@@ -51,28 +52,63 @@ const totalDebt = data.loans.reduce(
 {
   "success": true,
   "data": {
-    "userAddress": "0xabc...def",
+    "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
     "loans": [
       {
         "loanId": "5",
-        "borrower": "0xabc...def",
-        "collateralAmount": "1000.000000000000000000",
-        "principal": "50000.000000",
-        "accruedInterest": "128.750000",
-        "healthFactor": "1.842000000000000000",
-        "active": true
+        "borrower": "0xaBc7f1093D5E26B804a1C3f78dE025916B47C0d3",
+        "collateralAmount": "1000.0",
+        "principal": "50000.0",
+        "accruedInterest": "961.643835",
+        "healthFactor": "1.842",
+        "active": true,
+        "debtFree": false,
+        "fixedRateBps": 650,
+        "dueAt": "1796630400",
+        "term": {
+          "dueAt": "1796630400",
+          "effectiveDueAt": "1796630400",
+          "graceEnd": "1796889600",
+          "enforceable": false,
+          "termGracePeriod": "259200",
+          "termPenaltyBps": 300,
+          "stamped": true,
+          "termSource": "STAMPED"
+        }
       },
       {
         "loanId": "9",
-        "borrower": "0xabc...def",
-        "collateralAmount": "250.000000000000000000",
-        "principal": "12000.000000",
-        "accruedInterest": "14.200000",
-        "healthFactor": "1.204000000000000000",
-        "active": true
+        "borrower": "0xaBc7f1093D5E26B804a1C3f78dE025916B47C0d3",
+        "collateralAmount": "250.0",
+        "principal": "12000.0",
+        "accruedInterest": "53.424657",
+        "healthFactor": "1.204",
+        "active": true,
+        "debtFree": false,
+        "fixedRateBps": 650,
+        "dueAt": "1803801600",
+        "term": {
+          "dueAt": "1803801600",
+          "effectiveDueAt": "1803801600",
+          "graceEnd": "1804060800",
+          "enforceable": false,
+          "termGracePeriod": "259200",
+          "termPenaltyBps": 300,
+          "stamped": true,
+          "termSource": "STAMPED"
+        }
       }
     ]
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `userAddress` is not `0x` followed by 40 hex characters |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

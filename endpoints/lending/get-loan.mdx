@@ -1,10 +1,12 @@
 ---
 title: 'Get Loan'
-api: 'GET /lending-external-securities/api/positions/{marketId}/loan/{loanId}'
+api: 'GET /lending-external-securities-v2/api/positions/{marketId}/loan/{loanId}'
 description: 'Read a loan directly from the market contract'
 ---
 
-Returns live loan state by numeric loan ID, read from the contract with no database involvement. Use this when you need authoritative figures for a payoff quote, a health check, or a liquidation decision.
+Returns live loan state by on-chain loan ID, read from the market contract rather than from Trusset's position records. Use this when you need authoritative figures for a payoff quote, a health check, or a liquidation decision.
+
+The read also carries the loan's term: when it falls due, when its grace period ends, and whether it can already be liquidated on term alone. On a market that makes open-ended loans those fields are null.
 
 ## Path Parameters
 
@@ -16,15 +18,35 @@ Returns live loan state by numeric loan ID, read from the contract with no datab
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="loanId" type="string">Loan ID, echoed back.</ResponseField>
-    <ResponseField name="borrower" type="string">Borrower address.</ResponseField>
+    <ResponseField name="borrower" type="string">Borrower address, checksummed as the contract returns it.</ResponseField>
     <ResponseField name="collateralAmount" type="string">Collateral pledged, in collateral token units.</ResponseField>
     <ResponseField name="principal" type="string">Outstanding principal, in borrow asset units.</ResponseField>
-    <ResponseField name="accruedInterest" type="string">Interest accrued and unpaid, in borrow asset units.</ResponseField>
-    <ResponseField name="healthFactor" type="string">Health factor at 18 decimal places. `1.0` is the liquidation boundary. `null` on a loan that is no longer active, because a closed loan has no health.</ResponseField>
+    <ResponseField name="accruedInterest" type="string">Interest owed and unpaid, in borrow asset units, projected to the current block.</ResponseField>
+    <ResponseField name="healthFactor" type="string">Health factor as a decimal string. `1.0` is the liquidation boundary. `null` on a loan that is no longer active and on an open loan with no debt left, where the contract reports no finite value.</ResponseField>
     <ResponseField name="active" type="boolean">Whether the loan is open. `false` once it is repaid, closed, or fully liquidated.</ResponseField>
+    <ResponseField name="debtFree" type="boolean">`true` for an open loan whose principal and interest are both zero. Such a loan still locks its collateral until [Close Loan](/endpoints/lending/close-loan) releases it.</ResponseField>
+    <ResponseField name="fixedRateBps" type="integer">The rate stamped on this loan when it opened, in basis points. A stamped rate prices the loan by time alone and does not move with the pool's rate. `0` when the market's rate model was not in `FIXED` mode at signing, so the loan pays the floating rate. `null` when the loan record could not be read.</ResponseField>
+    <ResponseField name="dueAt" type="string">Unix seconds the loan falls due, as stamped at signing and moved by any extension of this loan. `null` on an open-ended loan.</ResponseField>
+    <ResponseField name="term" type="object">
+      The loan's term state. `null` on an open-ended loan, or when the term could not be read.
+      <Expandable>
+        <ResponseField name="dueAt" type="string">Unix seconds the loan falls due.</ResponseField>
+        <ResponseField name="effectiveDueAt" type="string">The due date actually applied: the later of `dueAt` and the market-wide due floor, which a confirmed market-wide extension raises.</ResponseField>
+        <ResponseField name="graceEnd" type="string">Unix seconds the grace period after `effectiveDueAt` ends.</ResponseField>
+        <ResponseField name="enforceable" type="boolean">`true` once `graceEnd` has passed on an open loan. The loan can then be liquidated on term alone, whatever its health factor.</ResponseField>
+        <ResponseField name="termGracePeriod" type="string">The grace period in seconds this loan is enforced under. `null` when it could not be read.</ResponseField>
+        <ResponseField name="termPenaltyBps" type="integer">The term penalty in basis points that caps what a term realization retains above the debt. `null` when it could not be read.</ResponseField>
+        <ResponseField name="stamped" type="boolean">`true` when the grace period and term penalty were stamped on the loan at signing, so later term changes on the market do not reach it. `false` for a loan opened before stamping existed. `null` when the market does not expose the stamp.</ResponseField>
+        <ResponseField name="termSource" type="string">Where `termGracePeriod` and `termPenaltyBps` come from: `STAMPED` (the loan's own stamp), `MARKET_CONFIG` (the market's live term configuration), or `UNKNOWN`.</ResponseField>
+      </Expandable>
+    </ResponseField>
     <ResponseField name="compliance" type="object">What the collateral token would currently permit for this borrower. See below. `null` when the market records no collateral token, or when the probe could not run.</ResponseField>
   </Expandable>
 </ResponseField>
+
+<Note>
+  `debtFree`, `fixedRateBps`, `dueAt` and `term` come from one batched chain read. When that read fails and the loan is read on its own instead, the response carries only the first seven fields and `compliance`.
+</Note>
 
 ## Compliance
 
@@ -34,40 +56,43 @@ The collateral is a third-party security token whose issuer can freeze an addres
   <Expandable>
     <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`, the market's collateral mode.</ResponseField>
     <ResponseField name="holder" type="string">The borrower this verdict is about, lowercased.</ResponseField>
-    <ResponseField name="restricted" type="boolean">`true` when something would block the collateral moving. `false` when every probe answered and none did. `null` when the token does not answer the probes at all, which is unknown rather than clear.</ResponseField>
-    <ResponseField name="code" type="string">Machine-readable reason, when there is one.</ResponseField>
-    <ResponseField name="reason" type="string">One sentence naming what is blocking, or why the state could not be established.</ResponseField>
-    <ResponseField name="collateralReturnable" type="boolean">Whether the token would accept a return of this collateral to the borrower right now. `null` when unchecked.</ResponseField>
-    <ResponseField name="willEscrowOnRelease" type="boolean">`true` when a release would be escrowed on the adapter rather than delivered, because the token would refuse the transfer. Custody markets only.</ResponseField>
-    <ResponseField name="escrowedCollateral" type="string">Collateral already sitting in escrow for this holder, in collateral units. Custody markets only. Claim it with [Claim Escrowed Collateral](/endpoints/lending/claim-escrowed-collateral).</ResponseField>
+    <ResponseField name="restricted" type="boolean">`true` when any check found a block. `false` when the evidence is complete and clear: on a `CUSTODY` market the token allows the adapter's return, on a `FREEZE` market all three holder checks read clear. `null` when that evidence is missing, which is unknown rather than clear.</ResponseField>
+    <ResponseField name="code" type="integer">The collateral token's own restriction code when it refuses the adapter's return to the borrower. `null` when nothing refuses it, on a `FREEZE` market, and when the token answers the probe with a bare yes or no.</ResponseField>
+    <ResponseField name="reason" type="string">One sentence naming what is blocking, or why the state could not be established. `null` when nothing is blocking.</ResponseField>
+    <ResponseField name="collateralReturnable" type="boolean">Whether the token would accept the adapter's return of this collateral to the borrower right now. Always `true` on a `FREEZE` market, where a release moves nothing. `null` when the token does not answer the transfer probe.</ResponseField>
+    <ResponseField name="willEscrowOnRelease" type="boolean">`true` when a release would be escrowed on the adapter rather than delivered, because the token would refuse the transfer. Always `false` on a `FREEZE` market. `null` on a `CUSTODY` market whose token does not answer the transfer probe.</ResponseField>
+    <ResponseField name="escrowedCollateral" type="string">Collateral already sitting in escrow for this holder, in collateral units. `CUSTODY` markets only, and `null` when the escrow could not be read. Claim it with [Claim Escrowed Collateral](/endpoints/lending/claim-escrowed-collateral).</ResponseField>
     <ResponseField name="escrowedCollateralRaw" type="string">The same figure in base units.</ResponseField>
-    <ResponseField name="holderVerified" type="boolean">Whether the borrower is still a verified identity on the token's register. `null` when unreadable.</ResponseField>
+    <ResponseField name="holderVerified" type="boolean">Whether the borrower is still a verified identity on the identity registry the collateral token names. `null` when the token names no registry or it could not be read.</ResponseField>
     <ResponseField name="holderAddressFrozen" type="boolean">Whether the token has frozen this address. `null` when unreadable.</ResponseField>
     <ResponseField name="tokenPaused" type="boolean">Whether the collateral token is paused. `null` when unreadable.</ResponseField>
     <ResponseField name="checkedAt" type="string">When this verdict was established. It does not move while the verdict is unchanged, so it reads as the age of the finding rather than the age of the request.</ResponseField>
   </Expandable>
 </ResponseField>
 
+On a `CUSTODY` market, the three holder checks run only when the transfer probe is unavailable or refuses the return. When the token allows the return, `holderVerified`, `holderAddressFrozen` and `tokenPaused` are `null` because they were not needed, not because they failed.
+
 <Warning>
-  Treat `restricted: null` as unknown, never as unrestricted. It means the collateral token answers neither the transfer probe nor the holder probes, so nothing about its compliance state has been established.
+  Treat `restricted: null` as unknown, never as unrestricted. It means the collateral token did not answer enough of the probes to establish its compliance state.
 </Warning>
 
 <Tip>
-  Total payoff is `principal` plus `accruedInterest`. Interest accrues per block, so add a small margin when quoting a full repayment. The contract caps repayment at the actual debt, so a slight overpayment is not transferred.
+  A full payoff is `principal` plus `accruedInterest`, plus the market's repay fee where one is set, capped at 0.5 percent of the debt. Interest accrues every second, so add a small margin when quoting. The contract never takes more than the closing amount, so a slight overpayment is not transferred. [Repay](/endpoints/lending/repay) with `all: true` sizes the payment, fee included.
 </Tip>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/loan/5" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/loan/5" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/positions/${marketId}/loan/5`,
+  `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/loan/5`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
-const liquidatable = data.active && parseFloat(data.healthFactor) < 1;
+const liquidatable =
+  data.active && ((data.healthFactor !== null && parseFloat(data.healthFactor) < 1) || data.term?.enforceable === true);
 ```
 </RequestExample>
 
@@ -77,15 +102,28 @@ const liquidatable = data.active && parseFloat(data.healthFactor) < 1;
   "success": true,
   "data": {
     "loanId": "5",
-    "borrower": "0xabc...def",
-    "collateralAmount": "1000.000000000000000000",
-    "principal": "50000.000000",
-    "accruedInterest": "128.750000",
-    "healthFactor": "1.842000000000000000",
+    "borrower": "0xaBc7f1093D5E26B804a1C3f78dE025916B47C0d3",
+    "collateralAmount": "1000.0",
+    "principal": "50000.0",
+    "accruedInterest": "961.643835",
+    "healthFactor": "1.842",
     "active": true,
+    "debtFree": false,
+    "fixedRateBps": 650,
+    "dueAt": "1796630400",
+    "term": {
+      "dueAt": "1796630400",
+      "effectiveDueAt": "1796630400",
+      "graceEnd": "1796889600",
+      "enforceable": false,
+      "termGracePeriod": "259200",
+      "termPenaltyBps": 300,
+      "stamped": true,
+      "termSource": "STAMPED"
+    },
     "compliance": {
       "mode": "FREEZE",
-      "holder": "0xabc...def",
+      "holder": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
       "restricted": false,
       "code": null,
       "reason": null,
@@ -96,7 +134,7 @@ const liquidatable = data.active && parseFloat(data.healthFactor) < 1;
       "holderVerified": true,
       "holderAddressFrozen": false,
       "tokenPaused": false,
-      "checkedAt": "2026-09-05T11:58:12.000Z"
+      "checkedAt": "2026-09-26T11:58:12.000Z"
     }
   }
 }
@@ -120,3 +158,13 @@ const liquidatable = data.active && parseFloat(data.healthFactor) < 1;
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `INVALID_LOAN_ID` | `400` | `loanId` is not a positive integer |
+| `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
+| `LOAN_NOT_FOUND` | `404` | The market holds no loan with this ID, or the loan could not be read from the network |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

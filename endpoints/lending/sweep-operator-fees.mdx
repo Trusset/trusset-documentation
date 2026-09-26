@@ -1,0 +1,158 @@
+---
+title: 'Sweep Operator Fees'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/operator-fees/sweep'
+description: 'Pay the operator share the market has booked to the operator wallet'
+---
+
+Builds the `sweepOperatorFees` transaction, which pays everything the market has booked for the operator to the operator wallet. The operator wallet is the market's `operatorFeeRecipient`: the wallet that took the lender-of-record role, unless it has rotated itself since with [Rotate Operator Wallet](/endpoints/lending/rotate-operator-wallet).
+
+Any wallet may sign. The destination is fixed on the market, so the signer can neither withhold the payment nor redirect it, and nothing reaches the signer. The market pays whichever wallet is the operator wallet when the transaction mines, so fees booked before a rotation go to the new wallet.
+
+On the current market implementation the operator's booked balance has three sources. It takes a fixed 8 percent of repaid interest after the infrastructure fee and 8 percent of every fixed transaction fee. It also takes distributor share realized while no provider held pool shares. [Get Cashflows](/endpoints/lending/get-cashflows) itemises all three.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="txHash" type="string">
+  Hash of the sweep you broadcast. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the market. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`sweepOperatorFees`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction pays and to whom, in words. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="permissionless" type="boolean">Always `true`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="requiredRole" type="string">Always `null`, because the sweep needs no role. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="requiredSigner" type="string">Always `null`, because any wallet may sign. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="note" type="string">States that the market pays the operator wallet, never the signer. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="recipient" type="string">The operator wallet the sweep pays. On the confirm call, read from the `OperatorFeePaid` event.</ResponseField>
+    <ResponseField name="amount" type="string">On the calldata call, what was payable when the calldata was built. On the confirm call, what the sweep actually paid, read from the `OperatorFeePaid` event.</ResponseField>
+    <ResponseField name="amountRaw" type="string">`amount` in the borrow asset's smallest unit.</ResponseField>
+    <ResponseField name="asset" type="object">The borrow asset: `address`, `symbol`, `decimals`.</ResponseField>
+    <ResponseField name="confirmWith" type="object">Where to send the hash: `endpoint` names this route and `field` is `txHash`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="txHash" type="string">Sweep transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that sent the sweep. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="at" type="string">ISO 8601 time of the block the sweep mined in. `null` when the block time could not be read. Returned when confirming with `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  The sweep pays whatever is booked when it mines, not the amount quoted when the calldata was built. A repayment landing in between raises the figure, so read the paid amount from the confirm call.
+</Note>
+
+The API refuses before you sign whenever the contract would revert: when no lender of record has taken the market, and when nothing is booked for the operator. A confirmed sweep is recorded on the market as an `OPERATOR_FEES_SWEPT` transaction, visible through [List Transactions](/endpoints/lending/list-transactions).
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/operator-fees/sweep" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/operator-fees/sweep`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const built = await fetch(url, { method: 'POST', headers, body: JSON.stringify({}) });
+const { data } = await built.json();
+
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
+
+const confirmed = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.hash }) });
+const { data: paid } = await confirmed.json();
+console.log(`Paid ${paid.amount} ${paid.asset.symbol} to ${paid.recipient}`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "sweepOperatorFees",
+    "description": "Pay the 68.0 USDC of accrued operator fees to the operator wallet 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "permissionless": true,
+    "requiredRole": null,
+    "requiredSigner": null,
+    "note": "Any wallet may sign this transaction. The market pays the accrued share to the wallet that took the lender-of-record role, never to the signer.",
+    "recipient": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "amount": "68.0",
+    "amountRaw": "68000000",
+    "asset": {
+      "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "symbol": "USDC",
+      "decimals": 6
+    },
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/clx_secmarket_001/operator-fees/sweep",
+      "field": "txHash"
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "signedBy": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "recipient": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "amount": "68.0",
+    "amountRaw": "68000000",
+    "asset": {
+      "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "symbol": "USDC",
+      "decimals": 6
+    },
+    "at": "2026-09-25T14:03:12.000Z"
+  }
+}
+```
+```json Error - Nothing Payable
+{
+  "success": false,
+  "error": {
+    "code": "NO_OPERATOR_FEES",
+    "message": "No operator fee is payable on this market: 0.0 USDC has accrued, and the share is paid only out of repaid interest, so sweepOperatorFees would revert. Nothing to sign until a borrower repays interest."
+  }
+}
+```
+```json Error - No Lender of Record
+{
+  "success": false,
+  "error": {
+    "code": "MARKET_NOT_ADOPTED",
+    "message": "No lender of record has taken this market, so it has no operator fee recipient and sweepOperatorFees reverts. The fee becomes collectable once the role is taken."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `txHash` is not a 0x-prefixed 32-byte hex hash |
+| `MISSING_MARKET_ID` | `400` | The market ID in the path is longer than 100 characters |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_NOT_ADOPTED` | `409` | No lender of record has taken the market, so it has no operator wallet and the sweep would revert |
+| `NO_OPERATOR_FEES` | `409` | Nothing is booked for the operator, so the sweep would revert. The message states what has accrued |
+| `OPERATOR_FEES_UNAVAILABLE` | `503` | The booked balance or the operator wallet could not be read, so no transaction is offered. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

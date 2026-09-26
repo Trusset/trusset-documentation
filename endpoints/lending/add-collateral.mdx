@@ -1,12 +1,12 @@
 ---
 title: 'Add Collateral'
-api: 'POST /lending-external-securities/api/positions/{marketId}/add-collateral'
+api: 'POST /lending-external-securities-v2/api/positions/{marketId}/add-collateral'
 description: 'Post additional collateral to an existing loan'
 ---
 
-Adds security tokens to an open loan, raising its health factor without repaying debt. This is the fastest way for a borrower to move a position away from liquidation.
+Adds security tokens to an open loan, raising its health factor without repaying debt. This is the fastest way for a borrower to move a position away from liquidation. Only the loan's borrower can sign it: the contract reverts for any other sender.
 
-`CUSTODY` markets require an approval on the collateral token first, returned as an explicit step. `FREEZE` markets do not.
+`CUSTODY` markets require an approval on the collateral token first, returned as an explicit step. `FREEZE` markets do not. A paused market does not block adding collateral.
 
 ## Path Parameters
 
@@ -18,8 +18,8 @@ Adds security tokens to an open loan, raising its health factor without repaying
   On-chain loan ID. A positive integer. Accepted as a JSON number or as a numeric string, so the value [Get Loan](/endpoints/lending/get-loan) returns passes straight back.
 </ParamField>
 
-<ParamField body="amount" type="string" required>
-  Security tokens to add, as a decimal string. Parsed at the collateral token's decimals.
+<ParamField body="amount" type="string">
+  Security tokens to add, as a positive decimal string. Parsed at the collateral token's decimals. Required when building calldata, not needed on the confirm call.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -30,14 +30,14 @@ Adds security tokens to an open loan, raising its health factor without repaying
 
 <ResponseField name="data" type="object">
   <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` when `txHash` is omitted.</ResponseField>
+    <ResponseField name="steps" type="array">One step in `FREEZE` markets. Two in `CUSTODY` markets, where an `approve` for the custody adapter precedes `addCollateral`.</ResponseField>
+    <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">Index of the `addCollateral` step. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="confirmWith" type="string">`addCollateral`. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="loanId" type="integer">Loan ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="amount" type="string">Collateral added, echoed back. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` when `txHash` is omitted.</ResponseField>
-    <ResponseField name="steps" type="array">One step in `FREEZE` markets, two in `CUSTODY` markets where an `approve` precedes `addCollateral`.</ResponseField>
-    <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm with. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="confirmWith" type="string">`addCollateral`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="amount" type="string">Collateral added, read from the mined transaction. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -45,45 +45,86 @@ Adds security tokens to an open loan, raising its health factor without repaying
   Adding collateral is bounded by the market's `maxUserCollateral` and `maxTotalCollateral` caps. Both are checked against the loan's borrower before any transaction is offered, so a pledge over a cap is refused with `SUPPLY_CAP_EXCEEDED` or `USER_SUPPLY_CAP_EXCEEDED` rather than reverting on-chain. Read headroom directly with [Get Supply Caps](/endpoints/lending/get-supply-caps).
 </Note>
 
+While a Dutch auction is open against the loan, the contract reverts the top-up. The API does not check for an open auction before offering calldata.
+
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/{marketId}/add-collateral" \
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/add-collateral" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{"loanId": 5, "amount": "200"}'
 ```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/add-collateral`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ loanId: 5, amount: '200' })
+});
+const { data } = await res.json();
+
+const hashes: string[] = [];
+for (const step of data.steps) {
+  const tx = await borrowerWallet.sendTransaction(step.transaction);
+  await tx.wait();
+  hashes.push(tx.hash);
+}
+
+await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ loanId: 5, txHash: hashes[data.confirmStepIndex] })
+});
+```
 </RequestExample>
 
 <ResponseExample>
-```json Confirmed Response
-{
-  "success": true,
-  "data": {
-    "txHash": "0xabc...def",
-    "loanId": 5,
-    "amount": "200"
-  }
-}
-```
 ```json Calldata Response (CUSTODY)
 {
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTIONS",
-    "mode": "CUSTODY",
     "steps": [
       {
         "action": "SIGN_TRANSACTION",
-        "transaction": { "to": "0xabc...def", "data": "0x..." },
+        "transaction": {
+          "to": "0x3c5e8b1d7f9a2046c8e1b3d5f7a9c0e2d4b6f8a1",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
         "functionName": "approve",
         "description": "Approve the custody adapter to pull collateral"
       },
       {
         "action": "SIGN_TRANSACTION",
-        "transaction": { "to": "0x70A0...", "data": "0x..." },
+        "transaction": {
+          "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
         "functionName": "addCollateral"
       }
-    ]
+    ],
+    "mode": "CUSTODY",
+    "confirmStepIndex": 1,
+    "confirmWith": "addCollateral"
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0x7e4a2c9f1b5d3086a2e4c6b8d0f1a3c5e7b9d2f4a6c8e0b1d3f5a7c9e2b4d6f8",
+    "loanId": 5,
+    "amount": "200.0"
   }
 }
 ```
@@ -94,8 +135,11 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
 | Code | HTTP | Cause |
 |---|---|---|
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
-| `VALIDATION_ERROR` | `400` | `loanId` is not a positive integer, or `amount` carries more decimal places than the collateral token supports |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `VALIDATION_ERROR` | `400` | `loanId` is not a positive integer, or `amount` is missing on the build call, not a positive decimal string, or carries more decimal places than the collateral token supports |
 | `LOAN_NOT_ACTIVE` | `400` | The loan is closed and can no longer be modified |
+| `COLLATERAL_ADAPTER_NOT_AUTHORIZED` | `400` | The adapter lacks the agent role (`FREEZE`) or allow-listed or verified holder status (`CUSTODY`) on the collateral token |
+| `FREEZE_MODE_UNSUPPORTED_TOKEN` | `400` | The token does not implement the ERC-3643 freeze interface |
 | `SUPPLY_CAP_EXCEEDED` | `400` | The pledge would push total collateral past `maxTotalCollateral` |
 | `USER_SUPPLY_CAP_EXCEEDED` | `400` | The pledge would push this borrower past `maxUserCollateral` |
 | `COLLATERAL_TRANSFER_RESTRICTED` | `400` | The collateral token's compliance rules block moving this collateral into the custody adapter |
@@ -103,3 +147,5 @@ curl -X POST "https://api.trusset.org/lending-external-securities/api/positions/
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to check its supply caps. Retry shortly |
 | `LOAN_STATE_UNAVAILABLE` | `503` | The loan could not be read from the network. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

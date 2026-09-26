@@ -1,34 +1,35 @@
 ---
 title: 'Get Liquidation Stats'
-api: 'GET /lending-external-securities/api/liquidations/{marketId}/liquidation-stats'
+api: 'GET /lending-external-securities-v2/api/liquidations/{marketId}/liquidation-stats'
 description: 'Aggregate liquidation counters from chain and from Trusset records'
 ---
 
-Returns liquidation totals from two sources side by side: counters read from the market contract, and record counts grouped by status from the Trusset database.
+Returns liquidation totals from two sources side by side: counters read from the market contract and its auction venue, and record counts grouped by status from the Trusset database.
 
 The endpoint reconciles pending liquidations from the chain before counting, so adopted records are included.
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>Market ID. At most 100 characters.</ParamField>
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="onChain" type="object">
-      Contract counters, or null when the read failed.
+      Contract counters. `null` only when the market has no on-chain address.
       <Expandable>
-        <ResponseField name="totalLiquidations" type="integer">Lifetime liquidations on this market.</ResponseField>
-        <ResponseField name="pendingLiquidationDebt" type="string">Debt seized but not yet settled, in borrow asset units.</ResponseField>
-        <ResponseField name="totalAuctions" type="integer">Lifetime Dutch auctions created.</ResponseField>
+        <ResponseField name="totalLiquidations" type="integer">Liquidation records the market has opened over its lifetime, on either trigger and on either path.</ResponseField>
+        <ResponseField name="pendingLiquidationDebt" type="string">Debt seized but not yet settled or written off, in borrow asset units.</ResponseField>
+        <ResponseField name="totalAuctions" type="integer">Dutch auctions the market's auction venue has opened. `0` when no venue is wired.</ResponseField>
+        <ResponseField name="readFailed" type="boolean">Present and `true` when a counter could not be read. The unread counters then read `0`, so zeros alongside this flag are not a fact about the market.</ResponseField>
       </Expandable>
     </ResponseField>
     <ResponseField name="database" type="object">
       <Expandable>
-        <ResponseField name="pending" type="integer">Liquidations awaiting settlement.</ResponseField>
-        <ResponseField name="settled" type="integer">Liquidations closed with proceeds routed back to the market.</ResponseField>
-        <ResponseField name="writtenOff" type="integer">Liquidations written off after the 7 day timeout, with bad debt covered by the insurance fund.</ResponseField>
+        <ResponseField name="pending" type="integer">Records awaiting settlement, including records whose auction is still open and records the router administrator reopened.</ResponseField>
+        <ResponseField name="settled" type="integer">Records settled. This includes auctions that sold their whole lot and router records closed without proceeds.</ResponseField>
+        <ResponseField name="writtenOff" type="integer">Liquidations written off after the 7 day timeout, with bad debt covered by the insurance fund. The fund pays what its balance allows, and the pool bears the principal it does not cover.</ResponseField>
         <ResponseField name="stuck" type="integer">Always `0` for external securities markets. See the note below.</ResponseField>
       </Expandable>
     </ResponseField>
@@ -40,13 +41,21 @@ The endpoint reconciles pending liquidations from the chain before counting, so 
 </Note>
 
 <Tip>
-  `onChain.pendingLiquidationDebt` above zero with `database.pending` at zero means the chain holds unsettled debt the backend has not recorded. Call [Get Pending Liquidations](/endpoints/lending/get-pending-liquidations), which runs a reconciliation pass and adopts anything missing.
+  `onChain.pendingLiquidationDebt` above zero with `database.pending` at zero means the market still carries debt that no open record here accounts for. A router record settled at zero directly on-chain, before its collateral left the router, produces exactly this. The market's own record then stays open until the write-off, and [List Settled Liquidations](/endpoints/lending/list-settled-liquidations) flags the collateral left behind as `collateralStranded`.
 </Tip>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/liquidations/{marketId}/liquidation-stats" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/liquidations/{marketId}/liquidation-stats" \
   -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/liquidations/${marketId}/liquidation-stats`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+if (data.onChain?.readFailed) console.warn('On-chain counters are incomplete');
 ```
 </RequestExample>
 
@@ -57,7 +66,7 @@ curl "https://api.trusset.org/lending-external-securities/api/liquidations/{mark
   "data": {
     "onChain": {
       "totalLiquidations": 5,
-      "pendingLiquidationDebt": "21159.200000",
+      "pendingLiquidationDebt": "21159.2",
       "totalAuctions": 2
     },
     "database": {
@@ -70,3 +79,12 @@ curl "https://api.trusset.org/lending-external-securities/api/liquidations/{mark
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+
+A failed database read answers `200` with every `database` count at `0`.

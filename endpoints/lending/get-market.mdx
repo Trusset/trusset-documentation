@@ -1,17 +1,17 @@
 ---
 title: 'Get Market'
-api: 'GET /lending-external-securities/api/markets/{marketId}'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}'
 description: 'Retrieve full detail for a single market'
 ---
 
-Returns the complete market record plus five enrichment blocks read live from the chain: `onChain`, `oracleStatus`, `configurationStatus`, `identityGate`, and `liquidationStats`. The lender-of-record fields are reconciled against the factory on the same call, so `curator`, `seekingCurator`, `realizationMode`, `liquidityCommitment` and `collateralAgent` are the chain's answer rather than a stored one.
+Returns the complete market record plus five enrichment blocks read live from the chain: `onChain`, `oracleStatus`, `configurationStatus`, `identityGate`, and `liquidationStats`. The lender-of-record fields are reconciled against the factory on the same call, so `curator`, `seekingCurator`, `realizationMode`, `liquidityCommitment` and `collateralAgent` are the chain's answer when the factory can be read. A failed factory read serves the stored values, and `errors` does not name it. `saleRecipient` is read from the market's liquidation router, which holds the recipient in force.
 
-Unlike [List Markets](/endpoints/lending/list-markets), which returns a fixed projection, this endpoint returns every stored field on the market, including the settlement asset triple and the decimals the backend uses when parsing your amounts.
+[List Markets](/endpoints/lending/list-markets) returns a fixed projection. This endpoint returns every stored field on the market, including the settlement asset triple and the decimals the backend uses when parsing your amounts.
 
 <Warning>
-  Each block falls back on its own. One failed read leaves that block `null` and does not empty the others, and a `null` block signals an unavailable RPC rather than a misconfigured market.
+  Each block falls back on its own. One failed read leaves that block `null` or marked unreadable and does not empty the others.
 
-  `errors` names every section that could not be read, as `{ section, message }`. It is empty on a clean read. Branch on it rather than inferring an outage from a `null`, because some blocks are legitimately `null` on a market that has no address or no oracle yet.
+  `errors` names every section that could not be read, as `{ section, message }`, where `section` is `onChain`, `configurationStatus`, `liquidationStats` or `oracle`. It is empty on a clean read. Branch on it rather than inferring an outage from a `null`, because some blocks are legitimately `null` on a market that has no address or no oracle yet.
 </Warning>
 
 ## Path Parameters
@@ -24,23 +24,42 @@ Unlike [List Markets](/endpoints/lending/list-markets), which returns a fixed pr
   <Expandable>
     <ResponseField name="collateralDecimals" type="integer">Decimals of the collateral token. Every collateral amount you send is parsed at this precision, and every collateral amount returned is formatted with it.</ResponseField>
     <ResponseField name="borrowAssetAddress" type="string">Settlement token (stablecoin) address.</ResponseField>
-    <ResponseField name="borrowAssetSymbol" type="string">Settlement token symbol.</ResponseField>
-    <ResponseField name="borrowAssetDecimals" type="integer">Settlement token decimals. Every borrow, repay, and liquidity amount is parsed at this precision.</ResponseField>
-    <ResponseField name="identityRegistryAddress" type="string">ERC-3643 identity registry for the collateral token. The lowercased zero address means no registry was supplied at deployment.</ResponseField>
-    <ResponseField name="liquidationBonus" type="string">Liquidator incentive in basis points.</ResponseField>
-    <ResponseField name="signerAuthorized" type="boolean">Last recorded oracle signer authorization state. `oracleStatus.signerAuthorized` is the live value.</ResponseField>
-    <ResponseField name="lastOracleUpdate" type="string">ISO 8601 timestamp of the last price push through this API.</ResponseField>
+    <ResponseField name="borrowAssetSymbol" type="string">Its symbol, for example `USDC`.</ResponseField>
+    <ResponseField name="borrowAssetDecimals" type="integer">Its decimals. Every borrow, repay, and liquidity amount is parsed at this precision.</ResponseField>
+    <ResponseField name="interestModelAddress" type="string">The market's interest rate model contract.</ResponseField>
+    <ResponseField name="identityRegistryAddress" type="string">The borrower identity register recorded for the market, lowercased. The zero address or `null` means the market has no borrower register. `identityGate` below is read from the contract itself.</ResponseField>
+    <ResponseField name="liquidationBonus" type="string">The market's liquidation penalty in basis points, as last recorded.</ResponseField>
+    <ResponseField name="operatorShare" type="string">The lender of record's share of repaid interest after the infrastructure fee, in basis points. When the factory's figure differs from the stored one, the factory's is served. On current markets it is `800`.</ResponseField>
+    <ResponseField name="signerAuthorized" type="boolean">Recorded oracle signer authorization for the instance's wallet, healed from the chain whenever the oracle is read. `oracleStatus.signerAuthorized` is the live value.</ResponseField>
+    <ResponseField name="lastOracleUpdate" type="string">ISO 8601 timestamp of the latest price update the record knows of, moved forward from the oracle whenever it is read.</ResponseField>
     <ResponseField name="controllerImported" type="boolean">True when this market was deployed under another instance and imported here by proving on-chain admin control.</ResponseField>
-    <ResponseField name="onChain" type="object">Live market metrics. See [Get Market Metrics](/endpoints/lending/get-metrics).</ResponseField>
-    <ResponseField name="oracleStatus" type="object">Live oracle state. See [Get Oracle Status](/endpoints/lending/get-oracle-status).</ResponseField>
-    <ResponseField name="configurationStatus" type="object">Contract wiring state: `liquidationContract`, `insuranceFund`, `adapter`, `liquidationConfigured`, `insuranceFundConfigured`, `adapterConfigured`, `routerAuthorized`, `fullyConfigured`.</ResponseField>
-    <ResponseField name="liquidationStats" type="object">`totalLiquidations`, `pendingLiquidationDebt`, `totalAuctions`.</ResponseField>
-    <ResponseField name="identityGate" type="object">
-      What the market's identity registry answers, and whether the market can work with it.
+    <ResponseField name="onChain" type="object">Live market metrics, or `null` for a market without an address. See [Get Market Metrics](/endpoints/lending/get-metrics).</ResponseField>
+    <ResponseField name="oracleStatus" type="object">Live oracle state, or `null` when the market has no oracle. A failed read carries `configured: false` and an `error` message. See [Get Oracle Status](/endpoints/lending/get-oracle-status).</ResponseField>
+    <ResponseField name="configurationStatus" type="object">
+      The readiness verdict, or `null` for a market without an address.
       <Expandable>
-        <ResponseField name="shape" type="string">`none` when no registry is installed, `tuple` when the registry answers in the shape the market decodes, `bool` when it answers `isVerified(address)` with a single boolean, `unknown` when it could not be established.</ResponseField>
-        <ResponseField name="usable" type="boolean">Whether the market can read the gate at all. `false` on `bool`.</ResponseField>
-        <ResponseField name="note" type="string">What a `false` means and what can be done about it. `null` when the gate is usable.</ResponseField>
+        <ResponseField name="liquidationContract" type="string">Liquidation router the market is wired to.</ResponseField>
+        <ResponseField name="insuranceFund" type="string">Insurance fund the market is wired to.</ResponseField>
+        <ResponseField name="adapter" type="string">Collateral adapter the market is wired to.</ResponseField>
+        <ResponseField name="liquidationConfigured" type="boolean">A router address is set on the market.</ResponseField>
+        <ResponseField name="insuranceFundConfigured" type="boolean">An insurance fund address is set on the market.</ResponseField>
+        <ResponseField name="adapterConfigured" type="boolean">An adapter address is set on the market.</ResponseField>
+        <ResponseField name="routerAuthorized" type="boolean">The router accepts liquidations from this market.</ResponseField>
+        <ResponseField name="routerHolderAuthorized" type="boolean">The router is an eligible holder of the collateral token.</ResponseField>
+        <ResponseField name="oracleSignerAuthorized" type="boolean">The instance's wallet may sign prices on the market's oracle.</ResponseField>
+        <ResponseField name="liquidatorRoleGranted" type="boolean">The instance's wallet holds `LIQUIDATOR_ROLE` on the market.</ResponseField>
+        <ResponseField name="pendingCurator" type="boolean">The market has no lender of record yet.</ResponseField>
+        <ResponseField name="fullyConfigured" type="boolean">The same verdict [Get Configuration Status](/endpoints/lending/get-configuration-status) gives, including the adapter's authorization on the collateral token.</ResponseField>
+        <ResponseField name="readFailed" type="boolean">Present and `true` when a wiring read failed. The figures beside it are then not a statement about the market.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="liquidationStats" type="object">`totalLiquidations`, `pendingLiquidationDebt` and `totalAuctions`, plus `readFailed: true` when a counter could not be read.</ResponseField>
+    <ResponseField name="identityGate" type="object">
+      What the market's borrower register answers, and what that means for the market. `null` when the register could not be reached.
+      <Expandable>
+        <ResponseField name="shape" type="string">`none` when no register is installed, `tuple` when it answers `isVerified(address)` with `(bool, uint8)`, `bool` when it answers with a single boolean, `unknown` when it does not answer `isVerified(address)` at all.</ResponseField>
+        <ResponseField name="usable" type="boolean">`true` in every current case. The `note` says what, if anything, stands in the way.</ResponseField>
+        <ResponseField name="note" type="string">What the answer means and who can act on it. `null` when there is nothing to do.</ResponseField>
       </Expandable>
     </ResponseField>
     <ResponseField name="errors" type="array">Sections that could not be read, each `{ section, message }`. Empty on a clean read.</ResponseField>
@@ -48,24 +67,25 @@ Unlike [List Markets](/endpoints/lending/list-markets), which returns a fixed pr
 </ResponseField>
 
 <Warning>
-  An `identityGate` of `shape: "bool"` is not a configuration problem that can be fixed. The gate is written at deployment and can never be replaced, so taking the lender-of-record role would revert, and so would every deposit and every borrow. Such a market has to be redeployed, with the identity registry left empty or naming one that answers in the shape the market decodes. `note` says so in full: show it verbatim.
+  A register that answers with a bare `bool` works on the current market implementation, which reads either shape. A market still on the earlier implementation reads `(bool, uint8)` only. There every deposit and every borrow reverts until the market admin moves it on with [Upgrade Market](/endpoints/lending/upgrade-market). A register that answers neither shape refuses every borrower until the admin replaces it through [Set Identity Gates](/endpoints/lending/set-identity-gates). Taking the lender-of-record role is not blocked in either case. `note` says which applies: show it verbatim.
 </Warning>
 
 <Note>
-  The `configurationStatus` block here covers contract wiring only. It does not include the token-side authorizations a market needs before loans can be opened. Use [Get Configuration Status](/endpoints/lending/get-configuration-status) or [Get Setup Steps](/endpoints/lending/get-setup-steps) for readiness.
+  `configurationStatus` here is a verdict without the calldata to act on it, and it is cached for up to 10 seconds. [Get Configuration Status](/endpoints/lending/get-configuration-status) returns the outstanding transactions and who must sign each. [Get Setup Steps](/endpoints/lending/get-setup-steps) returns them as an ordered checklist.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/lending-external-securities/api/markets/{marketId}" \
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}" \
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
 const res = await fetch(
-  `https://api.trusset.org/lending-external-securities/api/markets/${marketId}`,
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
+if (data.errors.length > 0) console.warn('Partial read', data.errors);
 console.log(`${data.borrowAssetSymbol} market, ${data.collateralDecimals} collateral decimals`);
 ```
 </RequestExample>
@@ -75,72 +95,95 @@ console.log(`${data.borrowAssetSymbol} market, ${data.collateralDecimals} collat
 {
   "success": true,
   "data": {
-    "id": "clx_secmarket_001",
-    "marketAddress": "0x70A0E25c7b768B87e658348B3b577678A173E038",
-    "oracleAddress": "0x3b25752c1459C5Cf1b0bfcFdF0D56883c8047423",
-    "insuranceFundAddress": "0x8f1a...9c22",
-    "adapterAddress": "0x4d2b...77ae",
-    "identityRegistryAddress": "0x9e3c...1145",
+    "id": "cmssh7p1k0001cghxq2m4v8rz",
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "oracleAddress": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+    "insuranceFundAddress": "0x8f1a4c2e9b7d3056a1e8c4f29d0b7a3e5c619c22",
+    "interestModelAddress": "0x2c7e91d4a3b05f68e1c2a4b7d9f03e5a6c8b1d42",
+    "adapterAddress": "0x4d2b9e71c3a05f8d6e2b41c7a9f03d58e6b177ae",
+    "identityRegistryAddress": "0x0000000000000000000000000000000000000000",
     "liquidationRouterAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
-    "collateralTokenAddress": "0xabc...def",
+    "collateralTokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
     "collateralTokenName": "Nyala Fund I",
     "collateralTokenSymbol": "NYF1",
     "collateralTokenIsin": "DE000A0F5UF5",
     "collateralMode": "FREEZE",
     "collateralDecimals": 18,
-    "borrowAssetAddress": "0x98aD0ca091552e23C564B41C74282e5343D03E8a",
+    "borrowAssetAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
     "borrowAssetSymbol": "USDC",
     "borrowAssetDecimals": 6,
-    "collateralAgent": "0x555...666",
-    "liquidationOperator": "0x777...888",
+    "collateralAgent": "0x5a1f7c3e9d2b4068e1c5a7f3b9d0e2c4a6f81666",
+    "liquidationOperator": "0x7e2c4a9f1b3d5068c2e4a6f8b0d1c3e5a7f92888",
+    "saleRecipient": "0x9c3e5a7f1b2d4068e0c2a4f6b8d9e1c3a5f70b11",
+    "curator": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+    "seekingCurator": false,
+    "realizationMode": "ISSUER_REDEMPTION",
+    "liquidityCommitment": "1000000000000",
     "priceSource": "NAV",
+    "operatorShare": "800",
     "collateralFactor": "7500",
     "liquidationThreshold": "8500",
     "liquidationBonus": "500",
     "closeFactor": "5000",
     "useDutchAuction": false,
-    "totalDeposits": "1000000",
-    "totalBorrows": "250000",
+    "totalDeposits": "1000000.0",
+    "totalBorrows": "250000.0",
     "utilizationRate": "2500",
     "borrowRate": "450",
-    "supplyRate": "84",
+    "supplyRate": "83.1938",
     "signerAuthorized": true,
-    "lastOracleUpdate": "2025-06-15T06:00:00.000Z",
+    "lastOracleUpdate": "2026-09-25T06:00:00.000Z",
     "controllerImported": false,
     "active": true,
-    "createdAt": "2025-06-01T09:00:00.000Z",
+    "createdAt": "2026-09-01T09:00:00.000Z",
     "onChain": {
       "isOnChain": true,
       "paused": false,
-      "totalDeposits": "1000000.000000",
-      "totalBorrows": "250000.000000",
-      "availableLiquidity": "750000.000000",
+      "totalDeposits": "1000000.0",
+      "totalBorrows": "250000.0",
+      "availableLiquidity": "750000.0",
+      "borrowableLiquidity": "700000.0",
       "utilizationRate": "2500",
       "borrowRate": "450",
-      "supplyRate": "84",
+      "supplyRate": "83.1938",
       "activeLoans": 4,
       "activeAuctions": 0,
       "pendingLiquidations": 0,
-      "pendingLiquidationDebt": "0.000000"
+      "pendingLiquidationDebt": "0.0"
     },
     "oracleStatus": {
-      "price": "104.820000",
+      "price": "104.82",
       "isStale": false,
       "priceAge": 1200,
+      "maxPriceAge": 86400,
+      "configured": true,
       "signerAuthorized": true
     },
     "configurationStatus": {
+      "liquidationContract": "0x067A3FeEA46649AdAd8e31c33B3a4D8774b8d8cF",
+      "insuranceFund": "0x8F1A4c2e9b7d3056a1E8C4f29D0b7a3e5c619c22",
+      "adapter": "0x4D2b9E71c3a05F8D6e2b41c7a9F03D58E6b177aE",
       "liquidationConfigured": true,
       "insuranceFundConfigured": true,
       "adapterConfigured": true,
       "routerAuthorized": true,
+      "routerHolderAuthorized": true,
+      "oracleSignerAuthorized": true,
+      "liquidatorRoleGranted": true,
+      "pendingCurator": false,
       "fullyConfigured": true
+    },
+    "identityGate": {
+      "shape": "none",
+      "usable": true,
+      "note": null
     },
     "liquidationStats": {
       "totalLiquidations": 0,
-      "pendingLiquidationDebt": "0.000000",
+      "pendingLiquidationDebt": "0.0",
       "totalAuctions": 0
-    }
+    },
+    "errors": []
   }
 }
 ```
@@ -154,3 +197,10 @@ console.log(`${data.borrowAssetSymbol} market, ${data.collateralDecimals} collat
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

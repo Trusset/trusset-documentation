@@ -1,0 +1,193 @@
+---
+title: 'Get Operator'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/operator'
+description: 'Read who holds a market lender-of-record role and what it has accrued'
+---
+
+Returns who operates the market as lender of record, the institution behind that wallet, its recent actions on the market, and the fees the market has accrued. Gate a borrow control on it: a market still seeking a lender of record refuses every loan. See [Lender of record](/endpoints/lending/introduction#lender-of-record).
+
+The call first reconciles this instance's record of the market with the lending factory. A lender of record takes the role from its own instance, so this is how the deploying instance learns that its market was adopted. [Get Nominations](/endpoints/lending/get-nominations) serves the reconciled values afterwards.
+
+`status` decides the shape. `awaiting` means the market still seeks a lender of record. `none` means no operator wallet is recorded. `active` means a lender of record holds the role, and only then are `operator`, `fees` and `marketFees` filled in.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="status" type="string">`active`, `awaiting` or `none`.</ResponseField>
+    <ResponseField name="operator" type="object">
+      The lender of record, or `null` unless `status` is `active`.
+      <Expandable>
+        <ResponseField name="wallet" type="string">The wallet holding the role, lowercased.</ResponseField>
+        <ResponseField name="companyName" type="string">Company name of the institution that registered the wallet, or `null`.</ResponseField>
+        <ResponseField name="profileImage" type="string">That institution's profile image, or `null`.</ResponseField>
+        <ResponseField name="isBank" type="boolean">Whether Trusset approved that institution to act as a lender of record.</ResponseField>
+        <ResponseField name="verified" type="boolean">Whether that institution's account is verified.</ResponseField>
+        <ResponseField name="instanceName" type="string">Name of the instance the wallet is registered on, or `null`.</ResponseField>
+        <ResponseField name="walletLabel" type="string">The wallet's label, or `null`.</ResponseField>
+        <ResponseField name="acceptedAt" type="string">When the role was taken, as an ISO 8601 timestamp, or `null` when no adoption record is found.</ResponseField>
+        <ResponseField name="acceptTxHash" type="string">The adoption transaction, or `null`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="actions" type="array">Up to 50 of the most recent ledger entries on this market made by the operator's wallets, newest first, each `{ id, txType, userAddress, amount, txHash, timestamp }`. Empty unless `status` is `active`.</ResponseField>
+    <ResponseField name="actionsFailed" type="boolean">`true` when the ledger could not be read, so an empty `actions` list says nothing.</ResponseField>
+    <ResponseField name="fees" type="object">The operator leg of `marketFees`, repeated for convenience. `null` unless `status` is `active`.</ResponseField>
+    <ResponseField name="marketFees" type="object">
+      Every fee leg the market has booked and not yet swept, read live. `null` unless `status` is `active`.
+      <Expandable>
+        <ResponseField name="readFailed" type="boolean">`true` when the legs could not be read. The amounts are then `null`.</ResponseField>
+        <ResponseField name="asset" type="object">`{ address, symbol, decimals }` of the settlement asset the fees are paid in.</ResponseField>
+        <ResponseField name="feeShareGeneration" type="string">`FIXED_SHARES` on a market that pays the fixed operator and distributor shares, `OFFERED_SHARE` on an older market that pays the share its deployer offered. `null` when unreadable.</ResponseField>
+        <ResponseField name="operator" type="object">`{ shareBps, recipient, payable, payableRaw, asset, sweepable, readFailed }`, plus `fixedShare: true` on a `FIXED_SHARES` market. `recipient` is the market's operator wallet. `payable` is formatted in the settlement asset and `payableRaw` is in its smallest unit. Swept with [Sweep Operator Fees](/endpoints/lending/sweep-operator-fees).</ResponseField>
+        <ResponseField name="distributor" type="object">The distributor leg on a `FIXED_SHARES` market, `null` otherwise. It carries `shareBps`, `payable`, `payableRaw`, `registeredVaults`, `reRegistration`, `operatorPosition` and `paidTo`. `operatorPosition` is the distributor share accrued on the operator wallet's direct position, swept with [Sweep Distributor Fees](/endpoints/lending/sweep-distributor-fees).</ResponseField>
+        <ResponseField name="protocol" type="object">`{ payable, payableRaw, destination, sweepable }`. `destination` is the market's insurance fund. Swept with [Sweep Protocol Fees](/endpoints/lending/sweep-protocol-fees).</ResponseField>
+        <ResponseField name="infrastructure" type="object">`{ payable, payableRaw, destination, sweepable }`. `destination` is the platform wallet fixed in the contract. Swept with [Sweep Infrastructure Fees](/endpoints/lending/sweep-infrastructure-fees).</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  The operator wallet that receives the operator share can differ from the wallet that took the role. The lender of record rotates it with [Rotate Operator Wallet](/endpoints/lending/rotate-operator-wallet), and `marketFees.operator.recipient` reads the wallet in force.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/operator" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/operator`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const canLend = data.status === 'active';
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - Active
+{
+  "success": true,
+  "data": {
+    "status": "active",
+    "operator": {
+      "wallet": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+      "companyName": "Example Lender AG",
+      "profileImage": null,
+      "isBank": true,
+      "verified": true,
+      "instanceName": "Lending desk",
+      "walletLabel": "Treasury",
+      "acceptedAt": "2026-09-26T10:41:12.000Z",
+      "acceptTxHash": "0x5d8e2a41c7b93f06e1d4a8c25b7f90e3d6a1c48b2e5f7093a4d6c81b5e2f7a90"
+    },
+    "actions": [
+      {
+        "id": "sectx_0192",
+        "txType": "CURATOR_ACCEPTED",
+        "userAddress": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "amount": "0",
+        "txHash": "0x5d8e2a41c7b93f06e1d4a8c25b7f90e3d6a1c48b2e5f7093a4d6c81b5e2f7a90",
+        "timestamp": "2026-09-26T10:41:12.000Z"
+      }
+    ],
+    "actionsFailed": false,
+    "fees": {
+      "shareBps": "800",
+      "recipient": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+      "payable": "0.0",
+      "payableRaw": "0",
+      "asset": {
+        "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+        "symbol": "USDC",
+        "decimals": 6
+      },
+      "sweepable": false,
+      "readFailed": false,
+      "fixedShare": true
+    },
+    "marketFees": {
+      "readFailed": false,
+      "asset": {
+        "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+        "symbol": "USDC",
+        "decimals": 6
+      },
+      "feeShareGeneration": "FIXED_SHARES",
+      "operator": {
+        "shareBps": "800",
+        "recipient": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "payable": "0.0",
+        "payableRaw": "0",
+        "asset": {
+          "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+          "symbol": "USDC",
+          "decimals": 6
+        },
+        "sweepable": false,
+        "readFailed": false,
+        "fixedShare": true
+      },
+      "distributor": {
+        "shareBps": "500",
+        "payable": "0.0",
+        "payableRaw": "0",
+        "registeredVaults": [],
+        "reRegistration": {
+          "pending": [],
+          "unread": [],
+          "predatingDistributor": []
+        },
+        "operatorPosition": {
+          "provider": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+          "claim": "0.0",
+          "claimRaw": "0",
+          "sweepable": false
+        },
+        "paidTo": "VAULTS_AND_OPERATOR_WALLET"
+      },
+      "protocol": {
+        "payable": "0.0",
+        "payableRaw": "0",
+        "destination": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+        "sweepable": false
+      },
+      "infrastructure": {
+        "payable": "0.0",
+        "payableRaw": "0",
+        "destination": "0x7d3a5e19c2b84f60a1e9d7c3b5f28a4e6c0d1b93",
+        "sweepable": false
+      }
+    }
+  }
+}
+```
+```json Response - Awaiting
+{
+  "success": true,
+  "data": {
+    "status": "awaiting",
+    "operator": null,
+    "actions": [],
+    "actionsFailed": false,
+    "fees": null,
+    "marketFees": null
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+
+A factory or ledger that cannot be read does not fail the call. The reconciliation is skipped, and an unreadable ledger or fee read is flagged in `actionsFailed` or `marketFees.readFailed`.

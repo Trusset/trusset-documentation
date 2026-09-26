@@ -1,0 +1,128 @@
+---
+title: 'Get Oracle History'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/oracle-history'
+description: 'List recorded price attestations beside the prices that landed on the oracle'
+---
+
+Returns two lists, newest first. `signed` holds the price attestations recorded for the market, through [Record Price Attestation](/endpoints/lending/record-price-attestation) or the Trusset app. `pushed` holds every price that actually landed on the oracle, read from its `PriceUpdated` events. An attestation that has landed carries the `pushedTxHash` of the transaction that landed it.
+
+Neither list is complete on its own. `signed` shows only attestations someone recorded; a signature from [Sign Price](/endpoints/lending/sign-price) that was never recorded is absent. `pushed` never holds the price set at deployment, which emits no event. An `ORACLE`-priced market reads an external feed, so its `pushed` list stays empty.
+
+## How the Pushed List Stays Current
+
+Each read first sweeps the oracle's events forward from where the last sweep stopped, then answers from the stored rows. The first sweep starts at the deployment block, or 200,000 blocks back when the deployment transaction is not on record. The sweep stays 3 blocks behind the chain head, so a push from the last few blocks may not appear yet. It runs at most once every 15 seconds per market and reads at most 400 events per run, so a long backlog can take several reads to catch up. A failed sweep leaves the stored rows unchanged and the read still answers.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Query Parameters
+
+<ParamField query="limit" type="integer" default="20">
+  Entries per list, from 1 to 100. Values above 100 are lowered to 100; zero or a non-numeric value falls back to 20.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="signed" type="object[]">
+      Recorded attestations, newest signed timestamp first.
+      <Expandable>
+        <ResponseField name="id" type="string">Attestation ID.</ResponseField>
+        <ResponseField name="price" type="string">The attested price as a decimal string.</ResponseField>
+        <ResponseField name="priceWei" type="string">The same price in base units.</ResponseField>
+        <ResponseField name="attestedAt" type="string">The signed timestamp, as an ISO 8601 string.</ResponseField>
+        <ResponseField name="validUntil" type="string">The signed expiry, as an ISO 8601 string.</ResponseField>
+        <ResponseField name="signer" type="string">The key that signed.</ResponseField>
+        <ResponseField name="source" type="string">`API` or `APP`, the face it was recorded through.</ResponseField>
+        <ResponseField name="pushedTxHash" type="string">The transaction that landed this attestation, or `null`.</ResponseField>
+        <ResponseField name="pushedAt" type="string">When that transaction was mined, or `null`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="pushed" type="object[]">
+      Prices that landed on the oracle, newest block first.
+      <Expandable>
+        <ResponseField name="id" type="string">Row ID.</ResponseField>
+        <ResponseField name="price" type="string">The new price as a decimal string.</ResponseField>
+        <ResponseField name="priceWei" type="string">The same price in base units.</ResponseField>
+        <ResponseField name="previousPrice" type="string">The price it replaced, as a decimal string.</ResponseField>
+        <ResponseField name="updater" type="string">The wallet that sent a pushed price, or the key that signed a signed price.</ResponseField>
+        <ResponseField name="txHash" type="string">The transaction that landed it.</ResponseField>
+        <ResponseField name="blockNumber" type="integer">Its block.</ResponseField>
+        <ResponseField name="pushedAt" type="string">The block's time, as an ISO 8601 string.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="syncedBlock" type="integer">The block the event mirror had reached when this read started, before its own sweep. `null` before the first sweep.</ResponseField>
+    <ResponseField name="settlementSymbol" type="string">The borrow asset's symbol, or `null`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/oracle-history?limit=20" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/oracle-history?limit=20`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "signed": [
+      {
+        "id": "clx4k2p9e0001m8tq3v7h5z2a",
+        "price": "105.4",
+        "priceWei": "105400000",
+        "attestedAt": "2024-06-15T10:00:00.000Z",
+        "validUntil": "2024-06-15T10:05:00.000Z",
+        "signer": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70",
+        "source": "API",
+        "pushedTxHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+        "pushedAt": "2024-06-15T10:01:12.000Z"
+      }
+    ],
+    "pushed": [
+      {
+        "id": "clx4k3a1f0004m8tq9c2d6e1b",
+        "price": "105.4",
+        "priceWei": "105400000",
+        "previousPrice": "104.82",
+        "updater": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70",
+        "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+        "blockNumber": 6120451,
+        "pushedAt": "2024-06-15T10:01:12.000Z"
+      }
+    ],
+    "syncedBlock": 6120448,
+    "settlementSymbol": "USDC"
+  }
+}
+```
+```json Error - No Oracle
+{
+  "success": false,
+  "error": {
+    "code": "NO_ORACLE",
+    "message": "No oracle is configured for this market"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_ORACLE` | `400` | The market records no oracle address |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `ORACLE_HISTORY_FAILED` | `500` | The history could not be read and no more specific code applied |

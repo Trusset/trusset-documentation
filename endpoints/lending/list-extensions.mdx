@@ -1,0 +1,123 @@
+---
+title: 'List Extensions'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/extensions'
+description: 'List the maturity extension proposals on a market and where each one stands'
+---
+
+Lists every maturity extension proposal on the market, newest first. The list is read from the chain, where proposal IDs run from `1` without gaps, and merged with what Trusset recorded when each leg was confirmed. A proposal made outside Trusset still appears, with `recorded: false` and no transaction hashes.
+
+Proposals are made with [Propose Extension](/endpoints/lending/propose-extension) and moved on with [Extension Action](/endpoints/lending/extension-action).
+
+<Note>
+  `chainReadFailed: true` means the chain did not answer and only recorded proposals are listed. Their state is then the last one Trusset saw, and a proposal made outside Trusset is missing. Retry before acting on it.
+</Note>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="proposals" type="array">
+      Every proposal, ordered by `proposalId` from highest to lowest.
+      <Expandable>
+        <ResponseField name="proposalId" type="string">Proposal ID on the market. Use it with [Extension Action](/endpoints/lending/extension-action).</ResponseField>
+        <ResponseField name="kind" type="string">`LOAN` for one loan, `BATCH` for every loan open when it was proposed, `FLOOR` for a raise of the market due floor.</ResponseField>
+        <ResponseField name="loanId" type="string">The loan a `LOAN` proposal extends. `null` for the other kinds.</ResponseField>
+        <ResponseField name="newDueAt" type="string">The proposed maturity, in unix seconds.</ResponseField>
+        <ResponseField name="maxLoanId" type="string">For a `BATCH`, the loan counter when it was proposed: it reaches loans `1` to `maxLoanId` only. `null` for the other kinds.</ResponseField>
+        <ResponseField name="validUntil" type="string">Unix seconds after which an unconfirmed proposal can no longer be confirmed, seven days after it was made.</ResponseField>
+        <ResponseField name="confirmed" type="boolean">`true` for a `BATCH` the admin confirmed, which now waits for its loans to be applied in pages. A `LOAN` or `FLOOR` proposal applies on confirmation and moves straight to `consumed` instead.</ResponseField>
+        <ResponseField name="consumed" type="boolean">`true` once a `LOAN` or `FLOOR` proposal was applied, or once any proposal was cancelled.</ResponseField>
+        <ResponseField name="cancelled" type="boolean">`true` when Trusset recorded a cancellation. `null` for a proposal Trusset has no record of, because the chain does not tell a cancellation from an application.</ResponseField>
+        <ResponseField name="expired" type="boolean">`true` for a proposal that was neither confirmed nor consumed before `validUntil`. A confirmed `BATCH` never expires.</ResponseField>
+        <ResponseField name="appliedCount" type="integer">Recorded transactions that extended at least one loan under this proposal. `null` when Trusset has no record of the proposal.</ResponseField>
+        <ResponseField name="proposedBy" type="string">The wallet that sent the proposal. `null` when not recorded.</ResponseField>
+        <ResponseField name="proposeTxHash" type="string">The proposing transaction. `null` when not recorded.</ResponseField>
+        <ResponseField name="confirmTxHash" type="string">The confirming transaction. `null` when not recorded or not confirmed.</ResponseField>
+        <ResponseField name="cancelTxHash" type="string">The cancelling transaction. `null` when not recorded or not cancelled.</ResponseField>
+        <ResponseField name="recorded" type="boolean">Whether Trusset recorded the proposal through [Confirm Extension Transaction](/endpoints/lending/confirm-extension-transaction).</ResponseField>
+        <ResponseField name="recordedByThisInstance" type="boolean">Whether your instance recorded it, rather than another instance that operates the same market. `null` when not recorded.</ResponseField>
+        <ResponseField name="onChain" type="boolean">Whether the chain read returned this proposal. `false` means the state shown is Trusset's record.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="chainReadFailed" type="boolean">`true` when the chain could not be read and only recorded proposals are listed.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/extensions" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/extensions`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const awaitingPages = data.proposals.filter(p => p.kind === 'BATCH' && p.confirmed && !p.consumed);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "proposals": [
+      {
+        "proposalId": "2",
+        "kind": "BATCH",
+        "loanId": null,
+        "newDueAt": "1797292800",
+        "maxLoanId": "14",
+        "validUntil": "1790121600",
+        "confirmed": true,
+        "consumed": false,
+        "cancelled": false,
+        "expired": false,
+        "appliedCount": 1,
+        "proposedBy": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+        "proposeTxHash": "0x61e2a05a0aedb4ad8aa58cae916a6a42589f454c439929c0510318b9ae54c6eb",
+        "confirmTxHash": "0xd06c7e62bde9120ec4a9af9161f7cab1a5d35abc7ce2ecf82b9634ec8566ed51",
+        "cancelTxHash": null,
+        "recorded": true,
+        "recordedByThisInstance": true,
+        "onChain": true
+      },
+      {
+        "proposalId": "1",
+        "kind": "LOAN",
+        "loanId": "5",
+        "newDueAt": "1795000000",
+        "maxLoanId": null,
+        "validUntil": "1789600000",
+        "confirmed": false,
+        "consumed": true,
+        "cancelled": null,
+        "expired": false,
+        "appliedCount": null,
+        "proposedBy": null,
+        "proposeTxHash": null,
+        "confirmTxHash": null,
+        "cancelTxHash": null,
+        "recorded": false,
+        "recordedByThisInstance": null,
+        "onChain": true
+      }
+    ],
+    "chainReadFailed": false
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | The `marketId` path segment is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |

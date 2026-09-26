@@ -1,0 +1,166 @@
+---
+title: 'Set Distributor Approval'
+api: 'POST /lending-external-securities-v2/api/vaults/{vaultId}/distributor-approval'
+description: 'Calldata for the vault owner to approve or withdraw a distributor'
+---
+
+Builds `setDistributorApproval(distributor, approved)` on the vault. On the current vault implementation a deposit may bind a new holder only to the vault owner or to an approved distributor. Approving a distributor lets deposits that name it bind new holders to it and credit it the distributor share on their shares.
+
+Withdrawing an approval stops new bindings only. Holders already bound to that distributor stay bound, and their shares keep crediting it. The API builds a deposit brought by an unapproved distributor without naming it. The deposit goes through, and the distributor share on an unbound holder's shares goes to the vault operator.
+
+Only the vault owner can sign, and only the instance that operates the vault can build the call. The vault owner needs no approval of its own. A distributor instance finds the wallet to approve as `distributor` on [Get Earnings](/endpoints/vaults/get-earnings), and the operator's view there lists every approval in `operator.approvedDistributors`.
+
+## Path Parameters
+
+<ParamField path="vaultId" type="string" required>Vault ID.</ParamField>
+
+## Body Parameters
+
+<ParamField body="distributor" type="string">
+  The distributor wallet to approve or withdraw, as a `0x` address. Required to build the calldata. Not the zero address and not the vault owner.
+</ParamField>
+
+<ParamField body="approved" type="boolean">
+  `true` to approve, `false` to withdraw the approval. Required to build the calldata.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The wallet that will sign. When given, it must be the vault owner. When omitted, the vault owner must be one of your instance's verified wallets.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined transaction, `0x` and 64 hex characters. Send it to confirm and record the result; nothing else is needed then. Omit it to receive the calldata.
+</ParamField>
+
+The route validates every field of the schema it shares with the other distributor actions, even where this action ignores it.
+
+## Response Fields
+
+The calldata response:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">`to` (the vault), `data`, `value` (`"0"`) and `chainId`.</ResponseField>
+    <ResponseField name="functionName" type="string">`setDistributorApproval`.</ResponseField>
+    <ResponseField name="requiredSigner" type="string">The vault owner. The vault refuses every other signer.</ResponseField>
+    <ResponseField name="signer" type="string">The same owner wallet, as the API resolved it.</ResponseField>
+    <ResponseField name="distributor" type="string">The distributor, lowercased.</ResponseField>
+    <ResponseField name="approved" type="boolean">The approval this transaction sets.</ResponseField>
+    <ResponseField name="description" type="string">What the change does, in words.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`endpoint`, this route with the vault ID filled in, and `field`, always `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+The confirmation response reads the `DistributorApprovalSet` event from the receipt, so `distributor` and `approved` state what the chain recorded, not what the request asked for:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">The verified hash.</ResponseField>
+    <ResponseField name="action" type="string">`approval`.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet that signed.</ResponseField>
+    <ResponseField name="amount" type="string">Always `"0.0"`: an approval moves no money.</ResponseField>
+    <ResponseField name="amountRaw" type="string">Always `"0"`.</ResponseField>
+    <ResponseField name="events" type="array">The distributor events the vault emitted in the transaction, here `APPROVAL_SET`.</ResponseField>
+    <ResponseField name="distributor" type="string">The distributor the event names.</ResponseField>
+    <ResponseField name="approved" type="boolean">The approval the event set.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd/distributor-approval" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"distributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1", "approved": true, "signerAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/vaults/${vaultId}/distributor-approval`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ distributor, approved: true, signerAddress: await ownerSigner.getAddress() })
+});
+const { data } = await res.json();
+
+const tx = await ownerSigner.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch(url, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.hash }) });
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+      "data": "0x2d5ce3e6...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "setDistributorApproval",
+    "requiredSigner": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "distributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+    "approved": true,
+    "description": "Approve 0x83fd50068b2fc776bbf237f8163495b2247408c1 as a distributor of this vault: a deposit it brings binds the depositor to it and credits it the distributor share of the interest on that depositor's shares",
+    "signer": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd/distributor-approval",
+      "field": "txHash"
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0x5a15932fed25709f8620ca3c5bcf96b7f1770e45f4bf571f387c962d15c85b35",
+    "action": "approval",
+    "signer": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "amount": "0.0",
+    "amountRaw": "0",
+    "events": ["APPROVAL_SET"],
+    "distributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+    "approved": true
+  }
+}
+```
+```json Error - Not Operator
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "NOT_VAULT_OPERATOR",
+    "message": "Only the instance that operates this vault approves its distributors."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `distributor` or `approved` is missing when building, or a body field is malformed |
+| `INVALID_DISTRIBUTOR` | `400` | `distributor` is the zero address |
+| `NOT_VAULT_OPERATOR` | `403` | Your instance does not operate this vault |
+| `NOT_VAULT_OWNER` | `403` | `signerAddress` is not the vault owner, or none was given and the owner is not a verified wallet of your instance |
+| `VAULT_NOT_FOUND` | `404` | No such vault, or it is not visible to your instance |
+| `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address on record |
+| `VAULT_UPGRADE_REQUIRED` | `409` | The vault runs an implementation without approvals, which binds a holder to any distributor a deposit names. The operator adopts the current implementation through the seven-day upgrade notice |
+| `DISTRIBUTOR_IS_OWNER` | `409` | The vault owner is admitted as a distributor without an approval |
+| `APPROVAL_UNCHANGED` | `409` | The distributor already has the approval requested |
+| `VAULT_OWNER_UNREADABLE` | `503` | The vault owner could not be read, so no transaction is offered. Retry shortly |
+| `VAULT_STATE_UNAVAILABLE` | `503` | The vault implementation, the current approval, or your standing in an unpublished vault could not be read. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read, so nothing was decided. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | The vault records or your instance's verified wallets could not be read. Retry shortly |
+| `VAULT_DISTRIBUTOR_ACTION_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |
+
+Confirming with `txHash` can also return `TX_NOT_FOUND` (`404`), `TX_REVERTED`, `TX_WRONG_TARGET` or `TX_WRONG_FUNCTION` (`400`), and `TX_NOT_VERIFIED` (`400`) when the receipt carries no `DistributorApprovalSet` event from this vault. See [transaction verification errors](/endpoints/introduction#confirm-a-transaction).

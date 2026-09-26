@@ -135,6 +135,8 @@ Both glosses are correct. Both names are misleading, because there is no relayer
 
 Unrelated and not affected: `keeperRelayer` in `licenses/commodities/`, which is an on-chain configuration address with its own "receives no implicit on-chain privileges" disclaimer.
 
+**Update, v2 pass.** The Lending reference now documents the v2 surface (item 14). There `RELAYER_NOT_CONFIGURED` no longer occurs: the oracle routes answer `WALLET_NOT_CONFIGURED` instead. `relayerAddress` is still a live response field, on `deploy-market`, `get-configuration-status`, `get-setup-steps` and `get-upgrade-status`, with the same gloss. The question above stands.
+
 ---
 
 ## 7. A locked sentence uses "we", which the style guide bans
@@ -233,6 +235,120 @@ The `secrets.enc` half is true and stays. No endpoint accepts it.
 The replacement states the same protection accurately. A commitment carries no value and a STARK reveals nothing beyond the predicate, so uploading them discloses no personal data; the file that would is `secrets.enc`, which is never accepted.
 
 **Needed:** confirmation from whoever owns the regulatory argument that the replacement wording is the one to stand behind. Until then the page is accurate and the lock entry in `INVENTORY.md` is stale.
+
+---
+
+## 14. The Lending and Vaults reference moved to the v2 surface
+
+**Files:** every page under `endpoints/lending/` and `endpoints/vaults/`, plus `endpoints/asset-register/`.
+
+Every page pointed at `/lending-external-securities/api`, the v1 surface, while describing features only v2 has: rate modes, loan terms, the `ORACLE` price source. Every call written from those pages reached the wrong product. The reference now documents `/lending-external-securities-v2/api` and nothing else. Every x-api-key route the v2 routers mount has exactly one page, 157 in all, and 85 of them are new.
+
+Two facts the pages do not forecast:
+
+- The backend still mounts v1 at `/lending-external-securities`. It is no longer documented anywhere. Nothing on the site says whether it is deprecated, frozen or retired.
+- The v2 factory is configured on Ethereum Sepolia only. Every production instance gets `503 SECURITY_LENDING_V2_NOT_CONFIGURED`, and liquidation bots `503 SHIM_NOT_CONFIGURED`. The introduction states the code without naming networks, so it stays true once mainnet is deployed.
+
+**Needed:** a decision on announcing v1's status, and a heads-up to the docs owner when v2 reaches mainnet.
+
+---
+
+## 15. The Tier 1 Lending introduction was rewritten against v2
+
+**File:** `endpoints/lending/introduction.mdx`.
+
+INVENTORY registers this page as Tier 1: no sentence-level rewording. Most of its factual sentences were false for v2. The page claimed adoption could not be done with an API key and that rate mode and terms were fixed at deployment. It also claimed `borrowableLiquidity` included vault capacity and that liquidity providers deposit directly. They were corrected against the backend and the contracts, not restyled.
+
+Locked sentences kept byte for byte, because they are still true: "Nothing is submitted on your behalf.", "Trusset holds no role.", "Trusset is not involved.", the 7 day write-off sentence, and "Write-off does not recover collateral from the router, so dispose of or return the collateral first."
+
+Two changed:
+
+- "There is no auto-sell for external securities, because these instruments have no on-platform venue." The first clause is true and kept. The reason clause is not: a market can now wire its own on-chain Dutch auction venue, and the docs call it that. The sentence now reads "There is no auto-sell for external securities.", followed by a sentence saying the auction venue sells only what a liquidation seizes into it, and that nothing moves from the router back into an auction.
+- "Trusset never holds, fetches or uses a private key, and no endpoint signs on your behalf." Not registered as locked, but a negative capability claim. The backend fetches Trusset's own operations key, `ADMIN_PRIVATE_KEY`, to derive the platform address. It does so when `PLATFORM_ADMIN_ADDRESS` is unset (`services/lending-external-securities-v2/rolePositionService.js:165-182`). Trusset also operates the factory owner key. The claim that matters is about the client's keys, so it now reads "No endpoint signs on your behalf, and Trusset never asks for, holds or uses a private key of yours."
+
+The same fact bears on the locked sentence "Trusset holds no private key and has no signer." in `endpoints/introduction.mdx`. Read literally, it is contradicted by the operations key and the factory owner key. It was not edited: the page is outside the lending scope and the lock holds.
+
+**Needed:** re-approval of the introduction by whoever owns the regulatory argument, and a decision on the global sentence. Setting `PLATFORM_ADMIN_ADDRESS` everywhere would stop the backend fetching the key at all.
+
+---
+
+## 16. A locked negative capability claim about the insurance fund was false on v2
+
+**File:** `endpoints/lending/settle-liquidation.mdx`.
+
+Locked: "It is not automatically covered by the insurance fund, which only steps in on a timeout write-off."
+
+Since 2026-09-18 the market draws on its insurance fund at every first settlement that retains less than the record's claim, in the same transaction (`LiquidationLib.sol` `_settle` and `_drawReserve`). Only principal neither the sale nor the fund covers is the pool's loss. The sentences before the locked one already said so, so the paragraph contradicted itself.
+
+The locked sentence was replaced with: "A record that is never settled draws on the fund the same way when Handle Liquidation Timeout writes it off after 7 days." Same reasoning as item 13: a verified-false statement about who bears a loss is worse than an unapproved edit.
+
+**Needed:** confirmation of the replacement wording.
+
+---
+
+## 17. A locked 7 day sentence named the wrong starting point
+
+**File:** `endpoints/lending/settle-expired-auction.mdx`.
+
+Locked: "The 7 day write-off clock starts at this point, not at the original liquidation."
+
+The number is right. The starting point is not: on v2 the market opens its record when the liquidation seizes collateral into the auction venue, and the write-off reads that record's timestamp (`LiquidationLib.sol` `_auctionStart`, `timeout`). Settling the expired auction does not restart it. The sentence now reads: "The 7 day write-off clock does not restart at this point. It runs from the original liquidation, when the market opened its record and the auction began, so the router-side sale has whatever remains of those 7 days."
+
+Two neighbouring 7 day sentences were kept byte for byte, each followed by a qualifying sentence. On `get-pending-liquidations.mdx` the qualifier covers the remainder of an expired auction. On `get-liquidation-stats.mdx` it says the fund pays only what its balance allows.
+
+**Needed:** confirmation of the replacement wording.
+
+---
+
+## 18. Two locked sentences on update-config were overstated or ambiguous
+
+**File:** `endpoints/lending/update-config.mdx`.
+
+"A fund that publishes NAV daily needs `maxPriceAge` above 86400 seconds, or every loan action will revert against a stale price between publications." The bound is right. "Every loan action" is not: repayment and adding collateral never read the price. The sentence now names the four actions that do: opening loans, drawing more, withdrawing collateral against open debt, and liquidating. `maxPriceAge` is also an oracle setting on v2, not part of the market config, and the page says so.
+
+"The contract caps each change at 10 percent per call." Kept byte for byte. The cap is 10 percentage points of the threshold, not 10 percent of its value, so a clarifying sentence follows it.
+
+**Needed:** confirmation of the first replacement, and a decision on restating the second as "10 percentage points".
+
+---
+
+## 19. Two sentences on sync-oracle were false on v2
+
+**File:** `endpoints/lending/sync-oracle.mdx`.
+
+INVENTORY counts three locked sentences on this page and names only one, the 5000 basis point deviation bound, which is kept byte for byte. Two other sentences were replaced, and one of them is probably a registered lock:
+
+- "There is no automatic price feed for these markets." False: an `ORACLE` market reads an external feed, and this endpoint refuses it with `EXTERNAL_FEED_ACTIVE`.
+- "The check is skipped when the oracle has never been priced, so the first push after deployment can be any positive value." False: every push-mode oracle is initialized with a positive price (`SecurityPriceOracle.initialize`), so the first push is measured against it.
+
+The page also now states the second circuit breaker v2 added: a rolling one-hour window bounded by the same `maxDeviationBps`.
+
+**Needed:** the list of the page's three locked sentences, so INVENTORY can record which one was corrected.
+
+---
+
+## 20. Backend behaviour documented as it is, pending a decision
+
+The pages describe what the code does. These points look unintended, and each page is worded to stay true after a fix, or carries a short note:
+
+- `realizationReady` on Get Auction Module requires the venue to be authorized on the insurance fund, but the wiring flow never offers that leg. A venue wired through the API therefore reads `false` for good. The non-fungible family already dropped the condition.
+- The chain binding middleware stops at the first object carrying `to` and `data`. On roughly ten setter routes that spread the builder result into `data`, `chainId` and `value` land on `data` and `data.transaction` carries only `{ to, data }`. The pages show the fields where they land.
+- Set Vault Liquidity and Register Vault have no `txHash` confirm leg on the x-api-key face. The app face has one.
+- Close Liquidation refuses a record marked `WRITTEN_OFF`. The router record of a write-off made through this API can therefore never be closed through it, and the router never becomes quiet enough to rotate its sale recipient.
+- The v2 hook service re-arms the v1 job name, so a new or edited monitor waits for the scheduler's next wake-up.
+- Confirm Bot Deployment writes a duplicate record when called twice, and its signer check cannot fire.
+- The API's nomination check reads the factory's deployer register, which the contract says it no longer consults.
+- The contracts repository's own documentation is stale in places the pages contradict. `docs/OPERATOR-CONFIG.md` says a binding `CLAMPED` cap suspends borrows, and that the auction venue checks every bidder against the identity registry. `contracts/evm/README.md` says the sale recipient has no setter and that `settleExpiredAuction` needs `LIQUIDATOR_ROLE`. It also says a non-vault provider's distributor slice goes to the operator wallet. The Solidity says otherwise in each case, and the pages follow the Solidity.
+
+**Needed:** a decision per item from the backend and contract owners. None blocks the documentation.
+
+---
+
+## 21. The v2 pass leaves one style convention to confirm
+
+`MISSING_MARKET_ID` (`400`, a market ID longer than 100 characters) is now listed in the error table of every page keyed by a market ID, 110 in all. Before this pass no page listed it. Listing it everywhere is consistent; covering it once in the introduction and removing it from the tables would be shorter.
+
+**Needed:** a preference. Either is a mechanical change.
 
 ---
 
