@@ -4,7 +4,11 @@ api: 'GET /customers/api/identity/claims/{walletAddress}'
 description: 'Every claim on an identity, read from the registry'
 ---
 
-Returns the claims the registry holds for a wallet. This is the raw chain read. For the same claims joined with the proof that filed each one, use [List Proofs](/endpoints/customers/list-proofs).
+Returns the active claims the registry holds for a wallet. This is the raw chain read. For the same claims joined with the proof that filed each one, use [List Proofs](/endpoints/customers/list-proofs).
+
+<Warning>
+  A failed chain read returns an empty `claims` array with a `200`, not an error. An empty list does not prove the wallet holds no claims. Retry before acting on one.
+</Warning>
 
 ## Path Parameters
 
@@ -15,18 +19,27 @@ Returns the claims the registry holds for a wallet. This is the raw chain read. 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="walletAddress" type="string">The subject, checksummed.</ResponseField>
-    <ResponseField name="claims" type="array">One entry per claim on the registry, each with its `claimType`, `claimTypeLabel`, `dataHash`, `issuer`, `issuedAt` and `expiry`.</ResponseField>
+    <ResponseField name="claims" type="array">One entry per active claim, each with its `claimType` index, `claimTypeLabel`, `dataHash`, `issuer`, `issuedAt`, `expiry` and `active`, which is always `true`. Revoked claims are not returned. On an ERC-3643 register, `issuer` is the trusted issuer contract, `issuedAt` and `expiry` are `0`, and each entry adds `topic`, `claimId` and `onchainId`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  A claim's `dataHash` is the leaf hash from the bundle that filed it, when it came from a proof. That is what ties an on-chain claim back to a specific leaf in a specific bundle, and it is why the hash is worth recording alongside the bundle.
+  A claim's `dataHash` is the leaf hash from the bundle that filed it when it came from a proof, or the root itself for the `KYC` claim. That is what ties an on-chain claim back to a specific leaf in a specific bundle, and it is why the hash is worth recording alongside the bundle.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/customers/api/identity/claims/0xAbCdEf0123456789AbCdEf0123456789AbCdEf01" \
+curl "https://api.trusset.org/customers/api/identity/claims/0xabCDeF0123456789AbcdEf0123456789aBCDEF01" \
   -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const wallet = '0xabCDeF0123456789AbcdEf0123456789aBCDEF01';
+const res = await fetch(`https://api.trusset.org/customers/api/identity/claims/${wallet}`, {
+  headers: { 'X-API-Key': 'trusset_your_key_here' }
+});
+const { data } = await res.json();
+
+const residency = data.claims.find((c: any) => c.claimTypeLabel === 'RESIDENCY');
 ```
 </RequestExample>
 
@@ -35,17 +48,23 @@ curl "https://api.trusset.org/customers/api/identity/claims/0xAbCdEf0123456789Ab
 {
   "success": true,
   "data": {
-    "walletAddress": "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
+    "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
     "claims": [
       {
         "claimType": 3,
         "claimTypeLabel": "RESIDENCY",
         "dataHash": "0x41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b9f2c",
-        "issuer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+        "issuer": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
         "issuedAt": 1788696000,
-        "expiry": 1820246400
+        "expiry": 1820246400,
+        "active": true
       }
     ]
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-06T12:00:00.000Z"
   }
 }
 ```
@@ -56,4 +75,4 @@ curl "https://api.trusset.org/customers/api/identity/claims/0xAbCdEf0123456789Ab
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_ADDRESS` | `400` | `walletAddress` is not a valid address |
-| `CLAIMS_FAILED` | `500` | The registry could not be read |
+| `CLAIMS_FAILED` | `500` | The register could not be resolved for this instance, for example an own-register binding without a valid address |

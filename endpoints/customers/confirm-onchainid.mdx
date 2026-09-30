@@ -1,0 +1,148 @@
+---
+title: 'Confirm ONCHAINID'
+api: 'POST /customers/api/identity/onchainid/confirm'
+description: 'Check a mined ONCHAINID deployment and record it for a wallet'
+---
+
+Checks a mined ONCHAINID deployment and records the identity against a customer's wallet. [Build Pending Registration](/endpoints/customers/build-pending-registration) then uses it instead of asking for another deployment. Recording does not register the wallet or verify it.
+
+<Warning>
+  Nothing in a deployment names the customer's wallet, so this call cannot tell which wallet it was built for. It records the identity against whatever `walletAddress` you send. Confirm each deployment with the wallet you requested it for.
+</Warning>
+
+## Body Parameters
+
+<ParamField body="walletAddress" type="string" required>
+  The customer's wallet that the deployment was requested for.
+</ParamField>
+
+<ParamField body="txHash" type="string" required>
+  The hash of the deployment transaction, from [Deploy ONCHAINID](/endpoints/customers/deploy-onchainid) or a `DEPLOY_IDENTITY` phase. [Verify Identity](/endpoints/customers/verify-identity), [Batch Verify](/endpoints/customers/batch-verify) and [Build Pending Registration](/endpoints/customers/build-pending-registration) all return one.
+</ParamField>
+
+## What the confirm checks
+
+The checks run in this order, and the first that fails answers.
+
+1. Your instance writes to an ERC-3643 register.
+2. The transaction is mined, succeeded, and created a contract.
+3. Its calldata is the deployment this API plans: the vendored `IdentityProxy` initcode, followed by an implementation authority and a management key. An ONCHAINID deployed with other tooling is refused.
+4. The new contract answers as an ONCHAINID, reports the implementation authority its deployment named, and holds the named management key. A key that cannot be read does not fail this check.
+5. The management key is a wallet registered to your instance, whenever the instance has one.
+6. The wallet is not on the register with a different ONCHAINID, and no other customer of your instance has this one recorded.
+
+The sender is not enforced. It is returned as `from` and written to the audit log, and a sender that is not a registered wallet is only logged.
+
+## What it records
+
+- The customer record of the wallet gets `metadata.onchainId` and `metadata.onchainIdTxHash`. A wallet without a record gets one, with status `pending`.
+- Every `PENDING` queue row of the wallet gets `metadata.onchainId`, so the next build uses it.
+- The customer audit log gets `ONCHAINID_DEPLOYED`, with the identity, the transaction, its sender, the management key and the implementation authority.
+
+A second call with the same transaction returns `alreadyRecorded: true` and writes nothing.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="registerKind" type="string">`TREX`.</ResponseField>
+    <ResponseField name="walletAddress" type="string">The customer's wallet, checksummed.</ResponseField>
+    <ResponseField name="identity" type="string">The ONCHAINID the transaction deployed.</ResponseField>
+    <ResponseField name="txHash" type="string">The deployment transaction.</ResponseField>
+    <ResponseField name="blockNumber" type="integer">The block it was mined in.</ResponseField>
+    <ResponseField name="from" type="string">The wallet that sent it.</ResponseField>
+    <ResponseField name="implementationAuthority" type="string">The implementation authority the ONCHAINID reports.</ResponseField>
+    <ResponseField name="managementKey" type="string">The management key its deployment named.</ResponseField>
+    <ResponseField name="managementKeyHeld" type="boolean">`true` when the ONCHAINID holds that key, or `null` when the key could not be read.</ResponseField>
+    <ResponseField name="alreadyRecorded" type="boolean">`true` when this identity and transaction were already recorded for the wallet, and nothing was written.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/identity/onchainid/confirm" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "walletAddress": "0x96C5822784130360F904372b83E130be4A1894D6",
+    "txHash": "0xc4f68ddf17874848ed516c50e5d4f82309f36d1803150135dccfc9eb3789ade0"
+  }'
+```
+```typescript TypeScript
+const response = await fetch(
+  'https://api.trusset.org/customers/api/identity/onchainid/confirm',
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      walletAddress: '0x96C5822784130360F904372b83E130be4A1894D6',
+      txHash: '0xc4f68ddf17874848ed516c50e5d4f82309f36d1803150135dccfc9eb3789ade0'
+    })
+  }
+);
+const { success, data, error } = await response.json();
+
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+console.log(`${data.walletAddress} now resolves to ONCHAINID ${data.identity}`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "registerKind": "TREX",
+    "walletAddress": "0x96C5822784130360F904372b83E130be4A1894D6",
+    "identity": "0x8986b6a837ccA6c6F6e257526296f07b9fe3fA9f",
+    "txHash": "0xc4f68ddf17874848ed516c50e5d4f82309f36d1803150135dccfc9eb3789ade0",
+    "blockNumber": 9312054,
+    "from": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+    "implementationAuthority": "0x77B26Fa7a8a7907134c56c83a56728Fb7C839FbD",
+    "managementKey": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+    "managementKeyHeld": true,
+    "alreadyRecorded": false
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T10:00:00.000Z"
+  }
+}
+```
+```json Error - Management Key
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "MANAGEMENT_KEY_NOT_INSTANCE",
+    "message": "The ONCHAINID 0x8986b6a837ccA6c6F6e257526296f07b9fe3fA9f names 0x6Ef3e5B1Cf631464Ef502E5F332Ef8CD8Be0a911 as its management key, which is neither a registered wallet of this instance nor a claim key on the register's trusted issuer, so it is not an identity this instance deployed."
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T10:00:00.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `walletAddress` is missing or malformed |
+| `INVALID_TX` | `400` | `txHash` is missing or not a 32-byte hex hash |
+| `TX_REVERTED` | `400` | The transaction reverted |
+| `TX_NOT_A_DEPLOYMENT` | `400` | The transaction created no contract |
+| `TX_NOT_A_PLANNED_IDENTITY` | `400` | The calldata is not the deployment this API plans, or the new contract reports a different implementation authority than its deployment named |
+| `TX_NOT_AN_IDENTITY` | `400` | The new contract does not answer as an ONCHAINID |
+| `MANAGEMENT_KEY_NOT_HELD` | `400` | The ONCHAINID does not hold the management key its deployment named |
+| `MANAGEMENT_KEY_NOT_INSTANCE` | `403` | The management key is not a wallet registered to your instance. Not checked while your instance has none |
+| `TX_NOT_FOUND` | `404` | The transaction is not mined yet, or does not exist |
+| `IDENTITY_MISMATCH` | `409` | The wallet is on the register with a different ONCHAINID |
+| `IDENTITY_IN_USE` | `409` | This ONCHAINID is already recorded for another wallet of your instance |
+| `OWN_REGISTRY_NOT_CONFIGURED` | `409` | Your instance is set to its own register but holds no valid register address |
+| `REGISTER_OPERATION_UNSUPPORTED` | `409` | Your instance writes to a Trusset register. The same answer comes back when the register could not be read to tell its interface, so retry once before relying on it |
+| `CHAIN_UNAVAILABLE` | `503` | The transaction could not be read. Retry shortly |
+| `ONCHAINID_CONFIRM_FAILED` | `400` | A chain read failed |
+| `ONCHAINID_CONFIRM_FAILED` | `500` | Any other failure |

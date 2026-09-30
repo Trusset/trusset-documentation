@@ -7,7 +7,13 @@ description: 'File a claim into one of the four assignable slots'
 Writes a claim to the registry from a hash you supply. It covers the four slots that are not backed by a proof.
 
 <Warning>
-  `KYC`, `ACCREDITATION`, `RESIDENCY` and `CITIZENSHIP` are refused here with `PROOF_REQUIRED`. Those four slots are reserved so that a residency attestation always means a proof was verified, rather than something anyone with an API key could write. File them with [Add Claims from Proof](/endpoints/customers/add-claims-from-proof).
+  The registry keeps one claim per slot. Filing a slot replaces the claim already there, whoever wrote it. The API does not check that the wallet holds an active identity, and the register reverts `addClaim` for one that does not.
+</Warning>
+
+<Warning>
+  `KYC`, `ACCREDITATION`, `RESIDENCY` and `CITIZENSHIP` are refused here with `PROOF_REQUIRED`. Those four slots are reserved on this API for claims filed from a proof bundle. File them with [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) or [Attest Proofs](/endpoints/customers/attest-proofs). The one exception is the `RESIDENCY` claim that [Build Pending Registration](/endpoints/customers/build-pending-registration) files with a queued approval.
+
+  The register does not enforce the reservation. A wallet holding `KYC_PROVIDER_ROLE` can write any slot by calling the register directly.
 </Warning>
 
 ## Body Parameters
@@ -19,11 +25,11 @@ Writes a claim to the registry from a hash you supply. It covers the four slots 
 </ParamField>
 
 <ParamField body="dataHash" type="string">
-  The claim's payload as a 32-byte hex hash. What it commits to is your convention.
+  The claim's payload as a 32-byte hex hash, `0x` and 64 hex characters. What it commits to is your convention. When both fields are sent, a valid `dataHash` wins.
 </ParamField>
 
 <ParamField body="dataInput" type="string">
-  A string to derive the hash from instead. It is hashed together with the claim type and the wallet, so the same input under a different slot or subject gives a different hash.
+  A string to derive the hash from instead. The hash is `keccak256` over the UTF-8 JSON `{"claimType":"<name>","data":"<input>","wallet":"<wallet>"}`, with the input trimmed and the wallet lowercased. The same input under a different slot or subject therefore gives a different hash.
 
   Supply this or `dataHash`.
 </ParamField>
@@ -36,26 +42,60 @@ Writes a claim to the registry from a hash you supply. It covers the four slots 
   Send it to confirm. Omit it to receive the calldata.
 </ParamField>
 
+<ParamField body="claimSignature" type="string">
+  ERC-3643 register only. The EIP-191 signature over the `messageHash` from a `SIGN_MESSAGES` answer, as 65-byte hex.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  ERC-3643 register only. The instance wallet that signs the claim. It must hold a CLAIM key on the register's trusted issuer.
+</ParamField>
+
+## Sign and confirm
+
+On the Trusset register the calldata calls `addClaim` on the register, which needs a wallet holding `KYC_PROVIDER_ROLE`. Before handing it out, the API checks that one of your instance's registered wallets holds that role, and refuses with `KYC_PROVIDER_ROLE_MISSING` otherwise. It skips the check when the instance has no registered wallet or the role cannot be read.
+
+The confirm leg requires a mined, successful `addClaim` on this instance's register that targets this wallet. It reads the slot, hash and expiry back out of the transaction and reports them, rather than comparing them with your request. It does not check who signed, and it writes no audit entry.
+
+## On an ERC-3643 register
+
+When the instance is bound to an ERC-3643 register, the claim is written to the subject's ONCHAINID. It needs a signature from a CLAIM key on the register's trusted issuer.
+
+1. The first call answers `SIGN_MESSAGES`. Sign the `messageHash` in `messages` as an EIP-191 personal message with a wallet that holds a CLAIM key on `claimIssuer`.
+2. Call again with `claimSignature`. The answer is `SIGN_TRANSACTIONS`, with one `addClaim` step addressed to the ONCHAINID.
+3. Broadcast it and confirm with `txHash`.
+
+A wallet with no ONCHAINID is refused with `NOT_REGISTERED`. Deploy one first with `POST /customers/api/identity/onchainid` and confirm it, so it is recorded. The claim carries no expiry, so `expiryDays` is not written and the confirm leg reports `expiry: 0`. The role check becomes an agent check on the register.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_CLAIM_SIGNATURE` | `400` | The signature is not 65-byte hex, or does not recover for this identity, topic and data |
+| `REGISTRY_AGENT_MISSING` | `403` | None of your instance's wallets is an agent of the register |
+| `CLAIM_SIGNER_MISSING` | `403` | None of your instance's wallets holds a CLAIM key on the register's trusted issuer |
+| `CLAIM_SIGNER_NOT_TRUSTED` | `403` | `signerAddress`, or the wallet the signature recovers to, holds no CLAIM key on the trusted issuer |
+| `NOT_REGISTERED` | `409` | The wallet has no ONCHAINID yet |
+| `REGISTRY_NO_CLAIM_TOPICS` | `409` | The register requires no claim topics, so there is nothing to file |
+| `REGISTRY_NO_TRUSTED_ISSUER` | `409` | The register names no trusted issuer for its claim topic |
+| `CHAIN_UNAVAILABLE` | `503` | The confirmed transaction could not be read |
+
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Calldata leg only.</ResponseField>
-    <ResponseField name="transaction" type="object">The unsigned registry call. Calldata leg only.</ResponseField>
-    <ResponseField name="functionName" type="string">`addClaim`. Calldata leg only.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. On an ERC-3643 register, `SIGN_MESSAGES` and then `SIGN_TRANSACTIONS`. Calldata leg only.</ResponseField>
+    <ResponseField name="transaction" type="object">The unsigned registry call. Trusset register, calldata leg only.</ResponseField>
+    <ResponseField name="functionName" type="string">`addClaim`. Trusset register, calldata leg only.</ResponseField>
+    <ResponseField name="registerKind" type="string">`TRUSSET` or `TREX`. Calldata leg only.</ResponseField>
+    <ResponseField name="messages" type="array">ERC-3643 register only: the claim message to sign, with `messageHash`, `claimType`, `identity`, `topic` and `claimIssuer`.</ResponseField>
+    <ResponseField name="steps" type="array">ERC-3643 register only: the `addClaim` transaction to the ONCHAINID, once the signature is in.</ResponseField>
     <ResponseField name="walletAddress" type="string">The subject, checksummed.</ResponseField>
     <ResponseField name="claimType" type="string">The slot, by name. On the confirm leg it is read back from the mined transaction, not echoed.</ResponseField>
-    <ResponseField name="dataHash" type="string">The hash written, lowercased.</ResponseField>
-    <ResponseField name="expiry" type="integer">Unix seconds, or `0`.</ResponseField>
+    <ResponseField name="dataHash" type="string">The hash written, lowercased. On the confirm leg it is read back from the mined transaction.</ResponseField>
+    <ResponseField name="expiry" type="integer">Unix seconds, or `0`. On the confirm leg it is read back from the mined transaction.</ResponseField>
     <ResponseField name="txHash" type="string">The confirmed transaction. Confirm leg only.</ResponseField>
     <ResponseField name="gasUsed" type="string">Gas used. Confirm leg only.</ResponseField>
     <ResponseField name="confirmWith" type="object">`{ endpoint, field: "txHash" }`. Calldata leg only.</ResponseField>
   </Expandable>
 </ResponseField>
-
-<Note>
-  The confirm leg reads the claim type, hash and expiry back out of the mined transaction rather than trusting what you sent, and refuses a receipt that targets a different wallet.
-</Note>
 
 <RequestExample>
 ```bash cURL
@@ -63,11 +103,32 @@ curl -X POST "https://api.trusset.org/customers/api/identity/add-claim" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{
-    "walletAddress": "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
+    "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
     "claimType": "SANCTIONS_CHECK",
     "dataInput": "screened-2026-09-06-clear",
     "expiryDays": 90
   }'
+```
+```typescript TypeScript
+const url = 'https://api.trusset.org/customers/api/identity/add-claim';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+const body = {
+  walletAddress: '0xabCDeF0123456789AbcdEf0123456789aBCDEF01',
+  claimType: 'SANCTIONS_CHECK',
+  dataInput: 'screened-2026-09-06-clear',
+  expiryDays: 90
+};
+
+const { data } = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) }).then(r => r.json());
+
+const tx = await signer.sendTransaction(data.transaction);
+await tx.wait();
+
+const confirmed = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ ...body, txHash: tx.hash })
+}).then(r => r.json());
 ```
 </RequestExample>
 
@@ -77,17 +138,41 @@ curl -X POST "https://api.trusset.org/customers/api/identity/add-claim" \
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTION",
-    "transaction": { "to": "0xe9114c40934f6fb6bb317935156b731f7a86d006", "data": "0x..." },
+    "transaction": { "to": "0xE9114c40934f6fB6BB317935156b731f7A86D006", "data": "0x..." },
     "functionName": "addClaim",
-    "description": "Add SANCTIONS_CHECK claim for 0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
-    "walletAddress": "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
+    "description": "Add SANCTIONS_CHECK claim for 0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
+    "registerKind": "TRUSSET",
+    "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
     "claimType": "SANCTIONS_CHECK",
-    "dataHash": "0x5c1980fe3b47a2091d6e8fc0453b71a29d84e6f5027cab3819740de6b25fa3c1",
+    "dataHash": "0x365036c53705a570a416a0e41030d84e9a1fd21928878bb7bddef2f372d7bd54",
     "expiry": 1796472000,
     "confirmWith": {
       "endpoint": "POST /customers/api/identity/add-claim",
       "field": "txHash"
     }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-06T12:00:00.000Z"
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
+    "claimType": "SANCTIONS_CHECK",
+    "dataHash": "0x365036c53705a570a416a0e41030d84e9a1fd21928878bb7bddef2f372d7bd54",
+    "expiry": 1796472000,
+    "txHash": "0x6e2b9d41c07a35f8e1d4b20c9a7f63e5d8c1b0a4f7e2d9c6b3a0f5e8d1c4b7a2",
+    "gasUsed": "74388"
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-06T12:00:00.000Z"
   }
 }
 ```
@@ -98,6 +183,10 @@ curl -X POST "https://api.trusset.org/customers/api/identity/add-claim" \
   "error": {
     "code": "PROOF_REQUIRED",
     "message": "This claim type must be added from a KYC proof; use /claims/from-proof"
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-06T12:00:00.000Z"
   }
 }
 ```
@@ -108,9 +197,17 @@ curl -X POST "https://api.trusset.org/customers/api/identity/add-claim" \
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_ADDRESS` | `400` | `walletAddress` is missing or malformed |
-| `INVALID_CLAIM_TYPE` | `400` | `claimType` is not a slot between 0 and 7 |
+| `INVALID_CLAIM_TYPE` | `400` | `claimType` is not a slot name or an index from 0 to 7 |
 | `PROOF_REQUIRED` | `400` | One of the four reserved slots was named |
 | `INVALID_HASH` | `400` | Neither a valid `dataHash` nor a non-empty `dataInput` was supplied |
 | `INVALID_EXPIRY` | `400` | `expiryDays` is outside 0 to 36500 |
+| `INVALID_TX` | `400` | `txHash` is not a 32-byte hex hash |
+| `TX_REVERTED` | `400` | The transaction reverted |
+| `TX_WRONG_TARGET` | `400` | The transaction was not sent to this instance's register |
+| `TX_WRONG_FUNCTION` | `400` | The transaction does not call `addClaim` |
 | `TX_TARGET_MISMATCH` | `400` | The confirmed transaction targets a different wallet |
-| `ADD_CLAIM_FAILED` | `400` | The claim could not be prepared or confirmed |
+| `KYC_PROVIDER_ROLE_MISSING` | `403` | None of your instance's wallets holds `KYC_PROVIDER_ROLE` on the register. Calldata leg only |
+| `TX_NOT_FOUND` | `404` | The transaction is not mined yet |
+| `OWN_REGISTRY_NOT_CONFIGURED` | `409` | The instance is bound to its own register but has no valid register address |
+| `REGISTRY_PROBE_FAILED` | `503` | The instance's own register, or its trusted issuer, could not be read |
+| `ADD_CLAIM_FAILED` | `400` or `500` | A chain call failed (`400`), or the request failed unexpectedly (`500`) |

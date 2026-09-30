@@ -1,0 +1,169 @@
+---
+title: 'Deploy ONCHAINID'
+api: 'POST /customers/api/identity/onchainid'
+description: 'Unsigned deployment of an identity contract for a wallet on an ERC-3643 register'
+---
+
+Returns the unsigned contract creation that deploys an ONCHAINID for a customer's wallet. An ERC-3643 register looks up an identity contract per wallet, so a wallet needs one before it can be registered. [Build Pending Registration](/endpoints/customers/build-pending-registration) asks for the same deployment in its `DEPLOY_IDENTITY` phase, and this endpoint lets you deploy ahead of time.
+
+Only an instance bound to an ERC-3643 register can use it. A Trusset register needs no ONCHAINID, and the call answers `REGISTER_OPERATION_UNSUPPORTED`.
+
+<Warning>
+  This call asks only the register whether the wallet has an ONCHAINID. It does not see one you deployed and confirmed for a wallet that is not registered yet, and plans a second deployment. Confirming that one as well replaces the recorded identity with the newer one.
+
+  The deployment names no customer wallet, so [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid) cannot tell which wallet it was built for. Confirm each deployment with the `walletAddress` you requested it for.
+</Warning>
+
+The ONCHAINID is created with `managementKey` as its management key. That is an issuer wallet, not the customer's. [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid) refuses a management key that is not a wallet registered to your instance.
+
+## Body Parameters
+
+<ParamField body="walletAddress" type="string" required>
+  The customer's wallet.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The wallet to name as the management key. Omit it to use your instance's primary registered wallet, or the most recently registered one when none is primary. Name a wallet registered to your instance, because the confirm refuses any other with `MANAGEMENT_KEY_NOT_INSTANCE`. A malformed address is ignored.
+</ParamField>
+
+## Broadcast the deployment
+
+Send `transaction.data` as a contract creation, with no `to`. `transaction.create` marks it as one and is not a field to pass to your wallet library.
+
+Any wallet can send it. The confirm checks the management key the deployment names, not the sender.
+
+Then record it with [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid), using the same `walletAddress`. Until then, [Build Pending Registration](/endpoints/customers/build-pending-registration) does not know the identity exists.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="registerKind" type="string">`TREX`.</ResponseField>
+    <ResponseField name="walletAddress" type="string">The customer's wallet, checksummed.</ResponseField>
+    <ResponseField name="exists" type="boolean">`true` when the register already holds an ONCHAINID for the wallet. Nothing is built then.</ResponseField>
+    <ResponseField name="identity" type="string">The registered ONCHAINID. When `exists` is `true` only.</ResponseField>
+    <ResponseField name="registered" type="boolean">Whether the wallet is on the register, which is always `true` when `exists` is. When `exists` is `true` only.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. This field and the ones down to `description` come back only when `exists` is `false`.</ResponseField>
+    <ResponseField name="stepType" type="string">`deployIdentity`.</ResponseField>
+    <ResponseField name="transaction" type="object">`to` (`null`), `data`, and `create` (`true`).</ResponseField>
+    <ResponseField name="functionName" type="string">`IdentityProxy`.</ResponseField>
+    <ResponseField name="managementKey" type="string">The management key the ONCHAINID is created with.</ResponseField>
+    <ResponseField name="implementationAuthority" type="string">The implementation authority the ONCHAINID proxies to, read from an identity already on the register.</ResponseField>
+    <ResponseField name="description" type="string">What the step does.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`endpoint` and `fields` of the confirm. Present in both shapes.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/identity/onchainid" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "walletAddress": "0x96C5822784130360F904372b83E130be4A1894D6",
+    "signerAddress": "0xCD92134767aEC2562be15d2a2062A082dA17dD84"
+  }'
+```
+```typescript TypeScript
+const api = 'https://api.trusset.org/customers/api/identity';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+const walletAddress = '0x96C5822784130360F904372b83E130be4A1894D6';
+
+const built = await fetch(`${api}/onchainid`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ walletAddress, signerAddress: await wallet.getAddress() })
+}).then(r => r.json());
+
+if (!built.data.exists) {
+  const tx = await wallet.sendTransaction({ data: built.data.transaction.data });
+  await tx.wait();
+
+  await fetch(`${api}/onchainid/confirm`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ walletAddress, txHash: tx.hash })
+  });
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Deployment
+{
+  "success": true,
+  "data": {
+    "registerKind": "TREX",
+    "walletAddress": "0x96C5822784130360F904372b83E130be4A1894D6",
+    "exists": false,
+    "action": "SIGN_TRANSACTION",
+    "stepType": "deployIdentity",
+    "managementKey": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+    "implementationAuthority": "0x77B26Fa7a8a7907134c56c83a56728Fb7C839FbD",
+    "transaction": {
+      "to": null,
+      "data": "0x608060405234801561001057600080fd5b50...",
+      "create": true
+    },
+    "functionName": "IdentityProxy",
+    "description": "Deploy the ONCHAINID identity contract for 0x96C5822784130360F904372b83E130be4A1894D6 (management key 0xCD92134767aEC2562be15d2a2062A082dA17dD84)",
+    "confirmWith": {
+      "endpoint": "POST /customers/api/identity/onchainid/confirm",
+      "fields": ["walletAddress", "txHash"]
+    }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T10:00:00.000Z"
+  }
+}
+```
+```json Already Registered
+{
+  "success": true,
+  "data": {
+    "registerKind": "TREX",
+    "walletAddress": "0x96C5822784130360F904372b83E130be4A1894D6",
+    "identity": "0x8986b6a837ccA6c6F6e257526296f07b9fe3fA9f",
+    "exists": true,
+    "registered": true,
+    "confirmWith": {
+      "endpoint": "POST /customers/api/identity/onchainid/confirm",
+      "fields": ["walletAddress", "txHash"]
+    }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T10:00:00.000Z"
+  }
+}
+```
+```json Error - Trusset Register
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "REGISTER_OPERATION_UNSUPPORTED",
+    "message": "This instance writes to a Trusset identity register, which needs no ONCHAINID: verify the wallet directly."
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T10:00:00.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `walletAddress` is missing or malformed |
+| `NO_REGISTERED_WALLET` | `409` | No `signerAddress` was sent and your instance has no registered Ethereum wallet to name as the management key |
+| `ONCHAINID_AUTHORITY_UNKNOWN` | `409` | Neither `signerAddress` nor any registered wallet of your instance is on the register with an ONCHAINID to read the implementation authority from |
+| `OWN_REGISTRY_NOT_CONFIGURED` | `409` | Your instance is set to its own register but holds no valid register address |
+| `REGISTER_OPERATION_UNSUPPORTED` | `409` | Your instance writes to a Trusset register. The same answer comes back when the register could not be read to tell its interface, so retry once before relying on it |
+| `ONCHAINID_BUILD_FAILED` | `400` | A chain read failed |
+| `ONCHAINID_BUILD_FAILED` | `500` | Any other failure |

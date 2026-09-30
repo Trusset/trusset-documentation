@@ -4,17 +4,27 @@ api: 'POST /customers/api/identity/claims/from-proof'
 description: 'Verify a zk-proof bundle and file the claims it backs on the registry'
 ---
 
-Verifies a proof bundle against the subject's on-chain root, derives the claims it backs, and returns the registry calldata for each one. This is the only way the four canonical claim slots are filled.
+Verifies a proof bundle, derives the claims it backs, and returns the registry calldata for each one.
 
-The subject must already be verified on chain, because the bundle is checked against the `kycHash` the registry holds. Verify first with [Verify Identity](/endpoints/customers/verify-identity).
+A bundle always backs a `KYC` claim, whose `dataHash` is the root itself. It backs one more claim per canonical leaf: `RESIDENCY` from `country`, `CITIZENSHIP` from `nationality` and `ACCREDITATION` from `investorType`. A canonical field proved with the wrong circuit is skipped rather than refused. [Add Claim](/endpoints/customers/add-claim) refuses these four slots, so they are filled here or by [Attest Proofs](/endpoints/customers/attest-proofs).
 
 <Warning>
-  Two different roots are checked, and they fail with different codes.
-
-  The root recomputed from the leaves must equal the root the manifest states, or the bundle is internally inconsistent and is refused with `ROOT_MISMATCH`. That root must then equal the root the registry holds for this wallet, or the bundle belongs to a different batch than the one registered and is refused with `HASH_MISMATCH`.
-
-  Neither is negotiable here. To file claims from a newer bundle, rotate the registered root with [Attest Proofs](/endpoints/customers/attest-proofs), which is the endpoint that allows it.
+  The registry keeps one claim per slot. Filing a slot replaces the claim already there, whoever wrote it. Use `selected` to file only the slots you mean to overwrite.
 </Warning>
+
+The subject must already be verified on chain, and a wallet whose `kycHash` on the registry is zero is refused with `NOT_VERIFIED`. Verify first with [Verify Identity](/endpoints/customers/verify-identity). A revoked identity keeps its `kycHash` and passes this check, but the registry reverts every `addClaim` for it.
+
+<Warning>
+  Two root mismatches fail with different codes.
+
+  `ROOT_MISMATCH` means the root recomputed from the leaves differs from the root the manifest states, so the bundle is internally inconsistent. `HASH_MISMATCH` means the manifest's root differs from the root the registry holds for this wallet, so the bundle belongs to a different batch than the one registered.
+
+  To file claims from a newer bundle, rotate the registered root with [Attest Proofs](/endpoints/customers/attest-proofs), which is the endpoint that allows it.
+</Warning>
+
+<Note>
+  This endpoint, [Inspect Manifest](/endpoints/customers/inspect-manifest) and Attest Proofs share one rate limit per instance: 30 requests in a 60-second window, both legs counted. Past it, they answer `429 RATE_LIMITED` with a `Retry-After` header in seconds.
+</Note>
 
 ## Body Parameters
 
@@ -23,47 +33,82 @@ The subject must already be verified on chain, because the bundle is checked aga
 </ParamField>
 
 <ParamField body="manifest" type="object" required>
-  The bundle's `manifest.json`, parsed.
+  The bundle's `manifest.json`, parsed. At most 64 KiB serialized and 32 leaves.
 </ParamField>
 
 <ParamField body="manifestSig" type="string">
-  The bundle's `manifest.sig`. Required whenever proof verification is enforced, which [Get Operator Key](/endpoints/customers/get-operator-key) reports as `proofVerificationEnforced`.
+  The 64 raw bytes of the bundle's `manifest.sig`, base64-encoded. Required whenever an operator key is registered. An instance that enforces proofs, which [Get Operator Key](/endpoints/customers/get-operator-key) reports as `proofVerificationEnforced`, cannot verify a bundle without a registered key. Any other instance without one skips the check.
 </ParamField>
 
 <ParamField body="proofs" type="object">
-  A map of field name to base64 STARK bytes, read from `proofs/*.bin`. Required under enforcement for every leaf you want filed. Each proof and the payload as a whole are size-capped.
+  A map of field name to base64 STARK bytes, read from `proofs/*.bin`. Under enforcement, verification needs one for every leaf you file; the `KYC` claim needs none, since it is the root itself. Each decoded proof is capped at 256 KiB and all of them together at 4 MiB. Verification also checks a proof sent for a leaf you do not file against that leaf's `proofDigest`.
 </ParamField>
 
 <ParamField body="selected" type="array">
-  Claim types to file, as names or indices. Omit it to file every claim the bundle backs. A selection that matches nothing the bundle proves is refused with `NO_SELECTED_CLAIMS`.
+  Claim type names to file, for example `["KYC", "RESIDENCY"]`. Indices are not matched. Omit it, or send an empty array, to file every claim the bundle backs. A selection that matches nothing the bundle proves is refused with `NO_SELECTED_CLAIMS`.
 </ParamField>
 
 <ParamField body="expiryDays" type="integer">
-  Days until the claims expire, between 0 and 36500. Omit it and the identity's own hard expiry is used, if it is still in the future. `0` means no expiry.
+  Days until the claims expire, between 0 and 36500. Omit it, or send `0`, and the identity's own hard expiry is used if it is still in the future. Otherwise the claims do not expire.
 </ParamField>
 
 <ParamField body="txResults" type="array">
-  Send this to confirm. An array of `{ claimType, txHash }`, one per claim you broadcast. Omit it to receive the calldata.
+  Send this to confirm. An array of `{ claimType, txHash }`, one per claim you broadcast, with `claimType` as a name or an index. Omit it to receive the calldata.
+</ParamField>
+
+<ParamField body="claimSignatures" type="array">
+  ERC-3643 register only. One `{ walletAddress, claimType, signature }` per message from a `SIGN_MESSAGES` answer, with `claimType` by name. See [On an ERC-3643 register](#on-an-erc-3643-register).
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  ERC-3643 register only. The instance wallet that signs the claims. It must hold a CLAIM key on the register's trusted issuer. Omitted, the first instance wallet holding one is used.
 </ParamField>
 
 ## The two calls
 
-Without `txResults` the response is `SIGN_TRANSACTIONS` with one step per derived claim, each carrying its `claimType`, `dataHash` and `expiry`. Broadcast them from a wallet that holds the registry role, then call again with the hashes.
+Without `txResults` the response is `SIGN_TRANSACTIONS` with one step per derived claim, `KYC` first. Each step carries its `claimType`, `dataHash` and `expiry`. Broadcast them from a wallet that holds `KYC_PROVIDER_ROLE` on the register, then send the same body again with `txResults`.
 
-The confirm leg verifies each receipt independently. It checks that the transaction targets this wallet, and that the claim type and data hash mined actually match the claim derived from the proof. A step whose hash you omit comes back `skipped`; one whose receipt does not match comes back `failed` with a reason; neither stops the others.
+Before handing out calldata, the API checks that one of your instance's registered wallets holds that role, and refuses with `KYC_PROVIDER_ROLE_MISSING` otherwise. It skips the check when the instance has no registered wallet or the role cannot be read.
+
+The confirm leg verifies the bundle again, then each receipt independently. A receipt must be a mined, successful `addClaim` on this instance's register for this wallet, writing the claim type and data hash derived from the proof. It does not check who signed or which expiry was mined. A step whose hash you omit comes back `skipped`; one that fails a check comes back `failed` with a reason; neither stops the others.
 
 <Note>
   `success` is `false` when no claim was confirmed, with `NO_CLAIMS_ADDED`, even though the HTTP status is `200`. Read `added` against `total`.
+
+  No ledger row is written here, so [List Proofs](/endpoints/customers/list-proofs) labels these claims `manual`. Attest Proofs records which leaf filed each slot.
 </Note>
+
+## On an ERC-3643 register
+
+When the instance is bound to an ERC-3643 register, each claim is written to the subject's ONCHAINID. It must carry a signature from a CLAIM key on the register's trusted issuer, so the flow gains one round.
+
+1. The first call answers `SIGN_MESSAGES`, with one entry in `messages` per claim. Sign each `messageHash` as an EIP-191 personal message with a wallet that holds a CLAIM key on `claimIssuer`.
+2. Call again with `claimSignatures`. The answer is `SIGN_TRANSACTIONS`, with one `addClaim` step per claim addressed to the subject's ONCHAINID.
+3. Broadcast the steps from the wallet the answer names in `signerAddress`, then confirm with `txResults` as above.
+
+An ONCHAINID claim carries no expiry, so `expiry` is not written on chain. The role check becomes an agent check: one of your instance's wallets must be an agent of the register. The confirm leg checks that each transaction wrote to this wallet's ONCHAINID.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_CLAIM_SIGNATURE` | `400` | A signature is not 65-byte hex, or does not recover for this identity, topic and data |
+| `REGISTRY_AGENT_MISSING` | `403` | None of your instance's wallets is an agent of the register |
+| `CLAIM_SIGNER_MISSING` | `403` | None of your instance's wallets holds a CLAIM key on the register's trusted issuer |
+| `CLAIM_SIGNER_NOT_TRUSTED` | `403` | `signerAddress`, or the wallet a signature recovers to, holds no CLAIM key on the trusted issuer |
+| `REGISTRY_NO_CLAIM_TOPICS` | `409` | The register requires no claim topics, so there is nothing to file |
+| `REGISTRY_NO_TRUSTED_ISSUER` | `409` | The register names no trusted issuer for its claim topic |
+| `REGISTRY_PROBE_FAILED` | `503` | The register or its trusted issuer could not be read |
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`. Calldata leg only.</ResponseField>
-    <ResponseField name="steps" type="array">One per claim: the unsigned transaction plus `claimType`, `dataHash` and `expiry`. Calldata leg only.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`. On an ERC-3643 register the first answer is `SIGN_MESSAGES`. Calldata leg only.</ResponseField>
+    <ResponseField name="registerKind" type="string">`TRUSSET` or `TREX`, the interface of the register this instance writes to. Calldata leg only.</ResponseField>
+    <ResponseField name="steps" type="array">One per claim, `KYC` first: the unsigned transaction plus `stepType`, `claimType`, `dataHash` and `expiry`. Calldata leg only.</ResponseField>
+    <ResponseField name="messages" type="array">ERC-3643 register only: one claim message per claim, each with `messageHash`, `claimType`, `identity`, `topic` and `claimIssuer`.</ResponseField>
+    <ResponseField name="next" type="string">ERC-3643 register only: what to send on the next call.</ResponseField>
     <ResponseField name="walletAddress" type="string">The subject, checksummed.</ResponseField>
-    <ResponseField name="kycHash" type="string">The root the registry holds for this wallet, which the bundle was checked against.</ResponseField>
+    <ResponseField name="kycHash" type="string">The root the registry holds for this wallet.</ResponseField>
     <ResponseField name="total" type="integer">Claims in this payload.</ResponseField>
     <ResponseField name="added" type="integer">Claims confirmed on chain. Confirm leg only.</ResponseField>
     <ResponseField name="claims" type="array">Per claim: `claimType`, `dataHash`, and a `status` of `confirmed`, `skipped` or `failed`. A confirmed entry carries `txHash` and `gasUsed`, a failed one carries `error`. Confirm leg only.</ResponseField>
@@ -74,34 +119,32 @@ The confirm leg verifies each receipt independently. It checks that the transact
 
 ## Verification failures
 
-Every code below means the bundle was rejected and nothing was written. They are stored on a verification report, so the same bundle asks the same question once and gets the same answer.
+Every code below means the bundle was rejected and nothing was written on chain. Failures found before the wallet check are never stored: size, shape, version and stub failures, bad proof encoding and an empty selection. `VERIFY_BUSY` and `VERIFY_TIMEOUT` are not stored either. Every other verdict, pass or fail, is stored on a verification report.
+
+A later request with the same manifest, proof bytes, selection and enforcement setting is answered from that report. That holds until the verifier or the trust anchors change.
 
 | Code | HTTP | What failed |
 |---|---|---|
-| `INVALID_MANIFEST` | `400` | The manifest is malformed or not canonicalizable |
+| `INVALID_MANIFEST` | `400` | The manifest is malformed or not canonicalizable, or its `epochDays` is missing or in the future |
 | `INVALID_SIGNATURE` | `400` | The signature is not 64 bytes, or does not verify under the registered key |
-| `UNREGISTERED_OPERATOR_KEY` | `400` | No operator key is registered for this instance |
-| `UNSUPPORTED_VERSION` | `400` | The manifest version is not one this verifier reads |
+| `UNREGISTERED_OPERATOR_KEY` | `400` | No operator key is registered and proofs are enforced |
+| `UNSUPPORTED_VERSION` | `400` | The manifest version, circuits version or STARK library is not one this verifier accepts, or the security level is below 100 bits |
 | `ROOT_MISMATCH` | `400` | The root recomputed from the leaves does not equal the root the manifest states |
 | `HASH_MISMATCH` | `400` | The manifest's root does not match the root the registry holds for this wallet |
 | `WALLET_MISMATCH` | `400` | The manifest was built for a different wallet |
 | `PROOF_MISSING` | `400` | A leaf being claimed has no STARK in `proofs`, or is commitment-only, while proofs are enforced |
-| `LEAF_HASH_MISMATCH` | `400` | A leaf hash does not recompute from its own components |
-| `COMMITMENT_MISMATCH` | `400` | A commitment does not match what the proof commits to |
+| `LEAF_HASH_MISMATCH` | `400` | A leaf hash, or a leaf's binding digest, does not recompute from its own components |
+| `COMMITMENT_MISMATCH` | `400` | A leaf's `publicInputs.commitment` differs from its `commitment` |
 | `PROOF_DIGEST_MISMATCH` | `400` | The proof bytes do not hash to the digest in the leaf |
-| `PROOF_INVALID` | `400` | A STARK failed verification |
+| `PROOF_INVALID` | `400` | A STARK failed verification, or a leaf's `publicDigest` does not recompute from its public inputs |
 | `PROOF_STALE` | `400` | The batch date is older than the instance's staleness bound |
-| `CIRCUIT_MISMATCH` | `400` | A canonical field was proved with the wrong circuit |
 | `UNSUPPORTED_CIRCUIT` | `400` | The circuit is not one this verifier knows |
 | `UNAPPROVED_PARAMS` | `400` | The predicate parameters are outside the network's trust anchors |
-| `UNAPPROVED_LIST` | `400` | The allowlist the proof committed to is not one this network accepts |
-| `DUPLICATE_FIELD` | `400` | Two leaves claim the same field |
-| `DUPLICATE_SLOT` | `400` | Two leaves would occupy the same claim slot |
-| `FIELD_NOT_IN_MANIFEST` | `400` | A proof was sent for a field the manifest does not carry |
-| `TOO_MANY_LEAVES` | `400` | The bundle carries more leaves than the verifier accepts |
-| `STUB_NOT_ALLOWED` | `400` | A `stub` bundle while proof verification is enforced |
+| `UNAPPROVED_LIST` | `400` | The list root or depth the proof committed to is not one this network accepts |
+| `STUB_NOT_ALLOWED` | `400` | A `stub` bundle was sent to a production instance |
 | `NO_SELECTED_CLAIMS` | `400` | Nothing in `selected` is backed by this bundle |
-| `PROOF_TOO_LARGE` | `413` | A single proof, or the payload as a whole, is over the size cap |
+| `PROOF_TOO_LARGE` | `413` | A decoded proof is over 256 KiB, all proofs together over 4 MiB, or the manifest over 64 KiB |
+| `TOO_MANY_LEAVES` | `413` | The bundle carries more than 32 leaves |
 | `VERIFY_BUSY` | `429` | Verification capacity is saturated. Retry shortly |
 | `VERIFY_TIMEOUT` | `503` | Verification did not finish in time. Retry shortly |
 
@@ -110,22 +153,44 @@ Every code below means the bundle was rejected and nothing was written. They are
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_ADDRESS` | `400` | `walletAddress` is missing or malformed |
-| `MISSING_MANIFEST` | `400` | No manifest in the body |
+| `MISSING_MANIFEST` | `400` | No manifest object in the body |
 | `INVALID_PROOFS` | `400` | `proofs` is not a map of field name to base64 string |
 | `INVALID_SELECTION` | `400` | `selected` is not an array |
 | `INVALID_EXPIRY` | `400` | `expiryDays` is outside 0 to 36500 |
 | `NOT_VERIFIED` | `400` | The subject carries no `kycHash` on the registry. Verify the identity first |
 | `NO_CLAIMS_ADDED` | `200` | Confirm leg, nothing confirmed. `success` is `false` |
+| `KYC_PROVIDER_ROLE_MISSING` | `403` | None of your instance's wallets holds `KYC_PROVIDER_ROLE` on the register. Calldata leg only |
 | `INSTANCE_NOT_FOUND` | `404` | The instance behind your key no longer exists |
+| `RATE_LIMITED` | `429` | More than 30 proof requests from this instance in the current 60-second window |
 | `CHAIN_UNAVAILABLE` | `503` | The registry could not be read. This is an outage, not a verification failure |
+| `ADD_CLAIMS_FAILED` | `400` or `500` | A chain call failed (`400`), or the request failed unexpectedly (`500`) |
 
 <RequestExample>
+```bash cURL
+BUNDLE=output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01
+
+curl -X POST "https://api.trusset.org/customers/api/identity/claims/from-proof" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"walletAddress\": \"0xabCDeF0123456789AbcdEf0123456789aBCDEF01\",
+    \"manifest\": $(cat "$BUNDLE/manifest.json"),
+    \"manifestSig\": \"$(base64 < "$BUNDLE/manifest.sig" | tr -d '\n')\",
+    \"proofs\": { \"country\": \"$(base64 < "$BUNDLE/proofs/country.bin" | tr -d '\n')\" },
+    \"selected\": [\"KYC\", \"RESIDENCY\"]
+  }"
+```
 ```typescript TypeScript
+import { readFile } from 'node:fs/promises';
+
+const bundle = 'output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01';
 const manifest = JSON.parse(await readFile(`${bundle}/manifest.json`, 'utf8'));
-const manifestSig = (await readFile(`${bundle}/manifest.sig`, 'utf8')).trim();
+const manifestSig = (await readFile(`${bundle}/manifest.sig`)).toString('base64');
 const proofs = {
   country: (await readFile(`${bundle}/proofs/country.bin`)).toString('base64')
 };
+const walletAddress = manifest.walletAddress;
+const selected = ['KYC', 'RESIDENCY'];
 
 const url = 'https://api.trusset.org/customers/api/identity/claims/from-proof';
 const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
@@ -133,7 +198,7 @@ const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'applica
 const built = await fetch(url, {
   method: 'POST',
   headers,
-  body: JSON.stringify({ walletAddress, manifest, manifestSig, proofs })
+  body: JSON.stringify({ walletAddress, manifest, manifestSig, proofs, selected })
 }).then(r => r.json());
 
 const txResults = [];
@@ -146,7 +211,7 @@ for (const step of built.data.steps) {
 const confirmed = await fetch(url, {
   method: 'POST',
   headers,
-  body: JSON.stringify({ walletAddress, manifest, manifestSig, proofs, txResults })
+  body: JSON.stringify({ walletAddress, manifest, manifestSig, proofs, selected, txResults })
 }).then(r => r.json());
 
 console.log(`${confirmed.data.added} of ${confirmed.data.total} claims filed`);
@@ -159,25 +224,39 @@ console.log(`${confirmed.data.added} of ${confirmed.data.total} claims filed`);
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTIONS",
+    "registerKind": "TRUSSET",
+    "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
     "steps": [
       {
         "action": "SIGN_TRANSACTION",
-        "transaction": { "to": "0xe9114c40934f6fb6bb317935156b731f7a86d006", "data": "0x..." },
+        "transaction": { "to": "0xE9114c40934f6fB6BB317935156b731f7A86D006", "data": "0x..." },
         "functionName": "addClaim",
-        "description": "Add RESIDENCY claim for 0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
+        "description": "Add KYC claim for 0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
+        "registerKind": "TRUSSET",
+        "stepType": "ADD_CLAIM",
+        "claimType": "KYC",
+        "dataHash": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
+        "expiry": 1820246400
+      },
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": { "to": "0xE9114c40934f6fB6BB317935156b731f7A86D006", "data": "0x..." },
+        "functionName": "addClaim",
+        "description": "Add RESIDENCY claim for 0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
+        "registerKind": "TRUSSET",
+        "stepType": "ADD_CLAIM",
         "claimType": "RESIDENCY",
         "dataHash": "0x41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b9f2c",
         "expiry": 1820246400
       }
     ],
-    "walletAddress": "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
     "kycHash": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
-    "total": 1,
+    "total": 2,
     "verification": {
       "verified": true,
       "mode": "production",
-      "reportId": "cmpv8t2u0003cghxkx1w1fwd",
-      "verifierVersion": "3.0.0",
+      "reportId": "cmpv8t2u0003cghxkx1w1fwd4",
+      "verifierVersion": "trusset-verifier@e146dac/c065d261b49d",
       "cached": false
     },
     "confirmWith": {
@@ -185,6 +264,11 @@ console.log(`${confirmed.data.added} of ${confirmed.data.total} claims filed`);
       "field": "txResults",
       "shape": "[{ claimType, txHash }]"
     }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-06T12:00:00.000Z"
   }
 }
 ```
@@ -192,11 +276,18 @@ console.log(`${confirmed.data.added} of ${confirmed.data.total} claims filed`);
 {
   "success": true,
   "data": {
-    "walletAddress": "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
+    "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
     "kycHash": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
-    "added": 1,
-    "total": 1,
+    "added": 2,
+    "total": 2,
     "claims": [
+      {
+        "claimType": "KYC",
+        "dataHash": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
+        "status": "confirmed",
+        "txHash": "0x3b5e0a91c7d24f68e1b0c35a9d7f2e4608b1c9d3e5f7a2b4c6d8e0f1a3b5c7d9",
+        "gasUsed": "96120"
+      },
       {
         "claimType": "RESIDENCY",
         "dataHash": "0x41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b9f2c",
@@ -208,10 +299,15 @@ console.log(`${confirmed.data.added} of ${confirmed.data.total} claims filed`);
     "verification": {
       "verified": true,
       "mode": "production",
-      "reportId": "cmpv8t2u0003cghxkx1w1fwd",
-      "verifierVersion": "3.0.0",
+      "reportId": "cmpv8t2u0003cghxkx1w1fwd4",
+      "verifierVersion": "trusset-verifier@e146dac/c065d261b49d",
       "cached": true
     }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-06T12:00:00.000Z"
   }
 }
 ```

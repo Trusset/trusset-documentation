@@ -6,25 +6,46 @@ description: 'Revoke a proof-backed claim and drop its ledger row'
 
 Revokes one claim slot on the registry and removes the ledger row that recorded which proof backed it. Use it when a proved fact stops being true.
 
+<Warning>
+  The confirm leg deletes the ledger row as soon as it accepts a receipt, so check what it accepts. On the Trusset register the receipt must be a mined `revokeClaim` on this instance's register, for this wallet and this slot. On an ERC-3643 register the slot cannot be read back from the transaction: any mined `revokeClaimBySignature`, or a `removeClaim` on this wallet's ONCHAINID, is accepted.
+</Warning>
+
 ## Body Parameters
 
 <ParamField body="walletAddress" type="string" required>The subject.</ParamField>
 
 <ParamField body="claimType" type="string | integer" required>
-  The slot to revoke, as a name or an index from 0 to 7.
+  The slot to revoke, as a name or an integer index from 0 to 7.
 </ParamField>
 
 <ParamField body="txHash" type="string">
   Send it to confirm the revocation. Omit it to receive the calldata.
 </ParamField>
 
+<ParamField body="signerAddress" type="string">
+  ERC-3643 register only. The instance wallet you will send the revocation from, echoed back as `signerAddress`.
+</ParamField>
+
+## Sign and confirm
+
+Without `txHash` the response carries one unsigned transaction. On the Trusset register it calls `revokeClaim` on the register, which needs a wallet holding `KYC_PROVIDER_ROLE`. The API checks that one of your instance's wallets holds that role, and refuses with `KYC_PROVIDER_ROLE_MISSING` otherwise. The register reverts the call when the slot holds no active claim.
+
+On an ERC-3643 register it calls `revokeClaimBySignature` on the trusted issuer that signed the claim, which marks that signature revoked. The claim stays on the ONCHAINID, and [List Claims](/endpoints/customers/list-claims) stops returning it once the issuer reports it invalid. A slot with no claim is refused up front with `CLAIM_NOT_FOUND`. The role check becomes an agent check on the register.
+
+With `txHash`, the API checks the receipt as described above, deletes the ledger row, and writes a `REVOKE_CLAIM` entry to the customer audit log. It does not check who signed.
+
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Calldata leg only.</ResponseField>
+    <ResponseField name="transaction" type="object">The unsigned call, as `to` and `data`. Calldata leg only.</ResponseField>
+    <ResponseField name="functionName" type="string">`revokeClaim`, or `revokeClaimBySignature` on an ERC-3643 register. Calldata leg only.</ResponseField>
+    <ResponseField name="registerKind" type="string">`TRUSSET` or `TREX`. Calldata leg only.</ResponseField>
+    <ResponseField name="identity" type="string">ERC-3643 register only: the subject's ONCHAINID. Calldata leg only.</ResponseField>
+    <ResponseField name="claimId" type="string">ERC-3643 register only: the claim being revoked. Calldata leg only.</ResponseField>
     <ResponseField name="walletAddress" type="string">The subject, checksummed.</ResponseField>
-    <ResponseField name="claimType" type="string">The slot, by name.</ResponseField>
+    <ResponseField name="claimType" type="string">The slot, by name. On the confirm leg it echoes the request.</ResponseField>
     <ResponseField name="txHash" type="string">The confirmed transaction. Confirm leg only.</ResponseField>
     <ResponseField name="gasUsed" type="string">Gas the revocation used. Confirm leg only.</ResponseField>
     <ResponseField name="confirmWith" type="object">`{ field: "txHash" }`. Calldata leg only.</ResponseField>
@@ -40,19 +61,56 @@ Revokes one claim slot on the registry and removes the ledger row that recorded 
 curl -X POST "https://api.trusset.org/customers/api/identity/proofs/revoke" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"walletAddress": "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01", "claimType": "RESIDENCY"}'
+  -d '{"walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01", "claimType": "RESIDENCY"}'
+```
+```typescript TypeScript
+const url = 'https://api.trusset.org/customers/api/identity/proofs/revoke';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+const body = { walletAddress: '0xabCDeF0123456789AbcdEf0123456789aBCDEF01', claimType: 'RESIDENCY' };
+
+const { data } = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) }).then(r => r.json());
+
+const tx = await signer.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch(url, { method: 'POST', headers, body: JSON.stringify({ ...body, txHash: tx.hash }) });
 ```
 </RequestExample>
 
 <ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": { "to": "0xE9114c40934f6fB6BB317935156b731f7A86D006", "data": "0x..." },
+    "functionName": "revokeClaim",
+    "description": "Revoke the RESIDENCY proof for 0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
+    "registerKind": "TRUSSET",
+    "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
+    "claimType": "RESIDENCY",
+    "confirmWith": { "field": "txHash" }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-06T12:00:00.000Z"
+  }
+}
+```
 ```json Confirmed Response
 {
   "success": true,
   "data": {
-    "walletAddress": "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
+    "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
     "claimType": "RESIDENCY",
     "txHash": "0xd402612bae9f7c3018d5a64b0f9e28c7135ad60897e4b2f150c3a8e6d7b409f1",
     "gasUsed": "51204"
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-06T12:00:00.000Z"
   }
 }
 ```
@@ -63,8 +121,19 @@ curl -X POST "https://api.trusset.org/customers/api/identity/proofs/revoke" \
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_ADDRESS` | `400` | `walletAddress` is missing or malformed |
-| `INVALID_CLAIM_TYPE` | `400` | `claimType` is not a slot between 0 and 7 |
+| `INVALID_CLAIM_TYPE` | `400` | `claimType` is not a slot name or an index from 0 to 7 |
+| `INVALID_TX` | `400` | `txHash` is not a 32-byte hex hash |
+| `TX_REVERTED` | `400` | The transaction reverted |
+| `TX_WRONG_TARGET` | `400` | The transaction was not sent to this instance's register |
+| `TX_WRONG_FUNCTION` | `400` | The transaction does not call a revocation function |
 | `TX_TARGET_MISMATCH` | `400` | The transaction targets a different wallet |
-| `TX_CLAIM_MISMATCH` | `400` | The transaction revokes a different claim |
+| `TX_CLAIM_MISMATCH` | `400` | The transaction revokes a different slot. Trusset register only |
+| `KYC_PROVIDER_ROLE_MISSING` | `403` | None of your instance's wallets holds `KYC_PROVIDER_ROLE` on the register. Calldata leg only |
+| `REGISTRY_AGENT_MISSING` | `403` | ERC-3643 register: none of your instance's wallets is an agent of the register. Calldata leg only |
 | `INSTANCE_NOT_FOUND` | `404` | The instance behind your key no longer exists |
-| `REVOKE_PROOF_FAILED` | `500` | The revocation could not be prepared or confirmed |
+| `TX_NOT_FOUND` | `404` | The transaction is not mined yet |
+| `CLAIM_NOT_FOUND` | `404` | ERC-3643 register: the wallet's ONCHAINID carries no claim in that slot |
+| `OWN_REGISTRY_NOT_CONFIGURED` | `409` | The instance is bound to its own register but has no valid register address |
+| `CHAIN_UNAVAILABLE` | `503` | ERC-3643 register: the transaction could not be read |
+| `REGISTRY_PROBE_FAILED` | `503` | The interface of the instance's own register could not be read |
+| `REVOKE_PROOF_FAILED` | `400` or `500` | A chain call failed (`400`), or the request failed unexpectedly (`500`) |

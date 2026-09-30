@@ -1,70 +1,148 @@
 ---
 title: 'Create ID Link'
 api: 'POST /customers/api/id-links'
-description: 'Generate a KYC verification link for a customer'
+description: 'Create a hosted identity verification link for a customer'
 ---
 
-Creates a new identity verification link that can be sent to a customer to complete their KYC process. The link connects to the configured identity provider (e.g., Sumsub) and, upon successful completion, triggers the on-chain identity verification.
+Creates a hosted verification link on verify.trusset.org for one customer. The customer opens it, pays the fee if you set one, connects a wallet and passes the identity check.
+
+<Warning>
+  The fee is collected before the identity check opens, and no endpoint refunds it. A customer who fails the check, or whose link is revoked, has still paid.
+
+  A link that names no wallet accepts the first wallet attached on the hosted page. Completion then writes that wallet to the customer record. Anyone holding the URL can do this, so treat the URL as a credential. Set `recipientWallet` whenever you know the wallet.
+</Warning>
+
+## How a link resolves
+
+The link reads `COMPLETED` once the customer finishes the hosted flow or the identity check passes. It reads `REJECTED` when the check fails or the verification profile blocks the customer's country, which can happen after it read `COMPLETED`. `COMPLETED` alone is not a verdict.
+
+A passed check writes nothing on chain by itself. The wallet is queued in [List Pending Verifications](/endpoints/customers/list-pending-verifications), and it stays unregistered until your instance's registered wallet signs the transaction.
+
+`EXPIRED` means the link was [revoked](/endpoints/customers/revoke-id-link). A link that runs past `expiresAt` without being revoked still reads `PENDING`, although the hosted page refuses it.
 
 ## Body Parameters
 
-The request body is passed directly to the ID link service. Required fields depend on the identity provider configuration for your instance.
+Send at least one recipient: `recipientEmail`, `recipientWallet` or `recipientPhone`. A linked customer can supply the wallet or the email instead.
 
-<ParamField body="email" type="string">
-  Customer email address. Used to send the verification link.
+<ParamField body="recipientEmail" type="string">
+  Where the link is emailed when `sendVia` includes `email`. It also pre-fills the identity check. The address is not validated here.
 </ParamField>
 
-<ParamField body="walletAddress" type="string">
-  Ethereum wallet address to associate with the verification.
+<ParamField body="recipientWallet" type="string">
+  Binds the link to this wallet, so the hosted page accepts no other. Stored and returned checksummed.
+</ParamField>
+
+<ParamField body="recipientPhone" type="string">
+  Where the link is texted when `sendVia` includes `sms`. Send it in E.164 form. The SMS sender strips spaces, hyphens, brackets and dots, reads a leading `00` as `+`, and reads a single leading `0` as a German number (`+49`). A number that still is not E.164 fails in `delivery.sms`, not here.
+</ParamField>
+
+<ParamField body="customerId" type="string">
+  The customer record this link completes. Completion then updates that record instead of creating a second customer. Archived customers are not matched.
+</ParamField>
+
+<ParamField body="referenceKey" type="string">
+  Names the customer by reference key instead. Used only when `customerId` is absent.
+</ParamField>
+
+<ParamField body="externalId" type="string">
+  Names the customer by external ID instead. Used only when `customerId` and `referenceKey` are absent.
+</ParamField>
+
+When a customer is named, each identifier must be a string of 1 to 128 characters. A customer who already holds a wallet binds the link to it, and a different `recipientWallet` is refused. When the request sends no recipient at all, the customer's first email contact becomes `recipientEmail`. The customer's country and investor type fill `country` and `investorType` when those are omitted.
+
+<ParamField body="investorType" type="string" default="RETAIL">
+  The `key` of an enabled [verification profile](/endpoints/customers/list-verification-profiles), matched exactly. The presets are `RETAIL`, `PROFESSIONAL` and `ELIGIBLE_COUNTERPARTY`. Custom keys are lowercase. The profile sets the check level, the documents requested and the blocked countries. Defaults to the linked customer's investor type, then `RETAIL`.
 </ParamField>
 
 <ParamField body="country" type="string">
-  ISO country code for the customer.
+  The customer's country as an ISO 3166-1 code: alpha-2 (`DE`), alpha-3 (`DEU`) or numeric. It is stored and returned as alpha-3. A country the profile blocks is refused here. The country the identity check reports is tested against the same list at review.
 </ParamField>
 
-<ParamField body="channels" type="string[]">
-  Delivery channels for the link (e.g., `["email"]`, `["sms"]`, `["email", "sms"]`).
+<ParamField body="expiryDays" type="integer" default="30">
+  Days until the link expires, from 1 to 365. Paying the fee extends a link with less than 24 hours left to 24 hours after payment.
 </ParamField>
 
-<ParamField body="metadata" type="object">
-  Arbitrary metadata to attach to the link.
+<ParamField body="feeCents" type="integer">
+  A verification fee in the smallest currency unit, from 50 to 1000000. The customer pays it through a Stripe checkout on the hosted page before the check opens. Omit it for a free link.
+</ParamField>
+
+<ParamField body="currency" type="string">
+  `eur` or `usd`, in any case. Required with `feeCents` and ignored without it.
+</ParamField>
+
+<ParamField body="sendVia" type="string | string[]">
+  `email`, `sms`, or both. Omit it to deliver the link yourself. A channel without a matching recipient is skipped, and other values are ignored.
+</ParamField>
+
+<ParamField body="note" type="string">
+  Shown as a note in the email and returned to the hosted page.
+</ParamField>
+
+<ParamField body="customMessage" type="string">
+  Replaces the default text of the email and the SMS, and is returned to the hosted page.
+</ParamField>
+
+<ParamField body="customRedirectUrl" type="string">
+  Stored with the link, but nothing reads it back. No endpoint returns it and the hosted page does not redirect to it.
 </ParamField>
 
 ## Response Fields
 
-<ResponseField name="success" type="boolean">Request status</ResponseField>
-<ResponseField name="data" type="object">The created ID link object, including the generated link URL and its current status.</ResponseField>
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="id" type="string">Link ID. [Revoke ID Link](/endpoints/customers/revoke-id-link) and [Resend ID Link](/endpoints/customers/resend-id-link) take it as `linkId`.</ResponseField>
+    <ResponseField name="token" type="string">The 64 hex character secret in the URL.</ResponseField>
+    <ResponseField name="verificationUrl" type="string">`https://verify.trusset.org/link/{token}`. Send only this to the customer.</ResponseField>
+    <ResponseField name="status" type="string">`PENDING`.</ResponseField>
+    <ResponseField name="recipientEmail" type="string">As stored, or `null`.</ResponseField>
+    <ResponseField name="recipientWallet" type="string">The bound wallet, checksummed, or `null` when the hosted page will ask for one.</ResponseField>
+    <ResponseField name="recipientPhone" type="string">As sent, or `null`.</ResponseField>
+    <ResponseField name="expiresAt" type="string">ISO 8601.</ResponseField>
+    <ResponseField name="sumsubApplicantId" type="string">The identity-check applicant created in advance, or `null`.</ResponseField>
+    <ResponseField name="country" type="string">ISO 3166-1 alpha-3, or `null`.</ResponseField>
+    <ResponseField name="customerId" type="string">The linked customer, or `null`.</ResponseField>
+    <ResponseField name="feeCents" type="integer">The fee, or `null`.</ResponseField>
+    <ResponseField name="currency" type="string">Lowercase, or `null`.</ResponseField>
+    <ResponseField name="delivery" type="object">
+      One entry per channel attempted, each `{ sent, error }` with `error` present only on failure. Empty when no channel was attempted. For email, `sent: true` does not confirm delivery, because a refusal by the mail provider is not reported here.
+    </ResponseField>
+    <ResponseField name="warnings" type="array">
+      Present only when something degraded. `SUMSUB_APPLICANT_NOT_CREATED` means the applicant could not be created in advance. The check still opens from the link, but without the email, country and document pre-fill.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
 
 <RequestExample>
 ```bash cURL
 curl -X POST "https://api.trusset.org/customers/api/id-links" \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: trusset_abc123xy_secret..." \
+  -H "X-API-Key: trusset_your_key_here" \
   -d '{
-    "email": "customer@example.com",
-    "walletAddress": "0xAbC123dEf456789012345678901234567890AbCd",
+    "recipientEmail": "investor@example.com",
+    "recipientWallet": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+    "investorType": "RETAIL",
     "country": "DE",
-    "channels": ["email"]
+    "expiryDays": 14,
+    "sendVia": ["email"]
   }'
 ```
 ```typescript TypeScript
-const response = await fetch(
-  'https://api.trusset.org/customers/api/id-links',
-  {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Key': 'trusset_abc123xy_secret...'
-    },
-    body: JSON.stringify({
-      email: 'customer@example.com',
-      walletAddress: '0xAbC123dEf456789012345678901234567890AbCd',
-      country: 'DE',
-      channels: ['email']
-    })
-  }
-);
-const { data: link } = await response.json();
+const response = await fetch('https://api.trusset.org/customers/api/id-links', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-API-Key': 'trusset_your_key_here'
+  },
+  body: JSON.stringify({
+    recipientEmail: 'investor@example.com',
+    recipientWallet: '0x8ba1f109551bD432803012645Ac136ddd64DBA72',
+    investorType: 'RETAIL',
+    country: 'DE',
+    expiryDays: 14,
+    sendVia: ['email']
+  })
+});
+const { success, data, error } = await response.json();
 ```
 </RequestExample>
 
@@ -73,18 +151,44 @@ const { data: link } = await response.json();
 {
   "success": true,
   "data": {
-    "id": "link_abc123",
-    "url": "https://verify.trusset.org/link_abc123",
-    "status": "pending",
-    "email": "customer@example.com",
-    "walletAddress": "0xAbC123dEf456789012345678901234567890AbCd",
-    "createdAt": "2025-06-15T12:00:00.000Z",
-    "expiresAt": "2025-06-22T12:00:00.000Z"
+    "id": "cmg6b2t9x0001lb08q4w7k3fz",
+    "token": "5cd9b10d804ba5fb5b4da94181cd0b57099f0dd4e956fc7ac7ec51ebe7fc8a22",
+    "verificationUrl": "https://verify.trusset.org/link/5cd9b10d804ba5fb5b4da94181cd0b57099f0dd4e956fc7ac7ec51ebe7fc8a22",
+    "status": "PENDING",
+    "recipientEmail": "investor@example.com",
+    "recipientWallet": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+    "recipientPhone": null,
+    "expiresAt": "2026-10-14T09:30:00.000Z",
+    "sumsubApplicantId": "66f1c2a9b8e4d3001a2b3c4d",
+    "country": "DEU",
+    "customerId": null,
+    "feeCents": null,
+    "currency": null,
+    "delivery": {
+      "email": { "sent": true }
+    }
   },
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-06-15T12:00:00.000Z"
+    "timestamp": "2026-09-30T09:30:00.000Z"
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_INPUT` | `400` | `customerId`, `referenceKey` or `externalId` is not a string of 1 to 128 characters |
+| `CUSTOMER_NOT_FOUND` | `404` | No customer on this instance matches the identifier, or the match is archived |
+| `CUSTOMER_WALLET_MISMATCH` | `400` | `recipientWallet` differs from the wallet the named customer already holds |
+| `MISSING_RECIPIENT` | `400` | No email, wallet or phone was sent, and the named customer supplies none |
+| `INVALID_ADDRESS` | `400` | The wallet is not a valid address |
+| `INVALID_COUNTRY` | `400` | `country` is not an ISO 3166-1 code |
+| `INVALID_EXPIRY` | `400` | `expiryDays` is outside 1 to 365 |
+| `INVALID_FEE` | `400` | `feeCents` is not an integer from 50 to 1000000 |
+| `INVALID_CURRENCY` | `400` | `feeCents` was sent and `currency` is not `eur` or `usd` |
+| `INVALID_INVESTOR_TYPE` | `400` | `investorType` names no enabled verification profile on this instance |
+| `COUNTRY_BLOCKED` | `403` | The verification profile blocks the customer's country |
+| `CREATE_FAILED` | `500` | The link could not be created |

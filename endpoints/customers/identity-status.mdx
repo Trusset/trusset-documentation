@@ -4,30 +4,50 @@ api: 'GET /customers/api/identity/status/{walletAddress}'
 description: 'Query both on-chain and off-chain identity status for a wallet'
 ---
 
-Returns the current identity state from two sources: the on-chain identity registry and the off-chain customer database. This dual view lets you detect discrepancies between chain state and your records.
+Returns the current identity state from two sources: the identity register your instance writes to, and your customer record. Comparing them shows where chain state and your records disagree.
+
+<Warning>
+  A register that cannot be read does not fail this call. It answers `200` with `onChain.unavailable: true` and a zeroed record whose `isVerified` is `false`. Check `unavailable` before you read `isVerified`, or an outage reads as a customer who is not verified.
+</Warning>
 
 ## Path Parameters
 
 <ParamField path="walletAddress" type="string" required>
-  Ethereum wallet address to query.
+  The wallet to query. Checksummed or lowercase.
 </ParamField>
 
 ## Response Fields
 
-<ResponseField name="success" type="boolean">Request status</ResponseField>
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="walletAddress" type="string">Checksummed address</ResponseField>
+    <ResponseField name="walletAddress" type="string">The wallet, checksummed.</ResponseField>
     <ResponseField name="onChain" type="object">
-      Identity data read directly from the on-chain registry contract. Structure depends on the contract implementation. Returns `null` if no on-chain record exists.
+      The identity as the register reports it. Always an object, never `null`: a wallet the register does not know reads as a zeroed record.
+      <Expandable>
+        <ResponseField name="kycHash" type="string">The registered KYC hash. On an ERC-3643 register, the data of the wallet's KYC claim. All zeros when there is none.</ResponseField>
+        <ResponseField name="investorType" type="integer">`1` retail, `2` professional, `3` eligible counterparty, `0` none. Always `0` on an ERC-3643 register.</ResponseField>
+        <ResponseField name="kycProvider" type="string">The wallet that last wrote the identity. On an ERC-3643 register, the trusted issuer of the KYC claim. The zero address when there is none.</ResponseField>
+        <ResponseField name="timestamp" type="integer">Unix seconds of the last write. Always `0` on an ERC-3643 register.</ResponseField>
+        <ResponseField name="softExpiry" type="integer">Unix seconds, or `0`. Always `0` on an ERC-3643 register.</ResponseField>
+        <ResponseField name="hardExpiry" type="integer">Unix seconds, or `0`. Always `0` on an ERC-3643 register.</ResponseField>
+        <ResponseField name="status" type="string">On a Trusset register, `active`, `soft_expired`, `hard_expired` or `revoked`. A wallet that was never verified also reads `revoked`, with an all-zero `kycHash`. On an ERC-3643 register, `active` when verified, `revoked` when on the register but not verified, `none` when not on it.</ResponseField>
+        <ResponseField name="statusCode" type="integer">`0` active, `1` soft expired, `2` hard expired, `3` revoked or none.</ResponseField>
+        <ResponseField name="frozen" type="boolean">Whether the register freezes the wallet. Always `false` on an ERC-3643 register, where freezing lives on each token.</ResponseField>
+        <ResponseField name="isVerified" type="boolean">Whether the register counts the wallet as verified.</ResponseField>
+        <ResponseField name="registerKind" type="string">ERC-3643 only. Always `TREX`.</ResponseField>
+        <ResponseField name="onchainId" type="string">ERC-3643 only. The wallet's ONCHAINID, or `null`.</ResponseField>
+        <ResponseField name="country" type="string">ERC-3643 only. The wallet's country on the register, in alpha-3, or `null`.</ResponseField>
+        <ResponseField name="unavailable" type="boolean">Present, and `true`, only when the register could not be read. Every other field is then zeroed and `status` is `none`.</ResponseField>
+        <ResponseField name="unavailableReason" type="string">Present with `unavailable`. The code of the failed read, or `READ_FAILED`.</ResponseField>
+      </Expandable>
     </ResponseField>
     <ResponseField name="offChain" type="object">
-      Off-chain customer record. Returns `null` if no matching customer exists in the database.
+      Your customer record for the wallet, or `null` when there is none or it is archived.
       <Expandable>
-        <ResponseField name="status" type="string">Customer status (e.g., `verified`, `revoked`, `pending`)</ResponseField>
-        <ResponseField name="country" type="string">ISO country code</ResponseField>
-        <ResponseField name="investorType" type="string">Investor classification</ResponseField>
-        <ResponseField name="verifiedAt" type="string">ISO 8601 verification timestamp</ResponseField>
+        <ResponseField name="status" type="string">Customer status, such as `pending`, `verified` or `revoked`.</ResponseField>
+        <ResponseField name="country" type="string">ISO 3166-1 alpha-3, or `null` when the record has none.</ResponseField>
+        <ResponseField name="investorType" type="string">The investor type or verification profile key on the record, such as `PROFESSIONAL`.</ResponseField>
+        <ResponseField name="verifiedAt" type="string">When the record was last verified, ISO 8601, or `null`.</ResponseField>
       </Expandable>
     </ResponseField>
   </Expandable>
@@ -35,61 +55,156 @@ Returns the current identity state from two sources: the on-chain identity regis
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/customers/api/identity/status/0xAbC123dEf456789012345678901234567890AbCd" \
-  -H "X-API-Key: trusset_abc123xy_secret..."
+curl "https://api.trusset.org/customers/api/identity/status/0xaBc123DEf456789012345678901234567890aBCD" \
+  -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
-const address = '0xAbC123dEf456789012345678901234567890AbCd';
+const address = '0xaBc123DEf456789012345678901234567890aBCD';
 const response = await fetch(
   `https://api.trusset.org/customers/api/identity/status/${address}`,
-  { headers: { 'X-API-Key': 'trusset_abc123xy_secret...' } }
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await response.json();
 
-if (data.onChain && !data.offChain) {
-  console.warn('On-chain record exists but no off-chain customer found');
+if (data.onChain.unavailable) {
+  throw new Error(`Register unreadable: ${data.onChain.unavailableReason}`);
+}
+if (data.onChain.isVerified && data.offChain?.status !== 'verified') {
+  console.warn('Verified on the register but not in your records');
 }
 ```
 </RequestExample>
 
 <ResponseExample>
-```json Response
+```json Response - Trusset
 {
   "success": true,
   "data": {
-    "walletAddress": "0xAbC123dEf456789012345678901234567890AbCd",
+    "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
     "onChain": {
-      "verified": true,
-      "kycHash": "0xdeadbeef...",
-      "investorType": 1,
-      "softExpiry": 1750000000,
-      "hardExpiry": 1780000000
+      "kycHash": "0xffb1f8c219725bd62205597cd7247c85cafeca20ac0a59f8ec6a7b979eaf672c",
+      "investorType": 2,
+      "kycProvider": "0x51A4F0c3B2e8d7A6c5B4e3f2A1d0c9b8e7f6A5D4",
+      "timestamp": 1790769900,
+      "softExpiry": 1822305600,
+      "hardExpiry": 1853841600,
+      "status": "active",
+      "statusCode": 0,
+      "frozen": false,
+      "isVerified": true
     },
     "offChain": {
       "status": "verified",
-      "country": "DE",
+      "country": "DEU",
       "investorType": "PROFESSIONAL",
-      "verifiedAt": "2025-03-01T10:00:00.000Z"
+      "verifiedAt": "2026-09-30T12:05:00.000Z"
     }
   },
+  "error": null,
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-06-15T12:00:00.000Z"
+    "timestamp": "2026-09-30T12:10:00.000Z"
   }
 }
 ```
-```json Response - No Records
+```json Response - ERC-3643
 {
   "success": true,
   "data": {
-    "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
-    "onChain": null,
-    "offChain": null
+    "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
+    "onChain": {
+      "kycHash": "0xffb1f8c219725bd62205597cd7247c85cafeca20ac0a59f8ec6a7b979eaf672c",
+      "investorType": 0,
+      "kycProvider": "0x9a8B7c6d5e4f30211203F4E5d6c7B8a998877665",
+      "timestamp": 0,
+      "softExpiry": 0,
+      "hardExpiry": 0,
+      "status": "active",
+      "statusCode": 0,
+      "frozen": false,
+      "isVerified": true,
+      "registerKind": "TREX",
+      "onchainId": "0x7d3e2c1b0A9F8E7D6C5b4A39281706f5E4d3C2b1",
+      "country": "DEU"
+    },
+    "offChain": {
+      "status": "verified",
+      "country": "DEU",
+      "investorType": "PROFESSIONAL",
+      "verifiedAt": "2026-09-30T12:05:00.000Z"
+    }
   },
+  "error": null,
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-06-15T12:00:00.000Z"
+    "timestamp": "2026-09-30T12:10:00.000Z"
+  }
+}
+```
+```json Response - Never Verified
+{
+  "success": true,
+  "data": {
+    "walletAddress": "0x1234567890AbcdEF1234567890aBcdef12345678",
+    "onChain": {
+      "kycHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "investorType": 0,
+      "kycProvider": "0x0000000000000000000000000000000000000000",
+      "timestamp": 0,
+      "softExpiry": 0,
+      "hardExpiry": 0,
+      "status": "revoked",
+      "statusCode": 3,
+      "frozen": false,
+      "isVerified": false
+    },
+    "offChain": null
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T12:10:00.000Z"
+  }
+}
+```
+```json Response - Register Unreadable
+{
+  "success": true,
+  "data": {
+    "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
+    "onChain": {
+      "kycHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "investorType": 0,
+      "kycProvider": "0x0000000000000000000000000000000000000000",
+      "timestamp": 0,
+      "softExpiry": 0,
+      "hardExpiry": 0,
+      "status": "none",
+      "statusCode": 3,
+      "frozen": false,
+      "isVerified": false,
+      "unavailable": true,
+      "unavailableReason": "SERVER_ERROR"
+    },
+    "offChain": {
+      "status": "verified",
+      "country": "DEU",
+      "investorType": "PROFESSIONAL",
+      "verifiedAt": "2026-09-30T12:05:00.000Z"
+    }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T12:10:00.000Z"
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `walletAddress` is not a valid address |
+| `STATUS_FAILED` | `500` | The customer record could not be read, or no register is configured for the instance's network |

@@ -13,15 +13,15 @@ The key is public by nature. No secret reaches this API, and the private half ne
 Send any combination. Sending none is refused with `NOTHING_TO_UPDATE`.
 
 <ParamField body="publicKey" type="string">
-  32-byte ed25519 public key as 64 hex characters, with or without a `0x` prefix. It is stored lowercased and unprefixed. Send `null` to clear the key, which leaves this instance unable to verify any production bundle.
+  32-byte ed25519 public key as 64 hex characters, with or without a `0x` prefix. It is stored lowercased and unprefixed. Send `null` to clear the key. Without a key, an instance that does not enforce proofs skips the signature check.
 </ParamField>
 
 <ParamField body="proofVerificationEnabled" type="boolean">
-  Whether this instance requires a real proof behind every claim. When `true`, a `stub` manifest is refused and a commitment-only leaf cannot be attested.
+  Whether this instance requires a STARK behind every leaf it files as a claim. When `true`, verification needs a registered operator key and the proof in `proofs` for every leaf being filed, and a commitment-only leaf cannot be attested. A production instance enforces this whatever the setting says. A value that is not a boolean is ignored.
 </ParamField>
 
 <ParamField body="maxStalenessDays" type="integer">
-  How old a bundle's batch date may be before it is refused with `PROOF_STALE`. Integer between 1 and 36500.
+  The staleness bound for a bundle's batch date, in days. `PROOF_STALE` is the failure for a batch date older than this. Integer between 1 and 36500. Send `null` to fall back to the default of 400 days.
 </ParamField>
 
 ## Response Fields
@@ -31,17 +31,17 @@ Send any combination. Sending none is refused with `NOTHING_TO_UPDATE`.
     <ResponseField name="operatorKey" type="string">The stored key, lowercased and unprefixed, or `null`.</ResponseField>
     <ResponseField name="operatorKeySetAt" type="string">When it was last set, ISO 8601, or `null`.</ResponseField>
     <ResponseField name="proofVerificationEnabled" type="boolean">What this instance asked for.</ResponseField>
-    <ResponseField name="proofVerificationEnforced" type="boolean">What actually applies. It is `true` when the instance asked for it, and also when the network's own trust anchors require proofs regardless. Read this one, not the setting.</ResponseField>
-    <ResponseField name="maxStalenessDays" type="integer">The staleness bound in effect.</ResponseField>
+    <ResponseField name="proofVerificationEnforced" type="boolean">What actually applies. It is `true` when the instance asked for it, and always on a production instance, whose trust anchors require proofs. Read this one, not the setting.</ResponseField>
+    <ResponseField name="maxStalenessDays" type="integer">The stored bound, or `null` when unset, in which case the default of 400 days applies.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Warning>
-  Rotating the key does not re-verify anything already attested. Claims filed under the old key stay on the registry, and their manifests no longer verify against the new one. Rotate deliberately, and keep the old key with the bundles it signed.
+  Rotating the key does not re-verify anything already attested. Claims filed under the old key stay on the registry. Rotate deliberately, and keep the old key with the bundles it signed.
 </Warning>
 
 <Note>
-  Every change is written to the customer audit log as `PROOF_OPERATOR_KEY_UPDATED`, recording whether the key changed, whether it was cleared, and which settings moved.
+  Every change is written to the customer audit log as `PROOF_OPERATOR_KEY_UPDATED`, recording whether a key was sent, whether it was cleared, and the new value of each setting sent.
 </Note>
 
 <RequestExample>
@@ -55,6 +55,22 @@ curl -X PUT "https://api.trusset.org/customers/api/identity/operator-key" \
     "maxStalenessDays": 365
   }'
 ```
+```typescript TypeScript
+const res = await fetch('https://api.trusset.org/customers/api/identity/operator-key', {
+  method: 'PUT',
+  headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    publicKey: 'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a',
+    proofVerificationEnabled: true,
+    maxStalenessDays: 365
+  })
+});
+const { data } = await res.json();
+
+if (!data.proofVerificationEnforced) {
+  throw new Error('This instance still files claims without checking STARKs');
+}
+```
 </RequestExample>
 
 <ResponseExample>
@@ -67,6 +83,11 @@ curl -X PUT "https://api.trusset.org/customers/api/identity/operator-key" \
     "proofVerificationEnabled": true,
     "proofVerificationEnforced": true,
     "maxStalenessDays": 365
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-06T12:00:00.000Z"
   }
 }
 ```

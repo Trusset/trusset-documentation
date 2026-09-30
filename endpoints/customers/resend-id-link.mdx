@@ -1,48 +1,58 @@
 ---
 title: 'Resend ID Link'
 api: 'POST /customers/api/id-links/{linkId}/resend'
-description: 'Re-send a KYC verification link through specified channels'
+description: 'Deliver an existing verification link again by email or SMS'
 ---
 
-Re-delivers an existing verification link to the customer through one or more channels. The link itself is not regenerated - only the delivery is repeated. Use this when the original notification was missed or when you want to add an additional delivery channel.
+Sends an existing link to its recipient again. The URL is the same one, and the link's expiry does not move.
+
+A link past its `expiresAt` that was never revoked still reads `PENDING`, and it is re-sent although the hosted page refuses it. Check `expiresAt` first, and [create a new link](/endpoints/customers/create-id-link) if it has passed.
 
 ## Path Parameters
 
 <ParamField path="linkId" type="string" required>
-  ID link identifier.
+  The link `id`, not the token.
 </ParamField>
 
 ## Body Parameters
 
 <ParamField body="channels" type="string[]" required>
-  Delivery channels to use. At least one channel is required. Values: `email`, `sms`.
+  A non-empty array of `email`, `sms`, or both. Email goes to the link's `recipientEmail` and SMS to its `recipientPhone`. A channel whose recipient is missing is skipped, and other values are ignored, so the call can succeed with nothing sent.
 </ParamField>
+
+The email states the days left before the link expires, rounded up and never below one. The SMS uses the link's `customMessage` when it has one.
 
 ## Response Fields
 
-<ResponseField name="success" type="boolean">Request status</ResponseField>
-<ResponseField name="data" type="object">Delivery result, including which channels were used and their status.</ResponseField>
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="verificationUrl" type="string">The URL that was sent.</ResponseField>
+    <ResponseField name="delivery" type="object">
+      One entry per channel attempted, each `{ sent, error }` with `error` present only on failure. Empty when no channel was attempted. For email, `sent: true` does not confirm delivery, because a refusal by the mail provider is not reported here.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
 
 <RequestExample>
 ```bash cURL
-curl -X POST "https://api.trusset.org/customers/api/id-links/link_abc123/resend" \
+curl -X POST "https://api.trusset.org/customers/api/id-links/cmg6b2t9x0001lb08q4w7k3fz/resend" \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: trusset_abc123xy_secret..." \
+  -H "X-API-Key: trusset_your_key_here" \
   -d '{ "channels": ["email", "sms"] }'
 ```
 ```typescript TypeScript
 const response = await fetch(
-  'https://api.trusset.org/customers/api/id-links/link_abc123/resend',
+  'https://api.trusset.org/customers/api/id-links/cmg6b2t9x0001lb08q4w7k3fz/resend',
   {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-API-Key': 'trusset_abc123xy_secret...'
+      'X-API-Key': 'trusset_your_key_here'
     },
     body: JSON.stringify({ channels: ['email', 'sms'] })
   }
 );
-const { data } = await response.json();
+const { success, data, error } = await response.json();
 ```
 </RequestExample>
 
@@ -51,17 +61,19 @@ const { data } = await response.json();
 {
   "success": true,
   "data": {
-    "linkId": "link_abc123",
-    "channels": ["email", "sms"],
-    "deliveredAt": "2025-06-15T12:00:00.000Z"
+    "verificationUrl": "https://verify.trusset.org/link/5cd9b10d804ba5fb5b4da94181cd0b57099f0dd4e956fc7ac7ec51ebe7fc8a22",
+    "delivery": {
+      "email": { "sent": true },
+      "sms": { "sent": false, "error": "Invalid phone number: +49151" }
+    }
   },
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-06-15T12:00:00.000Z"
+    "timestamp": "2026-09-30T10:00:00.000Z"
   }
 }
 ```
-```json Error - Missing Channels
+```json Missing channels
 {
   "success": false,
   "error": {
@@ -70,8 +82,17 @@ const { data } = await response.json();
   },
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-06-15T12:00:00.000Z"
+    "timestamp": "2026-09-30T10:00:00.000Z"
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_INPUT` | `400` | `channels` is missing, not an array, or empty |
+| `NOT_FOUND` | `404` | No link with this ID exists on your instance |
+| `INVALID_STATE` | `400` | The link was consumed, is `COMPLETED`, or was revoked |
+| `RESEND_FAILED` | `500` | The link could not be read. A failed send is reported in `delivery` instead |

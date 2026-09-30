@@ -4,7 +4,7 @@ api: 'GET /customers/api/identity/proofs/{walletAddress}'
 description: 'The claim slots on an identity and which proof backs each one'
 ---
 
-Returns the subject's on-chain root and every claim slot, joined with the ledger row that records which proof filed it. It answers the question a reviewer asks: what does this identity assert, and where did each assertion come from.
+Returns the subject's on-chain root and every active claim slot, joined with the ledger row that records which proof filed it. It answers the question a reviewer asks: what does this identity assert, and where did each assertion come from.
 
 ## Path Parameters
 
@@ -15,10 +15,12 @@ Returns the subject's on-chain root and every claim slot, joined with the ledger
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="walletAddress" type="string">The subject, checksummed.</ResponseField>
+    <ResponseField name="rootHash" type="string">The root the registry holds for this identity, lowercased, or `null` when there is none.</ResponseField>
     <ResponseField name="verified" type="boolean">Whether the registry holds a verified identity.</ResponseField>
-    <ResponseField name="frozen" type="boolean">Whether the identity is frozen.</ResponseField>
-    <ResponseField name="chainUnavailable" type="boolean">`true` when the registry could not be read. The rest of the response is then not a statement about the identity.</ResponseField>
-    <ResponseField name="proofs" type="array">One entry per claim slot on chain. See below.</ResponseField>
+    <ResponseField name="frozen" type="boolean">Whether the identity is frozen. Always `false` on an ERC-3643 register, which keeps no freeze.</ResponseField>
+    <ResponseField name="chainUnavailable" type="boolean">`true` when the identity could not be read. The rest of the response is then not a statement about the identity. A failed read of the claims alone is not flagged, and `proofs` then comes back empty.</ResponseField>
+    <ResponseField name="ledgerUnavailable" type="boolean">`true` when the proof ledger could not be read.</ResponseField>
+    <ResponseField name="proofs" type="array">One entry per active claim slot on chain. See below.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -26,31 +28,43 @@ Returns the subject's on-chain root and every claim slot, joined with the ledger
   <Expandable>
     <ResponseField name="claimType" type="integer">Slot index, 0 to 7.</ResponseField>
     <ResponseField name="claimTypeLabel" type="string">Its name, for example `RESIDENCY`.</ResponseField>
-    <ResponseField name="fieldName" type="string">The bundle field that filed it, or `null` when no ledger row matches.</ResponseField>
+    <ResponseField name="fieldName" type="string">The bundle field that filed it, or `null` when no ledger row matches this claim's hash.</ResponseField>
     <ResponseField name="circuit" type="string">The circuit that proved it, or `null`.</ResponseField>
     <ResponseField name="proofDigest" type="string">Digest of the STARK behind it, or `null`.</ResponseField>
     <ResponseField name="bundleRoot" type="string">The root of the bundle that filed it, or `null`.</ResponseField>
-    <ResponseField name="rootCurrent" type="boolean">Whether that bundle's root is still the one on chain. `false` means the claim was filed from a bundle the identity has since rotated away from.</ResponseField>
-    <ResponseField name="source" type="string">`proof` when a ledger row backs it, `manual` when the slot is filled but nothing records a proof, `null` when the ledger could not be read.</ResponseField>
-    <ResponseField name="issuer" type="string">Who wrote the claim on chain.</ResponseField>
-    <ResponseField name="issuedAt" type="integer">Unix seconds.</ResponseField>
-    <ResponseField name="expiry" type="integer">Unix seconds, or `0` for no expiry.</ResponseField>
-    <ResponseField name="txHash" type="string">The transaction that filed it, or `null`.</ResponseField>
+    <ResponseField name="rootCurrent" type="boolean">Whether that bundle's root is still the one on chain. `false` means the claim was filed from a bundle the identity has since rotated away from, or that no ledger row matches.</ResponseField>
+    <ResponseField name="source" type="string">`proof` when a ledger row with this hash backs it, `manual` when none does, `null` when the ledger could not be read. Only [Attest Proofs](/endpoints/customers/attest-proofs) writes ledger rows. A claim filed by [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) or [Add Claim](/endpoints/customers/add-claim) shows as `manual`.</ResponseField>
+    <ResponseField name="dataHash" type="string">The hash the claim carries on chain, lowercased.</ResponseField>
+    <ResponseField name="issuer" type="string">Who wrote the claim on chain. On an ERC-3643 register, the trusted issuer contract that signed it.</ResponseField>
+    <ResponseField name="issuedAt" type="integer">Unix seconds. `0` on an ERC-3643 register.</ResponseField>
+    <ResponseField name="expiry" type="integer">Unix seconds, or `0` for no expiry. Always `0` on an ERC-3643 register.</ResponseField>
+    <ResponseField name="txHash" type="string">The transaction that filed it, from the ledger, or `null`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Warning>
-  `rootCurrent: false` is the one to watch. The claim is still on chain and still readable by a token contract. But the bundle it came from no longer matches the identity's root, so the proof behind it can no longer be checked against the chain. Re-attest from the current bundle.
+  `rootCurrent: false` on a `source: "proof"` entry is the one to watch. The claim is still on chain and still readable by a token contract. But the bundle it came from no longer matches the identity's root, so the proof behind it can no longer be checked against the chain. Re-attest from the current bundle.
 </Warning>
 
 <Note>
-  The chain is the source of truth here and the ledger only supplies labels. When the ledger cannot be read, `source` is `null` on every entry and the per-proof fields are absent, but the root and the claims still render.
+  The chain is the source of truth here and the ledger only supplies labels. When the ledger cannot be read, `ledgerUnavailable` is `true`, `source` is `null` on every entry and the per-proof fields are `null`, but the root and the claims still render.
 </Note>
 
 <RequestExample>
 ```bash cURL
-curl "https://api.trusset.org/customers/api/identity/proofs/0xAbCdEf0123456789AbCdEf0123456789AbCdEf01" \
+curl "https://api.trusset.org/customers/api/identity/proofs/0xabCDeF0123456789AbcdEf0123456789aBCDEF01" \
   -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const wallet = '0xabCDeF0123456789AbcdEf0123456789aBCDEF01';
+const res = await fetch(`https://api.trusset.org/customers/api/identity/proofs/${wallet}`, {
+  headers: { 'X-API-Key': 'trusset_your_key_here' }
+});
+const { data } = await res.json();
+
+if (data.chainUnavailable) throw new Error('Registry unreadable, retry later');
+
+const stale = data.proofs.filter((p: any) => p.source === 'proof' && !p.rootCurrent);
 ```
 </RequestExample>
 
@@ -59,10 +73,12 @@ curl "https://api.trusset.org/customers/api/identity/proofs/0xAbCdEf0123456789Ab
 {
   "success": true,
   "data": {
-    "walletAddress": "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01",
+    "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
+    "rootHash": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
     "verified": true,
     "frozen": false,
     "chainUnavailable": false,
+    "ledgerUnavailable": false,
     "proofs": [
       {
         "claimType": 3,
@@ -73,12 +89,18 @@ curl "https://api.trusset.org/customers/api/identity/proofs/0xAbCdEf0123456789Ab
         "bundleRoot": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
         "rootCurrent": true,
         "source": "proof",
-        "issuer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+        "dataHash": "0x41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b9f2c",
+        "issuer": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
         "issuedAt": 1788696000,
         "expiry": 1820246400,
         "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b"
       }
     ]
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-06T12:00:00.000Z"
   }
 }
 ```
@@ -90,4 +112,5 @@ curl "https://api.trusset.org/customers/api/identity/proofs/0xAbCdEf0123456789Ab
 |---|---|---|
 | `INVALID_ADDRESS` | `400` | `walletAddress` is not a valid address |
 | `INSTANCE_NOT_FOUND` | `404` | The instance behind your key no longer exists |
+| `OWN_REGISTRY_NOT_CONFIGURED` | `409` | The instance is bound to its own register but has no valid register address |
 | `PROOFS_FAILED` | `500` | The proof tree could not be assembled |

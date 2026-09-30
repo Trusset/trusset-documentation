@@ -1,0 +1,161 @@
+---
+title: 'List Pending Verifications'
+api: 'GET /customers/api/identity/pending'
+description: 'KYC approvals waiting for your wallet to register them on chain'
+---
+
+Lists the KYC approvals your instance has not yet put on chain. When a customer passes KYC through an ID link or a hosted verification service, Trusset computes the `kycHash`, investor type, expiries and residency claim, then queues a row here. Nothing is signed until your wallet signs it.
+
+Work the queue in two steps. [Build Pending Registration](/endpoints/customers/build-pending-registration) returns the transactions, and [Confirm Pending Registration](/endpoints/customers/confirm-pending-registration) records them once mined. [Dismiss Pending Verification](/endpoints/customers/dismiss-pending-verification) closes a row without registering it.
+
+## Where rows come from
+
+| `source` | Queued when | `sourceRef` |
+|---|---|---|
+| `SUMSUB` | Sumsub approves the customer of an ID link that names a wallet, and the wallet is not yet verified on your register | The ID link `id` |
+| `VERIFICATION_SERVICE` | Sumsub approves a customer who checked out through a hosted verification service | The checkout `id` |
+| `REGISTER_SWITCH` | Your instance moved to a different register. Every verified customer that is not archived and has a `kycHash` is queued for the new one | Your instance `id` |
+
+A Sumsub approval from a country that the customer's verification profile blocks is refused and never queued. `REGISTER_SWITCH` rows are not checked until the build.
+
+The expiries are fixed when the row is queued: 180 days soft and 365 days hard, unless a hosted verification service sets its own. They do not move while the row waits.
+
+A wallet has at most one `PENDING` row. A new approval for the same wallet refreshes that row, replacing its hash, expiries and metadata, instead of adding a second.
+
+A row also closes when its wallet is verified through [Verify Identity](/endpoints/customers/verify-identity) or [Batch Verify](/endpoints/customers/batch-verify). It then reads `CONFIRMED`, with `metadata.resolvedBy` set to `DIRECT_VERIFY` or `BATCH_VERIFY`. Closed rows are kept and stay listable by `status`.
+
+## Query Parameters
+
+<ParamField query="status" type="string" default="PENDING">
+  `PENDING`, `CONFIRMED` or `DISMISSED`, in any case. Any other value returns no rows, and no single value lists every status at once.
+</ParamField>
+
+<ParamField query="page" type="integer" default="1">
+  Page number. Values below 1 read as 1. A value that is not a number fails with `PENDING_LIST_FAILED`.
+</ParamField>
+
+<ParamField query="limit" type="integer" default="50">
+  Rows per page, capped at 200. Values below 1 read as 1. A value that is not a number fails with `PENDING_LIST_FAILED`.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="rows" type="array">The rows, oldest first. See below.</ResponseField>
+    <ResponseField name="pagination" type="object">`page`, `limit`, `total` and `totalPages`, with `page` and `limit` as bounded.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="rows" type="array">
+  <Expandable>
+    <ResponseField name="id" type="string">The row. Pass it to Build, Confirm and Dismiss.</ResponseField>
+    <ResponseField name="instanceId" type="string">Your instance.</ResponseField>
+    <ResponseField name="walletAddress" type="string">The customer's wallet, lowercased.</ResponseField>
+    <ResponseField name="investorType" type="integer">The investor type to register, as the register's number: `1` retail, `2` professional, `3` eligible counterparty. It comes from the customer's verification profile.</ResponseField>
+    <ResponseField name="kycHash" type="string">The hash to register, computed at approval, or `null`.</ResponseField>
+    <ResponseField name="softExpiry" type="string">ISO 8601, or `null`.</ResponseField>
+    <ResponseField name="hardExpiry" type="string">ISO 8601, or `null`.</ResponseField>
+    <ResponseField name="source" type="string">`SUMSUB`, `VERIFICATION_SERVICE` or `REGISTER_SWITCH`.</ResponseField>
+    <ResponseField name="sourceRef" type="string">The ID link, checkout or instance the row came from.</ResponseField>
+    <ResponseField name="status" type="string">`PENDING`, `CONFIRMED` or `DISMISSED`.</ResponseField>
+    <ResponseField name="txHash" type="string">The transaction the row was confirmed with, or `null`.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that signed that transaction, or `null`.</ResponseField>
+    <ResponseField name="error" type="string">Why the most recent confirm left the row queued, or `null`. Read it on `PENDING` rows.</ResponseField>
+    <ResponseField name="metadata" type="object">What the approval carried. The keys the queue acts on are listed below.</ResponseField>
+    <ResponseField name="createdAt" type="string">When the row was queued, ISO 8601.</ResponseField>
+    <ResponseField name="updatedAt" type="string">When it last changed, ISO 8601.</ResponseField>
+    <ResponseField name="confirmedAt" type="string">When it confirmed, ISO 8601, or `null`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="metadata" type="object">
+  <Expandable>
+    <ResponseField name="country" type="string">The customer's country, normally ISO 3166-1 alpha-3. The build checks it against the verification profile's blocked countries, and an ERC-3643 register stores it.</ResponseField>
+    <ResponseField name="investorTypeName" type="string">The verification profile key, such as `RETAIL`. A customer record that the confirm creates takes it as its investor type.</ResponseField>
+    <ResponseField name="residencyClaim" type="object">`dataHash` and `expiry`, in Unix seconds, of the `RESIDENCY` claim to file. Present on `SUMSUB` and `VERIFICATION_SERVICE` rows that carried a country.</ResponseField>
+    <ResponseField name="onchainId" type="string">The customer's ONCHAINID on an ERC-3643 register, once recorded by [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid).</ResponseField>
+    <ResponseField name="notifyEmail" type="string">Where the customer is told that the registration completed. `SUMSUB` and `VERIFICATION_SERVICE` rows only.</ResponseField>
+    <ResponseField name="resolvedBy" type="string">`DIRECT_VERIFY` or `BATCH_VERIFY` when another endpoint closed the row.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+Other keys, such as `applicantId`, `idLinkId`, `checkoutId` and `name`, describe where the approval came from. A confirm uses them to fill in a customer record it creates, and to run its follow-ups.
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/customers/api/identity/pending?status=PENDING&limit=50" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const response = await fetch(
+  'https://api.trusset.org/customers/api/identity/pending?status=PENDING&limit=50',
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await response.json();
+
+for (const row of data.rows) {
+  console.log(row.id, row.walletAddress, row.source, row.error ?? 'never attempted');
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "rows": [
+      {
+        "id": "cmg1u7k3p0004l80h2f9s6d1x",
+        "instanceId": "cmfz3k8q20001jr08w5n2x7cv",
+        "walletAddress": "0x96c5822784130360f904372b83e130be4a1894d6",
+        "investorType": 1,
+        "kycHash": "0xd815320690e956adfd07197c275b560561fbf5aab2d633d3d46db748c468d0af",
+        "softExpiry": "2027-03-27T14:03:11.000Z",
+        "hardExpiry": "2027-09-28T14:03:11.000Z",
+        "source": "SUMSUB",
+        "sourceRef": "cmg1u6x0d0002l80h8r4v2k9q",
+        "status": "PENDING",
+        "txHash": null,
+        "signedBy": null,
+        "error": null,
+        "metadata": {
+          "applicantId": "68d93f0c2b7e4a1f9c5d8e21",
+          "idLinkId": "cmg1u6x0d0002l80h8r4v2k9q",
+          "country": "DEU",
+          "investorTypeName": "RETAIL",
+          "notifyEmail": "investor@example.com",
+          "issuerName": "Example Issuer AG",
+          "residencyClaim": {
+            "dataHash": "0xbd549c840e3415871bfba8d089cfbf49b7529d3c767c211b623552e15a0e669c",
+            "expiry": 1822140191
+          }
+        },
+        "createdAt": "2026-09-28T14:03:11.482Z",
+        "updatedAt": "2026-09-28T14:03:11.482Z",
+        "confirmedAt": null
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "limit": 50,
+      "total": 1,
+      "totalPages": 1
+    }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T10:00:00.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NOT_FOUND` | `404` | The instance behind your key is archived or no longer exists |
+| `PENDING_LIST_FAILED` | `500` | The queue could not be read, or `page` or `limit` is not a number |

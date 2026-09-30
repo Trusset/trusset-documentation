@@ -1,0 +1,178 @@
+---
+title: 'Create Disclosure Request'
+api: 'POST /customers/api/disclosure-requests'
+description: 'Ask a wallet holder to disclose a verified fact to your instance'
+---
+
+Asks the holder of a wallet to disclose one verified fact to your instance. The holder answers on verify.trusset.org with a consent the wallet signs and, for some facts, a zk-STARK proof from their KYC proof bundle.
+
+<Note>
+  Creating a request sends the holder nothing. Tell them to sign in at verify.trusset.org with the wallet, in the same environment as your instance. No webhook reports the answer either, so read the request with [Get Disclosure Request](/endpoints/customers/get-disclosure-request).
+</Note>
+
+## Scopes
+
+| Scope | Asks for | What can answer it |
+|---|---|---|
+| `AGE` | Age over the 18-year floor | An age proof from the holder's bundle. Without one the holder cannot approve. |
+| `COUNTRY` | Country of residence | The bundle's `country` proof, or else an active `RESIDENCY` claim on the register. |
+| `FULL_KYC` | The complete on-chain verification | The wallet's register record and all its active claims. An attached bundle adds its proofs. |
+
+What each answer proves, and what it leaves undisclosed, is set out on [Get Disclosure Request](/endpoints/customers/get-disclosure-request).
+
+## What the holder sees and signs
+
+The holder signs in by signing a message with the wallet. Each open request for that wallet shows your issuer name, or your instance name when there is none, with the scope, your `message`, your `referenceUrl` and the expiry.
+
+Approving signs this EIP-712 consent with the wallet. Declining needs no signature.
+
+```json
+{
+  "domain": { "name": "Trusset Verify", "version": "1", "chainId": 11155111 },
+  "primaryType": "DisclosureConsent",
+  "types": {
+    "DisclosureConsent": [
+      { "name": "requestId", "type": "string" },
+      { "name": "wallet", "type": "address" },
+      { "name": "requestor", "type": "string" },
+      { "name": "scope", "type": "string" },
+      { "name": "reference", "type": "string" },
+      { "name": "expiresAt", "type": "uint256" }
+    ]
+  },
+  "message": {
+    "requestId": "cmg7q3v2k0004lq08h2z9x6de",
+    "wallet": "0x801D3b83882B1047fb2CeB6C097C3ae806D8D028",
+    "requestor": "ACME Capital AG",
+    "scope": "COUNTRY",
+    "reference": "https://acme-capital.example/onboarding/4711",
+    "expiresAt": 1791970200
+  }
+}
+```
+
+`chainId` is 1 for a production instance and 11155111 (Sepolia) for a development one. `reference` is an empty string when you send no `referenceUrl`, and `expiresAt` is in Unix seconds.
+
+## How a request resolves
+
+A request starts `OPEN` and ends in one of four states. `APPROVED` and `DECLINED` are the holder's answers. `CANCELLED` is yours, through [Cancel Disclosure Request](/endpoints/customers/cancel-disclosure-request). `EXPIRED` applies once `expiresAt` passes without an answer, and the holder can no longer respond.
+
+Expiry is applied when requests are read, so a list or a fetch never shows an overdue request as `OPEN`.
+
+Approval reads the identity register the wallet was verified on. That is the Trusset ID Register first, then the issuer-owned registers of instances that hold the wallet as a customer. A wallet with no identity root there cannot approve, and a register that cannot be read blocks approval until it can.
+
+An approval does not require the identity to be current. A revoked or expired identity keeps its root and can still approve, so read `disclosure.chain.isVerified` before relying on the answer.
+
+## Body Parameters
+
+<ParamField body="walletAddress" type="string" required>
+  The wallet whose holder you ask, as `0x` and 40 hex characters. Send it lowercase or correctly checksummed. It is returned checksummed.
+</ParamField>
+
+<ParamField body="scope" type="string" required>
+  `AGE`, `COUNTRY` or `FULL_KYC`, in any case.
+</ParamField>
+
+<ParamField body="referenceUrl" type="string">
+  An `https` link the holder can open, such as the case the request belongs to. At most 512 characters, with no user name or password in it. It is normalised, so a bare host gains a trailing slash, and it is part of the signed consent.
+</ParamField>
+
+<ParamField body="message" type="string">
+  Shown to the holder. At most 280 characters after the ends are trimmed. Control characters other than tabs and line breaks are removed first.
+</ParamField>
+
+<ParamField body="expiresInDays" type="integer" default="14">
+  Days the holder has to answer, from 1 to 90.
+</ParamField>
+
+A wallet can have one open request per scope from your instance. Requests made in the Issuer Portal count toward this.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="id" type="string">Request ID.</ResponseField>
+    <ResponseField name="walletAddress" type="string">Checksummed.</ResponseField>
+    <ResponseField name="scope" type="string">`AGE`, `COUNTRY` or `FULL_KYC`.</ResponseField>
+    <ResponseField name="scopeLabel" type="string">`Reveal age`, `Reveal country` or `Reveal full KYC`.</ResponseField>
+    <ResponseField name="referenceUrl" type="string">As normalised, or `null`.</ResponseField>
+    <ResponseField name="message" type="string">As stored, or `null`.</ResponseField>
+    <ResponseField name="status" type="string">`OPEN`.</ResponseField>
+    <ResponseField name="environment" type="string">`PROD` for a production instance, `DEV` for a development one. The holder sees the request only when signed in to the same environment.</ResponseField>
+    <ResponseField name="createdAt" type="string">ISO 8601.</ResponseField>
+    <ResponseField name="expiresAt" type="string">ISO 8601.</ResponseField>
+    <ResponseField name="respondedAt" type="string">`null` until the request is answered or cancelled.</ResponseField>
+    <ResponseField name="proofLevel" type="string">`null` until the request is approved.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/disclosure-requests" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -d '{
+    "walletAddress": "0x801D3b83882B1047fb2CeB6C097C3ae806D8D028",
+    "scope": "COUNTRY",
+    "referenceUrl": "https://acme-capital.example/onboarding/4711",
+    "message": "Please confirm your country of residence for your account opening",
+    "expiresInDays": 14
+  }'
+```
+```typescript TypeScript
+const response = await fetch('https://api.trusset.org/customers/api/disclosure-requests', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-API-Key': 'trusset_your_key_here'
+  },
+  body: JSON.stringify({
+    walletAddress: '0x801D3b83882B1047fb2CeB6C097C3ae806D8D028',
+    scope: 'COUNTRY',
+    referenceUrl: 'https://acme-capital.example/onboarding/4711',
+    message: 'Please confirm your country of residence for your account opening',
+    expiresInDays: 14
+  })
+});
+const { success, data, error } = await response.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json 201 Response
+{
+  "success": true,
+  "data": {
+    "id": "cmg7q3v2k0004lq08h2z9x6de",
+    "walletAddress": "0x801D3b83882B1047fb2CeB6C097C3ae806D8D028",
+    "scope": "COUNTRY",
+    "scopeLabel": "Reveal country",
+    "referenceUrl": "https://acme-capital.example/onboarding/4711",
+    "message": "Please confirm your country of residence for your account opening",
+    "status": "OPEN",
+    "environment": "DEV",
+    "createdAt": "2026-09-30T09:30:00.000Z",
+    "expiresAt": "2026-10-14T09:30:00.000Z",
+    "respondedAt": null,
+    "proofLevel": null
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T09:30:00.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `walletAddress` is missing or is not `0x` and 40 hex characters |
+| `INVALID_SCOPE` | `400` | `scope` is not `AGE`, `COUNTRY` or `FULL_KYC` |
+| `INVALID_REFERENCE` | `400` | `referenceUrl` is not an `https` URL, is longer than 512 characters, or carries a user name or password |
+| `INVALID_MESSAGE` | `400` | `message` is not a string, or is longer than 280 characters |
+| `INVALID_EXPIRY` | `400` | `expiresInDays` is not an integer from 1 to 90 |
+| `INSTANCE_NOT_FOUND` | `404` | The instance behind your key no longer exists or is archived |
+| `DUPLICATE_REQUEST` | `409` | The wallet already has an open request for this scope from your instance |
+| `CREATE_DISCLOSURE_REQUEST_FAILED` | `500` | The request could not be created. A mixed-case `walletAddress` with a wrong checksum also ends here |

@@ -1,0 +1,199 @@
+---
+title: 'Get Lending Positions'
+api: 'GET /customers/api/manage/{customerId}/lending-positions'
+description: 'The loans behind one customer across every lending family, with their debt'
+---
+
+Returns the loans behind one customer across every lending family: each loan's principal, interest and debt, totals per asset class, and a roll-up per client. The customer record itself carries no debt figures, so this is where they are read.
+
+A loan counts when it was borrowed from the customer's primary or linked wallets, or when it is attributed to the customer through `clientReference` on [Open Loan](/endpoints/lending/open-loan). Only the external securities families carry attribution. A loan from one of the customer's wallets that is attributed to a different customer is left out.
+
+<Warning>
+  The debt is only as fresh as `basis` says. A loan whose market could not be read, or one beyond the first 60 read in a call, carries the figure the platform last recorded, without interest accrued since. `totals` adds amounts across markets as plain numbers, with no currency conversion.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="customerId" type="string" required>
+  Customer ID. Wallets, reference keys and external IDs are not resolved here. Archived records are found too.
+</ParamField>
+
+## Query Parameters
+
+<ParamField query="includeClosed" type="string" default="false">
+  Set to `true` to also return loans that are no longer active. `totals` and `clients` count active loans either way.
+</ParamField>
+
+<ParamField query="refresh" type="string" default="true">
+  Set to `false` to skip the chain and return the figures last recorded. Otherwise each active loan with an on-chain loan ID is read from its market, up to 60 per call. The figures read are saved to the platform's record. A market that cannot be read falls back to its recorded figures without failing the call.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="customer" type="object">The record the loans belong to: `id`, `name`, `referenceKey`, `externalId` and `walletAddress`.</ResponseField>
+    <ResponseField name="positions" type="array">
+      One entry per loan, grouped by lending family and then by market, newest first within a market.
+      <Expandable>
+        <ResponseField name="family" type="string">`securities-v2`, `securities-nft`, `securities`, `stocks`, `commodities` or `gold`.</ResponseField>
+        <ResponseField name="familyLabel" type="string">A readable name for the family, such as `External securities lending v2`.</ResponseField>
+        <ResponseField name="bucket" type="string">The `totals` key the loan counts under: `securities`, `stocks`, `commodities` or `gold`.</ResponseField>
+        <ResponseField name="marketId" type="string">Platform market ID.</ResponseField>
+        <ResponseField name="marketAddress" type="string">Market contract, or `null`.</ResponseField>
+        <ResponseField name="marketLabel" type="string">Collateral and borrow symbols joined with ` / `, such as `NYF1 / USDC`. Stock markets show the borrow symbol alone. Commodity and Tether Gold markets show `null`.</ResponseField>
+        <ResponseField name="borrowAssetSymbol" type="string">Symbol of the asset borrowed. Always `USDC` for Tether Gold, and `null` for commodity markets.</ResponseField>
+        <ResponseField name="positionId" type="string">The platform's position record ID.</ResponseField>
+        <ResponseField name="loanId" type="string">Loan ID on the market contract, or `null`.</ResponseField>
+        <ResponseField name="borrower" type="string">The borrowing wallet, lowercased.</ResponseField>
+        <ResponseField name="principal" type="number">Outstanding principal in whole units of the borrow asset.</ResponseField>
+        <ResponseField name="interest" type="number">Accrued interest in the same units.</ResponseField>
+        <ResponseField name="debt" type="number">`principal` plus `interest`.</ResponseField>
+        <ResponseField name="collateral" type="number">Collateral as last recorded, never read live, in whole token units. Units for the non-fungible family.</ResponseField>
+        <ResponseField name="healthFactor" type="string">Decimal health factor, or `null`.</ResponseField>
+        <ResponseField name="status" type="string">The status the platform recorded, such as `ACTIVE`, `REPAID` or `LIQUIDATED`.</ResponseField>
+        <ResponseField name="active" type="boolean">Whether the loan is open. On a row read from the chain this is the chain's answer, so a loan closed on chain reads `false` with zero debt while `status` can still show `ACTIVE`.</ResponseField>
+        <ResponseField name="openedAt" type="string">ISO 8601.</ResponseField>
+        <ResponseField name="dueAt" type="string">Maturity as a Unix timestamp in seconds, for the `securities-v2` and `securities-nft` families. Otherwise `null`.</ResponseField>
+        <ResponseField name="customerId" type="string">The customer the loan is attributed to, or `null` when it is counted by wallet.</ResponseField>
+        <ResponseField name="attribution" type="string">`client-reference` or `wallet`.</ResponseField>
+        <ResponseField name="attributedAt" type="string">When the attribution was recorded, or `null`.</ResponseField>
+        <ResponseField name="live" type="boolean">Whether this call read the figures from the chain.</ResponseField>
+        <ResponseField name="lastUpdated" type="string">When the figures were read, for a live row. Otherwise when the platform's record was last written.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="totals" type="object">Sum of `debt` over active loans: `total`, `securities`, `stocks`, `commodities` and `gold`.</ResponseField>
+    <ResponseField name="clients" type="array">Active debt per client, largest first. Here that is at most two entries: this customer for its attributed loans, and a `wallet` entry with `customerId` `null` for unattributed loans on its wallets. Each carries `customerId`, `reference`, `name`, `attribution`, `debt` and `loans`. `reference` is the `externalId`, else the `referenceKey`, else the ID.</ResponseField>
+    <ResponseField name="basis" type="string">`chain` when every active loan was read from the chain in this call, `mixed` when some were, `record` when none were.</ResponseField>
+    <ResponseField name="asOf" type="string">When the chain was read, or `null` when nothing was read live.</ResponseField>
+    <ResponseField name="recordAsOf" type="string">The oldest `lastUpdated` among active loans that were not read live, or `null`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/customers/api/manage/cmt0k3b9x0004cghxw7r2d5ya/lending-positions" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const response = await fetch(
+  'https://api.trusset.org/customers/api/manage/cmt0k3b9x0004cghxw7r2d5ya/lending-positions',
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await response.json();
+
+if (data.recordAsOf) {
+  console.warn(`Some debt is as recorded on ${data.recordAsOf}`);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "customer": {
+      "id": "cmt0k3b9x0004cghxw7r2d5ya",
+      "name": "Acme Corp",
+      "referenceKey": null,
+      "externalId": "acme-001",
+      "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD"
+    },
+    "positions": [
+      {
+        "family": "securities-v2",
+        "familyLabel": "External securities lending v2",
+        "bucket": "securities",
+        "marketId": "cmssh7p1k0001cghxq2m4v8rz",
+        "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "marketLabel": "NYF1 / USDC",
+        "borrowAssetSymbol": "USDC",
+        "positionId": "cmt2a7c4e0011cghx9v5z3b8f",
+        "loanId": "5",
+        "borrower": "0xabc123def456789012345678901234567890abcd",
+        "principal": 25000,
+        "interest": 184.37,
+        "debt": 25184.37,
+        "collateral": 1200,
+        "healthFactor": "1.742318204517839211",
+        "status": "ACTIVE",
+        "active": true,
+        "openedAt": "2026-09-12T08:30:00.000Z",
+        "dueAt": "1796977800",
+        "customerId": "cmt0k3b9x0004cghxw7r2d5ya",
+        "attribution": "client-reference",
+        "attributedAt": "2026-09-12T08:31:05.000Z",
+        "live": true,
+        "lastUpdated": "2026-09-30T12:00:00.000Z"
+      },
+      {
+        "family": "stocks",
+        "familyLabel": "Stock lending",
+        "bucket": "stocks",
+        "marketId": "cmr8q2w5e0002cghx7n4b6v1z",
+        "marketAddress": "0x4e8b2d7f1a9c6e3b5d0f2a8c7e1b4d9f6a3c5e21",
+        "marketLabel": "USDC",
+        "borrowAssetSymbol": "USDC",
+        "positionId": "cmr9d4k1s0005cghx2p8w6y3n",
+        "loanId": "7",
+        "borrower": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+        "principal": 1500,
+        "interest": 12.5,
+        "debt": 1512.5,
+        "collateral": 40,
+        "healthFactor": "2.35",
+        "status": "ACTIVE",
+        "active": true,
+        "openedAt": "2026-07-02T14:10:00.000Z",
+        "dueAt": null,
+        "customerId": null,
+        "attribution": "wallet",
+        "attributedAt": null,
+        "live": false,
+        "lastUpdated": "2026-09-29T22:00:00.000Z"
+      }
+    ],
+    "totals": {
+      "total": 26696.87,
+      "stocks": 1512.5,
+      "securities": 25184.37,
+      "commodities": 0,
+      "gold": 0
+    },
+    "clients": [
+      {
+        "customerId": "cmt0k3b9x0004cghxw7r2d5ya",
+        "reference": "acme-001",
+        "name": "Acme Corp",
+        "attribution": "client-reference",
+        "debt": 25184.37,
+        "loans": 1
+      },
+      {
+        "customerId": null,
+        "reference": null,
+        "name": null,
+        "attribution": "wallet",
+        "debt": 1512.5,
+        "loans": 1
+      }
+    ],
+    "basis": "mixed",
+    "asOf": "2026-09-30T12:00:00.000Z",
+    "recordAsOf": "2026-09-29T22:00:00.000Z"
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T12:00:00.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NOT_FOUND` | `404` | No customer with this ID on your instance |
+| `FETCH_FAILED` | `500` | The positions could not be read |

@@ -6,7 +6,9 @@ icon: 'users'
 
 A customer here is two things kept apart: a record your instance holds, and an identity on a registry contract. The record carries who they are to you. The registry carries what a token contract can check before it moves.
 
-Nothing links them automatically. You write the record, you verify the identity, and the wallet you name is what joins the two.
+The wallet is what joins the two. [Create Customer](/endpoints/customers/create) and [Link Wallet](/endpoints/customers/link-wallet) read the registry, and a wallet it already shows as verified starts the record as `verified`. On the Trusset ID Register, that holds only when one of your instance's registered wallets did the verifying. Confirming [Verify Identity](/endpoints/customers/verify-identity) creates or updates the record for the wallet it verified.
+
+Beyond that the two do not follow each other. A record's `status` is what was last recorded, not a live registry read, and archiving a record leaves the identity on the registry. Read the registry's own answer with [Identity Status](/endpoints/customers/identity-status).
 
 ## Base Path
 
@@ -18,24 +20,35 @@ Every request authenticates with an instance API key in the `X-API-Key` header. 
 
 | Path | Covers |
 |---|---|
-| `/manage` | Customer records and the wallets attached to them |
-| `/identity` | On-chain verification, claims, and KYC proofs |
+| `/manage` | Customer records, the wallets attached to them, and their lending positions |
+| `/identity` | On-chain verification, the pending queue, claims, and KYC proofs |
 | `/id-links` | Hosted verification links you send to a customer |
 | `/verification-profiles` | The verification levels configured for your instance |
+| `/disclosure-requests` | Requests asking a wallet holder to disclose a verified fact |
 
-Customer records need the `customers` service. Everything under `/identity`, `/verification-profiles` and the ID link flows needs `identity`.
+Customer records need the `customers` service. Everything under `/identity`, `/id-links`, `/verification-profiles` and `/disclosure-requests` needs `identity`.
 
 ## Which register you write to
 
-An instance writes to the Trusset ID Register by default, or to your own register when the instance is bound to one. Every identity call resolves that automatically, so the same request works either way and no endpoint takes a registry address.
+An instance writes to the Trusset ID Register by default, or to its own register when it is bound to one. Its own register is either a Trusset identity register or an ERC-3643 identity registry (Tokeny T-REX with ONCHAINID). Every identity call resolves the register automatically, and no endpoint takes a registry address. Calldata responses name the kind in `registerKind`: `TRUSSET` or `TREX`.
 
-What changes with your own register is who holds the roles. A write your instance's wallet has no role for is refused before any calldata is handed out, rather than reverting after you paid for it.
+The request is the same on both kinds, but the work behind it is not. On a Trusset register, each write is one transaction from a wallet holding `KYC_PROVIDER_ROLE`, or `REGISTER_OPERATOR_ROLE` to revoke an identity. On an ERC-3643 registry, registering a wallet can take three rounds: deploying its ONCHAINID, signing each claim as a message, then adding the claims and registering the identity. [Verify Identity](/endpoints/customers/verify-identity) sets out which key signs each step.
+
+When none of your instance's wallets holds the role a write needs, the write is refused before any calldata is handed out. A Trusset register answers `403 KYC_PROVIDER_ROLE_MISSING`, or `403 REGISTER_OPERATOR_ROLE_MISSING` for a revocation, and an ERC-3643 registry `403 REGISTRY_AGENT_MISSING`. The check is skipped when the instance has no registered wallet or the role cannot be read, and a write without the role then reverts on chain.
 
 ## Writes return calldata
 
-Every identity write follows the same two-call shape as the rest of the platform. Call it once without `txHash` to get the unsigned transaction, broadcast it from your own wallet, then call it again with `txHash` to have the receipt verified and the result recorded.
+Every write that changes the registry returns unsigned calldata for a wallet you control to sign and broadcast. Nothing is submitted on your behalf. Call the endpoint once without `txHash` to get the transaction, then again with the hash to have the receipt verified and the result recorded.
 
-Nothing is submitted on your behalf.
+Some writes vary that shape. [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) and [Attest Proofs](/endpoints/customers/attest-proofs) confirm several receipts in one call with `txResults`. The pending queue and ONCHAINID deployments confirm on their own endpoints. On an ERC-3643 registry, a write can first answer with messages to sign, which the next call sends back as `claimSignatures`. When a plan holds several transactions, `confirmStepIndex` names the one to confirm.
+
+## Pending approvals
+
+When a customer passes KYC through an [ID link](/endpoints/customers/create-id-link) or a hosted verification service, the approval does not reach the register on its own. It waits in a queue with the `kycHash`, investor type, expiries and residency claim Trusset computed, until your wallet signs it.
+
+Work the queue with [List Pending Verifications](/endpoints/customers/list-pending-verifications), [Build Pending Registration](/endpoints/customers/build-pending-registration) and [Confirm Pending Registration](/endpoints/customers/confirm-pending-registration). [Dismiss Pending Verification](/endpoints/customers/dismiss-pending-verification) closes a row for good.
+
+On an ERC-3643 registry a wallet needs an ONCHAINID before it can be registered. Build Pending Registration asks for one in its first phase when the wallet has none. [Deploy ONCHAINID](/endpoints/customers/deploy-onchainid) and [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid) deploy one ahead of time.
 
 ## Claims
 
@@ -43,18 +56,20 @@ The registry holds eight claim slots per identity. Four of them mean something f
 
 | Slot | Index | How it is filled |
 |---|---|---|
-| `KYC` | 0 | From a proof |
+| `KYC` | 0 | From a proof, over the bundle root |
 | `AML` | 1 | Manually |
 | `ACCREDITATION` | 2 | From a proof, over `investorType` |
-| `RESIDENCY` | 3 | From a proof, over `country` |
+| `RESIDENCY` | 3 | From a proof, over `country`, or from the pending queue |
 | `CITIZENSHIP` | 4 | From a proof, over `nationality` |
 | `TAX_RESIDENCY` | 5 | Manually |
 | `SANCTIONS_CHECK` | 6 | Manually |
 | `PEP_CHECK` | 7 | Manually |
 
-The four canonical slots are reserved. [Add Claim](/endpoints/customers/add-claim) refuses them with `PROOF_REQUIRED`, because a residency attestation that anyone could write by hand would not be worth reading. They are filled by [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) and nothing else.
+The four canonical slots are reserved on this API. [Add Claim](/endpoints/customers/add-claim) refuses them with `PROOF_REQUIRED`, because a residency attestation that anyone could write by hand would not be worth reading. [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) can file all four from a verified bundle, and [Attest Proofs](/endpoints/customers/attest-proofs) any of them except `KYC`. A Trusset register does not enforce the reservation itself: any wallet holding `KYC_PROVIDER_ROLE` can write any slot directly.
 
 The four assignable slots take a hash you supply. What they mean is your convention, and a proof for a field with no canonical meaning can be filed in one of them.
+
+On an ERC-3643 registry the claims live on the wallet's ONCHAINID instead. Each slot except `KYC` becomes the topic `uint256(keccak256(name))`, where `name` is the slot name such as `RESIDENCY`. A `KYC` claim takes the register's first required claim topic that one of your wallets can sign for. A CLAIM key of the registry's trusted issuer signs each claim.
 
 ## KYC proofs
 
@@ -66,7 +81,7 @@ Trusset never sees the underlying data. What reaches this API is the manifest, t
 
 <Steps>
   <Step title="Register your operator key">
-    [Set Operator Key](/endpoints/customers/set-operator-key) records the ed25519 public key the tool prints. Every manifest signature is checked against it.
+    [Set Operator Key](/endpoints/customers/set-operator-key) records the ed25519 public key the tool prints. Bundles are verified against it.
   </Step>
   <Step title="Verify the identity">
     [Verify Identity](/endpoints/customers/verify-identity) puts the subject on the registry with their `kycHash`, which is the bundle's Merkle root.
@@ -83,6 +98,12 @@ Trusset never sees the underlying data. What reaches this API is the manifest, t
   A leaf can be a hiding commitment with no zk proof behind it, which the tool uses for fields like a surname where there is no predicate worth proving. Those leaves are marked `commitmentOnly` and are not attestable while proof verification is enforced.
 </Note>
 
+## Disclosure requests
+
+A disclosure request asks the holder of a wallet to disclose one verified fact to your instance. The fact is age over 18 (`AGE`), country of residence (`COUNTRY`), or the complete on-chain verification (`FULL_KYC`).
+
+The holder answers on verify.trusset.org with a consent the wallet signs and, for some facts, a zk-STARK proof from their bundle. Creating a request sends the holder nothing, and no webhook reports the answer, so read it back with [Get Disclosure Request](/endpoints/customers/get-disclosure-request).
+
 ## Response envelope
 
 ```json
@@ -97,8 +118,39 @@ Trusset never sees the underlying data. What reaches this API is the manifest, t
 }
 ```
 
-On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. Always branch on `success` rather than on the HTTP status alone.
+Routes under `/identity` always send both `data` and `error`, with the unused one `null`. The other paths send only the one that applies, so a success has no `error` key and a failure has no `data` key. On failure, `error` carries `code` and `message`. Always branch on `success` rather than on the HTTP status alone.
+
+The lists under `/manage` and `/id-links` put `total` in `metadata`. [List Disclosure Requests](/endpoints/customers/list-disclosure-requests) returns `data.items` and `data.pagination` instead.
 
 <Warning>
-  A registry read that fails answers `503 CHAIN_UNAVAILABLE`, never "not verified". The two are different facts, and reporting an outage as a verification failure would send you to re-verify a customer who is already verified.
+  A failed registry read is not a verdict, and on some routes it does not look like a failure. [Identity Status](/endpoints/customers/identity-status) answers `200` with `onChain.unavailable: true`, and [List Proofs](/endpoints/customers/list-proofs) sets `chainUnavailable: true` when it cannot read the identity. [List Claims](/endpoints/customers/list-claims) answers `200` with an empty `claims` list, the same as a wallet with no claims. [Check Transfer Compliance](/endpoints/customers/can-transfer) answers `500 CHECK_FAILED`. Treat none of these as "not verified", and never re-verify a customer because of one.
 </Warning>
+
+## Errors every route can return
+
+These refusals come before a route runs, so they carry no `data`. The rate limit and the key-material check run before authentication, and those two answers carry no `requestId`.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `AUTH_REQUIRED` | `401` | No `X-API-Key` header |
+| `AUTH_FAILED` | `401` | The key is malformed, unknown, inactive or expired, or its instance is missing or archived |
+| `ACCOUNT_FROZEN` | `403` | The issuer account is suspended |
+| `SERVICE_NOT_ENABLED` | `403` | The instance does not have the service the path needs |
+| `CREDIT_LIMIT_EXCEEDED` | `402` | The instance's monthly credit allowance is used up |
+| `RATE_LIMIT_EXCEEDED` | `429` | The key made more than 200 requests in the current minute |
+| `KEY_MATERIAL_REJECTED` | `400` | A write body carries a field named for key material or for signing on someone's behalf |
+| `VALIDATION_ERROR` | `400` | The body is not valid JSON |
+| `PAYLOAD_TOO_LARGE` | `413` | The body is larger than 10 MB |
+| `AUTH_ERROR` | `500` | Authentication failed on the server |
+
+## Rate limits
+
+Every request made with an API key counts against 200 requests per minute for that key, across every product. The minute is a fixed window on the clock, not a rolling one. Exceeding it returns `429 RATE_LIMIT_EXCEEDED` with a `Retry-After` header in seconds. Every response reports the budget in `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`. See [Rate Limits](/endpoints/rate-limits).
+
+[Add Claims from Proof](/endpoints/customers/add-claims-from-proof), [Inspect Manifest](/endpoints/customers/inspect-manifest) and [Attest Proofs](/endpoints/customers/attest-proofs) also share a budget of 30 requests per minute per instance. It answers `429` with code `RATE_LIMITED`, not `RATE_LIMIT_EXCEEDED`, and a `Retry-After` header. No other Customers route has a tighter limit.
+
+## Credits
+
+Requests made with an API key also draw on your instance's monthly credit allowance, one credit each, reads included. Every Customers path is billed against the `identity` service, `/manage` included. Writes made in the Issuer Portal draw on the same allowance.
+
+Every metered response carries `X-Credits-Limit`, `X-Credits-Remaining` and `X-Credits-Reset`, plus an `X-Request-Id` you can quote in support requests. When the allowance is exhausted the request is refused with `402 CREDIT_LIMIT_EXCEEDED`, and `metadata` carries `creditsLimit`, `creditsRemaining` and `resetsAt`. Only a `5xx` answer refunds its credit, so a refusal such as `SERVICE_NOT_ENABLED` still costs one.

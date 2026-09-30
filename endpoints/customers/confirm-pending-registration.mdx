@@ -1,0 +1,210 @@
+---
+title: 'Confirm Pending Registration'
+api: 'POST /customers/api/identity/pending/confirm'
+description: 'Check the signed registration and mark the queued approvals verified'
+---
+
+Checks the transactions your wallets broadcast for a set of queued rows, then closes every row whose wallet the register now reports as verified. A confirmed row marks its customer `verified`, and creates the customer record when there is none.
+
+<Warning>
+  On a Trusset register, the batch from [Build Pending Registration](/endpoints/customers/build-pending-registration) skips some entries without reverting. It skips a wallet that already holds an unrevoked identity, and a row whose expiry has passed. It also skips any entry it runs out of gas for.
+
+  A skipped wallet that the register still reports as verified confirms anyway. Its row closes, the register keeps the hash, investor type and expiries it already held, and the customer record takes that hash. The queued ones are never written. `investorTypeMismatch` flags a different investor type, but nothing in the response flags a different hash or expiry.
+
+  Any other skipped row comes back `NOT_REGISTERED_ON_CHAIN` and stays queued. A row skipped for gas can be built again. A row whose wallet holds an identity past its hard expiry or frozen, or whose own expiry has passed, is skipped again every time.
+
+  To put a skipped approval on the register, use [Verify Identity](/endpoints/customers/verify-identity) with the row's `kycHash`. It verifies the wallet or updates the identity it already holds, and closes the row if it is still queued.
+</Warning>
+
+## Body Parameters
+
+<ParamField body="ids" type="array" required>
+  1 to 200 row ids, normally `ids` from the build. Only rows still `PENDING` on your instance are checked, and any other id is dropped without an error.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  The registering transaction. On a Trusset register it is required: the batch, or a `verifyIdentity` or `updateIdentity` call. On an ERC-3643 register it is the `registerIdentity` or `batchRegisterIdentity` step. Omit it there when every wallet was already registered.
+</ParamField>
+
+<ParamField body="claimTxResults" type="array">
+  The claim steps you broadcast, as `[{ id, txHash }]` with the row `id` each step carried. Entries are kept per `id`, so for a row with two claim steps only the last entry sent is checked. A claim that fails its check is left out of the record and fails nothing else.
+</ParamField>
+
+## What the confirm checks
+
+| Check | Trusset register | ERC-3643 register |
+|---|---|---|
+| `txHash` | Required. A mined, successful `batchVerifyIdentities`, `verifyIdentity` or `updateIdentity` call to your register | Optional. A mined, successful `registerIdentity`, `batchRegisterIdentity`, `updateCountry` or `updateIdentity` call to your register. Without it, `claimTxResults` is required |
+| Signer of `txHash` | On the Trusset ID Register, a verified wallet registered to your instance, or the call fails with `UNAUTHORIZED_SIGNER`. On your own register it is logged, not enforced | Logged, not enforced |
+| Coverage | The transaction must name every selected wallet, or the call fails with `TX_ENTRIES_MISMATCH` | Not checked |
+| `claimTxResults` | Read only for rows with a `residencyClaim`. Recorded when the receipt is an `addClaim` on your register for the row's wallet, carrying the queued residency hash | Recorded when the receipt is an `addClaim` on the wallet's ONCHAINID |
+| A row confirms when | The transaction verified or updated the wallet, or the register reports it verified | The register's `isVerified` answers `true` for the wallet, whatever transactions put it there |
+
+A failed check of `txHash` refuses the whole call before any row changes. The per-row outcome comes back in `results`, and one row's outcome does not affect another's.
+
+## What a confirmed row changes
+
+- The row turns `CONFIRMED`, with the transaction, its signer and the time.
+- The customer record with this wallet becomes `verified`, with the `kycHash` the register holds and the transaction. Without a record, one is created from the row's metadata. On an ERC-3643 register the record also gets `metadata.onchainId`.
+- The customer audit log gets `ON_CHAIN_VERIFIED`, with the queued and the registered hash.
+- A hosted verification checkout behind the row turns `VERIFIED`, and stock escrow deposits waiting on its ID link are bound to the wallet.
+- When the row carries `notifyEmail`, the customer is emailed that verification is complete.
+
+The customer write is best effort. A failure there is logged, and the row still confirms.
+
+A row that does not confirm stays `PENDING`, and its `error` says why. Build and confirm it again once the cause is fixed. A repeat call for rows that all confirmed answers `NOT_FOUND`, because none of them is `PENDING` any more.
+
+<Note>
+  The HTTP status is `200` and `success` is `true` even when no row confirmed. Read `confirmed` and each entry of `results`.
+</Note>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="confirmed" type="integer">Rows that confirmed.</ResponseField>
+    <ResponseField name="notRegistered" type="integer">Rows that did not, for either reason in `results`.</ResponseField>
+    <ResponseField name="txHash" type="string">The checked `txHash`, or `null` on an ERC-3643 register when none was sent.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that signed it, or `null`.</ResponseField>
+    <ResponseField name="registerKind" type="string">`TREX` on an ERC-3643 register. Absent on a Trusset register.</ResponseField>
+    <ResponseField name="results" type="array">One entry per row checked. See below.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="results" type="array">
+  <Expandable>
+    <ResponseField name="id" type="string">The row.</ResponseField>
+    <ResponseField name="walletAddress" type="string">Its wallet, lowercased.</ResponseField>
+    <ResponseField name="status" type="string">`CONFIRMED`; `NOT_REGISTERED_ON_CHAIN` when the register does not report the wallet as verified; `CHAIN_READ_UNAVAILABLE` when the register could not be read, which says nothing about the wallet. Both of the latter leave the row queued.</ResponseField>
+    <ResponseField name="txHash" type="string">The transaction recorded for the row. On an ERC-3643 register without `txHash`, its claim transaction.</ResponseField>
+    <ResponseField name="claimTxHash" type="string">The claim transaction that passed its check, or `null`. `CONFIRMED` only.</ResponseField>
+    <ResponseField name="investorTypeMismatch" type="boolean">Trusset register only, present and `true` when the register holds a different investor type than the row queued. The row still confirms.</ResponseField>
+    <ResponseField name="onchainId" type="string">ERC-3643 register only. The wallet's ONCHAINID. `CONFIRMED` only.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/identity/pending/confirm" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ids": ["cmg1u7k3p0004l80h2f9s6d1x", "cmg1u9q2m0007l80hc4t8z3wa"],
+    "txHash": "0x22eacbdb9dfefdd4633fe2b22760dce1cc62179d409eecdcdc541c9dfd52df35",
+    "claimTxResults": [
+      { "id": "cmg1u7k3p0004l80h2f9s6d1x", "txHash": "0x717b88a4537d14a797577ce70e9dd36c90652b2c487997de02dcfa5bd7a5466c" }
+    ]
+  }'
+```
+```typescript TypeScript
+const response = await fetch(
+  'https://api.trusset.org/customers/api/identity/pending/confirm',
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: plan.ids, txHash, claimTxResults })
+  }
+);
+const { data } = await response.json();
+
+for (const row of data.results) {
+  if (row.status !== 'CONFIRMED') console.warn(`${row.walletAddress} stays queued: ${row.status}`);
+  if (row.investorTypeMismatch) console.warn(`${row.walletAddress} holds a different investor type`);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Trusset Register
+{
+  "success": true,
+  "data": {
+    "confirmed": 1,
+    "notRegistered": 1,
+    "txHash": "0x22eacbdb9dfefdd4633fe2b22760dce1cc62179d409eecdcdc541c9dfd52df35",
+    "signedBy": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+    "results": [
+      {
+        "id": "cmg1u7k3p0004l80h2f9s6d1x",
+        "walletAddress": "0x96c5822784130360f904372b83e130be4a1894d6",
+        "status": "CONFIRMED",
+        "txHash": "0x22eacbdb9dfefdd4633fe2b22760dce1cc62179d409eecdcdc541c9dfd52df35",
+        "claimTxHash": "0x717b88a4537d14a797577ce70e9dd36c90652b2c487997de02dcfa5bd7a5466c"
+      },
+      {
+        "id": "cmg1u9q2m0007l80hc4t8z3wa",
+        "walletAddress": "0xff21b8ac28bb6a20c1c0160af42303d2946b99ea",
+        "status": "NOT_REGISTERED_ON_CHAIN",
+        "txHash": "0x22eacbdb9dfefdd4633fe2b22760dce1cc62179d409eecdcdc541c9dfd52df35"
+      }
+    ]
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T10:00:00.000Z"
+  }
+}
+```
+```json ERC-3643 Register
+{
+  "success": true,
+  "data": {
+    "confirmed": 1,
+    "notRegistered": 0,
+    "txHash": "0x33972a14e4b0dc60dffb07f253c189f6135bf06a16cc2b978f482ba339d6b915",
+    "signedBy": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+    "registerKind": "TREX",
+    "results": [
+      {
+        "id": "cmg1u7k3p0004l80h2f9s6d1x",
+        "walletAddress": "0x96c5822784130360f904372b83e130be4a1894d6",
+        "status": "CONFIRMED",
+        "txHash": "0x33972a14e4b0dc60dffb07f253c189f6135bf06a16cc2b978f482ba339d6b915",
+        "claimTxHash": "0x58f3da36dfb88fb3d18ccf45fe13ffa7dd0d7370f08247af16999a339125c6c1",
+        "onchainId": "0x8986b6a837ccA6c6F6e257526296f07b9fe3fA9f"
+      }
+    ]
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T10:00:00.000Z"
+  }
+}
+```
+```json Error - Entries Mismatch
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_ENTRIES_MISMATCH",
+    "message": "Transaction does not cover 1 of the selected wallets"
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T10:00:00.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `ids` is not an array of 1 to 200 ids, or on an ERC-3643 register neither `txHash` nor `claimTxResults` was sent |
+| `INVALID_TX` | `400` | `txHash` is missing on a Trusset register, or is not a 32-byte hex hash |
+| `TX_REVERTED` | `400` | The transaction reverted |
+| `TX_WRONG_TARGET` | `400` | Trusset register: the transaction was not sent to your register. ERC-3643 register: it created a contract |
+| `TX_WRONG_FUNCTION` | `400` | The transaction calls a function this confirm does not accept |
+| `TX_TARGET_MISMATCH` | `400` | ERC-3643 register: `txHash` is a claim transaction. Send it in `claimTxResults` |
+| `TX_ENTRIES_MISMATCH` | `400` | Trusset register: the transaction does not cover every selected wallet |
+| `UNAUTHORIZED_SIGNER` | `403` | Trusset ID Register: the transaction was not signed by a verified wallet registered to your instance. The rows stay queued. Register that wallet, then confirm the same `txHash` again |
+| `NOT_FOUND` | `404` | None of the `ids` is a `PENDING` row of your instance, or the instance no longer exists |
+| `TX_NOT_FOUND` | `404` | The transaction is not mined yet, or does not exist |
+| `OWN_REGISTRY_NOT_CONFIGURED` | `409` | Your instance is set to its own register but holds no valid register address |
+| `CHAIN_UNAVAILABLE` | `503` | ERC-3643 register: the transaction could not be read. Retry shortly |
+| `REGISTRY_PROBE_FAILED` | `503` | The register could not be read to tell its interface. Retry shortly |
+| `PENDING_CONFIRM_FAILED` | `400` | A chain read failed, including a transaction that could not be read on a Trusset register |
+| `PENDING_CONFIRM_FAILED` | `500` | Any other failure |

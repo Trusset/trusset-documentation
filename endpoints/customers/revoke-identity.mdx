@@ -1,88 +1,153 @@
 ---
 title: 'Revoke Identity'
 api: 'POST /customers/api/identity/revoke'
-description: 'Revoke an on-chain identity verification'
+description: 'Revoke a wallet on the identity register and mark the customer revoked'
 ---
 
-Revokes a previously verified identity on-chain and marks the off-chain customer record `revoked`. Use this when a customer fails ongoing compliance checks or when their verification must be invalidated.
+Revokes a wallet's identity on the register your instance writes to, and marks the customer record `revoked`. Use it when a customer fails ongoing compliance checks or their verification must be invalidated.
 
-Call it once without `txHash` to get the calldata, and again with `txHash` once you have broadcast it. The record is updated on the second call.
+<Warning>
+  On an ERC-3643 register, revoking deletes the wallet's entry from the register and nothing else. The ONCHAINID and its KYC claim stay as they are. To invalidate the claim as well, call [Revoke Claim](/endpoints/customers/revoke-claim) first. Once the entry is deleted, the claim can no longer be found through the wallet.
+</Warning>
+
+Both registers answer with one transaction. What it does depends on `registerKind`:
+
+| `registerKind` | Transaction | Effect | Who sends it |
+|---|---|---|---|
+| `TRUSSET` | `revokeIdentity` on the register | The identity stays on the register and reads as `revoked` | A wallet with `REGISTER_OPERATOR_ROLE` |
+| `TREX` | `deleteIdentity` on the register | The wallet's entry is removed from the register | An agent of the register |
+
+Call it once without `txHash` to get the calldata, and again with `txHash` once the transaction is mined. The record is updated on the second call.
 
 ## Body Parameters
 
 <ParamField body="walletAddress" type="string" required>
-  Ethereum wallet address to revoke.
+  The wallet to revoke. Checksummed or lowercase.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  ERC-3643 only. Returned as `signerAddress`, in place of your primary wallet. The API does not check it.
 </ParamField>
 
 <ParamField body="txHash" type="string">
-  Hash of the transaction you broadcast. Send it to confirm the revocation and update the record. Omit it to receive the calldata.
+  The hash of the mined transaction. Send it to confirm the revocation and update the record. Omit it to receive the calldata.
 </ParamField>
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
-  <Expandable>
-    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="transaction" type="object">`to` (the identity registry) and `data`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="functionName" type="string">Always `revokeIdentity`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="confirmWith" type="object">Where to send the hash once broadcast, as `endpoint` and `field`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="walletAddress" type="string">Checksummed address.</ResponseField>
-    <ResponseField name="status" type="string">Always `revoked`. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="txHash" type="string">The confirmed transaction hash. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="gasUsed" type="string">Gas consumed. Returned when confirming with `txHash`.</ResponseField>
+  <Expandable title="Calldata leg">
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">`{ to, data }`, where `to` is the register.</ResponseField>
+    <ResponseField name="functionName" type="string">`revokeIdentity` on a Trusset register, `deleteIdentity` on an ERC-3643 register.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction does.</ResponseField>
+    <ResponseField name="registerKind" type="string">`TRUSSET` or `TREX`.</ResponseField>
+    <ResponseField name="walletAddress" type="string">The wallet, checksummed.</ResponseField>
+    <ResponseField name="register" type="string">ERC-3643 only. The register address.</ResponseField>
+    <ResponseField name="signerAddress" type="string">ERC-3643 only. Your primary wallet, or the `signerAddress` you sent. It is not checked to be an agent.</ResponseField>
+    <ResponseField name="stepType" type="string">ERC-3643 only. Always `revoke`.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint: "POST /customers/api/identity/revoke", field: "txHash" }`.</ResponseField>
+  </Expandable>
+  <Expandable title="Confirm leg">
+    <ResponseField name="walletAddress" type="string">The wallet, checksummed.</ResponseField>
+    <ResponseField name="status" type="string">Always `revoked`.</ResponseField>
+    <ResponseField name="txHash" type="string">The confirmed transaction.</ResponseField>
+    <ResponseField name="gasUsed" type="string">Gas used.</ResponseField>
   </Expandable>
 </ResponseField>
 
-<Note>
-  Confirmation checks that the transaction called `revokeIdentity` on the address you named. A receipt that revokes a different address is rejected and no record changes.
-</Note>
+## Before the calldata
+
+On a Trusset register, the API refuses with `REGISTER_OPERATOR_ROLE_MISSING` when it can read that none of your instance's wallets holds the role. It does not check that the wallet holds an unrevoked identity, and revoking one that does not reverts on chain.
+
+On an ERC-3643 register, it refuses with `REGISTRY_AGENT_MISSING` when none of your instance's wallets is an agent. It refuses with `NOT_REGISTERED` when the wallet is not on the register.
+
+## Confirm
+
+The confirm leg checks that the transaction is mined, succeeded, and calls `revokeIdentity` or `deleteIdentity` on the register for the wallet you named. A receipt for a different wallet is refused with `TX_TARGET_MISMATCH`, and nothing changes. It does not check who signed.
+
+It then sets the customer record for that wallet to `revoked` with `revokedAt`, archived or not. When no record exists, nothing is written and the call still succeeds.
 
 <RequestExample>
 ```bash cURL
 curl -X POST "https://api.trusset.org/customers/api/identity/revoke" \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: trusset_abc123xy_secret..." \
-  -d '{ "walletAddress": "0xAbC123dEf456789012345678901234567890AbCd" }'
+  -H "X-API-Key: trusset_your_key_here" \
+  -d '{ "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD" }'
 ```
 ```typescript TypeScript
-const response = await fetch(
-  'https://api.trusset.org/customers/api/identity/revoke',
-  {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Key': 'trusset_abc123xy_secret...'
-    },
-    body: JSON.stringify({
-      walletAddress: '0xAbC123dEf456789012345678901234567890AbCd'
-    })
-  }
-);
-const { data } = await response.json();
+const url = 'https://api.trusset.org/customers/api/identity/revoke';
+const headers = {
+  'Content-Type': 'application/json',
+  'X-API-Key': 'trusset_your_key_here'
+};
+const walletAddress = '0xaBc123DEf456789012345678901234567890aBCD';
+
+const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ walletAddress }) });
+const { data } = await res.json();
+
+const tx = await wallet.sendTransaction(data.transaction);
+await tx.wait();
+
+await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ walletAddress, txHash: tx.hash })
+});
 ```
 </RequestExample>
 
 <ResponseExample>
-```json Calldata Response
+```json Calldata Response - Trusset
 {
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTION",
     "transaction": {
-      "to": "0x5B3c9D1e7F2a4B6c8D0e2F4a6B8c0D2e4F6a8B0c",
-      "data": "0x7b1e9c40..."
+      "to": "0xE9114c40934f6fB6BB317935156b731f7A86D006",
+      "data": "0x0ebddd17..."
     },
     "functionName": "revokeIdentity",
-    "description": "Revoke 0xabc123def456789012345678901234567890abcd on the identity registry",
-    "walletAddress": "0xabc123def456789012345678901234567890abcd",
+    "description": "Revoke 0xaBc123DEf456789012345678901234567890aBCD on the identity registry",
+    "registerKind": "TRUSSET",
+    "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
     "confirmWith": {
       "endpoint": "POST /customers/api/identity/revoke",
       "field": "txHash"
     }
   },
+  "error": null,
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-06-15T12:00:00.000Z"
+    "timestamp": "2026-09-30T12:00:00.000Z"
+  }
+}
+```
+```json Calldata Response - ERC-3643
+{
+  "success": true,
+  "data": {
+    "register": "0x4C2b1a0f9E8d7c6B5a4938271605F4e3D2c1B0A9",
+    "registerKind": "TREX",
+    "signerAddress": "0x51A4F0c3B2e8d7A6c5B4e3f2A1d0c9b8e7f6A5D4",
+    "action": "SIGN_TRANSACTION",
+    "stepType": "revoke",
+    "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
+    "transaction": {
+      "to": "0x4C2b1a0f9E8d7c6B5a4938271605F4e3D2c1B0A9",
+      "data": "0xa8d29d1d..."
+    },
+    "functionName": "deleteIdentity",
+    "description": "Revoke 0xaBc123DEf456789012345678901234567890aBCD on the identity registry",
+    "confirmWith": {
+      "endpoint": "POST /customers/api/identity/revoke",
+      "field": "txHash"
+    }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T12:00:00.000Z"
   }
 }
 ```
@@ -90,15 +155,49 @@ const { data } = await response.json();
 {
   "success": true,
   "data": {
-    "walletAddress": "0xabc123def456789012345678901234567890abcd",
+    "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
     "status": "revoked",
-    "txHash": "0xabc123def456789012345678901234567890abc123def456789012345678901234",
+    "txHash": "0x2404b4cd06b02a65d7bc0fe19be869fa7237e5b73bb807564254ab045045420f",
     "gasUsed": "42150"
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T12:05:00.000Z"
+  }
+}
+```
+```json Error - Not Registered
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "NOT_REGISTERED",
+    "message": "0xaBc123DEf456789012345678901234567890aBCD holds no identity on the register 0x4C2b1a0f9E8d7c6B5a4938271605F4e3D2c1B0A9, so there is nothing to revoke."
   },
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-06-15T12:00:00.000Z"
+    "timestamp": "2026-09-30T12:00:00.000Z"
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `walletAddress` is missing or not a valid address |
+| `REGISTER_OPERATOR_ROLE_MISSING` | `403` | Trusset register: none of your instance's wallets holds `REGISTER_OPERATOR_ROLE` |
+| `REGISTRY_AGENT_MISSING` | `403` | ERC-3643: none of your instance's wallets is an agent of the register |
+| `NOT_REGISTERED` | `409` | ERC-3643: the wallet is not on the register |
+| `OWN_REGISTRY_NOT_CONFIGURED` | `409` | The instance is bound to its own register but no valid register address is set |
+| `REGISTRY_PROBE_FAILED` | `503` | Your own register could not be read to tell its kind |
+| `INVALID_TX` | `400` | `txHash` is not 32-byte hex |
+| `TX_NOT_FOUND` | `404` | The transaction is not mined yet |
+| `TX_REVERTED` | `400` | The transaction reverted |
+| `TX_WRONG_TARGET` | `400` | The transaction does not write to the register |
+| `TX_WRONG_FUNCTION` | `400` | The transaction does not call `revokeIdentity` or `deleteIdentity` |
+| `TX_TARGET_MISMATCH` | `400` | The transaction revokes a different wallet |
+| `CHAIN_UNAVAILABLE` | `503` | ERC-3643: the transaction could not be read |
+| `REVOKE_FAILED` | `400`, `500` | Any other failure. `400` when a chain call failed |

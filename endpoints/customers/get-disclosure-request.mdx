@@ -1,0 +1,227 @@
+---
+title: 'Get Disclosure Request'
+api: 'GET /customers/api/disclosure-requests/{id}'
+description: 'Read a disclosure request, with the consent and disclosure once approved'
+---
+
+Returns one disclosure request made by your instance. Once the holder approves it, the response also carries the signed consent and the disclosure. The disclosure is a snapshot of the wallet's register record, plus the verified proofs when the holder attached their bundle.
+
+<Warning>
+  An approval is consent, not a current verification. A holder can approve while the identity is revoked or expired, because the root stays on the register. Check `disclosure.chain.isVerified` and `disclosure.chain.status` before acting on the answer.
+</Warning>
+
+## What an approval proves
+
+| `proofLevel` | Scope | What you can rely on |
+|---|---|---|
+| `ZK_PROOF` | `AGE` | The holder was at least 6570 days old, the network's 18-year floor, on the day in the age leaf's `publicInputs.currentEpochDays`. The date of birth is not disclosed. |
+| `ZK_PROOF` | `COUNTRY` | The country of residence is on the approved country list the proof names. The country itself is not disclosed. |
+| `ON_CHAIN_CLAIM` | `COUNTRY` | An active `RESIDENCY` claim sits on the register, with its issuer and `dataHash`. |
+| `CONSENT_ONLY` | `FULL_KYC` | The register record and every active claim, read at approval. |
+| `ZK_PROOF` | `FULL_KYC` | The same record and claims, with the manifest and a verified proof for each proved field. |
+
+A `RESIDENCY` claim filed through a hosted ID link carries the keccak256 hash of the alpha-3 country code, which you can compare with the hash of the country you expect. A claim filed from a proof carries a leaf hash, which does not reveal the country.
+
+A bundle is checked against the wallet and the root on chain, and its parameters against the network's trust anchors. Its batch date must fall within your instance's `maxStalenessDays` from [Set Operator Key](/endpoints/customers/set-operator-key), or 400 days when you set no bound. Each proof is then verified as a STARK.
+
+`zk.verification.checks.signature` reads `verified` when the manifest signature was checked against the operator key of the wallet's KYC provider. It reads `root-anchored` when no such key was found, and then only the match with the on-chain root vouches for the manifest. A development instance also accepts `stub` bundles, which `zk.verification.mode` shows.
+
+A leaf marked `commitmentOnly` is bound to the root but was neither proved nor checked against the trust anchors. That holds even when `proofLevel` is `ZK_PROOF`, so check the flag on every leaf you rely on.
+
+Everything needed to re-check an approval comes back. The consent recovers to the wallet with any EIP-712 library, `chain.registry` names the contract that was read, and `zk.proofs` holds the proof bytes.
+
+## Path Parameters
+
+<ParamField path="id" type="string" required>
+  The request `id`. Letters and digits only, at most 100 characters.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="id" type="string">Request ID.</ResponseField>
+    <ResponseField name="walletAddress" type="string">Checksummed.</ResponseField>
+    <ResponseField name="scope" type="string">`AGE`, `COUNTRY` or `FULL_KYC`.</ResponseField>
+    <ResponseField name="scopeLabel" type="string">`Reveal age`, `Reveal country` or `Reveal full KYC`.</ResponseField>
+    <ResponseField name="referenceUrl" type="string">Or `null`.</ResponseField>
+    <ResponseField name="message" type="string">Or `null`.</ResponseField>
+    <ResponseField name="status" type="string">`OPEN`, `APPROVED`, `DECLINED`, `EXPIRED` or `CANCELLED`. A request past `expiresAt` without an answer reads `EXPIRED`.</ResponseField>
+    <ResponseField name="environment" type="string">`PROD` or `DEV`.</ResponseField>
+    <ResponseField name="createdAt" type="string">ISO 8601.</ResponseField>
+    <ResponseField name="expiresAt" type="string">ISO 8601.</ResponseField>
+    <ResponseField name="respondedAt" type="string">When the holder answered or the request was cancelled, ISO 8601, or `null`.</ResponseField>
+    <ResponseField name="proofLevel" type="string">`ZK_PROOF`, `ON_CHAIN_CLAIM` or `CONSENT_ONLY` once approved, otherwise `null`.</ResponseField>
+    <ResponseField name="consent" type="object">
+      Present only when `status` is `APPROVED`.
+      <Expandable>
+        <ResponseField name="typedData" type="object">The EIP-712 `domain`, `types`, `primaryType` and `message` the wallet signed.</ResponseField>
+        <ResponseField name="signature" type="string">The wallet's signature, 65 bytes as hex.</ResponseField>
+        <ResponseField name="signedAt" type="string">ISO 8601.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="disclosure" type="object">
+      Present only when `status` is `APPROVED`.
+      <Expandable>
+        <ResponseField name="proofLevel" type="string">As above.</ResponseField>
+        <ResponseField name="scope" type="string">As above.</ResponseField>
+        <ResponseField name="chain" type="object">
+          The register record read at approval.
+          <Expandable>
+            <ResponseField name="chainId" type="integer">1 for production, 11155111 for development.</ResponseField>
+            <ResponseField name="registry" type="string">Address of the register that was read.</ResponseField>
+            <ResponseField name="register" type="object">`address`, `kind` (`TRUSSET` or `TREX`), `source` (`PLATFORM` for the Trusset ID Register, `ISSUER` for an issuer-owned one) and `name`, which is `null` for the Trusset ID Register.</ResponseField>
+            <ResponseField name="walletAddress" type="string">Checksummed.</ResponseField>
+            <ResponseField name="kycHash" type="string">The identity root.</ResponseField>
+            <ResponseField name="status" type="string">`active`, `soft_expired`, `hard_expired` or `revoked`. On an ERC-3643 register, `active`, `revoked` or `none`.</ResponseField>
+            <ResponseField name="statusCode" type="integer">`0` active, `1` soft expired, `2` hard expired, `3` revoked. An ERC-3643 register reports only `0` or `3`.</ResponseField>
+            <ResponseField name="isVerified" type="boolean">Whether the register reported the wallet as verified.</ResponseField>
+            <ResponseField name="frozen" type="boolean">Whether the wallet is frozen on the register.</ResponseField>
+            <ResponseField name="investorType" type="integer">1 Retail, 2 Professional, 3 Eligible Counterparty, 0 for none. Always 0 on an ERC-3643 register.</ResponseField>
+            <ResponseField name="kycProvider" type="string">The address that verified the wallet. On an ERC-3643 register, the issuer of its KYC claim.</ResponseField>
+            <ResponseField name="timestamp" type="integer">Verification time in Unix seconds. 0 on an ERC-3643 register.</ResponseField>
+            <ResponseField name="softExpiry" type="integer">Unix seconds. 0 on an ERC-3643 register.</ResponseField>
+            <ResponseField name="hardExpiry" type="integer">Unix seconds. 0 on an ERC-3643 register.</ResponseField>
+            <ResponseField name="claims" type="array">Active claims in scope: all of them for `FULL_KYC`, `RESIDENCY` claims for `COUNTRY`, none for `AGE`. Each carries `claimType`, `claimTypeLabel`, `dataHash`, `issuer`, `issuedAt`, `expiry` and `active`. ERC-3643 claims add `topic`, `claimId` and `onchainId`, with `issuedAt` and `expiry` at 0.</ResponseField>
+            <ResponseField name="readAt" type="string">The approval time, ISO 8601. Register reads are cached for up to 30 seconds, so the values can be that much older.</ResponseField>
+          </Expandable>
+        </ResponseField>
+        <ResponseField name="zk" type="object">
+          `null` unless the holder attached their bundle.
+          <Expandable>
+            <ResponseField name="manifest" type="object">The whole manifest the holder attached. The root is recomputed over every leaf, so leaves outside the scope are included.</ResponseField>
+            <ResponseField name="manifestSig" type="string">Base64, or `null`.</ResponseField>
+            <ResponseField name="proofs" type="object">Base64 proofs keyed by field name, for the fields in scope only.</ResponseField>
+            <ResponseField name="leaves" type="array">The leaves in scope, each with `fieldName`, `circuit`, `circuitId`, `leafHash`, `commitment`, `proofDigest`, `publicDigest`, `publicInputs`, `params`, `paramsHash`, `commitmentOnly` and `proofProvided`. A `commitmentOnly` leaf has no proof behind it.</ResponseField>
+            <ResponseField name="verification" type="object">`checks` (`walletAndRootMatchChain`, `signature`, `freshness`, `trustAnchors`, `merkleRoot`, and `stark` listing the fields whose proofs were verified), `verifierVersion`, `policyVersion`, `mode` (`production` or `stub`), `epochDays` and `verifiedAt`.</ResponseField>
+          </Expandable>
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/customers/api/disclosure-requests/cmg7q3v2k0004lq08h2z9x6de" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+import { verifyTypedData } from 'ethers';
+
+const response = await fetch(
+  'https://api.trusset.org/customers/api/disclosure-requests/cmg7q3v2k0004lq08h2z9x6de',
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await response.json();
+
+if (data.status === 'APPROVED') {
+  const { domain, types, message } = data.consent.typedData;
+  const signer = verifyTypedData(domain, types, message, data.consent.signature);
+  if (signer.toLowerCase() !== data.walletAddress.toLowerCase()) {
+    throw new Error('The consent was not signed by the requested wallet');
+  }
+  if (!data.disclosure.chain.isVerified) {
+    throw new Error(`The identity is ${data.disclosure.chain.status}`);
+  }
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Approved
+{
+  "success": true,
+  "data": {
+    "id": "cmg7q3v2k0004lq08h2z9x6de",
+    "walletAddress": "0x801D3b83882B1047fb2CeB6C097C3ae806D8D028",
+    "scope": "COUNTRY",
+    "scopeLabel": "Reveal country",
+    "referenceUrl": "https://acme-capital.example/onboarding/4711",
+    "message": "Please confirm your country of residence for your account opening",
+    "status": "APPROVED",
+    "environment": "DEV",
+    "createdAt": "2026-09-30T09:30:00.000Z",
+    "expiresAt": "2026-10-14T09:30:00.000Z",
+    "respondedAt": "2026-10-01T14:05:12.000Z",
+    "proofLevel": "ON_CHAIN_CLAIM",
+    "consent": {
+      "typedData": {
+        "domain": { "name": "Trusset Verify", "version": "1", "chainId": 11155111 },
+        "types": {
+          "DisclosureConsent": [
+            { "name": "requestId", "type": "string" },
+            { "name": "wallet", "type": "address" },
+            { "name": "requestor", "type": "string" },
+            { "name": "scope", "type": "string" },
+            { "name": "reference", "type": "string" },
+            { "name": "expiresAt", "type": "uint256" }
+          ]
+        },
+        "primaryType": "DisclosureConsent",
+        "message": {
+          "requestId": "cmg7q3v2k0004lq08h2z9x6de",
+          "wallet": "0x801D3b83882B1047fb2CeB6C097C3ae806D8D028",
+          "requestor": "ACME Capital AG",
+          "scope": "COUNTRY",
+          "reference": "https://acme-capital.example/onboarding/4711",
+          "expiresAt": 1791970200
+        }
+      },
+      "signature": "0xa576042ab810cc5759ef8f5d65285ae468ab7228a4e8d5136cd63bb5ecbe28ff43a4d27dd65524bf1d3b22ae3273b14c6792dfeb9758441ce0d95a83b97a873d1c",
+      "signedAt": "2026-10-01T14:05:12.000Z"
+    },
+    "disclosure": {
+      "proofLevel": "ON_CHAIN_CLAIM",
+      "scope": "COUNTRY",
+      "chain": {
+        "chainId": 11155111,
+        "registry": "0xE9114c40934f6fB6BB317935156b731f7A86D006",
+        "register": {
+          "address": "0xE9114c40934f6fB6BB317935156b731f7A86D006",
+          "kind": "TRUSSET",
+          "source": "PLATFORM",
+          "name": null
+        },
+        "walletAddress": "0x801D3b83882B1047fb2CeB6C097C3ae806D8D028",
+        "kycHash": "0x16de76ef146acf8f3a664b09f5e1c20aa1f0672b3403a909dae2d36d47def754",
+        "status": "active",
+        "statusCode": 0,
+        "isVerified": true,
+        "frozen": false,
+        "investorType": 1,
+        "kycProvider": "0x8f876930DEa54Cb0Aa7F5EE617511AEDB3cB25aE",
+        "timestamp": 1788336000,
+        "softExpiry": 1803888000,
+        "hardExpiry": 1819872000,
+        "claims": [
+          {
+            "claimType": 3,
+            "claimTypeLabel": "RESIDENCY",
+            "dataHash": "0xbd549c840e3415871bfba8d089cfbf49b7529d3c767c211b623552e15a0e669c",
+            "issuer": "0x8f876930DEa54Cb0Aa7F5EE617511AEDB3cB25aE",
+            "issuedAt": 1788336000,
+            "expiry": 1819872000,
+            "active": true
+          }
+        ],
+        "readAt": "2026-10-01T14:05:12.000Z"
+      },
+      "zk": null
+    }
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-10-01T15:00:00.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `id` contains characters other than letters and digits, or is longer than 100 characters |
+| `NOT_FOUND` | `404` | No request with this ID was made by your instance |
+| `GET_DISCLOSURE_REQUEST_FAILED` | `500` | The request could not be read |

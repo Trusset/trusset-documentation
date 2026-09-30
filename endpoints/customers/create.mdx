@@ -6,26 +6,48 @@ description: 'Register a new customer for the authenticated instance'
 
 Creates a new customer record tied to the authenticated instance. You can either provide a wallet address directly, or omit it to receive a `referenceKey` that allows linking a wallet later via the [Link Wallet](/endpoints/customers/link-wallet) endpoint.
 
+<Warning>
+  If an archived customer on your instance has this `walletAddress` as its primary, the call restores that record rather than creating one. The record keeps its ID, linked wallets and `kycHash`. Its `status` and `verifiedAt` are set as for a new record, and its `referenceKey` is cleared. Every other field this endpoint takes is replaced from the body, and a field you omit is cleared or reset to its default.
+</Warning>
+
 ## Body Parameters
 
+At least one of `name`, `walletAddress` and `externalId` is required.
+
 <ParamField body="walletAddress" type="string">
-  Ethereum wallet address. Must be a valid checksummed or lowercased address. If omitted, a `referenceKey` is generated for deferred wallet linking.
+  Primary wallet. Letter case does not matter, but a mixed-case address must carry a valid checksum. Stored checksummed. If omitted, a `referenceKey` is generated for deferred wallet linking.
 </ParamField>
 
 <ParamField body="name" type="string">
-  Customer display name.
-</ParamField>
-
-<ParamField body="country" type="string">
-  ISO 3166-1 alpha-2 or alpha-3 country code (e.g., `DE`, `DEU`).
-</ParamField>
-
-<ParamField body="investorType" type="string" default="RETAIL">
-  Investor classification. Values: `RETAIL`, `PROFESSIONAL`, `ELIGIBLE_COUNTERPARTY`.
+  Customer display name. Required when `customerType` is `COMPANY`.
 </ParamField>
 
 <ParamField body="externalId" type="string">
-  Your own external reference identifier for this customer.
+  Your own external reference identifier for this customer. It must be unique among the customers of your instance that are not archived. [Update Customer](/endpoints/customers/update) does not take it.
+</ParamField>
+
+<ParamField body="customerType" type="string" default="INDIVIDUAL">
+  `INDIVIDUAL` or `COMPANY`, in any letter case. [Update Customer](/endpoints/customers/update) refuses to change it.
+</ParamField>
+
+<ParamField body="country" type="string">
+  ISO 3166-1 alpha-2, alpha-3 or numeric code, in any letter case (`DE`, `DEU` or `276`). Stored and returned as alpha-3.
+</ParamField>
+
+<ParamField body="investorType" type="string" default="RETAIL">
+  The key of one of your [verification profiles](/endpoints/customers/list-verification-profiles). The presets are `RETAIL`, `PROFESSIONAL` and `ELIGIBLE_COUNTERPARTY`. The value is stored as sent and is not checked against your profiles. When it names a profile whose blocked-country list holds `country`, the call is refused with `COUNTRY_BLOCKED`.
+</ParamField>
+
+<ParamField body="companyUrl" type="string">
+  Company records only. Up to 300 characters. `https://` is added when no scheme is given, and the URL must use `http` or `https` with a dotted hostname. Stored in normalised form.
+</ParamField>
+
+<ParamField body="companyId" type="string">
+  Individual records only. The ID of a company record on your instance that is not archived.
+</ParamField>
+
+<ParamField body="contactChannels" type="string[]">
+  Up to 20 strings of up to 200 characters each. Entries are trimmed, blank ones are dropped, and duplicates are removed ignoring case.
 </ParamField>
 
 <ParamField body="metadata" type="object">
@@ -34,10 +56,16 @@ Creates a new customer record tied to the authenticated instance. You can either
 
 ## Response Fields
 
+Returns `201`, including when an archived record was restored.
+
 <ResponseField name="success" type="boolean">Request status</ResponseField>
 <ResponseField name="data" type="object">
-  The created customer object. Includes `referenceKey` when no `walletAddress` was provided.
+  The customer record, with the fields listed on [Get Customer](/endpoints/customers/get) other than its linked wallets, company links, Sumsub applicant record and audit entries. `referenceKey` is set when no `walletAddress` was sent.
 </ResponseField>
+
+<Note>
+  `status` starts as `pending`. It starts as `verified` when the registry already holds a verified identity for `walletAddress`, registered by the Trusset platform verifier or by one of your instance's verified wallets. On an instance bound to its own register, any verifier counts. A registry read that fails leaves the record `pending` and does not fail the call.
+</Note>
 
 <RequestExample>
 ```bash cURL (with wallet)
@@ -45,8 +73,10 @@ curl -X POST "https://api.trusset.org/customers/api/manage" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: trusset_abc123xy_secret..." \
   -d '{
-    "walletAddress": "0xAbC123dEf456789012345678901234567890AbCd",
+    "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
     "name": "Acme Corp",
+    "customerType": "COMPANY",
+    "companyUrl": "acme.example",
     "country": "DE",
     "investorType": "PROFESSIONAL"
   }'
@@ -57,6 +87,7 @@ curl -X POST "https://api.trusset.org/customers/api/manage" \
   -H "X-API-Key: trusset_abc123xy_secret..." \
   -d '{
     "name": "Acme Corp",
+    "customerType": "COMPANY",
     "country": "DE",
     "investorType": "PROFESSIONAL"
   }'
@@ -70,30 +101,13 @@ const response = await fetch('https://api.trusset.org/customers/api/manage', {
   },
   body: JSON.stringify({
     name: 'Acme Corp',
+    customerType: 'COMPANY',
     country: 'DE',
     investorType: 'PROFESSIONAL'
   })
 });
 const { data: customer } = await response.json();
-console.log(customer.referenceKey); // ref_a1b2c3d4e5f6...
-```
-```python Python
-import requests
-
-response = requests.post(
-    'https://api.trusset.org/customers/api/manage',
-    headers={
-        'Content-Type': 'application/json',
-        'X-API-Key': 'trusset_abc123xy_secret...'
-    },
-    json={
-        'name': 'Acme Corp',
-        'country': 'DE',
-        'investorType': 'PROFESSIONAL'
-    }
-)
-customer = response.json()['data']
-print(customer['referenceKey'])  # ref_a1b2c3d4e5f6...
+console.log(customer.referenceKey);
 ```
 </RequestExample>
 
@@ -102,20 +116,37 @@ print(customer['referenceKey'])  # ref_a1b2c3d4e5f6...
 {
   "success": true,
   "data": {
-    "id": "cust_abc123",
-    "instanceId": "inst_xyz789",
-    "walletAddress": "0xAbC123dEf456789012345678901234567890AbCd",
-    "referenceKey": null,
+    "id": "cmt0k3b9x0004cghxw7r2d5ya",
+    "instanceId": "cmrz4d1v20000cghx8k6p3m7t",
+    "issuerId": "cmrz3a8q10000cghxf5w2n9k4",
+    "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
+    "externalId": null,
     "name": "Acme Corp",
-    "country": "DE",
+    "country": "DEU",
     "investorType": "PROFESSIONAL",
+    "customerType": "COMPANY",
+    "companyUrl": "https://acme.example/",
+    "companyId": null,
     "status": "pending",
+    "frozen": false,
+    "kycHash": null,
+    "onChainTxHash": null,
+    "sumsubApplicantId": null,
+    "idLinkId": null,
+    "referenceKey": null,
+    "contactChannels": [],
+    "metadata": null,
     "archived": false,
-    "createdAt": "2025-06-15T12:00:00.000Z"
+    "archivedAt": null,
+    "verifiedAt": null,
+    "revokedAt": null,
+    "onChainSyncedAt": null,
+    "createdAt": "2026-09-30T12:00:00.000Z",
+    "updatedAt": "2026-09-30T12:00:00.000Z"
   },
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-06-15T12:00:00.000Z"
+    "timestamp": "2026-09-30T12:00:00.000Z"
   }
 }
 ```
@@ -123,20 +154,37 @@ print(customer['referenceKey'])  # ref_a1b2c3d4e5f6...
 {
   "success": true,
   "data": {
-    "id": "cust_abc123",
-    "instanceId": "inst_xyz789",
+    "id": "cmt0k3b9x0004cghxw7r2d5ya",
+    "instanceId": "cmrz4d1v20000cghx8k6p3m7t",
+    "issuerId": "cmrz3a8q10000cghxf5w2n9k4",
     "walletAddress": null,
-    "referenceKey": "ref_a1b2c3d4e5f67890abcdef12345678",
+    "externalId": null,
     "name": "Acme Corp",
-    "country": "DE",
+    "country": "DEU",
     "investorType": "PROFESSIONAL",
+    "customerType": "COMPANY",
+    "companyUrl": null,
+    "companyId": null,
     "status": "pending",
+    "frozen": false,
+    "kycHash": null,
+    "onChainTxHash": null,
+    "sumsubApplicantId": null,
+    "idLinkId": null,
+    "referenceKey": "ref_a1b2c3d4e5f67890abcdef1234567890",
+    "contactChannels": [],
+    "metadata": null,
     "archived": false,
-    "createdAt": "2025-06-15T12:00:00.000Z"
+    "archivedAt": null,
+    "verifiedAt": null,
+    "revokedAt": null,
+    "onChainSyncedAt": null,
+    "createdAt": "2026-09-30T12:00:00.000Z",
+    "updatedAt": "2026-09-30T12:00:00.000Z"
   },
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-06-15T12:00:00.000Z"
+    "timestamp": "2026-09-30T12:00:00.000Z"
   }
 }
 ```
@@ -144,13 +192,35 @@ print(customer['referenceKey'])  # ref_a1b2c3d4e5f6...
 {
   "success": false,
   "error": {
-    "code": "CREATE_FAILED",
-    "message": "Failed to create customer"
+    "code": "CUSTOMER_EXISTS",
+    "message": "Customer with this wallet already exists"
   },
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2025-06-15T12:00:00.000Z"
+    "timestamp": "2026-09-30T12:00:00.000Z"
   }
 }
 ```
 </ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_COUNTRY` | `400` | `country` is not an ISO 3166-1 code |
+| `MISSING_IDENTIFIER` | `400` | None of `name`, `walletAddress` and `externalId` was sent |
+| `INVALID_ADDRESS` | `400` | `walletAddress` is not a valid address |
+| `INVALID_CUSTOMER_TYPE` | `400` | `customerType` is not `INDIVIDUAL` or `COMPANY` |
+| `MISSING_NAME` | `400` | A company was sent without `name` |
+| `COMPANY_CANNOT_LINK` | `400` | A company was sent with `companyId` |
+| `INVALID_COMPANY_URL` | `400` | `companyUrl` was sent for an individual, or is not a usable URL |
+| `COMPANY_URL_TOO_LONG` | `400` | `companyUrl` is over 300 characters |
+| `INVALID_COMPANY` | `400` | `companyId` is not a string of 20 to 40 characters |
+| `INVALID_CONTACT_CHANNELS` | `400` | `contactChannels` is not an array |
+| `TOO_MANY_CONTACT_CHANNELS` | `400` | More than 20 contact channels |
+| `INVALID_CONTACT_CHANNEL` | `400` | A contact channel is not a string |
+| `CONTACT_CHANNEL_TOO_LONG` | `400` | A contact channel is over 200 characters |
+| `COUNTRY_BLOCKED` | `403` | `country` is on the blocked-country list of the profile `investorType` names |
+| `COMPANY_NOT_FOUND` | `404` | `companyId` names no company record on your instance that is not archived |
+| `CUSTOMER_EXISTS` | `409` | The wallet is another active customer's primary or any customer's linked wallet, or `externalId` is taken |
+| `CREATE_FAILED` | `500` | The record could not be written |
