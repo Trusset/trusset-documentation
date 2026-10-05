@@ -22,11 +22,40 @@ Each field is read on its own:
 
 Sending only `borrowerRegistry` therefore changes the borrower side and leaves the provider side as it is.
 
+Instead of an address, a side can name one of your [verification profiles](/endpoints/customers/list-verification-profiles#eligibility-registers) in `borrowerProfile` or `providerProfile`. The profile's eligibility register is then installed, so the side admits exactly the wallets admitted under that profile. An address sent beside a profile must name the same register, or the request is refused with `GATE_PROFILE_CONFLICT`. A profile without an eligibility register is refused with `ELIGIBILITY_REGISTER_NOT_SET`.
+
+## Professional Borrowers
+
+A `MARKET`-priced market carries the free-hand realization path under § 1259 BGB, which is open against professional borrowers only. Its borrower register must therefore admit professional clients and nobody else. The API judges that from the verification profiles bound to the register as their eligibility register, read across every instance on the market's network and environment, not only yours. The register qualifies when:
+
+- At least one such profile admits wallets to it. A profile bound in the `EXTERNAL` mode admits nobody through Trusset, so it is not counted.
+- Every profile that admits wallets to it is limited to professional clients (`professionalOnly: true`): the `PROFESSIONAL` or `ELIGIBLE_COUNTERPARTY` preset, or a custom profile limited to professional clients.
+- Every one of those profiles is in the `REGISTER` mode, so its own instance signs each admission. A register bound as an instance register does not qualify.
+
+A profile of another instance counts like one of yours. When one that is not limited to professional clients admits wallets to the same register, the register does not qualify, and the refusal names it only as a verification profile of another instance. The register deployed for your own `PROFESSIONAL` profile, named with `borrowerProfile: "PROFESSIONAL"`, is the direct way to a qualifying gate.
+
+Any change that would leave a `MARKET` market with a borrower register that does not qualify is refused with `PROFESSIONAL_BORROWER_GATE_REQUIRED`, `details.field: "borrowerRegistry"`. That includes a change to the provider side alone while the borrower register does not qualify, so fix the borrower side first, or in the same call.
+
+Until the borrower register qualifies, the API prepares nothing that lends on the market or moves liquidity into it. [Open Loan](/endpoints/lending/open-loan), [Borrow More](/endpoints/lending/borrow-more), [Add Liquidity](/endpoints/lending/add-liquidity) and the `register` action of [Register Vault](/endpoints/lending/register-vault) refuse with the same code, and so do vault allocations, draw caps and rebalances for the market in the Issuer Portal. [Get Identity Gates](/endpoints/lending/get-identity-gates) reports the state as `borrowerGateCompliant`. When the profiles behind the register cannot be read, those calls answer `503 STATE_UNAVAILABLE` and decide nothing.
+
+<Note>
+  This rule is enforced by the API, not by the market contract. The contract only asks the borrower register whether a wallet is verified, so a transaction built and signed outside this API is not refused on this ground.
+</Note>
+
+## Vaults Registered on the Market
+
+On a current market every registered vault examines its depositors against the provider register, so a new provider register must fit the vaults already registered:
+
+- A vault with its own register needs the provider register to be that same register, or none.
+- A vault without a register of its own takes its depositor gate from the provider registers of the markets it funds, and keeps the first one for good. Once a provider register is installed, it can be neither replaced nor cleared while such a vault is registered.
+
+A change that breaks this is refused with `PROVIDER_GATE_MISMATCH`, and `details.conflicts` lists each vault as `{ vault, register }`, with `register` `null` for a vault without one. Set the provider register to the vaults' register, or deregister those vaults first with [Register Vault](/endpoints/lending/register-vault).
+
 ## Registers That Must Stay
 
 A `MARKET`-priced market must keep a borrower register. The API refuses to clear it with `IDENTITY_REGISTRY_REQUIRED`, and the contract would revert the same change.
 
-On a current market the provider register can be cleared, since the market takes no third-party deposit that it would guard. On an older market whose pool is open to third-party providers, the API refuses to clear the provider register with `IDENTITY_REGISTRY_REQUIRED`. `details.field` names the side in both cases.
+On a current market the provider register can be cleared, since the market takes no third-party deposit that it would guard. A vault without a register of its own registered on the market still blocks the change, see [Vaults Registered on the Market](#vaults-registered-on-the-market). On an older market whose pool is open to third-party providers, the API refuses to clear the provider register with `IDENTITY_REGISTRY_REQUIRED`. `details.field` names the side in both cases.
 
 A market on the earlier single-register implementation examines both sides through one register and cannot change it. It is refused with `MARKET_UPGRADE_REQUIRED` until the admin moves it onto the current implementation with [Upgrade Market](/endpoints/lending/upgrade-market).
 
@@ -50,6 +79,14 @@ A request that would leave both registers as they are is refused with `IDENTITY_
   The provider register to install, or `null`, `""` or the zero address to clear it. Omit it to keep the current one. Same address rules as `borrowerRegistry`.
 </ParamField>
 
+<ParamField body="borrowerProfile" type="string">
+  A verification profile key of your instance, 1 to 60 letters, digits, `-` or `_`. Installs that profile's eligibility register as the borrower register.
+</ParamField>
+
+<ParamField body="providerProfile" type="string">
+  A verification profile key whose eligibility register is installed as the provider register.
+</ParamField>
+
 <ParamField body="txHash" type="string">
   Hash of the mined transaction, as a 0x-prefixed 64-character hex string. Send it to confirm; the registers are then read from the chain, so the other fields are not needed. Omit it to receive the calldata.
 </ParamField>
@@ -69,6 +106,8 @@ The calldata response:
     <ResponseField name="functionName" type="string">`setIdentityGates`.</ResponseField>
     <ResponseField name="borrowerRegistry" type="string">The borrower register the transaction installs, lowercased, or `null` for none.</ResponseField>
     <ResponseField name="providerRegistry" type="string">The provider register the transaction installs, lowercased, or `null` for none.</ResponseField>
+    <ResponseField name="borrowerProfile" type="object">`{ key, name, entityType, professionalOnly, requirementsHash }` of the profile whose eligibility register becomes the borrower register, or `null` when it belongs to no profile of your instance.</ResponseField>
+    <ResponseField name="providerProfile" type="object">The same for the provider register, or `null`.</ResponseField>
     <ResponseField name="unchanged" type="boolean">Always `false`, since a request that changes nothing is refused.</ResponseField>
     <ResponseField name="description" type="string">What the transaction sets, in words.</ResponseField>
     <ResponseField name="requiredRole" type="string">`DEFAULT_ADMIN_ROLE`.</ResponseField>
@@ -90,6 +129,8 @@ The confirmed response:
     <ResponseField name="signedBy" type="string">The wallet that sent it.</ResponseField>
     <ResponseField name="borrowerRegistry" type="string">The borrower register now on the market, or `null`.</ResponseField>
     <ResponseField name="providerRegistry" type="string">The provider register now on the market, or `null`.</ResponseField>
+    <ResponseField name="borrowerProfile" type="object">The profile behind the borrower register now on the market, or `null`.</ResponseField>
+    <ResponseField name="providerProfile" type="object">The profile behind the provider register now on the market, or `null`.</ResponseField>
     <ResponseField name="gates" type="object">The full [Get Identity Gates](/endpoints/lending/get-identity-gates) answer after the change, or `null` when it could not be read.</ResponseField>
   </Expandable>
 </ResponseField>
@@ -101,7 +142,7 @@ Confirming records an `IDENTITY_GATES_SET` transaction on the market, visible th
 curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/identity-gates" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"borrowerRegistry": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90"}'
+  -d '{"borrowerProfile": "PROFESSIONAL"}'
 ```
 ```typescript TypeScript
 const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/identity-gates`;
@@ -112,7 +153,7 @@ const headers = {
 const res = await fetch(url, {
   method: 'POST',
   headers,
-  body: JSON.stringify({ borrowerRegistry: '0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90' })
+  body: JSON.stringify({ borrowerProfile: 'PROFESSIONAL' })
 });
 const { data } = await res.json();
 const tx = await adminWallet.sendTransaction({
@@ -145,6 +186,14 @@ await fetch(url, {
     "requiredRole": "DEFAULT_ADMIN_ROLE",
     "borrowerRegistry": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
     "providerRegistry": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+    "borrowerProfile": {
+      "key": "PROFESSIONAL",
+      "name": "Professional",
+      "entityType": "INDIVIDUAL",
+      "professionalOnly": true,
+      "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390"
+    },
+    "providerProfile": null,
     "unchanged": false,
     "description": "Set borrower register 0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90 and provider register 0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37 (every registered vault examines its depositors against it) on this market; every entry is a live read against the register at call time (requires DEFAULT_ADMIN_ROLE)",
     "requiredSigner": null,
@@ -173,6 +222,14 @@ await fetch(url, {
     "signedBy": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
     "borrowerRegistry": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
     "providerRegistry": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+    "borrowerProfile": {
+      "key": "PROFESSIONAL",
+      "name": "Professional",
+      "entityType": "INDIVIDUAL",
+      "professionalOnly": true,
+      "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390"
+    },
+    "providerProfile": null,
     "gates": {
       "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
       "generation": "TWO_REGISTERS",
@@ -196,7 +253,17 @@ await fetch(url, {
         "shape": "tuple",
         "usable": true
       },
-      "upgradeRequired": false
+      "upgradeRequired": false,
+      "borrowerProfile": {
+        "key": "PROFESSIONAL",
+        "name": "Professional",
+        "entityType": "INDIVIDUAL",
+        "professionalOnly": true,
+        "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390"
+      },
+      "providerProfile": null,
+      "borrowerGateCompliant": true,
+      "borrowerGateProblem": null
     }
   }
 }
@@ -208,6 +275,16 @@ await fetch(url, {
     "code": "IDENTITY_REGISTRY_REQUIRED",
     "message": "This market prices its collateral from a live market price, which carries the free-hand realization path under § 1259 BGB, and that path is only available against professional borrowers. A borrower register has to stay installed on it.",
     "details": { "field": "borrowerRegistry" }
+  }
+}
+```
+```json Error - Professional Borrower Gate
+{
+  "success": false,
+  "error": {
+    "code": "PROFESSIONAL_BORROWER_GATE_REQUIRED",
+    "message": "This market prices its collateral from a live market price, which carries the free-hand realization path under § 1259 BGB and is only available against professional borrowers. The borrower register 0x9e3c8a15f4d70b2681c5a3f9027d4be8115c7d21 admits wallets for the Retail profile, which is not limited to professional clients. Choose the register of a profile limited to professional clients as the borrower gate.",
+    "details": { "field": "borrowerRegistry", "priceSource": "MARKET" }
   }
 }
 ```
@@ -224,21 +301,29 @@ await fetch(url, {
 
 ## Error Codes
 
-Refusals from the checks above carry `details` as an object: `field` for the side concerned, and `registry` on `IDENTITY_REGISTRY_INCOMPATIBLE`. `IDENTITY_GATES_UNCHANGED` carries the two registers the market already has.
+Refusals from the checks above carry `details` as an object: `field` for the side concerned, `registry` on `IDENTITY_REGISTRY_INCOMPATIBLE`, `priceSource` on `PROFESSIONAL_BORROWER_GATE_REQUIRED`, and `conflicts` on `PROVIDER_GATE_MISMATCH`. `IDENTITY_GATES_UNCHANGED` carries the two registers the market already has.
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | A register is not 0x followed by 40 hex characters, fails its EIP-55 checksum, or `txHash` is malformed |
+| `VALIDATION_ERROR` | `400` | A register is not 0x followed by 40 hex characters, fails its EIP-55 checksum, a profile key is not 1 to 60 letters, digits, `-` or `_`, or `txHash` is malformed |
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `GATE_PROFILE_CONFLICT` | `400` | A register address names a different register than the profile sent for the same side |
+| `GATE_PROFILE_UNRESOLVED` | `400` | A profile key could not be resolved for a reason that carries no code of its own |
 | `IDENTITY_GATES_FAILED` | `400` | The change could not be prepared or confirmed and no more specific code applied |
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `PROFILE_NOT_FOUND` | `404` | `borrowerProfile` or `providerProfile` names no verification profile of your instance |
 | `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds the admin role that sets its registers. Skipped when confirming with `txHash` |
 | `MARKET_UPGRADE_REQUIRED` | `409` | The market runs the earlier single-register implementation |
+| `ELIGIBILITY_REGISTER_NOT_SET` | `409` | The named profile has no eligibility register |
 | `IDENTITY_REGISTRY_REQUIRED` | `409` | The request would clear a register the market must keep |
+| `PROFESSIONAL_BORROWER_GATE_REQUIRED` | `409` | A `MARKET` market would be left with a borrower register that does not qualify as a professional gate. See [Professional borrowers](#professional-borrowers) |
+| `PROVIDER_GATE_MISMATCH` | `409` | The new provider register does not fit a vault registered on the market. `details.conflicts` lists them |
 | `IDENTITY_GATES_UNCHANGED` | `409` | The request would leave both registers as they are |
 | `IDENTITY_REGISTRY_INCOMPATIBLE` | `422` | A named register does not answer `isVerified(address)` |
 | `IDENTITY_GATES_UNREADABLE` | `503` | The market's current registers could not be read. Retry |
 | `IDENTITY_REGISTRY_UNREADABLE` | `503` | A named register could not be reached to be checked. Retry |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The vaults registered on the market, or one of their registers, could not be read. Retry |
+| `STATE_UNAVAILABLE` | `503` | The verification profiles behind the borrower register could not be read. Retry |
 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction), with the status listed there.

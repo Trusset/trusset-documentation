@@ -39,7 +39,7 @@ A collateral token can back several markets as long as they differ in collateral
 <ParamField body="openToAnyCurator" type="boolean" default="false">
   Offer the market to claimants beyond the named candidates. The factory admits a claimant nobody nominated when the borrower register the deployer installed verifies it. Through this API the claimant must also be an account Trusset approved as a lender of record. The claim takes two transactions, announced and then completed after a delay. See [Accept Lender Role](/endpoints/operators/accept-lender-role#claim-an-open-market).
 
-  An open market deployed with no `identityRegistry` is narrowed rather than refused. With no borrower register to admit them, claimants nobody nominated are refused, so only a nominee can take the market.
+  An open `NAV` or `ORACLE` market deployed with no `identityRegistry` is narrowed rather than refused. With no borrower register to admit them, claimants nobody nominated are refused, so only a nominee can take the market. An open `MARKET` market must install one.
 </ParamField>
 
 <ParamField body="mode" type="string" default="FREEZE">
@@ -51,7 +51,7 @@ A collateral token can back several markets as long as they differ in collateral
 
   `NAV` is a price the issuer publishes. `MARKET` signals an observable market price: the contract then refuses Dutch auctions and holds the auction floor premium at 98 percent or more. `ORACLE` reads the external feed named in `oracleAddress` and takes no pushed price at all.
 
-  A `MARKET` deployment also needs `identityRegistry`, because a lender of record can only adopt such a market with a borrower register installed.
+  A `MARKET` market lends to professional borrowers only, so it needs a borrower register. See [Borrower register on a MARKET market](#borrower-register-on-a-market-market).
 </ParamField>
 
 <ParamField body="oracleAddress" type="string">
@@ -65,11 +65,19 @@ A collateral token can back several markets as long as they differ in collateral
 <ParamField body="identityRegistry" type="string">
   The borrower register, installed on the market by this transaction. Borrowers are examined against it on every loan. It must answer `isVerified(address)`, as an ERC-3643 identity registry, an ONCHAINID-based register and the Trusset register all do.
 
-  Required for the `MARKET` price source and optional for `NAV` and `ORACLE`. Omitted, the collateral token's own compliance alone governs who may borrow. A register installed here stands at adoption: the lender of record cannot bring a different one. The market admin can change it afterwards with [Set Identity Gates](/endpoints/lending/set-identity-gates).
+  Optional for `NAV` and `ORACLE`. For `MARKET`, see [Borrower register on a MARKET market](#borrower-register-on-a-market-market). Omitted, the collateral token's own compliance alone governs who may borrow. A register installed here stands at adoption: the lender of record cannot bring a different one. The market admin can change it afterwards with [Set Identity Gates](/endpoints/lending/set-identity-gates).
+</ParamField>
+
+<ParamField body="identityRegistryProfile" type="string">
+  A [verification profile](/endpoints/customers/list-verification-profiles#eligibility-registers) key of this instance, 1 to 60 letters, digits, `-` or `_`. The deployment installs that profile's eligibility register as the borrower register, exactly as if its address were sent in `identityRegistry`. Sending both is accepted only when they name the same register, otherwise `GATE_PROFILE_CONFLICT`. A profile without an eligibility register is refused with `ELIGIBILITY_REGISTER_NOT_SET`.
 </ParamField>
 
 <ParamField body="providerRegistry" type="string">
   The register the deployer proposes for liquidity providers. It is recorded on the factory and installed by nothing: which provider register the market uses is the lender of record's decision at adoption. It must answer `isVerified(address)`, exactly like `identityRegistry`.
+</ParamField>
+
+<ParamField body="providerRegistryProfile" type="string">
+  A verification profile key whose eligibility register is proposed as `providerRegistry`. The same rules as `identityRegistryProfile` apply.
 </ParamField>
 
 <ParamField body="fallbackDecimals" type="integer" default="0">
@@ -79,6 +87,14 @@ A collateral token can back several markets as long as they differ in collateral
 <ParamField body="txHash" type="string">
   Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
 </ParamField>
+
+## Borrower register on a MARKET market
+
+A `MARKET` market carries the free-hand realization path, which is open against professional borrowers only. Its borrower register must therefore qualify as a professional gate: every verification profile that admits wallets to it, on any instance of the market's network and environment, is limited to professional clients and in the `REGISTER` mode, and there is at least one. The register deployed for the lender of record's own `PROFESSIONAL` profile qualifies, as long as no other profile admits wallets to it. Until the register qualifies, the API opens no loan and adds no liquidity on the market. See [Professional borrowers](/endpoints/lending/set-identity-gates#professional-borrowers).
+
+A `MARKET` deployment that nominates `candidates` and leaves `openToAnyCurator` off may omit `identityRegistry`. The nominee then brings its professional register with its adoption terms, and [Accept Lender Role](/endpoints/operators/accept-lender-role) checks it. Any other `MARKET` deployment must install a register, or it is refused with `IDENTITY_REGISTRY_REQUIRED`.
+
+The deployment does not check whether a register it installs qualifies. A register installed here stands at adoption, so when it does not, the lender of record is warned with `BORROWER_GATE_NOT_PROFESSIONAL` and must replace it through [Set Identity Gates](/endpoints/lending/set-identity-gates) before loans are opened or liquidity is added. Nominating the lender of record and letting it bring the register avoids that step.
 
 ## Rate offering
 
@@ -465,7 +481,7 @@ const { data: recorded } = await confirm.json();
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | A field failed schema validation, including a rate or term offering that mixes modes, a missing `initialPrice` for `NAV` or `MARKET`, and `oracleAddress` sent or missing against the price source. `error.details` names each offending field |
+| `VALIDATION_ERROR` | `400` | A field failed schema validation, including a rate or term offering that mixes modes, a missing `initialPrice` for `NAV` or `MARKET`, `oracleAddress` sent or missing against the price source, and a profile key that is not 1 to 60 letters, digits, `-` or `_`. `error.details` names each offending field |
 | `OPERATOR_SHARE_FIXED` | `400` | `operatorShareBps` was sent. The shares are fixed by the contracts |
 | `TOKEN_NOT_IMPORTED` | `400` | `collateralTokenAddress` is not a security token this instance imported or issued |
 | `BORROW_ASSET_IS_COLLATERAL` | `400` | `borrowAssetAddress` and `collateralTokenAddress` are the same token |
@@ -478,6 +494,10 @@ const { data: recorded } = await confirm.json();
 | `BORROW_ASSET_NOT_ERC20` | `400` | `decimals()` or `balanceOf()` could not be read on the borrow asset |
 | `BORROW_ASSET_DECIMALS_UNSUPPORTED` | `400` | Borrow asset decimals outside 6 to 18 |
 | `INVALID_IDENTITY_REGISTRY` | `400` | `identityRegistry` or `providerRegistry` fails its EIP-55 checksum |
+| `GATE_PROFILE_CONFLICT` | `400` | `identityRegistry` or `providerRegistry` names a different register than the profile sent beside it. `details.field` names the side |
+| `GATE_PROFILE_UNRESOLVED` | `400` | A profile key could not be resolved for a reason that carries no code of its own |
+| `PROFILE_NOT_FOUND` | `404` | `identityRegistryProfile` or `providerRegistryProfile` names no verification profile of this instance |
+| `ELIGIBILITY_REGISTER_NOT_SET` | `409` | The named profile has no eligibility register |
 | `INVALID_ORACLE_ADDRESS` | `400` | `oracleAddress` is the zero address or fails its checksum |
 | `INVALID_INITIAL_PRICE` | `400` | `initialPrice` carries more decimal places than the borrow asset supports, or rounds to zero at its scale |
 | `INVALID_RATE_OFFERING` | `400` | A `CLAMPED` cap below its floor |
@@ -488,7 +508,7 @@ const { data: recorded } = await confirm.json();
 | `MARKET_UNRECORDED` | `409` | A matching market was already deployed by this instance's wallet and never recorded. `details` carries `marketAddress`, `deployer` and `txHash`. Record it by sending that `txHash` with `collateralTokenAddress` to this endpoint instead of deploying again |
 | `WALLET_NOT_CONFIGURED` | `412` | This instance has no verified wallet to sign the deployment |
 | `TOKEN_PROFILE_REQUIRED` | `422` | The token has no published profile, so there is no asset data to attest. `details.editProfile` names where to add it |
-| `IDENTITY_REGISTRY_REQUIRED` | `422` | `priceSource` is `MARKET` and no `identityRegistry` was given |
+| `IDENTITY_REGISTRY_REQUIRED` | `422` | `priceSource` is `MARKET`, no borrower register was named, and the deployment does not nominate its lender of record (no `candidates`, or `openToAnyCurator` on). `details` carries `field` and `priceSource` |
 | `IDENTITY_REGISTRY_INCOMPATIBLE` | `422` | `identityRegistry` or `providerRegistry` does not answer `isVerified(address)`. `details` names the field and the register |
 | `ORACLE_FEED_NOT_A_CONTRACT` | `422` | No contract at `oracleAddress` |
 | `ORACLE_FEED_UNUSABLE` | `422` | The feed does not answer `decimals()`, answers neither price shape, or answers a non-positive or undated price |

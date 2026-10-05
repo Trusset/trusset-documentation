@@ -1,0 +1,184 @@
+---
+title: 'Build Removal'
+api: 'POST /customers/api/eligibility/removals/calldata'
+description: 'Unsigned transactions that take wallets off a profile eligibility register'
+---
+
+Returns one unsigned `deleteIdentity` transaction per wallet whose removal from a profile's eligibility register is waiting. A wallet of your instance that is an agent of the register signs and broadcasts each one, then [Confirm Removal](/endpoints/customers/confirm-removal) records it. Trusset holds no key and sends nothing.
+
+The register must be in the `REGISTER` mode, exactly as for [Build Admission](/endpoints/customers/build-admission). See [Which registers can be signed here](/endpoints/customers/introduction#which-registers-can-be-signed-here).
+
+## Body Parameters
+
+<ParamField body="profileKey" type="string">
+  The profile, by key. Matched exactly, then in upper and lower case. Send this or `profileId`.
+</ParamField>
+
+<ParamField body="profileId" type="string">
+  The profile, by `id`. Used instead of `profileKey` when both are sent.
+</ParamField>
+
+<ParamField body="signerAddress" type="string" required>
+  The wallet that will sign. It must be a verified Ethereum wallet of your instance and an agent of the register.
+</ParamField>
+
+<ParamField body="ids" type="string[]">
+  Only these admissions, by `id`. Up to 200 are read, and an id that is not a `REMOVAL_PENDING` admission of this profile is ignored.
+</ParamField>
+
+<ParamField body="wallets" type="string[]">
+  Only the admissions of these wallets. Up to 200 are read, and malformed addresses are dropped. Sent together with `ids`, an admission must match both.
+</ParamField>
+
+## How the removals are chosen
+
+Before the queue is read, every admission of the profile whose `dueAt` has passed is moved to `REMOVAL_PENDING` with reason `LAPSED`, so a lapsed admission is built in the same call. Then up to 20 waiting removals are taken, the longest waiting first. Build again after confirming for the rest.
+
+The signer and register checks are those of [Build Admission](/endpoints/customers/build-admission#what-is-checked). Each wallet is then read on the register. A wallet that no longer holds an identity there is recorded `REMOVED` without a transaction and reported in `skipped` with `ALREADY_REMOVED`.
+
+The first transaction is simulated from `signerAddress`. When it would revert, the call is refused with `ELIGIBILITY_TX_WOULD_REVERT`. The others are not simulated.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`, or `NONE` when every selected wallet was already gone from the register.</ResponseField>
+    <ResponseField name="profile" type="object">`{ key, name, entityType, professionalOnly, requirementsHash }` of the profile.</ResponseField>
+    <ResponseField name="registryAddress" type="string">The eligibility register, checksummed.</ResponseField>
+    <ResponseField name="signerAddress" type="string">The wallet that must sign, checksummed.</ResponseField>
+    <ResponseField name="steps" type="array">
+      One transaction per wallet. Broadcast each and confirm each hash.
+      <Expandable>
+        <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+        <ResponseField name="stepType" type="string">`revoke`.</ResponseField>
+        <ResponseField name="transaction" type="object">`{ to, data }`, addressed to the eligibility register. Send it on your instance's Ethereum network with no value.</ResponseField>
+        <ResponseField name="functionName" type="string">`deleteIdentity`.</ResponseField>
+        <ResponseField name="description" type="string">What the step does, with the removal reason.</ResponseField>
+        <ResponseField name="walletAddress" type="string">The wallet that signs, the same as `signerAddress`.</ResponseField>
+        <ResponseField name="subject" type="string">The wallet removed.</ResponseField>
+        <ResponseField name="id" type="string">The admission the step removes.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="rows" type="array">`{ id, walletAddress }` for every wallet with a step.</ResponseField>
+    <ResponseField name="skipped" type="array">`{ id, walletAddress, code, message }` for every wallet recorded `REMOVED` without a step. `code` is `ALREADY_REMOVED`.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint: "POST /customers/api/eligibility/removals/confirm", fields: ["txHash"], perStep: true }`. `perStep` means each step's hash is confirmed on its own.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/eligibility/removals/calldata" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -d '{
+    "profileKey": "PROFESSIONAL",
+    "signerAddress": "0xCD92134767aEC2562be15d2a2062A082dA17dD84"
+  }'
+```
+```typescript TypeScript
+const api = 'https://api.trusset.org/customers/api/eligibility';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(`${api}/removals/calldata`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ profileKey: 'PROFESSIONAL', signerAddress: await agentWallet.getAddress() })
+});
+const { data: plan } = await res.json();
+
+for (const step of plan.steps) {
+  const tx = await agentWallet.sendTransaction(step.transaction);
+  await tx.wait();
+  await fetch(`${api}/removals/confirm`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ txHash: tx.hash })
+  });
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "profile": {
+      "key": "PROFESSIONAL",
+      "name": "Professional",
+      "entityType": "INDIVIDUAL",
+      "professionalOnly": true,
+      "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390"
+    },
+    "registryAddress": "0x4f2A9c81D06e3b75A1C8E24D9B07f56E3a1d8C90",
+    "signerAddress": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "stepType": "revoke",
+        "walletAddress": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+        "transaction": {
+          "to": "0x4f2A9c81D06e3b75A1C8E24D9B07f56E3a1d8C90",
+          "data": "0xa8d29d1d..."
+        },
+        "functionName": "deleteIdentity",
+        "description": "Remove 0x2D27abCA46009EEF7D73eD1B1e913809f2280bE6 from the Professional eligibility register (REVOKED)",
+        "subject": "0x2D27abCA46009EEF7D73eD1B1e913809f2280bE6",
+        "id": "cmgdz1k4p0002l40a8t6x3v9q"
+      },
+      {
+        "action": "SIGN_TRANSACTION",
+        "stepType": "revoke",
+        "walletAddress": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+        "transaction": {
+          "to": "0x4f2A9c81D06e3b75A1C8E24D9B07f56E3a1d8C90",
+          "data": "0xa8d29d1d..."
+        },
+        "functionName": "deleteIdentity",
+        "description": "Remove 0x06DAf160e10be3BE6b5b30491102Ef7E34B7b98D from the Professional eligibility register (MANUAL)",
+        "subject": "0x06DAf160e10be3BE6b5b30491102Ef7E34B7b98D",
+        "id": "cmgdz6t3y0009l40a1d5f8g2h"
+      }
+    ],
+    "rows": [
+      { "id": "cmgdz1k4p0002l40a8t6x3v9q", "walletAddress": "0x2D27abCA46009EEF7D73eD1B1e913809f2280bE6" },
+      { "id": "cmgdz6t3y0009l40a1d5f8g2h", "walletAddress": "0x06DAf160e10be3BE6b5b30491102Ef7E34B7b98D" }
+    ],
+    "skipped": [],
+    "confirmWith": {
+      "endpoint": "POST /customers/api/eligibility/removals/confirm",
+      "fields": ["txHash"],
+      "perStep": true
+    }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-10-05T11:24:02.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `signerAddress` is missing, malformed or the zero address |
+| `SIGNER_NOT_INSTANCE_WALLET` | `403` | `signerAddress` is not a verified Ethereum wallet of your instance |
+| `ELIGIBILITY_AGENT_REQUIRED` | `403` | `signerAddress` is not an agent of the register |
+| `INSTANCE_NOT_FOUND` | `404` | The instance behind your key is archived or no longer exists |
+| `PROFILE_NOT_FOUND` | `404` | Neither `profileId` nor `profileKey` names a profile of your instance |
+| `ELIGIBILITY_NETWORK_UNSUPPORTED` | `409` | Your instance is not on Ethereum |
+| `ELIGIBILITY_REGISTER_NOT_SET` | `409` | The profile has no eligibility register |
+| `ELIGIBILITY_REGISTER_NOT_DEPLOYED` | `409` | No contract is deployed at the profile's register |
+| `ELIGIBILITY_REGISTER_IS_TRUSSET` | `409` | The register answers like the Trusset ID register, which cannot stand for one profile |
+| `ELIGIBILITY_ADMISSION_INSTANCE_REGISTER` | `409` | The profile is bound to your instance register. Remove the wallet there with [Revoke Identity](/endpoints/customers/revoke-identity) |
+| `ELIGIBILITY_ADMISSION_EXTERNAL` | `409` | The register is managed outside Trusset. The message says why |
+| `NOTHING_TO_REMOVE` | `409` | No removal of the profile is waiting among the ones selected |
+| `ELIGIBILITY_TX_WOULD_REVERT` | `409` | The first transaction reverts when simulated. Nothing was returned to sign |
+| `ELIGIBILITY_REGISTER_INCOMPATIBLE` | `422` | The register does not answer `isVerified(address)` with a single bool |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 eligibility requests per minute |
+| `BUILD_REMOVAL_FAILED` | `500` | The transactions could not be built |
+| `CHAIN_UNAVAILABLE` | `503` | The register or the chain did not answer in time. Retry shortly |

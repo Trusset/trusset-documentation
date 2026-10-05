@@ -1,0 +1,128 @@
+---
+title: 'Confirm Admission'
+api: 'POST /customers/api/eligibility/admissions/confirm'
+description: 'Record the wallets a mined transaction admitted to an eligibility register'
+---
+
+Reads a mined admission transaction from the chain and records every wallet it put on an eligibility register. Send the hash of the transaction [Build Admission](/endpoints/customers/build-admission) returned, once it is mined. Nothing else is needed: the register, the profile and the wallets all come from the chain.
+
+## What the confirm reads
+
+The transaction must be mined, successful, and sent to the eligibility register of one of your profiles, so its `to` is the register. The profile is the one bound to that register.
+
+Every wallet the register's `IdentityRegistered` logs in the receipt name is then checked live on the register:
+
+- A wallet still on the register is recorded `ADMITTED`, with the transaction, its sender as `signedBy` and the block time as `admittedAt`. When the profile sets `reverifyDays`, `dueAt` is that many days after `admittedAt`.
+- A wallet that left the register again since is reported with a `note` and not recorded.
+- A wallet no admission was queued for gets a new admission with `source: CHAIN`.
+
+The sender is not checked against your wallets. What the register's own logs and state report is what is recorded, so a wallet an agent admitted with its own tools can be recorded here too. Sending the same hash again changes nothing and answers `alreadyRecorded: true` for each wallet.
+
+## Body Parameters
+
+<ParamField body="txHash" type="string" required>
+  The admission transaction, `0x` followed by 64 hex characters.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">The transaction, lowercased.</ResponseField>
+    <ResponseField name="registryAddress" type="string">The eligibility register it called, checksummed.</ResponseField>
+    <ResponseField name="profile" type="object">`{ key, name, entityType, professionalOnly, requirementsHash }` of the profile bound to the register.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that sent the transaction, checksummed.</ResponseField>
+    <ResponseField name="blockNumber" type="integer">The block it was mined in.</ResponseField>
+    <ResponseField name="results" type="array">
+      One entry per wallet the logs name.
+      <Expandable>
+        <ResponseField name="walletAddress" type="string">The wallet, checksummed.</ResponseField>
+        <ResponseField name="status" type="string">`ADMITTED` when recorded now. Otherwise the admission's status as it stands, or `null` when there is none.</ResponseField>
+        <ResponseField name="admissionId" type="string">The admission recorded. Present with `ADMITTED`.</ResponseField>
+        <ResponseField name="dueAt" type="string">When the admission lapses, or `null`. Present with `ADMITTED`.</ResponseField>
+        <ResponseField name="alreadyRecorded" type="boolean">Present and `true` when this transaction was already recorded for the wallet.</ResponseField>
+        <ResponseField name="note" type="string">Present when the wallet is no longer on the register.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/eligibility/admissions/confirm" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -d '{ "txHash": "0xa26d665a8a5906cedfa63287b1b36e65ec42a1fd5c30617ac52bdc2d2d541d73" }'
+```
+```typescript TypeScript
+const response = await fetch('https://api.trusset.org/customers/api/eligibility/admissions/confirm', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-API-Key': 'trusset_your_key_here'
+  },
+  body: JSON.stringify({ txHash: tx.hash })
+});
+const { data } = await response.json();
+
+for (const result of data.results) {
+  if (result.note) console.warn(`${result.walletAddress}: ${result.note}`);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0xa26d665a8a5906cedfa63287b1b36e65ec42a1fd5c30617ac52bdc2d2d541d73",
+    "registryAddress": "0x4f2A9c81D06e3b75A1C8E24D9B07f56E3a1d8C90",
+    "profile": {
+      "key": "PROFESSIONAL",
+      "name": "Professional",
+      "entityType": "INDIVIDUAL",
+      "professionalOnly": true,
+      "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390"
+    },
+    "signedBy": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+    "blockNumber": 9318442,
+    "results": [
+      {
+        "walletAddress": "0xfF21b8AC28Bb6A20c1c0160AF42303D2946B99EA",
+        "status": "ADMITTED",
+        "admissionId": "cmgdz1k4p0003l40a2r5w8y1n",
+        "dueAt": "2027-10-05T11:02:36.000Z"
+      },
+      {
+        "walletAddress": "0x96C5822784130360F904372b83E130be4A1894D6",
+        "status": "ADMITTED",
+        "admissionId": "cmgdz3m8s0005l40a7b2c9d4e",
+        "dueAt": "2027-10-05T11:02:36.000Z"
+      }
+    ]
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-10-05T11:03:05.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_TX` | `400` | `txHash` is not a 32-byte transaction hash |
+| `TX_REVERTED` | `400` | The transaction reverted |
+| `TX_NOT_AN_ELIGIBILITY_REGISTER` | `400` | The transaction did not call the eligibility register of one of your profiles |
+| `TX_ADMITTED_NOBODY` | `400` | The receipt carries no `IdentityRegistered` log from the register |
+| `INSTANCE_NOT_FOUND` | `404` | The instance behind your key is archived or no longer exists |
+| `TX_NOT_FOUND` | `404` | No transaction with this hash on your instance's network |
+| `TX_PENDING` | `409` | The transaction is not mined yet. Confirm again once it is |
+| `ELIGIBILITY_NETWORK_UNSUPPORTED` | `409` | Your instance is not on Ethereum |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 eligibility requests per minute |
+| `CONFIRM_ADMISSION_FAILED` | `500` | The result could not be recorded |
+| `CHAIN_UNAVAILABLE` | `503` | The transaction or the register could not be read in time. Retry shortly: a wallet recorded before the failure answers `alreadyRecorded` |

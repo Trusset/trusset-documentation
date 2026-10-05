@@ -1,0 +1,103 @@
+---
+title: 'Issue Sumsub Token'
+api: 'POST /customers/api/id-links/{linkId}/sumsub-token'
+description: 'An access token that runs a link identity check inside your own app'
+---
+
+Returns a Sumsub access token for the link's applicant and level. Pass it to the Sumsub WebSDK or MobileSDK embedded in your own app, and the customer completes the identity check there instead of on verify.trusset.org. See [Run the check in your own app](/endpoints/customers/create-id-link#run-the-check-in-your-own-app).
+
+The review that comes back is handled exactly like one from the hosted page. It is accepted only from the level the link was created with, for the applicant type the profile admits, and when no reported country is blocked. See [Review rules](/endpoints/customers/create-id-link#review-rules).
+
+The token is valid for `expiresInSeconds`, 20 minutes. Call again for a fresh one, for example from the SDK's token expiration handler. Every token is issued for the same applicant, so a customer who stopped halfway continues where they left off.
+
+## When a token is issued
+
+Only while the link is open: not revoked or past `expiresAt`, not rejected, not completed, and with its fee paid. The fee is collected only on the hosted page, so create a link your app runs without `feeCents`.
+
+A review that asks the customer to resubmit leaves a link whose review has not settled open, so a new token lets them resubmit in your app. Once the review has settled, no further token is issued: an approved link answers `ALREADY_USED`, a refused or rejected one `LINK_REJECTED`. See [A review settles once](/endpoints/customers/create-id-link#a-review-settles-once).
+
+The check runs on Trusset's Sumsub account.
+
+## Path Parameters
+
+<ParamField path="linkId" type="string" required>
+  The link `id`, not the token.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="token" type="string">The Sumsub access token. Pass it to the SDK as is.</ResponseField>
+    <ResponseField name="expiresInSeconds" type="integer">`1200`.</ResponseField>
+    <ResponseField name="levelName" type="string">The Sumsub level the link was created with. A review from any other level is refused.</ResponseField>
+    <ResponseField name="applicantType" type="string">`company` when the link's profile admits companies (`entityType: COMPANY`), otherwise `individual`. A review of the other kind of applicant is refused.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/id-links/cmgdx4r2k0003l50a7c1n8e2w/sumsub-token" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const issueToken = async (): Promise<string> => {
+  const response = await fetch(
+    'https://api.trusset.org/customers/api/id-links/cmgdx4r2k0003l50a7c1n8e2w/sumsub-token',
+    { method: 'POST', headers: { 'X-API-Key': 'trusset_your_key_here' } }
+  );
+  const { success, data, error } = await response.json();
+  if (!success) throw new Error(`${error.code}: ${error.message}`);
+  return data.token;
+};
+
+const accessToken = await issueToken();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "token": "_act-sbx-jwt-eyJhbGciOiJub25lIn0...",
+    "expiresInSeconds": 1200,
+    "levelName": "basic-kyc-level",
+    "applicantType": "individual"
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-10-05T09:41:20.000Z"
+  }
+}
+```
+```json Error - Already Used
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ALREADY_USED",
+    "message": "The identity check behind this link is complete"
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-10-05T10:20:02.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `ALREADY_USED` | `400` | The link is completed or consumed |
+| `EXPIRED` | `400` | The link was revoked or is past `expiresAt` |
+| `PAYMENT_REQUIRED` | `402` | The link carries a fee that has not been paid |
+| `NOT_FOUND` | `404` | No link with this ID exists on your instance |
+| `LINK_REJECTED` | `409` | The identity check behind the link was refused or rejected |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 link onboarding requests per minute |
+| `TOKEN_FAILED` | `500` | The token could not be issued |
+| `KYC_UNAVAILABLE` | `503` | The link carries no Sumsub applicant reference, or Trusset's Sumsub account is not configured |
+| `SUMSUB_UNAVAILABLE` | `503` | Sumsub did not issue a token. Retry shortly |

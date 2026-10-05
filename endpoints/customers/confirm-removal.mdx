@@ -1,0 +1,114 @@
+---
+title: 'Confirm Removal'
+api: 'POST /customers/api/eligibility/removals/confirm'
+description: 'Record the wallets a mined transaction removed from an eligibility register'
+---
+
+Reads a mined removal transaction from the chain and records every wallet it took off an eligibility register. [Build Removal](/endpoints/customers/build-removal) returns one transaction per wallet, so confirm each hash on its own once it is mined.
+
+## What the confirm reads
+
+The transaction must be mined, successful, and sent to the eligibility register of one of your profiles. Every wallet the register's `IdentityRemoved` logs in the receipt name is then checked live on the register:
+
+- A wallet no longer on the register, with an admission recorded here, is recorded `REMOVED`, with the transaction, its sender as `signedBy` and the block time as `removedAt`. Its `removalReason` stays as queued, or `MANUAL` when none was.
+- A wallet registered again since is reported with a `note` and not recorded.
+- A wallet removed on chain that no admission was recorded for is reported with a `note`.
+
+The sender is not checked against your wallets. Sending the same hash again changes nothing and answers `alreadyRecorded: true` for each wallet.
+
+## Body Parameters
+
+<ParamField body="txHash" type="string" required>
+  One removal transaction, `0x` followed by 64 hex characters.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">The transaction, lowercased.</ResponseField>
+    <ResponseField name="registryAddress" type="string">The eligibility register it called, checksummed.</ResponseField>
+    <ResponseField name="profile" type="object">`{ key, name, entityType, professionalOnly, requirementsHash }` of the profile bound to the register.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that sent the transaction, checksummed.</ResponseField>
+    <ResponseField name="blockNumber" type="integer">The block it was mined in.</ResponseField>
+    <ResponseField name="results" type="array">
+      One entry per wallet the logs name.
+      <Expandable>
+        <ResponseField name="walletAddress" type="string">The wallet, checksummed.</ResponseField>
+        <ResponseField name="status" type="string">`REMOVED` when recorded now. Otherwise the admission's status as it stands, or `null` when there is none.</ResponseField>
+        <ResponseField name="admissionId" type="string">The admission recorded. Present with `REMOVED`.</ResponseField>
+        <ResponseField name="alreadyRecorded" type="boolean">Present and `true` when this transaction was already recorded for the wallet.</ResponseField>
+        <ResponseField name="note" type="string">Present when the wallet is on the register again, or when no admission was recorded for it.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/eligibility/removals/confirm" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -d '{ "txHash": "0x559c0c942900bc1c4b484457f6f0a6e823374954c254a8ef46e8481161e0ca93" }'
+```
+```typescript TypeScript
+const response = await fetch('https://api.trusset.org/customers/api/eligibility/removals/confirm', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-API-Key': 'trusset_your_key_here'
+  },
+  body: JSON.stringify({ txHash: tx.hash })
+});
+const { data } = await response.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0x559c0c942900bc1c4b484457f6f0a6e823374954c254a8ef46e8481161e0ca93",
+    "registryAddress": "0x4f2A9c81D06e3b75A1C8E24D9B07f56E3a1d8C90",
+    "profile": {
+      "key": "PROFESSIONAL",
+      "name": "Professional",
+      "entityType": "INDIVIDUAL",
+      "professionalOnly": true,
+      "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390"
+    },
+    "signedBy": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+    "blockNumber": 9318517,
+    "results": [
+      {
+        "walletAddress": "0x2D27abCA46009EEF7D73eD1B1e913809f2280bE6",
+        "status": "REMOVED",
+        "admissionId": "cmgdz1k4p0002l40a8t6x3v9q"
+      }
+    ]
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-10-05T11:25:31.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_TX` | `400` | `txHash` is not a 32-byte transaction hash |
+| `TX_REVERTED` | `400` | The transaction reverted |
+| `TX_NOT_AN_ELIGIBILITY_REGISTER` | `400` | The transaction did not call the eligibility register of one of your profiles |
+| `TX_REMOVED_NOBODY` | `400` | The receipt carries no `IdentityRemoved` log from the register |
+| `INSTANCE_NOT_FOUND` | `404` | The instance behind your key is archived or no longer exists |
+| `TX_NOT_FOUND` | `404` | No transaction with this hash on your instance's network |
+| `TX_PENDING` | `409` | The transaction is not mined yet. Confirm again once it is |
+| `ELIGIBILITY_NETWORK_UNSUPPORTED` | `409` | Your instance is not on Ethereum |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 eligibility requests per minute |
+| `CONFIRM_REMOVAL_FAILED` | `500` | The result could not be recorded |
+| `CHAIN_UNAVAILABLE` | `503` | The transaction or the register could not be read in time. Retry shortly: a wallet recorded before the failure answers `alreadyRecorded` |

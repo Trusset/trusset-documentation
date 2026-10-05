@@ -1,0 +1,262 @@
+---
+title: 'Request Admission'
+api: 'POST /customers/api/eligibility/admissions'
+description: 'Queue a customer wallet for a profile eligibility register'
+---
+
+Queues a wallet for admission to the eligibility register of one verification profile. Nothing is written on chain here: the admission waits as `PENDING` until your wallet signs it through [Build Admission](/endpoints/customers/build-admission) and [Confirm Admission](/endpoints/customers/confirm-admission). See [Eligibility registers](/endpoints/customers/introduction#eligibility-registers).
+
+Most admissions need no request. Trusset queues one when a customer of the profile passes an ID link review or is registered on your instance register. Use this endpoint for a customer onboarded before the profile had a register, or under a different profile.
+
+## Who can be admitted
+
+The wallet must belong to a customer record on your instance that is not archived. A wallet no customer holds is refused with `CUSTOMER_NOT_FOUND`, so onboard the customer first. The customer must also meet the profile:
+
+- The customer's `status` is not `rejected` or `revoked`.
+- The customer's country is not on the profile's `blockedCountries`.
+- The customer's `customerType` matches the profile's `entityType`: `INDIVIDUAL` or `COMPANY`.
+
+Whether the wallet is verified on your instance register is checked when the admission is built, not here.
+
+## Admitting under another profile
+
+A customer onboarded under one profile, whose `investorType` names that profile, does not automatically meet another. To admit them anyway, send `confirmEligibility: true`. That records your decision that the customer meets this profile's requirements, together with the profile they were onboarded under, on the admission and in the customer audit log. Without it the request is refused with `ELIGIBILITY_CONFIRMATION_REQUIRED`.
+
+The `investorType` is compared with the profile key in any letter case. Admissions Trusset queues on its own never need the confirmation, because they follow the profile the customer was verified under.
+
+## Registers that take no request
+
+The profile's register mode, recorded when the register was bound, is checked before the customer. See [Which registers can be signed here](/endpoints/customers/introduction#which-registers-can-be-signed-here).
+
+When the profile's register is your instance register itself, registering a wallet there is its admission. Nothing is queued, and the call answers `201` with `admission: null`, `mode: INSTANCE_REGISTER` and a `message`. Register the wallet through [Verify Identity](/endpoints/customers/verify-identity) or the [pending queue](/endpoints/customers/list-pending-verifications) instead.
+
+When the profile's register is managed outside your instance, in the `EXTERNAL` mode, its owner admits wallets with its own tools. The call is refused with `409 ADMISSIONS_MANAGED_EXTERNALLY`.
+
+## A wallet waiting for removal
+
+An admission in `REMOVAL_PENDING` has a removal waiting to be signed. A request for that wallet withdraws the removal instead of queuing a new admission. Whether it can depends on why the removal was queued:
+
+| `removalReason` | Withdrawn by this request |
+|---|---|
+| `LAPSED`, `REVOKED`, `REJECTED` | Only with `confirmEligibility: true`, which records that you re-verified the customer outside Trusset. Otherwise `409 REVERIFICATION_REQUIRED` |
+| `MANUAL`, `COUNTRY_BLOCKED` | Yes, without a confirmation |
+
+The customer must meet the profile again first. A customer record still `revoked` or `rejected` is refused with `CUSTOMER_NOT_ELIGIBLE`, and a country still blocked with `COUNTRY_BLOCKED`.
+
+A fresh verification of the customer, through an ID link or a registration on your instance register, withdraws a `LAPSED`, `REVOKED` or `REJECTED` removal on its own. It never withdraws a `MANUAL` or `COUNTRY_BLOCKED` removal. Only a request from you, here or in the Issuer Portal, does.
+
+The register is read before anything changes, and the outcome follows what it holds:
+
+- **The wallet is still on the register.** The removal is cancelled and the admission is `ADMITTED` again: `200` with `alreadyAdmitted: true` and `removalCancelled: true`.
+- **The wallet is already off the register**, for example because a removal was signed but not yet confirmed. The admission goes back to `PENDING` and waits to be built like a new one: `201` with `alreadyAdmitted: false`.
+
+## Re-verification
+
+When the profile sets `reverifyDays`, an admission is due again that many days after it was admitted, and a lapsed admission is queued for removal with reason `LAPSED`.
+
+The period restarts only on a verification of the customer, through an ID link or a registration on your instance register, or on a request sent with `confirmEligibility: true` that withdraws a removal while the wallet is still on the register. The response then carries `renewed: true`, and `dueAt` counts from now. A request never renews an admission that is already `ADMITTED`.
+
+<Warning>
+  An admission made `ADMITTED` again without a verification or a confirmation keeps its `dueAt`. When that date has already passed, the admission lapses again at once, and its new `LAPSED` removal then needs `confirmEligibility: true`.
+</Warning>
+
+## Body Parameters
+
+<ParamField body="profileKey" type="string">
+  The profile, by key. Matched exactly, then in upper and lower case. Send this or `profileId`.
+</ParamField>
+
+<ParamField body="profileId" type="string">
+  The profile, by `id`. Used instead of `profileKey` when both are sent.
+</ParamField>
+
+<ParamField body="walletAddress" type="string" required>
+  The wallet to admit, `0x` followed by 40 hex characters. Stored and returned checksummed.
+</ParamField>
+
+<ParamField body="confirmEligibility" type="boolean">
+  `true` to admit a customer onboarded under another profile, or to withdraw a `LAPSED`, `REVOKED` or `REJECTED` removal after you re-verified the customer outside Trusset. Only the boolean `true` counts.
+</ParamField>
+
+<ParamField body="note" type="string">
+  A note kept with the admission and in the audit log, up to 300 characters. Longer text is cut.
+</ParamField>
+
+## What comes back
+
+| Situation | HTTP | Response |
+|---|---|---|
+| Queued, or queued again after a removal or cancellation | `201` | `admission` with `status: PENDING`, `alreadyAdmitted: false` |
+| Already waiting | `201` | The same `PENDING` admission, `alreadyAdmitted: false` |
+| Already on the register | `200` | `admission` with `status: ADMITTED`, `alreadyAdmitted: true` |
+| A removal was waiting and the wallet is still on the register | `200` | The removal is cancelled and the admission is `ADMITTED` again. `alreadyAdmitted: true`, `removalCancelled: true`, and `renewed: true` with `confirmEligibility: true` |
+| A removal was waiting and the wallet is already off the register | `201` | The admission is `PENDING` again, `alreadyAdmitted: false` |
+| The profile's register is your instance register | `201` | `admission: null`, `mode: INSTANCE_REGISTER` and a `message` |
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="admission" type="object">The admission, as on [List Admissions](/endpoints/customers/list-admissions). `null` with `mode: INSTANCE_REGISTER`.</ResponseField>
+    <ResponseField name="alreadyAdmitted" type="boolean">`true` when the wallet is already on the register. Absent with `mode: INSTANCE_REGISTER`.</ResponseField>
+    <ResponseField name="removalCancelled" type="boolean">Present and `true` when a waiting removal was cancelled.</ResponseField>
+    <ResponseField name="renewed" type="boolean">Present and `true` when the re-verification period started again, so `dueAt` counts from now.</ResponseField>
+    <ResponseField name="mode" type="string">`INSTANCE_REGISTER`, only when the profile's register is your instance register.</ResponseField>
+    <ResponseField name="message" type="string">Why nothing was queued, with `mode` only.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/eligibility/admissions" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -d '{
+    "profileKey": "PROFESSIONAL",
+    "walletAddress": "0xfF21b8AC28Bb6A20c1c0160AF42303D2946B99EA",
+    "confirmEligibility": true,
+    "note": "Opt-up to professional client approved by compliance on 2026-10-01"
+  }'
+```
+```typescript TypeScript
+const response = await fetch('https://api.trusset.org/customers/api/eligibility/admissions', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-API-Key': 'trusset_your_key_here'
+  },
+  body: JSON.stringify({
+    profileKey: 'PROFESSIONAL',
+    walletAddress: '0xfF21b8AC28Bb6A20c1c0160AF42303D2946B99EA',
+    confirmEligibility: true,
+    note: 'Opt-up to professional client approved by compliance on 2026-10-01'
+  })
+});
+const { success, data, error } = await response.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json 201 Response
+{
+  "success": true,
+  "data": {
+    "admission": {
+      "id": "cmgdz1k4p0003l40a2r5w8y1n",
+      "profileKey": "PROFESSIONAL",
+      "profileName": "Professional",
+      "registryAddress": "0x4f2A9c81D06e3b75A1C8E24D9B07f56E3a1d8C90",
+      "walletAddress": "0xfF21b8AC28Bb6A20c1c0160AF42303D2946B99EA",
+      "customerId": "cmgdy2b7r0004l40a9c3e6f2h",
+      "status": "PENDING",
+      "source": "API",
+      "sourceRef": null,
+      "lapsed": false,
+      "current": true,
+      "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390",
+      "dueAt": null,
+      "admittedTxHash": null,
+      "admittedAt": null,
+      "removalReason": null,
+      "removalTxHash": null,
+      "removedAt": null,
+      "signedBy": null,
+      "error": null,
+      "createdAt": "2026-10-05T10:47:09.512Z",
+      "updatedAt": "2026-10-05T10:47:09.512Z"
+    },
+    "alreadyAdmitted": false
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-10-05T10:47:09.530Z"
+  }
+}
+```
+```json 200 Response - Removal Withdrawn
+{
+  "success": true,
+  "data": {
+    "admission": {
+      "id": "cmgdz1k4p0002l40a8t6x3v9q",
+      "profileKey": "PROFESSIONAL",
+      "profileName": "Professional",
+      "registryAddress": "0x4f2A9c81D06e3b75A1C8E24D9B07f56E3a1d8C90",
+      "walletAddress": "0x2D27abCA46009EEF7D73eD1B1e913809f2280bE6",
+      "customerId": "cmgdv8h2c0002l30a4n7q1z5k",
+      "status": "ADMITTED",
+      "source": "KYC_LINK",
+      "sourceRef": "cmgdv7f1b0001l30a9e3m6x2p",
+      "lapsed": false,
+      "current": true,
+      "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390",
+      "dueAt": "2027-10-05T14:02:11.371Z",
+      "admittedTxHash": "0xf74c4d459825fd4ed545a14911d0ac951aa378cf40924b9c75036c1e85080f8b",
+      "admittedAt": "2026-10-05T09:15:24.000Z",
+      "removalReason": null,
+      "removalTxHash": null,
+      "removedAt": null,
+      "signedBy": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+      "error": null,
+      "createdAt": "2026-10-05T09:02:51.204Z",
+      "updatedAt": "2026-10-05T14:02:11.384Z"
+    },
+    "alreadyAdmitted": true,
+    "removalCancelled": true,
+    "renewed": true
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-10-05T14:02:11.402Z"
+  }
+}
+```
+```json Error - Confirmation Required
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ELIGIBILITY_CONFIRMATION_REQUIRED",
+    "message": "The customer was onboarded under the RETAIL profile. Admitting the wallet to Professional records your decision that the customer meets its requirements; send confirmEligibility: true to make it."
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-10-05T10:46:52.118Z"
+  }
+}
+```
+```json Error - Re-verification Required
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "REVERIFICATION_REQUIRED",
+    "message": "The admission of 0x2D27abCA46009EEF7D73eD1B1e913809f2280bE6 to the Professional profile is waiting for removal because its re-verification period ran out. Re-verify the customer, or send confirmEligibility: true to record that the customer was re-verified outside Trusset."
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-10-05T13:58:40.271Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `walletAddress` is not a valid address, or is the zero address |
+| `COUNTRY_BLOCKED` | `403` | The customer's country is on the profile's blocked list |
+| `PROFILE_NOT_FOUND` | `404` | Neither `profileId` nor `profileKey` names a profile of your instance |
+| `CUSTOMER_NOT_FOUND` | `404` | No customer record on your instance holds the wallet, or the one that does is archived |
+| `CUSTOMER_NOT_ELIGIBLE` | `409` | The customer behind the wallet is `rejected` or `revoked` |
+| `ENTITY_TYPE_MISMATCH` | `409` | The customer's `customerType` differs from the profile's `entityType` |
+| `ELIGIBILITY_CONFIRMATION_REQUIRED` | `409` | The customer was onboarded under another profile and `confirmEligibility` is not `true` |
+| `REVERIFICATION_REQUIRED` | `409` | The wallet's removal is waiting with reason `LAPSED`, `REVOKED` or `REJECTED`, and `confirmEligibility` is not `true`. Re-verify the customer, or confirm that you did |
+| `ADMISSIONS_MANAGED_EXTERNALLY` | `409` | The profile's register is in the `EXTERNAL` mode, so its owner admits wallets with its own tools |
+| `ELIGIBILITY_REGISTER_NOT_SET` | `409` | The profile has no eligibility register |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 eligibility requests per minute. See [Rate limits](/endpoints/customers/introduction#rate-limits) |
+| `REQUEST_ADMISSION_FAILED` | `500` | The admission could not be recorded |
+| `CHAIN_UNAVAILABLE` | `503` | A removal was waiting and the register could not be read to tell whether the wallet is still on it. Nothing changed. Retry shortly |

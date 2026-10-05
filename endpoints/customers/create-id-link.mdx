@@ -14,11 +14,68 @@ Creates a hosted verification link on verify.trusset.org for one customer. The c
 
 ## How a link resolves
 
-The link reads `COMPLETED` once the customer finishes the hosted flow or the identity check passes. It reads `REJECTED` when the check fails or the verification profile blocks the customer's country, which can happen after it read `COMPLETED`. `COMPLETED` alone is not a verdict.
+The link reads `COMPLETED` once the customer finishes the hosted flow or the identity check passes. It reads `REJECTED` when the check fails or the review does not meet the profile (see [Review rules](#review-rules)), which can happen after it read `COMPLETED`. `COMPLETED` alone is not a verdict.
 
-A passed check writes nothing on chain by itself. The wallet is queued in [List Pending Verifications](/endpoints/customers/list-pending-verifications), and it stays unregistered until your instance's registered wallet signs the transaction.
+A check approved before any wallet is bound also reads `COMPLETED`, and the link then waits for a wallet: [Get ID Link](/endpoints/customers/get-id-link) reports `awaitingWallet: true`. From then on only you can bind the wallet, with [Bind Link Wallet](/endpoints/customers/bind-link-wallet). The hosted page refuses the customer with `409 ISSUER_BINDS_WALLET` and asks them to contact you. Before the approval, the hosted page binds a wallet only to a link that is still open and unused.
+
+A passed check writes nothing on chain by itself. The wallet is queued in [List Pending Verifications](/endpoints/customers/list-pending-verifications), and it stays unregistered until your instance's registered wallet signs the transaction. When the profile has an eligibility register, the wallet's admission to it is queued as well. See [Eligibility registers](/endpoints/customers/introduction#eligibility-registers).
 
 `EXPIRED` means the link was [revoked](/endpoints/customers/revoke-id-link). A link that runs past `expiresAt` without being revoked still reads `PENDING`, although the hosted page refuses it.
+
+## Review rules
+
+Sumsub reports each review to Trusset. A green review is accepted only when all of these hold:
+
+- It comes from the Sumsub level the link was created with. Otherwise it is refused with `KYC_LEVEL_MISMATCH`, or with `KYC_LEVEL_UNKNOWN` when Sumsub reports no level.
+- The applicant is of the kind the profile admits: a company applicant for a `COMPANY` profile, an individual for an `INDIVIDUAL` one. Otherwise `KYC_ENTITY_MISMATCH`.
+- No country reported for the applicant is on the profile's blocked list, and neither is the link's own `country`. The reported countries are the document country, the declared country, the nationality and, for a company, its country. Otherwise `COUNTRY_BLOCKED`.
+
+The level is fixed when the link is created. The applicant kind and the blocked countries are read from the profile when the review arrives.
+
+A refused review turns the link `REJECTED` and the customer record, when there is one, `rejected`, and the customer's audit log records `KYC_REFUSED_LEVEL`, `KYC_REFUSED_ENTITY` or `KYC_REFUSED_COUNTRY`. A final red review turns it `REJECTED` too. A customer record already verified under another profile keeps its status. A refusal or a rejection also queues the removal of the link's wallet from the eligibility register of the link's profile, and cancels its admission there when it is still waiting.
+
+A red review that asks the customer to resubmit documents (`reviewRejectType: RETRY`) keeps a link whose review has not settled open, so the customer can finish on the same link. A link the hosted page had already completed is reopened as `PENDING`.
+
+### A review settles once
+
+The first approval, refusal or final rejection applied to a link settles it. A review that arrives after that is ignored, repeats and replays of the same review included, with one exception: a final red review still turns an approved link `REJECTED`, unless Sumsub dated it no later than the moment Trusset applied the approval.
+
+| Review | Link not settled yet | Link already settled |
+|---|---|---|
+| Green | Approved, or refused under the rules above | Ignored |
+| Red, final | The link turns `REJECTED` | The link turns `REJECTED` when it was approved and the review is dated after the approval was applied. Ignored otherwise |
+| Red, resubmission requested | The link stays open | Ignored |
+
+A revoked link ignores every review. Sumsub delivers each review by webhook, and an event Sumsub dated more than 7 days before it arrives is ignored whatever it says. An ignored review changes nothing: the link, the customer record, the queues and the customer webhook stay as they were, and the audit log records `KYC_REVIEW_IGNORED`. [Recheck Link Review](/endpoints/customers/recheck-link-review) applies the same rules. It does not ask Sumsub about a settled link at all, unless the link is approved and still waiting for a wallet.
+
+<Warning>
+  A final rejection that turns an approved link `REJECTED` dismisses the link's registration while it still waits in the [pending queue](/endpoints/customers/list-pending-verifications), so it can no longer be signed. An identity you already registered stays on your instance register until you revoke it with [Revoke Identity](/endpoints/customers/revoke-identity).
+</Warning>
+
+A customer webhook set up in the Issuer Portal reports each review Trusset applies as `customer.kyc_reviewed`, with `outcome` `APPROVED`, `REFUSED`, `REJECTED` or `RETRY`. `UNCONFIRMED` means Sumsub approved but the applicant could not be read to apply the rules above, so the link is unchanged until a later review or [Recheck Link Review](/endpoints/customers/recheck-link-review) applies the approval. An ignored review is not reported. A registration waiting for your signature is reported as `customer.registration_pending`, and a completed registration as `customer.registered`.
+
+## Run the check in your own app
+
+Your app can run the identity check itself with the Sumsub SDK instead of sending the customer to the hosted page. The link stays the record of the onboarding either way, and the review is held to the same rules.
+
+<Steps>
+  <Step title="Create the link">
+    Create it as described on this page, without `feeCents`, because a fee is collected only on the hosted page. Omit `sendVia` so nothing is delivered, and name the wallet with `recipientWallet` when you already know it.
+  </Step>
+  <Step title="Run the check">
+    [Issue Sumsub Token](/endpoints/customers/issue-sumsub-token) returns an access token for the link's applicant and level. Pass it to the Sumsub WebSDK or MobileSDK in your app.
+  </Step>
+  <Step title="Bind the wallet">
+    [Bind Link Wallet](/endpoints/customers/bind-link-wallet) attaches the customer's wallet, before or after the review. A review approved without a wallet waits for one, and the registration is queued once the wallet is bound. After the approval this call is the only way to bind it.
+  </Step>
+  <Step title="Follow the outcome">
+    [Get ID Link](/endpoints/customers/get-id-link) reads the review, the registration and the eligibility admissions. [Recheck Link Review](/endpoints/customers/recheck-link-review) asks Sumsub again when a review did not arrive or could not be applied.
+  </Step>
+</Steps>
+
+When the link carries `recipientEmail` or `recipientPhone`, Trusset still tells the recipient of a rejection, a resubmission request or a verification that needed no registration. A resubmission message points to the hosted link. The registration on your instance register and any eligibility admission are signed by your own wallet, as for a hosted link.
+
+Every identity check runs on Trusset's Sumsub account, whether the customer completes it on the hosted page or in your app.
 
 ## Body Parameters
 
@@ -56,6 +113,10 @@ When a customer is named, each identifier must be a string of 1 to 128 character
 
 <ParamField body="country" type="string">
   The customer's country as an ISO 3166-1 code: alpha-2 (`DE`), alpha-3 (`DEU`) or numeric. It is stored and returned as alpha-3. A country the profile blocks is refused here. The country the identity check reports is tested against the same list at review.
+</ParamField>
+
+<ParamField body="company" type="object">
+  For a profile whose `entityType` is `COMPANY`, which runs the check for a company applicant. `name` and `registrationNumber`, both strings, pre-fill that applicant together with `country`. Ignored for an `INDIVIDUAL` profile.
 </ParamField>
 
 <ParamField body="expiryDays" type="integer" default="30">

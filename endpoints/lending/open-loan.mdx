@@ -104,6 +104,12 @@ The calldata response carries a `warnings` array when a preflight found somethin
 
 `enforcement` is `OFF_CHAIN` on every one of these. The contract does not know about them, so acting on a warning is the caller's decision. When the market charges an opening fee, the array also carries `transactionFee.message` as a plain string rather than an object.
 
+## Professional borrowers
+
+On a `MARKET`-priced market the API builds no loan until the market's borrower register qualifies as a professional gate, and refuses with `409 PROFESSIONAL_BORROWER_GATE_REQUIRED`, `details.field: "borrowerRegistry"`. The register qualifies when at least one verification profile admits wallets to it, and every profile that does, on any instance of the market's network and environment, is limited to professional clients and has its admissions signed by its own instance. See [Professional borrowers](/endpoints/lending/set-identity-gates#professional-borrowers).
+
+The check runs right after the lender-of-record check, before the adapter, pause and term checks. It reads the market's price source and borrower register from the chain, and the profiles from Trusset's records. When either read fails the call answers `503`, `MARKET_STATE_UNAVAILABLE` or `STATE_UNAVAILABLE`, and builds nothing. The market contract does not apply this rule, so it holds only for transactions built through this API.
+
 ## Vault draws
 
 Some markets draw on vault liquidity, shown as `useVaultLiquidity` on [Get Market Metrics](/endpoints/lending/get-metrics). There, a borrow larger than the pool's borrowable liquidity pulls the shortfall from the registered vaults inside the borrower's own transaction. The draw is the smallest amount that covers the shortfall with the reserve earmark intact. The confirm response lists each draw in `vaultDraws`.
@@ -333,6 +339,16 @@ const { data: loan } = await confirmed.json();
   }
 }
 ```
+```json Error - Professional Borrower Gate
+{
+  "success": false,
+  "error": {
+    "code": "PROFESSIONAL_BORROWER_GATE_REQUIRED",
+    "message": "This market prices its collateral from a live market price, which carries the free-hand realization path under § 1259 BGB and is only available against professional borrowers. The borrower register 0x9e3c8a15f4d70b2681c5a3f9027d4be8115c7d21 admits wallets for a verification profile of another instance, which is not limited to professional clients. Choose the register of a profile limited to professional clients as the borrower gate. Borrowing stays closed until the market admin sets that borrower gate under Gates on the operator desk.",
+    "details": { "field": "borrowerRegistry" }
+  }
+}
+```
 </ResponseExample>
 
 ## Error Codes
@@ -350,7 +366,7 @@ The price, supply-cap, collateral-value and liquidity checks run in the order th
 | `COLLATERAL_ADAPTER_NOT_AUTHORIZED` | `400` | The adapter lacks the agent role (`FREEZE`) or allow-listed or verified holder status (`CUSTODY`) on the collateral token |
 | `FREEZE_MODE_UNSUPPORTED_TOKEN` | `400` | The token does not implement the ERC-3643 freeze interface. Use a `CUSTODY` market |
 | `MARKET_PAUSED` | `400` | The market is paused. Its admin must unpause it |
-| `IDENTITY_NOT_VERIFIED` | `400` | `borrowerAddress` is not verified on the market's borrower register |
+| `IDENTITY_NOT_VERIFIED` | `400` | `borrowerAddress` is not verified on the market's borrower register. `details.register` names the register and `details.requiredProfile` the verification profile whose eligibility register it is, or `null`. With a profile, the message says to onboard and admit the wallet under it |
 | `BELOW_MIN_BORROW` | `400` | `borrowAmount` is under the market's `minBorrowAmount` |
 | `PRICE_STALE` | `400` | The price is older than the oracle's staleness window. On an attested market, push a price with [Sync Oracle Price](/endpoints/lending/sync-oracle) or supply a `signedPrice`. On an external-feed market, wait for the feed to publish |
 | `SUPPLY_CAP_EXCEEDED` | `400` | The pledge would push total collateral past `maxTotalCollateral` |
@@ -362,10 +378,12 @@ The price, supply-cap, collateral-value and liquidity checks run in the order th
 | `CLIENT_REFERENCE_NOT_FOUND` | `404` | `clientReference` matches no customer of your instance |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet. See [Lender of record](/endpoints/lending/introduction#lender-of-record) |
+| `PROFESSIONAL_BORROWER_GATE_REQUIRED` | `409` | The market is `MARKET`-priced and its borrower register does not qualify as a professional gate. `details.field` is `borrowerRegistry`. See [Professional borrowers](#professional-borrowers) |
 | `MARKET_TERM_EXPIRED` | `409` | The market's terminal due date has passed, so the contract refuses every new loan. Repayment and withdrawals stay open |
 | `COLLATERAL_MATURED` | `409` | The collateral instrument passed its recorded maturity, and the record was asserted by a party to this market. `error.details` carries `maturityDate` |
 | `EXTERNAL_FEED_ACTIVE` | `409` | A `signedPrice` was sent to a market that prices from an external feed. Retry without it |
 | `CLIENT_REFERENCE_CONFLICT` | `409` | On confirm, the loan is already attributed to another client and `reattribute` was not `true` |
-| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to run a check, so no transaction was prepared. Retry shortly |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to run a check, its price source and borrower register included, so no transaction was prepared. Retry shortly |
+| `STATE_UNAVAILABLE` | `503` | The verification profiles behind a `MARKET` market's borrower register could not be read. Retry shortly |
 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

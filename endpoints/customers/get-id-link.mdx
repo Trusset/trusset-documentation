@@ -1,0 +1,145 @@
+---
+title: 'Get ID Link'
+api: 'GET /customers/api/id-links/{linkId}'
+description: 'One verification link with its review, customer, registration and admissions'
+---
+
+Returns one link with what happened behind it: the Sumsub review, the customer record it completed, the on-chain registration queued for its wallet, and the wallet's admissions to eligibility registers. Use it to follow a link your own app runs with the Sumsub SDK, see [Run the check in your own app](/endpoints/customers/create-id-link#run-the-check-in-your-own-app), or any link created in the Issuer Portal.
+
+Reading changes nothing. When a review seems not to have arrived, [Recheck Link Review](/endpoints/customers/recheck-link-review) asks Sumsub again.
+
+## Path Parameters
+
+<ParamField path="linkId" type="string" required>
+  The link `id` from [Create ID Link](/endpoints/customers/create-id-link) or [List ID Links](/endpoints/customers/list-id-links). Not the token.
+</ParamField>
+
+## Reading the state
+
+`status` is the link's own state, as on [List ID Links](/endpoints/customers/list-id-links). The other fields say where the onboarding stands:
+
+| Reading | Meaning |
+|---|---|
+| `review.answer` is `null` | No review yet |
+| `awaitingWallet: true` | The review was approved and no wallet is bound. Bind one with [Bind Link Wallet](/endpoints/customers/bind-link-wallet). The hosted page refuses the customer meanwhile with `ISSUER_BINDS_WALLET`, so the wallet is yours to bind |
+| `registration.status: PENDING` | The wallet's registration on your instance register waits for your wallet to sign it in the [pending queue](/endpoints/customers/list-pending-verifications) |
+| `registration.status: CONFIRMED` | The wallet is registered on your instance register |
+| `status: REJECTED` with `review.answer: GREEN` | Sumsub approved, but the review did not meet the profile. See [Review rules](/endpoints/customers/create-id-link#review-rules) |
+| `admissions[].status: PENDING` | An admission to a profile's eligibility register waits for your wallet. See [Eligibility registers](/endpoints/customers/introduction#eligibility-registers) |
+
+`registration` is `null` when nothing was queued, which includes a wallet your instance register already verified when the review was approved.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="id" type="string">Link ID.</ResponseField>
+    <ResponseField name="status" type="string">`PENDING`, `COMPLETED`, `REJECTED` or `EXPIRED`. `EXPIRED` means revoked.</ResponseField>
+    <ResponseField name="used" type="boolean">Whether the link is consumed. A consumed link takes no further check and no wallet.</ResponseField>
+    <ResponseField name="awaitingWallet" type="boolean">`true` when the review was approved before any wallet was bound, so the link waits for one.</ResponseField>
+    <ResponseField name="profile" type="object">The link's verification profile as `{ key, name, entityType, professionalOnly }`, or `{ key }` alone when the profile no longer exists.</ResponseField>
+    <ResponseField name="recipientWallet" type="string">The bound wallet, checksummed, or `null`.</ResponseField>
+    <ResponseField name="walletBoundBy" type="string">`ISSUER` when you named the wallet at creation or bound it through the API or the Issuer Portal, `PUBLIC` when the customer attached it on the hosted page, or `null`.</ResponseField>
+    <ResponseField name="country" type="string">ISO 3166-1 alpha-3, or `null`.</ResponseField>
+    <ResponseField name="expiresAt" type="string">ISO 8601. A revoked link carries its revocation time.</ResponseField>
+    <ResponseField name="createdAt" type="string">ISO 8601.</ResponseField>
+    <ResponseField name="usedAt" type="string">ISO 8601, or `null`.</ResponseField>
+    <ResponseField name="verificationUrl" type="string">`https://verify.trusset.org/link/{token}`.</ResponseField>
+    <ResponseField name="review" type="object">
+      What Sumsub reported for the link's applicant. Once the link's review has settled, a later review changes the link only as [A review settles once](/endpoints/customers/create-id-link#a-review-settles-once) allows, so act on `status`.
+      <Expandable>
+        <ResponseField name="status" type="string">The last Sumsub event recorded for the applicant, such as `applicantPending` or `applicantReviewed`, or `null`.</ResponseField>
+        <ResponseField name="answer" type="string">`GREEN`, `RED`, or `null` before a review.</ResponseField>
+        <ResponseField name="rejectLabels" type="string[]">Sumsub's reject labels on a red review, or `null`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="customer" type="object">`{ id, status, verifiedAt }` of the customer record the link completed, or `null`.</ResponseField>
+    <ResponseField name="registration" type="object">The latest row the link queued in the pending queue for its wallet, as `{ pendingId, status, txHash, confirmedAt }`, or `null`. `status` is `PENDING`, `CONFIRMED` or `DISMISSED`.</ResponseField>
+    <ResponseField name="admissions" type="array">Every admission of the link's wallet on your instance, under any profile, as `{ id, profileKey, registryAddress, status, admittedTxHash, admittedAt, removalReason }`. Empty without a wallet.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/customers/api/id-links/cmgdx4r2k0003l50a7c1n8e2w" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const response = await fetch(
+  'https://api.trusset.org/customers/api/id-links/cmgdx4r2k0003l50a7c1n8e2w',
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data: link } = await response.json();
+
+const needsWallet = link.awaitingWallet;
+const registrationWaiting = link.registration?.status === 'PENDING';
+const admissionsWaiting = link.admissions.filter((a: { status: string }) => a.status === 'PENDING');
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "id": "cmgdx4r2k0003l50a7c1n8e2w",
+    "status": "COMPLETED",
+    "used": true,
+    "awaitingWallet": false,
+    "profile": {
+      "key": "PROFESSIONAL",
+      "name": "Professional",
+      "entityType": "INDIVIDUAL",
+      "professionalOnly": true
+    },
+    "recipientWallet": "0x96C5822784130360F904372b83E130be4A1894D6",
+    "walletBoundBy": "ISSUER",
+    "country": "DEU",
+    "expiresAt": "2026-11-04T09:30:00.000Z",
+    "createdAt": "2026-10-05T09:30:00.000Z",
+    "usedAt": "2026-10-05T10:12:44.000Z",
+    "verificationUrl": "https://verify.trusset.org/link/9fd252e39c094bca85ef788b64f8c2ea4ea1dcfa2a1a40aeb89ddffdf7b886f4",
+    "review": {
+      "status": "applicantReviewed",
+      "answer": "GREEN",
+      "rejectLabels": null
+    },
+    "customer": {
+      "id": "cmgdx5a9q0006l50a2m4k7h1c",
+      "status": "pending",
+      "verifiedAt": null
+    },
+    "registration": {
+      "pendingId": "cmgdx5b1t0007l50a6f3p9r2d",
+      "status": "PENDING",
+      "txHash": null,
+      "confirmedAt": null
+    },
+    "admissions": [
+      {
+        "id": "cmgdz3m8s0005l40a7b2c9d4e",
+        "profileKey": "PROFESSIONAL",
+        "registryAddress": "0x4f2A9c81D06e3b75A1C8E24D9B07f56E3a1d8C90",
+        "status": "PENDING",
+        "admittedTxHash": null,
+        "admittedAt": null,
+        "removalReason": null
+      }
+    ]
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-10-05T10:15:00.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NOT_FOUND` | `404` | No link with this ID exists on your instance |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 link onboarding requests per minute. See [Rate limits](/endpoints/customers/introduction#rate-limits) |
+| `FETCH_FAILED` | `500` | The link could not be read |

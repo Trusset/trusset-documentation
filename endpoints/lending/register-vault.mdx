@@ -32,9 +32,21 @@ Registration runs these checks in order. Deregistration runs none beyond the add
 
 1. The address must be a vault created by the v2 vault factory, otherwise the call is refused with `NOT_A_VAULT`. When the factory cannot be read, this check is skipped.
 2. The market's implementation must be readable, otherwise the call is refused with `MARKET_STATE_UNAVAILABLE`.
-3. On a market still running the earlier single-register implementation, the vault must be verified on the market's identity registry, otherwise the call is refused with `IDENTITY_NOT_VERIFIED`. On the current implementation, registration consults no register.
+3. On a market still running the earlier single-register implementation, the vault must be verified on the market's identity registry, otherwise the call is refused with `IDENTITY_NOT_VERIFIED`.
+4. On a `MARKET`-priced market, the borrower register must qualify as a professional gate, otherwise the call is refused with `PROFESSIONAL_BORROWER_GATE_REQUIRED`. See [Professional borrowers](/endpoints/lending/set-identity-gates#professional-borrowers).
+5. The vault's investors must meet the market's provider gate, read live from the vault and the market. See [Provider gate](#provider-gate).
 
 Neither call checks the current draw list. Registering a vault already on it, or deregistering one that is not, reverts on-chain. Registration does not check who operates the vault or which asset it holds either. A vault run by someone other than this market's lender of record, or settling in another asset, can be registered. It stays inert, because its operator can never set a cap for this market.
+
+## Provider gate
+
+A vault examines its depositors against its own register, when it has one, and against the provider register of every market it funds. On the current vault implementation, a vault without a register of its own adopts the provider register of the first market it funds or consents to draw for, and keeps it for good. A vault that no register examines takes no deposit at all. Registration therefore admits a vault only where those registers agree:
+
+- A vault with its own register can be registered on a market whose provider register is that same register, or that names none. Otherwise `PROVIDER_GATE_MISMATCH`.
+- A vault without a register of its own needs the market to name a provider register, or `DEPOSITOR_GATE_REQUIRED`. Unless the vault already funds this market, that register must be the one the vault adopted. A vault that has adopted none yet needs it to be the provider register of every market it funds or has consented to draw for. Otherwise `PROVIDER_GATE_MISMATCH`.
+- A vault without a register of its own that has adopted none, funds no market and still has shares in issue cannot be registered until its holders have redeemed, because nothing records which register they were examined against. It is refused with `PROVIDER_GATE_MISMATCH`.
+
+The vault contract holds its operator to the same rule when funds are allocated or a draw cap is set, so a vault registered against it could never be funded from. The message names each register, and the verification profile of your instance behind it when there is one.
 
 ## Draw order
 
@@ -191,5 +203,9 @@ const registered = status.registeredVaults.some(
 | `IDENTITY_NOT_VERIFIED` | `400` | `register` only, on a market running the earlier single-register implementation. The vault is not verified on the market's identity registry |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so no admin exists to sign. See [Lender of record](/endpoints/lending/introduction#lender-of-record) |
-| `MARKET_STATE_UNAVAILABLE` | `503` | `register` only. The market's implementation could not be read. Retry shortly |
+| `PROFESSIONAL_BORROWER_GATE_REQUIRED` | `409` | `register` only. The market is `MARKET`-priced and its borrower register does not qualify as a professional gate. `details.field` is `borrowerRegistry` |
+| `PROVIDER_GATE_MISMATCH` | `409` | `register` only. The vault's own register, the register it adopted, or the provider register of a market it already funds differs from this market's provider register. Also a vault with no register of its own that funds no market while its shares are still held |
+| `DEPOSITOR_GATE_REQUIRED` | `409` | `register` only. The vault has no register of its own and the market names no provider register |
+| `MARKET_STATE_UNAVAILABLE` | `503` | `register` only. The market's implementation, its price source and borrower register, the vault's register, the register it adopted, its share supply, this market's provider register or the markets the vault funds could not be read. Retry shortly |
+| `STATE_UNAVAILABLE` | `503` | `register` only. The verification profiles behind a `MARKET` market's borrower register could not be read. Retry shortly |
 | `VAULTS_NOT_CONFIGURED` | `503` | `register` only. Operator vaults are not configured on your instance's network |

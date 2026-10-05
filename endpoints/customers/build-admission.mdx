@@ -1,0 +1,217 @@
+---
+title: 'Build Admission'
+api: 'POST /customers/api/eligibility/admissions/calldata'
+description: 'The unsigned transaction that puts waiting wallets on a profile eligibility register'
+---
+
+Returns the unsigned transaction that registers waiting admissions of one profile on its eligibility register. A wallet of your instance that is an agent of the register signs and broadcasts it, then [Confirm Admission](/endpoints/customers/confirm-admission) records the result. Trusset holds no key and sends nothing.
+
+Only a register in the `REGISTER` mode can be built for. A profile bound to your instance register, or to a register managed outside Trusset, is refused. See [Which registers can be signed here](/endpoints/customers/introduction#which-registers-can-be-signed-here).
+
+## Body Parameters
+
+<ParamField body="profileKey" type="string">
+  The profile, by key. Matched exactly, then in upper and lower case. Send this or `profileId`.
+</ParamField>
+
+<ParamField body="profileId" type="string">
+  The profile, by `id`. Used instead of `profileKey` when both are sent.
+</ParamField>
+
+<ParamField body="signerAddress" type="string" required>
+  The wallet that will sign. It must be a verified Ethereum wallet of your instance and an agent of the register. The transaction is simulated from it before anything is returned.
+</ParamField>
+
+<ParamField body="ids" type="string[]">
+  Only these admissions, by `id`. Up to 200 are read, and an id that is not a `PENDING` admission of this profile is ignored.
+</ParamField>
+
+<ParamField body="wallets" type="string[]">
+  Only the admissions of these wallets. Up to 200 are read, and malformed addresses are dropped. Sent together with `ids`, an admission must match both.
+</ParamField>
+
+Without `ids` or `wallets`, the oldest waiting admissions of the profile are used. One call builds at most 50. Build again after confirming for the rest.
+
+## What is checked
+
+The checks run in this order, and the first that fails refuses the call:
+
+1. `signerAddress` is a verified wallet of your instance (`SIGNER_NOT_INSTANCE_WALLET`).
+2. The profile has a register, the register answers `isVerified(address)` with a single bool, and its mode is `REGISTER` (`ELIGIBILITY_ADMISSION_INSTANCE_REGISTER`, `ELIGIBILITY_ADMISSION_EXTERNAL`).
+3. `signerAddress` is an agent of the register (`ELIGIBILITY_AGENT_REQUIRED`). The message names the wallets that are.
+4. At least one admission is waiting among the ones selected (`NOTHING_TO_ADMIT`).
+
+Then each admission is checked against your instance register and the eligibility register. An admission that fails is left out of the transaction and reported in `skipped`:
+
+| `skipped[].code` | Cause | What happens to the admission |
+|---|---|---|
+| `ALREADY_ADMITTED` | The wallet already holds an identity on the eligibility register | Recorded as `ADMITTED` without a transaction |
+| `INSTANCE_REGISTRATION_PENDING` | The wallet is not registered on your instance register yet | Stays `PENDING`. Sign its [pending registration](/endpoints/customers/build-pending-registration) first |
+| `NOT_VERIFIED_ON_INSTANCE_REGISTER` | The wallet is on your instance register but not verified there, for example because its KYC claim is missing or revoked | Stays `PENDING` |
+| `COUNTRY_BLOCKED` | The country your instance register holds for the wallet is on the profile's blocked list | `CANCELLED`, with `removalReason: COUNTRY_BLOCKED` and the country named in `error` |
+
+Every remaining wallet is registered with the ONCHAINID and the country your instance register holds for it, so the eligibility register reads the same identity and claims. Last, the transaction is simulated from `signerAddress`. When it would revert, the call is refused with `ELIGIBILITY_TX_WOULD_REVERT` and nothing is returned to sign.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`, or `NONE` when every selected admission was skipped. `NONE` comes with empty `steps` and `rows` and without `transaction`, `functionName` or `confirmWith`.</ResponseField>
+    <ResponseField name="profile" type="object">`{ key, name, entityType, professionalOnly, requirementsHash }` of the profile.</ResponseField>
+    <ResponseField name="registryAddress" type="string">The eligibility register, checksummed.</ResponseField>
+    <ResponseField name="signerAddress" type="string">The wallet that must sign, checksummed.</ResponseField>
+    <ResponseField name="steps" type="array">
+      One step.
+      <Expandable>
+        <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+        <ResponseField name="stepType" type="string">`verify`.</ResponseField>
+        <ResponseField name="transaction" type="object">`{ to, data }`, addressed to the eligibility register. Send it on your instance's Ethereum network with no value.</ResponseField>
+        <ResponseField name="functionName" type="string">`registerIdentity` for one wallet, `batchRegisterIdentity` for several.</ResponseField>
+        <ResponseField name="description" type="string">What the step does.</ResponseField>
+        <ResponseField name="walletAddress" type="string">The wallet that signs, the same as `signerAddress`.</ResponseField>
+        <ResponseField name="walletAddresses" type="string[]">`batchRegisterIdentity` only. The wallets admitted.</ResponseField>
+        <ResponseField name="ids" type="string[]">The admissions the step covers.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="transaction" type="object">The step's transaction, repeated.</ResponseField>
+    <ResponseField name="functionName" type="string">The step's function, repeated.</ResponseField>
+    <ResponseField name="rows" type="array">`{ id, walletAddress, identity }` for every admission in the transaction. `identity` is the ONCHAINID it is registered with.</ResponseField>
+    <ResponseField name="skipped" type="array">`{ id, walletAddress, code, message }` for every admission left out. Empty when none was.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint: "POST /customers/api/eligibility/admissions/confirm", fields: ["txHash"] }`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/eligibility/admissions/calldata" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -d '{
+    "profileKey": "PROFESSIONAL",
+    "signerAddress": "0xCD92134767aEC2562be15d2a2062A082dA17dD84"
+  }'
+```
+```typescript TypeScript
+const api = 'https://api.trusset.org/customers/api/eligibility';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(`${api}/admissions/calldata`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ profileKey: 'PROFESSIONAL', signerAddress: await agentWallet.getAddress() })
+});
+const { data: plan } = await res.json();
+
+for (const skip of plan.skipped) console.warn(`${skip.walletAddress} skipped: ${skip.code}`);
+
+if (plan.action === 'SIGN_TRANSACTION') {
+  const tx = await agentWallet.sendTransaction(plan.transaction);
+  await tx.wait();
+  await fetch(`${api}/admissions/confirm`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ txHash: tx.hash })
+  });
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "profile": {
+      "key": "PROFESSIONAL",
+      "name": "Professional",
+      "entityType": "INDIVIDUAL",
+      "professionalOnly": true,
+      "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390"
+    },
+    "registryAddress": "0x4f2A9c81D06e3b75A1C8E24D9B07f56E3a1d8C90",
+    "signerAddress": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "stepType": "verify",
+        "walletAddresses": [
+          "0xfF21b8AC28Bb6A20c1c0160AF42303D2946B99EA",
+          "0x96C5822784130360F904372b83E130be4A1894D6"
+        ],
+        "transaction": {
+          "to": "0x4f2A9c81D06e3b75A1C8E24D9B07f56E3a1d8C90",
+          "data": "0x653dc9f1..."
+        },
+        "functionName": "batchRegisterIdentity",
+        "description": "Admit 2 wallets to the Professional eligibility register",
+        "walletAddress": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+        "ids": ["cmgdz1k4p0003l40a2r5w8y1n", "cmgdz3m8s0005l40a7b2c9d4e"]
+      }
+    ],
+    "transaction": {
+      "to": "0x4f2A9c81D06e3b75A1C8E24D9B07f56E3a1d8C90",
+      "data": "0x653dc9f1..."
+    },
+    "functionName": "batchRegisterIdentity",
+    "rows": [
+      { "id": "cmgdz1k4p0003l40a2r5w8y1n", "walletAddress": "0xfF21b8AC28Bb6A20c1c0160AF42303D2946B99EA", "identity": "0xeD885159017c5799aF7ADD64F05A92b76eb9E55D" },
+      { "id": "cmgdz3m8s0005l40a7b2c9d4e", "walletAddress": "0x96C5822784130360F904372b83E130be4A1894D6", "identity": "0x8986b6a837ccA6c6F6e257526296f07b9fe3fA9f" }
+    ],
+    "skipped": [
+      {
+        "id": "cmgdz4q1w0006l40a3h8j5k7m",
+        "walletAddress": "0x340b36b00E0178Db9045834059771C7b25A58c74",
+        "code": "INSTANCE_REGISTRATION_PENDING",
+        "message": "The wallet is not registered on the instance identity register yet. Sign its pending registration first."
+      }
+    ],
+    "confirmWith": {
+      "endpoint": "POST /customers/api/eligibility/admissions/confirm",
+      "fields": ["txHash"]
+    }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-10-05T11:01:12.000Z"
+  }
+}
+```
+```json Error - Not An Agent
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ELIGIBILITY_AGENT_REQUIRED",
+    "message": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52 is not an agent of the Professional eligibility register 0x4f2A9c81D06e3b75A1C8E24D9B07f56E3a1d8C90. Connect 0xCD92134767aEC2562be15d2a2062A082dA17dD84."
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-10-05T11:00:48.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `signerAddress` is missing, malformed or the zero address |
+| `SIGNER_NOT_INSTANCE_WALLET` | `403` | `signerAddress` is not a verified Ethereum wallet of your instance |
+| `ELIGIBILITY_AGENT_REQUIRED` | `403` | `signerAddress` is not an agent of the register |
+| `INSTANCE_NOT_FOUND` | `404` | The instance behind your key is archived or no longer exists |
+| `PROFILE_NOT_FOUND` | `404` | Neither `profileId` nor `profileKey` names a profile of your instance |
+| `ELIGIBILITY_NETWORK_UNSUPPORTED` | `409` | Your instance is not on Ethereum |
+| `ELIGIBILITY_REGISTER_NOT_SET` | `409` | The profile has no eligibility register |
+| `ELIGIBILITY_REGISTER_NOT_DEPLOYED` | `409` | No contract is deployed at the profile's register |
+| `ELIGIBILITY_REGISTER_IS_TRUSSET` | `409` | The register answers like the Trusset ID register, which cannot stand for one profile |
+| `ELIGIBILITY_ADMISSION_INSTANCE_REGISTER` | `409` | The profile is bound to your instance register. Registering a wallet there is its admission |
+| `ELIGIBILITY_ADMISSION_EXTERNAL` | `409` | Admissions to this register are managed outside Trusset. The message says why |
+| `NOTHING_TO_ADMIT` | `409` | No admission of the profile is waiting among the ones selected |
+| `ELIGIBILITY_TX_WOULD_REVERT` | `409` | The simulated transaction reverts. Nothing was returned to sign |
+| `ELIGIBILITY_REGISTER_INCOMPATIBLE` | `422` | The register does not answer `isVerified(address)` with a single bool |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 eligibility requests per minute |
+| `BUILD_ADMISSION_FAILED` | `500` | The transaction could not be built |
+| `CHAIN_UNAVAILABLE` | `503` | A register or the chain did not answer in time. Nothing was decided. Retry shortly |

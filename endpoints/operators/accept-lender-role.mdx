@@ -81,13 +81,21 @@ Seven parties are required. Each is a checksum-valid address that is not the zer
 ### Registers and provisioning
 
 <ParamField body="identityRegistry" type="string">
-  Borrower register for a market that has none. Only a nominated wallet may bring one. It is ignored when the deployer already installed a register, which stands. A `MARKET`-priced market must end up with one.
+  Borrower register for a market that has none. Only a nominated wallet may bring one. It is ignored when the deployer already installed a register, which stands. A `MARKET`-priced market must end up with one, and it must qualify as a professional gate, see [Professional borrowers](#professional-borrowers).
 
   It must answer `isVerified(address)`, as an ERC-3643 identity registry, an ONCHAINID-based register and the Trusset register all do. Omit it, or send the zero address, to adopt without one where the price source allows.
 </ParamField>
 
+<ParamField body="identityRegistryProfile" type="string">
+  A [verification profile](/endpoints/customers/list-verification-profiles#eligibility-registers) key of your instance, 1 to 60 letters, digits, `-` or `_`. Its eligibility register is used as `identityRegistry`. Sent with `identityRegistry`, both must name the same register, otherwise `GATE_PROFILE_CONFLICT`.
+</ParamField>
+
 <ParamField body="providerRegistry" type="string">
   The register every vault on the market examines its depositors against. Installed when the market carries none. The deployer's `proposedProviderRegistry` is a suggestion only: this field decides.
+</ParamField>
+
+<ParamField body="providerRegistryProfile" type="string">
+  A verification profile key whose eligibility register is used as `providerRegistry`, with the same rules as `identityRegistryProfile`.
 </ParamField>
 
 <ParamField body="liquidator" type="string">
@@ -96,6 +104,8 @@ Seven parties are required. Each is a checksum-valid address that is not the zer
 
 <ParamField body="vault" type="string">
   One of this instance's own vaults, registered on the market as a just-in-time liquidity source with vault liquidity switched on. The vault must settle in the market's borrow asset and be operated by the signing wallet. The vault's own draw cap remains the one step left, signed by the vault operator.
+
+  The vault's investors must meet the market's provider gate, under the rules of [Register Vault](/endpoints/lending/register-vault#provider-gate). A vault with its own register needs `providerRegistry` to be that register or none (`PROVIDER_GATE_MISMATCH`). A vault without one needs a `providerRegistry`, since nothing else would examine its depositors (`DEPOSITOR_GATE_REQUIRED`). It must be the register the vault adopted from the first market it funded, or, before it adopted one, the provider register of every market it funds (`PROVIDER_GATE_MISMATCH`).
 </ParamField>
 
 `providerRegistry`, `liquidator` and `vault` need the current market implementation. A market on the earlier implementation, reported as `SINGLE_REGISTER` by [Get Queued Market](/endpoints/operators/get-queued-market), refuses them with `MARKET_UPGRADE_REQUIRED`. It also needs a borrower register whatever its price source.
@@ -113,6 +123,17 @@ Seven parties are required. Each is a checksum-valid address that is not the zer
 <ParamField body="claimSalt" type="string">
   Salt for an open-market claim, `0x` followed by 64 hex characters. Omit it on the first call and the API generates one. Send the returned value, with identical terms, on the second call. A nominee does not need it.
 </ParamField>
+
+## Professional borrowers
+
+A `MARKET`-priced market lends to professional borrowers only. Its borrower register must qualify as a professional gate: at least one verification profile admits wallets to it, and every profile that does, on any instance of the market's network and environment, is limited to professional clients and in the `REGISTER` mode. The register deployed for your `PROFESSIONAL` profile, named with `identityRegistryProfile: "PROFESSIONAL"`, is the simplest path. See [Professional borrowers](/endpoints/lending/set-identity-gates#professional-borrowers).
+
+How that is enforced depends on who installs the register:
+
+- **You bring it**, on a market the deployer left without one: a register that does not qualify is refused with `422 PROFESSIONAL_BORROWER_GATE_REQUIRED`, `details.field: "identityRegistry"`.
+- **The deployer installed it**: it stands, and the adoption is not refused. When it does not qualify, the response carries the warning `BORROWER_GATE_NOT_PROFESSIONAL` and `requiredFollowUp: { action: "SET_IDENTITY_GATES", reason: "BORROWER_GATE_NOT_PROFESSIONAL" }`. Right after taking the role, replace the register through [Set Identity Gates](/endpoints/lending/set-identity-gates#professional-borrowers). Until then the API opens no loan and adds no liquidity on the market.
+
+When the profiles behind the register cannot be read, the call answers `503 STATE_UNAVAILABLE` and builds nothing.
 
 ## Approve the asset data
 
@@ -159,10 +180,13 @@ The adoption transaction:
     <ResponseField name="borrowAsset" type="object">`{ address, symbol, decimals }` of the market's settlement asset, or `null` when it could not be read.</ResponseField>
     <ResponseField name="generation" type="string">`TWO_REGISTERS` or `SINGLE_REGISTER`.</ResponseField>
     <ResponseField name="installedRegister" type="object">The borrower register the deployer installed, `{ address, shape, usable, note }`, or `null`.</ResponseField>
+    <ResponseField name="borrowerProfile" type="object">`{ key, name, entityType, professionalOnly, requirementsHash }` of your verification profile whose eligibility register the borrower register is, or `null`.</ResponseField>
+    <ResponseField name="providerProfile" type="object">The same for the provider register, or `null`.</ResponseField>
+    <ResponseField name="requiredFollowUp" type="object">`{ action: "SET_IDENTITY_GATES", reason: "BORROWER_GATE_NOT_PROFESSIONAL" }` when the deployer's borrower register must be replaced after adoption, otherwise `null`. See [Professional borrowers](#professional-borrowers).</ResponseField>
     <ResponseField name="terms" type="object">The terms as encoded: the seven parties, `identityRegistry`, `providerRegistry`, `liquidator`, `vault`, `liquidityCommitment` in the borrow asset's smallest unit, `realizationMode`, `claimSalt`, `maxFixedRateBps` and `assetDataHash`. Absent optional values read `null`.</ResponseField>
     <ResponseField name="assetData" type="object">`{ acknowledged, contentHash, version, attestor, factorySupport, note }`. `acknowledged` says whether this adoption approves a version.</ResponseField>
     <ResponseField name="handoverNote" type="string">What the transaction hands over. On a `TWO_REGISTERS` market the oracle, rate model and insurance fund pass to their named owners inside the transaction. On a `SINGLE_REGISTER` market each named owner must accept ownership afterwards.</ResponseField>
-    <ResponseField name="warnings" type="array">Present only when there is something to say, each `{ code, vault, message }`. `VAULT_PREDATES_DISTRIBUTOR` flags a vault that cannot yet collect the distributor share this market books for it.</ResponseField>
+    <ResponseField name="warnings" type="array">Present only when there is something to say, each `{ code, message }`. `VAULT_PREDATES_DISTRIBUTOR` flags a vault that cannot yet collect the distributor share this market books for it, and also names the `vault`. `BORROWER_GATE_NOT_PROFESSIONAL` flags a `MARKET` market whose installed borrower register does not qualify as a professional gate. Its message says why.</ResponseField>
     <ResponseField name="confirmWith" type="object">`{ endpoint: "confirm-accept", txHash: true }`. See [Confirm Lender Role](/endpoints/operators/confirm-lender-role).</ResponseField>
   </Expandable>
 </ResponseField>
@@ -265,6 +289,9 @@ await tx.wait();
     },
     "generation": "TWO_REGISTERS",
     "installedRegister": null,
+    "borrowerProfile": null,
+    "providerProfile": null,
+    "requiredFollowUp": null,
     "terms": {
       "admin": "0x5a3c9e71b0d24f86a1c7e5039b2d84f6c1a0e7d3",
       "issuer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
@@ -358,11 +385,13 @@ A malformed body is refused by its first offending field. The four `INVALID_` co
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | `marketAddress`, `maxFixedRateBps` or `claimSalt` failed validation |
+| `VALIDATION_ERROR` | `400` | `marketAddress`, `maxFixedRateBps`, `claimSalt`, `identityRegistryProfile` or `providerRegistryProfile` failed validation |
 | `INVALID_CURATOR_TERMS` | `400` | A party address, `identityRegistry`, `providerRegistry`, `liquidator` or `vault` is missing where required, malformed, the zero address where a party is required, or fails its checksum |
 | `INVALID_REALIZATION_MODE` | `400` | `realizationMode` is missing or not `EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION` |
 | `INVALID_LIQUIDITY_COMMITMENT` | `400` | `liquidityCommitment` is not a non-negative decimal, or carries more decimal places than the borrow asset |
 | `INVALID_CONTENT_HASH` | `400` | `assetDataHash` is not a 32-byte hex hash, or `acknowledgeAssetData` is not a boolean |
+| `GATE_PROFILE_CONFLICT` | `400` | `identityRegistry` or `providerRegistry` names a different register than the profile sent beside it |
+| `GATE_PROFILE_UNRESOLVED` | `400` | A profile key could not be resolved for a reason that carries no code of its own |
 | `ACCEPT_FAILED` | `400` | The transaction could not be built for a reason that carries no code of its own |
 | `CURATOR_NOT_APPROVED` | `403` | Trusset has not approved this account to act as a lender of record |
 | `NOT_NOMINATED` | `403` | No verified wallet of this instance is nominated, and the market is not open |
@@ -370,12 +399,16 @@ A malformed body is refused by its first offending field. The four `INVALID_` co
 | `CANDIDATE_NOT_VERIFIED` | `403` | None of the wallets checked is verified on the register the open market admits claimants through |
 | `MARKET_NOT_V2` | `404` | The address is not a market of the v2 lending factory this instance deploys to |
 | `MARKET_NOT_DEPLOYED` | `404` | No deployment for this market could be read from the lending factory |
+| `PROFILE_NOT_FOUND` | `404` | `identityRegistryProfile` or `providerRegistryProfile` names no verification profile of this instance |
 | `VAULT_NOT_FOUND` | `404` | `vault` is not a vault of this instance, or it is archived |
 | `NOT_SEEKING_CURATOR` | `409` | The market already has a lender of record. The message names it |
 | `REALIZATION_MODE_UNAVAILABLE` | `409` | `AUCTION` was declared on a `MARKET`-priced market |
 | `REALIZATION_BASIS_UNAVAILABLE` | `409` | `EXCHANGE_SALE` was declared on a `NAV` or `ORACLE` market |
 | `SIGNER_SET_NOT_CLEAN` | `409` | The market's oracle reports a different number of authorized signers than adoption requires |
 | `MARKET_UPGRADE_REQUIRED` | `409` | `providerRegistry`, `liquidator` or `vault` was sent for a market on the earlier implementation |
+| `ELIGIBILITY_REGISTER_NOT_SET` | `409` | The named profile has no eligibility register |
+| `PROVIDER_GATE_MISMATCH` | `409` | `providerRegistry` differs from the register `vault` admits its depositors against: its own, the one it adopted, or the provider register of a market it funds. Also a `vault` without a register of its own that funds no market while its shares are still held. The message starts with the vault's name |
+| `DEPOSITOR_GATE_REQUIRED` | `409` | `vault` has no register of its own and the terms name no provider register |
 | `ASSET_MISMATCH` | `409` | `vault` settles in a different asset than the market |
 | `VAULT_NOT_OPERATORS` | `409` | `vault` is operated by a different wallet than the one signing the adoption |
 | `ASSET_DATA_STALE` | `409` | `assetDataHash` is no longer the standing attestation. `details` carries `reviewed`, `standing`, `standingVersion` and `attestedAt` |
@@ -385,6 +418,7 @@ A malformed body is refused by its first offending field. The four `INVALID_` co
 | `CLAIM_EXPIRED` | `409` | The announcement lapsed. Start again without `claimSalt` |
 | `WALLET_NOT_CONFIGURED` | `412` | This instance has no verified wallet |
 | `IDENTITY_REGISTRY_REQUIRED` | `422` | The market ends up without a borrower register where one is required: a `MARKET`-priced market, or a market on the earlier implementation |
+| `PROFESSIONAL_BORROWER_GATE_REQUIRED` | `422` | On a `MARKET` market without an installed register, the borrower register in the terms does not qualify as a professional gate. `details` carries `field` and `priceSource` |
 | `IDENTITY_REGISTRY_INCOMPATIBLE` | `422` | A register named in the terms does not answer `isVerified(address)` in a shape the market reads |
 | `SALE_RECIPIENT_NOT_ELIGIBLE` | `422` | The collateral token refuses delivery from the market's router to `saleRecipient`. The message names the blocked party and the remedy |
 | `ORACLE_FEED_UNUSABLE` | `422` | On an `ORACLE` market, the feed cannot answer a price inside the staleness window right now |
@@ -393,4 +427,6 @@ A malformed body is refused by its first offending field. The four `INVALID_` co
 | `ORACLE_STATE_UNREADABLE` | `503` | The market's oracle could not be read to check its signer set. Retry shortly |
 | `IDENTITY_REGISTRY_UNREADABLE` | `503` | The market's borrower register, or a register named in the terms, could not be reached. Retry shortly |
 | `MARKET_IMPLEMENTATION_UNREADABLE` | `503` | The market implementation could not be read. Retry shortly |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The register of `vault`, the register it adopted, its share supply, or the markets it funds and their provider registers could not be read. Retry shortly |
+| `STATE_UNAVAILABLE` | `503` | On a `MARKET` market, the verification profiles behind the borrower register could not be read. Retry shortly |
 | `FACTORY_READ_FAILED` | `503` | The factory could not be read for the market, its asset data record or the claim record. Retry shortly |

@@ -24,9 +24,10 @@ Every request authenticates with an instance API key in the `X-API-Key` header. 
 | `/identity` | On-chain verification, the pending queue, claims, and KYC proofs |
 | `/id-links` | Hosted verification links you send to a customer |
 | `/verification-profiles` | The verification levels configured for your instance |
+| `/eligibility` | Admissions to and removals from the eligibility registers of your verification profiles |
 | `/disclosure-requests` | Requests asking a wallet holder to disclose a verified fact |
 
-Customer records need the `customers` service. Everything under `/identity`, `/id-links`, `/verification-profiles` and `/disclosure-requests` needs `identity`.
+Customer records need the `customers` service. Everything under `/identity`, `/id-links`, `/verification-profiles`, `/eligibility` and `/disclosure-requests` needs `identity`.
 
 ## Which register you write to
 
@@ -49,6 +50,60 @@ When a customer passes KYC through an [ID link](/endpoints/customers/create-id-l
 Work the queue with [List Pending Verifications](/endpoints/customers/list-pending-verifications), [Build Pending Registration](/endpoints/customers/build-pending-registration) and [Confirm Pending Registration](/endpoints/customers/confirm-pending-registration). [Dismiss Pending Verification](/endpoints/customers/dismiss-pending-verification) closes a row for good.
 
 On an ERC-3643 registry a wallet needs an ONCHAINID before it can be registered. Build Pending Registration asks for one in its first phase when the wallet has none. [Deploy ONCHAINID](/endpoints/customers/deploy-onchainid) and [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid) deploy one ahead of time.
+
+## Eligibility registers
+
+A [verification profile](/endpoints/customers/list-verification-profiles) can carry an eligibility register: an on-chain identity register that holds exactly the wallets admitted under that profile. Lending markets and vaults read it as a gate, so a market can lend only to the customers of one profile and a vault can take deposits only from them. A register is deployed for a profile, or an existing one bound to it, in the Issuer Portal. This API manages who is on it.
+
+One register stands for one profile of an instance. The Issuer Portal refuses to bind a register that another profile of the instance already uses (`ELIGIBILITY_REGISTER_IN_USE`), or one that keeps its identities in the same identity storage as another profile's register (`ELIGIBILITY_STORAGE_IN_USE`). A profile limited to professional clients takes only a register in the `REGISTER` mode below, whose admissions your instance signs (`PROFESSIONAL_REGISTER_REQUIRED`), because lending markets rely on it to admit professional clients only. A bound profile's `professionalOnly` setting cannot change until the register is unbound.
+
+Admissions work like the pending queue. A wallet waits as an admission, your wallet signs the transaction that puts it on the register, and the confirm reads the outcome from the chain.
+
+<Steps>
+  <Step title="Queue">
+    [Request Admission](/endpoints/customers/request-admission) queues a wallet of one of your customers. Trusset also queues admissions on its own, listed below.
+  </Step>
+  <Step title="Build">
+    [Build Admission](/endpoints/customers/build-admission) returns one unsigned `registerIdentity` or `batchRegisterIdentity` transaction for up to 50 waiting wallets.
+  </Step>
+  <Step title="Sign">
+    A wallet of your instance that is an agent of the register signs and broadcasts it. Trusset holds no key and sends nothing.
+  </Step>
+  <Step title="Confirm">
+    [Confirm Admission](/endpoints/customers/confirm-admission) takes the transaction hash alone and records every wallet the register's `IdentityRegistered` logs in the receipt name.
+  </Step>
+</Steps>
+
+Removals take the same path with [Request Removal](/endpoints/customers/request-removal), [Build Removal](/endpoints/customers/build-removal), which returns one `deleteIdentity` transaction per wallet, and [Confirm Removal](/endpoints/customers/confirm-removal), which reads `IdentityRemoved` logs. [List Admissions](/endpoints/customers/list-admissions) shows the queue in every state, [Get Wallet Eligibility](/endpoints/customers/get-wallet-eligibility) shows one wallet across every register, and [List Eligibility Profiles](/endpoints/customers/list-eligibility-profiles) lists the profiles that have one.
+
+Trusset queues these on its own:
+
+| When | Queued |
+|---|---|
+| A customer of the profile passes an [ID link](/endpoints/customers/create-id-link) review with a wallet bound | An admission to that profile's register, `source: KYC_LINK` |
+| A wallet is registered on your instance register through [Verify Identity](/endpoints/customers/verify-identity), [Batch Verify](/endpoints/customers/batch-verify) or [Confirm Pending Registration](/endpoints/customers/confirm-pending-registration) | An admission to the register of the profile it was verified under, `source: VERIFICATION`, or `KYC_LINK` for a queued row an ID link put there |
+| [Revoke Identity](/endpoints/customers/revoke-identity) is confirmed for a wallet | Its removal from every register, reason `REVOKED` |
+| An ID link review for a wallet is rejected, or refused under its profile | Its removal from the register of the link's profile, reason `COUNTRY_BLOCKED` when the country was the cause, otherwise `REJECTED` |
+| A profile's blocked countries change in the Issuer Portal to cover an admitted customer's country | That wallet's removal, reason `COUNTRY_BLOCKED` |
+| `reverifyDays` of the profile pass after the wallet was admitted or its customer was last verified | Its removal, reason `LAPSED` |
+
+A removal that reaches an admission still waiting to be signed cancels it instead. Nothing is written to a register until your wallet signs.
+
+A removal waiting to be signed can be withdrawn. A `LAPSED`, `REVOKED` or `REJECTED` removal is withdrawn by a fresh verification of the customer, or by [Request Admission](/endpoints/customers/request-admission#a-wallet-waiting-for-removal) with `confirmEligibility: true`. A `MANUAL` or `COUNTRY_BLOCKED` removal is withdrawn only by a request from you, never by a verification.
+
+### Which registers can be signed here
+
+What this API can do on a register depends on the register. The mode is recorded when the register is bound. The Issuer Portal shows it, and [List Eligibility Profiles](/endpoints/customers/list-eligibility-profiles) reports it as `admissionMode`. [Request Admission](/endpoints/customers/request-admission) follows the recorded mode. The builds inspect the register again, so a register that no wallet of your instance is an agent of any more is refused there.
+
+| Mode | Register | Admissions |
+|---|---|---|
+| `REGISTER` | An ERC-3643 identity registry with its own identity storage, one of your instance's verified wallets as an agent, on an instance that runs its own ERC-3643 register. A register deployed from the Issuer Portal is one | Built and confirmed here |
+| `INSTANCE_REGISTER` | Your instance register itself | Registering a wallet on your instance register is its admission. [Request Admission](/endpoints/customers/request-admission) answers `mode: INSTANCE_REGISTER`, and the builds refuse with `ELIGIBILITY_ADMISSION_INSTANCE_REGISTER` |
+| `EXTERNAL` | Any other register: one that is not ERC-3643, one that shares your instance register's identity storage, one where none of your wallets is an agent, or any register while your instance has no ERC-3643 register of its own | Read only. [Request Admission](/endpoints/customers/request-admission) refuses with `ADMISSIONS_MANAGED_EXTERNALLY`, the builds refuse with `ELIGIBILITY_ADMISSION_EXTERNAL`, and the register's owner admits wallets with its own tools. [Get Wallet Eligibility](/endpoints/customers/get-wallet-eligibility) still reads it |
+
+A register deployed from the Issuer Portal uses the claim topics and trusted issuers of your instance register, and a wallet is admitted with the ONCHAINID your instance register holds for it. It therefore reads as verified there on the same claims, which is why [Build Admission](/endpoints/customers/build-admission) skips a wallet your instance register does not verify yet.
+
+Eligibility registers are available on Ethereum instances only. A customer webhook set up in the Issuer Portal reports the queue as `eligibility.admission_pending`, `eligibility.admitted`, `eligibility.removal_pending` and `eligibility.removed`.
 
 ## Claims
 
@@ -118,7 +173,7 @@ The holder answers on verify.trusset.org with a consent the wallet signs and, fo
 }
 ```
 
-Routes under `/identity` always send both `data` and `error`, with the unused one `null`. The other paths send only the one that applies, so a success has no `error` key and a failure has no `data` key. On failure, `error` carries `code` and `message`. Always branch on `success` rather than on the HTTP status alone.
+Routes under `/identity` and `/eligibility` always send both `data` and `error`, with the unused one `null`. So do [Get ID Link](/endpoints/customers/get-id-link), [Issue Sumsub Token](/endpoints/customers/issue-sumsub-token), [Bind Link Wallet](/endpoints/customers/bind-link-wallet) and [Recheck Link Review](/endpoints/customers/recheck-link-review). The other paths send only the one that applies, so a success has no `error` key and a failure has no `data` key. On failure, `error` carries `code` and `message`. Always branch on `success` rather than on the HTTP status alone.
 
 The lists under `/manage` and `/id-links` put `total` in `metadata`. [List Disclosure Requests](/endpoints/customers/list-disclosure-requests) returns `data.items` and `data.pagination` instead.
 
@@ -147,7 +202,9 @@ These refusals come before a route runs, so they carry no `data`. The rate limit
 
 Every request made with an API key counts against 200 requests per minute for that key, across every product. The minute is a fixed window on the clock, not a rolling one. Exceeding it returns `429 RATE_LIMIT_EXCEEDED` with a `Retry-After` header in seconds. Every response reports the budget in `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`. See [Rate Limits](/endpoints/rate-limits).
 
-[Add Claims from Proof](/endpoints/customers/add-claims-from-proof), [Inspect Manifest](/endpoints/customers/inspect-manifest) and [Attest Proofs](/endpoints/customers/attest-proofs) also share a budget of 30 requests per minute per instance. It answers `429` with code `RATE_LIMITED`, not `RATE_LIMIT_EXCEEDED`, and a `Retry-After` header. No other Customers route has a tighter limit.
+[Add Claims from Proof](/endpoints/customers/add-claims-from-proof), [Inspect Manifest](/endpoints/customers/inspect-manifest) and [Attest Proofs](/endpoints/customers/attest-proofs) also share a budget of 30 requests per minute per instance. It answers `429` with code `RATE_LIMITED`, not `RATE_LIMIT_EXCEEDED`, and a `Retry-After` header.
+
+Two more budgets of 120 requests per minute per instance apply. The admission and removal writes under `/eligibility` share one with [Get Wallet Eligibility](/endpoints/customers/get-wallet-eligibility). [Get ID Link](/endpoints/customers/get-id-link), [Issue Sumsub Token](/endpoints/customers/issue-sumsub-token), [Bind Link Wallet](/endpoints/customers/bind-link-wallet) and [Recheck Link Review](/endpoints/customers/recheck-link-review) share the other. Both answer `429 RATE_LIMIT_EXCEEDED` with a `Retry-After` header. No other Customers route has a tighter limit.
 
 ## Credits
 
