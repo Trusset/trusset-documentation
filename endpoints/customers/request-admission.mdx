@@ -38,26 +38,26 @@ An admission in `REMOVAL_PENDING` has a removal waiting to be signed. A request 
 
 | `removalReason` | Withdrawn by this request |
 |---|---|
-| `LAPSED`, `REVOKED`, `REJECTED` | Only with `confirmEligibility: true`, which records that you re-verified the customer outside Trusset. Otherwise `409 REVERIFICATION_REQUIRED` |
-| `MANUAL`, `COUNTRY_BLOCKED` | Yes, without a confirmation |
+| `LAPSED`, `REVOKED`, `REJECTED`, `REQUIREMENTS_CHANGED` | Only with `reverifiedOutsideTrusset: true`, which records that you re-verified the customer outside Trusset. Otherwise `409 REVERIFICATION_REQUIRED` |
+| `MANUAL`, `COUNTRY_BLOCKED`, `ARCHIVED`, `WALLET_CHANGED` | Yes, without an attestation |
 
-The customer must meet the profile again first. A customer record still `revoked` or `rejected` is refused with `CUSTOMER_NOT_ELIGIBLE`, and a country still blocked with `COUNTRY_BLOCKED`.
+The customer must meet the profile again first. A customer record still `revoked` or `rejected` is refused with `CUSTOMER_NOT_ELIGIBLE`, and a country still blocked with `COUNTRY_BLOCKED`. After an archive or a wallet change no customer of your instance holds the wallet any more, so the request is refused with `CUSTOMER_NOT_FOUND`. A customer onboarded under another profile still needs `confirmEligibility: true` for the withdrawal, as for any admission under that profile.
 
-A fresh verification of the customer, through an ID link or a registration on your instance register, withdraws a `LAPSED`, `REVOKED` or `REJECTED` removal on its own. It never withdraws a `MANUAL` or `COUNTRY_BLOCKED` removal. Only a request from you, here or in the Issuer Portal, does.
+A fresh verification of the customer, through an ID link or a registration on your instance register, withdraws a `LAPSED`, `REVOKED`, `REJECTED` or `REQUIREMENTS_CHANGED` removal on its own. It never withdraws a `MANUAL`, `COUNTRY_BLOCKED`, `ARCHIVED` or `WALLET_CHANGED` removal. Only a request from you, here or in the Issuer Portal, does.
 
 The register is read before anything changes, and the outcome follows what it holds:
 
-- **The wallet is still on the register.** The removal is cancelled and the admission is `ADMITTED` again: `200` with `alreadyAdmitted: true` and `removalCancelled: true`.
+- **The wallet is still on the register.** The removal is cancelled and the admission is `ADMITTED` again: `200` with `alreadyAdmitted: true` and `removalCancelled: true`. An `eligibility.removal_cancelled` event goes to your customer webhooks.
 - **The wallet is already off the register**, for example because a removal was signed but not yet confirmed. The admission goes back to `PENDING` and waits to be built like a new one: `201` with `alreadyAdmitted: false`.
 
 ## Re-verification
 
 When the profile sets `reverifyDays`, an admission is due again that many days after it was admitted, and a lapsed admission is queued for removal with reason `LAPSED`.
 
-The period restarts only on a verification of the customer, through an ID link or a registration on your instance register, or on a request sent with `confirmEligibility: true` that withdraws a removal while the wallet is still on the register. The response then carries `renewed: true`, and `dueAt` counts from now. A request never renews an admission that is already `ADMITTED`.
+The period restarts only on a verification of the customer, through an ID link or a registration on your instance register, or on a request sent with `reverifiedOutsideTrusset: true` that withdraws a `LAPSED`, `REVOKED`, `REJECTED` or `REQUIREMENTS_CHANGED` removal while the wallet is still on the register. The response then carries `renewed: true`, and `dueAt` counts from now. `confirmEligibility` never restarts it, and a request never renews an admission that is already `ADMITTED`.
 
 <Warning>
-  An admission made `ADMITTED` again without a verification or a confirmation keeps its `dueAt`. When that date has already passed, the admission lapses again at once, and its new `LAPSED` removal then needs `confirmEligibility: true`.
+  An admission made `ADMITTED` again without a verification or an attestation keeps its `dueAt`. When that date has already passed, the admission lapses again at once, and its new `LAPSED` removal then needs `reverifiedOutsideTrusset: true`.
 </Warning>
 
 ## Body Parameters
@@ -75,7 +75,11 @@ The period restarts only on a verification of the customer, through an ID link o
 </ParamField>
 
 <ParamField body="confirmEligibility" type="boolean">
-  `true` to admit a customer onboarded under another profile, or to withdraw a `LAPSED`, `REVOKED` or `REJECTED` removal after you re-verified the customer outside Trusset. Only the boolean `true` counts.
+  `true` to admit a customer onboarded under another profile. It records your decision that the customer meets this profile's requirements. Only the boolean `true` counts.
+</ParamField>
+
+<ParamField body="reverifiedOutsideTrusset" type="boolean">
+  `true` to withdraw a `LAPSED`, `REVOKED`, `REJECTED` or `REQUIREMENTS_CHANGED` removal after you re-verified the customer outside Trusset. It is recorded on the admission and restarts the re-verification period. Only the boolean `true` counts.
 </ParamField>
 
 <ParamField body="note" type="string">
@@ -87,9 +91,9 @@ The period restarts only on a verification of the customer, through an ID link o
 | Situation | HTTP | Response |
 |---|---|---|
 | Queued, or queued again after a removal or cancellation | `201` | `admission` with `status: PENDING`, `alreadyAdmitted: false` |
-| Already waiting | `201` | The same `PENDING` admission, `alreadyAdmitted: false` |
+| Already waiting | `200` | The same `PENDING` admission, `alreadyAdmitted: false`. Nothing changes and no event is sent |
 | Already on the register | `200` | `admission` with `status: ADMITTED`, `alreadyAdmitted: true` |
-| A removal was waiting and the wallet is still on the register | `200` | The removal is cancelled and the admission is `ADMITTED` again. `alreadyAdmitted: true`, `removalCancelled: true`, and `renewed: true` with `confirmEligibility: true` |
+| A removal was waiting and the wallet is still on the register | `200` | The removal is cancelled and the admission is `ADMITTED` again. `alreadyAdmitted: true`, `removalCancelled: true`, and `renewed: true` with `reverifiedOutsideTrusset: true` |
 | A removal was waiting and the wallet is already off the register | `201` | The admission is `PENDING` again, `alreadyAdmitted: false` |
 | The profile's register is your instance register | `201` | `admission: null`, `mode: INSTANCE_REGISTER` and a `message` |
 
@@ -233,7 +237,7 @@ const { success, data, error } = await response.json();
   "data": null,
   "error": {
     "code": "REVERIFICATION_REQUIRED",
-    "message": "The admission of 0x2D27abCA46009EEF7D73eD1B1e913809f2280bE6 to the Professional profile is waiting for removal because its re-verification period ran out. Re-verify the customer, or send confirmEligibility: true to record that the customer was re-verified outside Trusset."
+    "message": "The admission of 0x2D27abCA46009EEF7D73eD1B1e913809f2280bE6 to the Professional profile is waiting for removal because its re-verification period ran out. Re-verify the customer, or send reverifiedOutsideTrusset: true to record that the customer was re-verified outside Trusset."
   },
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
@@ -254,7 +258,7 @@ const { success, data, error } = await response.json();
 | `CUSTOMER_NOT_ELIGIBLE` | `409` | The customer behind the wallet is `rejected` or `revoked` |
 | `ENTITY_TYPE_MISMATCH` | `409` | The customer's `customerType` differs from the profile's `entityType` |
 | `ELIGIBILITY_CONFIRMATION_REQUIRED` | `409` | The customer was onboarded under another profile and `confirmEligibility` is not `true` |
-| `REVERIFICATION_REQUIRED` | `409` | The wallet's removal is waiting with reason `LAPSED`, `REVOKED` or `REJECTED`, and `confirmEligibility` is not `true`. Re-verify the customer, or confirm that you did |
+| `REVERIFICATION_REQUIRED` | `409` | The wallet's removal is waiting with reason `LAPSED`, `REVOKED`, `REJECTED` or `REQUIREMENTS_CHANGED`, and `reverifiedOutsideTrusset` is not `true`. Re-verify the customer, or send `reverifiedOutsideTrusset: true` once you have |
 | `ADMISSIONS_MANAGED_EXTERNALLY` | `409` | The profile's register is in the `EXTERNAL` mode, so its owner admits wallets with its own tools |
 | `ELIGIBILITY_REGISTER_NOT_SET` | `409` | The profile has no eligibility register |
 | `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 eligibility requests per minute. See [Rate limits](/endpoints/customers/introduction#rate-limits) |

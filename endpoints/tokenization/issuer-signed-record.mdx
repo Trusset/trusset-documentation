@@ -1,0 +1,99 @@
+---
+title: 'Issuer-Signed Instrument Record'
+description: 'Publish a client issuer instrument record from a tokenization platform without holding a role on the token'
+---
+
+This page is for a tokenization platform or register whose clients are the issuers. You import your clients' tokens into your instance, but the token's on-chain controller is the issuer. Its wallet is the token's `owner()`, a T-REX agent or a holder of `DEFAULT_ADMIN_ROLE`. Your instance holds none of those roles, so it cannot publish the instrument record on its own.
+
+The issuer-signed flow lets the controller approve the record with a signature, and your platform carries it. Trusset checks the signature and the controller's role on chain when the record is saved. The controller's wallet never becomes a wallet of your instance, so it gets none of your instance's platform roles and no approval power over your other clients' tokens.
+
+<Note>
+  The issuer app keeps its own rule: it offers Start Setup only when a verified wallet of the instance controls the token. A record for a token your instance does not control comes through this flow.
+</Note>
+
+## The five steps
+
+<Steps>
+  <Step title="Import the token">
+    [Import Token](/endpoints/tokenization/import-token). [Detect Token](/endpoints/tokenization/detect-token) already answers `instrumentAuthority.holds: false` for a token your instance does not control.
+  </Step>
+  <Step title="Ask what to sign">
+    [Request Instrument Approval](/endpoints/tokenization/request-instrument-approval) with the record body `{ instrument, documents }`. It validates the body exactly like the save, writes nothing and returns `message`, `recordVersion` and `signedAt`.
+  </Step>
+  <Step title="Have the controller sign">
+    The issuer signs `message` with the controlling wallet in your app: `personal_sign` (EIP-191) for a wallet, or the contract wallet's own signing flow for a Safe, which Trusset checks through ERC-1271.
+  </Step>
+  <Step title="Save">
+    [Save Instrument](/endpoints/tokenization/save-instrument) with the same body plus `issuerApproval: { signer, signature, recordVersion, signedAt }`. Add `takeOver: true` when the approval request answered `takeOverRequired: true`.
+  </Step>
+  <Step title="Read it back">
+    [Get Instrument](/endpoints/tokenization/get-instrument) shows the record asserted by your instance on the controller's authority, with the signature kept in its provenance.
+  </Step>
+</Steps>
+
+```typescript TypeScript
+const base = 'https://api.trusset.org/instruments/api';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+const record = {
+  instrument: { securityClass: 'BOND', isin: 'DE000A0F5UF5', currency: 'EUR', nominalPerUnit: '1000' },
+  documents: []
+};
+
+const request = await fetch(`${base}/${tokenAddress}/approval-request`, {
+  method: 'POST', headers, body: JSON.stringify(record)
+}).then(r => r.json());
+if (!request.success) throw new Error(request.error.message);
+
+const signature = await issuerSigner.signMessage(request.data.message);
+
+const saved = await fetch(`${base}/${tokenAddress}`, {
+  method: 'PUT',
+  headers,
+  body: JSON.stringify({
+    ...record,
+    ...(request.data.takeOverRequired ? { takeOver: true } : {}),
+    issuerApproval: {
+      signer: await issuerSigner.getAddress(),
+      signature,
+      recordVersion: request.data.recordVersion,
+      signedAt: request.data.signedAt
+    }
+  })
+}).then(r => r.json());
+```
+
+## What the signature binds
+
+The message the controller signs reads:
+
+```text
+Trusset instrument record
+Token: 0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f on chain 11155111
+Instance: inst_abc123
+Content digest: 0x7d3a1c0e2f9b4a6d8c5e3f1a0b9c7d5e3f1a2b4c6d8e0f1a3b5c7d9e1f3a5b7c
+Record version: 0
+Signed at: 2026-10-07T14:33:39.000Z
+```
+
+It commits to the token, the chain, the carrying instance, the exact content, the record version and the time. Replayed into another instance it fails, because the instance is in the message. After any change to the record it fails with `ISSUER_APPROVAL_STALE`. After ten minutes it fails with `ISSUER_APPROVAL_EXPIRED`. With altered content it fails with `ISSUER_SIGNATURE_INVALID`.
+
+## The content digest
+
+`Content digest` is keccak256 over the UTF-8 bytes of the canonical JSON of the record content: the `instrument`, `documents` and `presentation` members your body carries, as sent. A body with none of them and `takeOver: true` signs `{"takeOver":true}`.
+
+Canonical JSON follows RFC 8785: object keys sorted, no whitespace, strings escaped as `JSON.stringify` escapes them, which leaves non-ASCII characters as they are. In Python that is `json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`. The approval request returns the digest anyway, so your platform only has to send the same body twice.
+
+## What Trusset checks at the save
+
+The signature recovers to `signer`, or the `signer` contract confirms it through ERC-1271. Then the signer's role is read on chain: `owner()`, `isAgent(signer)` or `hasRole(DEFAULT_ADMIN_ROLE, signer)`. A former owner or a revoked agent is refused with `ISSUER_NOT_CONTROLLER`, which names the current `owner()` when the contract answers one. Other AccessControl roles and ONCHAINID management keys do not count as control.
+
+## How it behaves around other writers
+
+- **Two controllers.** An owner and an agent can both sign. The last valid signed save wins, and each one is bound to the version it saw.
+- **A record another instance asserts.** An issuer-signed save with `takeOver: true` replaces it, even while that instance still holds a role, because the controller's signature is the strongest authority there is.
+- **Release.** The asserting instance can [release](/endpoints/tokenization/release-instrument) the record without a signature.
+- **Your own overview.** Your instance edits its overview with [Update Profile](/endpoints/tokenization/update-profile) whether or not it controls the token.
+
+## Cost
+
+Two calls per save, the approval request and the save, each one credit within the write limit of 10 requests per minute per API key. Verification costs one signature recovery and one multicall for a wallet, and two more chain reads for a contract wallet.

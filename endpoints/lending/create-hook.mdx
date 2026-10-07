@@ -11,10 +11,27 @@ Creates a hook on a lending market and returns `201` with the stored record. A h
 | `hookType` | Runs | What a run does |
 |---|---|---|
 | `monitorRisk` | On its `checkFrequency`, and on [Execute Hook](/endpoints/lending/execute-hook) | Fetches `riskUri` and evaluates `riskFields` against the JSON response. An evaluation of `false` runs every active `afterLiquidation` hook that lists this monitor in `triggerHookIds`. A fetch error does not |
-| `beforeLiquidation` | Only on [Execute Hook](/endpoints/lending/execute-hook) | Evaluates `parameterChecks` against the `loanData` sent with that call. The result blocks nothing |
-| `afterLiquidation` | On [Execute Hook](/endpoints/lending/execute-hook), and when a monitor it lists in `triggerHookIds` evaluates to `false` | Runs its `actionType`: `inform` posts to `webhookUrl`, `buy` returns unsigned bid steps |
+| `beforeLiquidation` | When a loan of the market is liquidated, and on [Execute Hook](/endpoints/lending/execute-hook) | Evaluates `parameterChecks` against the liquidation's data, or the `loanData` sent with that call. The result blocks nothing |
+| `afterLiquidation` | When a loan of the market is liquidated, on [Execute Hook](/endpoints/lending/execute-hook), and when a monitor it lists in `triggerHookIds` evaluates to `false` | Runs its `actionType`: `inform` queues a signed delivery to `webhookUrl`, `buy` returns unsigned bid steps |
 
-Liquidating a loan runs no hook. A `beforeLiquidation` check that fails does not stop a liquidation, and an `afterLiquidation` hook does not fire when one happens.
+A liquidation runs the active `beforeLiquidation` and `afterLiquidation` hooks of every instance that holds the market, once per liquidation, whichever confirm or sync records it first. A failing check records its result and does not stop the liquidation. A `buy` action runs only when the liquidation opened an auction. A monitor's breach runs only `inform` actions, because a breach carries no auction to act on.
+
+## Signed deliveries
+
+An `inform` action does not post inline. It queues a delivery that a worker sends and retries: up to eight attempts with growing pauses, from ten seconds to an hour, until the endpoint answers `2xx`. A redirect or a non-public host is not retried. Every delivery of one event to one hook carries the same `id`, so a retry is never a second event.
+
+Each delivery is a `POST` with these headers:
+
+| Header | Value |
+|---|---|
+| `x-webhook-signature` | HMAC-SHA256, hex, with the hook's signing secret over the `x-webhook-timestamp` value, a dot and the raw body |
+| `x-webhook-timestamp` | Unix seconds at sending |
+| `x-trusset-delivery-id` | The delivery `id`, the same on every retry |
+| `x-hook-id`, `x-hook-type` | The hook and the event: `afterLiquidation` or `riskBreach` |
+
+The body carries `id`, `event`, `hookId`, `marketId`, `emittedAt` and `timestamp`. A liquidation adds `loanId`, `marketLiquidationId`, `auctionId`, `collateralAmount`, `debtOwed`, `borrower`, `txHash` and `marketAddress`. A breach adds `monitorHookId`, `monitorName`, `riskUri`, `checkedAt`, `breached` with the failing fields and their values, and `fields`.
+
+The signing secret is returned once, as `webhookSecret`, when an `inform` hook is created. Store it then. A new one is issued by `POST /lending-external-securities-v2/api/hooks/{marketId}/{hookId}/rotate-secret`, and `GET /lending-external-securities-v2/api/hooks/{marketId}/{hookId}/deliveries` lists the deliveries with their status, attempts and last error.
 
 A monitor is due once `checkFrequency` has passed since its last run, and a new monitor is due at once. The scheduler picks a new monitor up at its next wake-up, not at the moment of this call. Run it once with [Execute Hook](/endpoints/lending/execute-hook) to see it evaluate.
 
@@ -79,7 +96,7 @@ A monitor is due once `checkFrequency` has passed since its last run, and a new 
 </ParamField>
 
 <ParamField body="webhookPayload" type="object">
-  Extra fields merged into the `inform` body. The fixed fields `hookId`, `marketId`, `loanId`, `auctionId`, `collateralAmount`, `debtOwed`, `borrower` and `timestamp` overwrite a key of the same name.
+  Extra fields merged into the `inform` body. The fixed fields listed under [Signed deliveries](#signed-deliveries) overwrite a key of the same name.
 </ParamField>
 
 <ParamField body="triggerHookIds" type="array">
@@ -89,7 +106,7 @@ A monitor is due once `checkFrequency` has passed since its last run, and a new 
 ## Response Fields
 
 <ResponseField name="data" type="object">
-  The new hook record, returned with HTTP `201`. See [List Hooks](/endpoints/lending/list-hooks) for each field.
+  The new hook record, returned with HTTP `201`. See [List Hooks](/endpoints/lending/list-hooks) for each field. `signed` says whether deliveries are signed, and `webhookSecret` carries the signing secret of an `inform` hook in this response only.
 </ResponseField>
 
 <RequestExample>

@@ -1,0 +1,86 @@
+---
+title: 'Get Instrument'
+api: 'GET /instruments/api/{tokenAddress}'
+description: 'The instrument record of a token, your overview and whether your instance can publish the record'
+---
+
+Returns the one instrument record every lender reads for the token on this chain, your instance's overview of it, and whether your instance can publish the record on its own. The token has to be an active import of your instance, or issued through it.
+
+## Path Parameters
+
+<ParamField path="tokenAddress" type="string" required>The token contract address.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="instrument" type="object">
+      The record, or `null` when nobody has published one yet.
+      <Expandable>
+        <ResponseField name="version" type="integer">Starts at `1` and rises with every save, release and takeover. An [issuer approval](/endpoints/tokenization/issuer-signed-record) signs the version it applies to.</ResponseField>
+        <ResponseField name="fields" type="object">One entry per field, each `{ value, provenance, assertedBy, assertedAt, evidence, verification }`. `provenance` is `ISSUER_ASSERTED` for a value an instance published, `REGISTER_GLEIF` for the issuer identity resolved from the LEI and `ABSENT` for a field that holds nothing.</ResponseField>
+        <ResponseField name="documents" type="array">The offering documents, each with its `docType`, `uri`, sha256 `contentHash`, `mimeType`, `bytes`, `language`, `version` and `issuedAt`.</ResponseField>
+        <ResponseField name="missingRequired" type="object">`{ fields, documents }` the record's `securityClass` expects and does not carry yet.</ResponseField>
+        <ResponseField name="assertedBy" type="object">Who stands behind the record: `companyName`, the on-chain `authority` it was published on (`basis`, `wallet`, and `via: "ISSUER_SIGNATURE"` when the token's controller signed it) and the `approval` that signed it.</ResponseField>
+        <ResponseField name="released" type="boolean">`true` when the asserting instance released the record and no instance stands behind it.</ResponseField>
+        <ResponseField name="editable" type="boolean">`true` when your instance asserts the record and still controls the token.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="assertedHere" type="boolean">`true` when your instance asserts the record.</ResponseField>
+    <ResponseField name="presentation" type="object">Your instance's overview, the fields [Update Profile](/endpoints/tokenization/update-profile) writes.</ResponseField>
+    <ResponseField name="carriedFromProfile" type="object">Values an older profile of yours holds for record fields that are still empty. Nothing in it is published until it is saved.</ResponseField>
+    <ResponseField name="unmappableFromProfile" type="object">`{ fields, documents }` an older profile holds that the record cannot take.</ResponseField>
+    <ResponseField name="authority" type="object">
+      Whether your instance can publish the record on its own, read from the chain now.
+      <Expandable>
+        <ResponseField name="holds" type="boolean">`true` when a verified wallet of your instance is the token's `owner()`, one of its agents or a holder of `DEFAULT_ADMIN_ROLE`, or the token was issued through your instance. `false` otherwise: the record then comes from the token's controller through the [issuer-signed flow](/endpoints/tokenization/issuer-signed-record). `null` with `readFailed: true` when the chain or the wallets could not be read.</ResponseField>
+        <ResponseField name="basis" type="string">`ISSUING_INSTANCE`, `TOKEN_OWNER`, `TOKEN_AGENT` or `TOKEN_ADMIN`.</ResponseField>
+        <ResponseField name="wallet" type="string">The verified wallet that holds the role.</ResponseField>
+        <ResponseField name="wallets" type="array">Your instance's verified wallets that were checked.</ResponseField>
+        <ResponseField name="owner" type="string">The token's `owner()` when the contract answers one.</ResponseField>
+        <ResponseField name="message" type="string">When `holds` is `false`, the sentence to show the user, naming the controller and both ways the record can come in.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="issuedHere" type="boolean">`true` when the token was issued through your instance.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/instruments/api/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - no record, no control
+{
+  "success": true,
+  "data": {
+    "instrument": null,
+    "assertedHere": false,
+    "presentation": { "sector": "Fixed income" },
+    "carriedFromProfile": {},
+    "unmappableFromProfile": { "fields": [], "documents": 0 },
+    "authority": {
+      "holds": false,
+      "basis": null,
+      "wallet": null,
+      "wallets": ["0x5d2f8a0c34b1e9d7f6a2c4e8b0d1f3a5c7e9e809"],
+      "owner": "0x7f6032507e7b098bd80657920656954d5e7f1acd",
+      "message": "None of this instance's verified wallets (0x5d2f8a0c34b1e9d7f6a2c4e8b0d1f3a5c7e9e809) is the token's owner, one of its agents or its admin on chain, and the token was not issued through this instance, so this instance cannot save the record on its own. Only the token's controller can publish this record. On chain the token's owner is 0x7f6032507e7b098bd80657920656954d5e7f1acd; an agent of the token or a holder of its admin role also controls it. If one of your own wallets controls the token, add it as a verified wallet of this instance on the Wallet page. Otherwise the record comes through the API, signed by the controller: POST /instruments/api/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f/approval-request returns the message to sign, then PUT /instruments/api/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f with issuerApproval. The published overview stays editable here either way."
+    },
+    "issuedHere": false
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `tokenAddress` is not a valid address |
+| `IMPORT_NOT_FOUND` | `404` | The token is not an active import of your instance and was not issued through it |
+| `IMPORT_LOOKUP_FAILED` | `503` | The import could not be read. Retry shortly |
+| `INSTRUMENT_UNREADABLE` | `503` | The record could not be read. Retry shortly |

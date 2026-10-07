@@ -1,0 +1,113 @@
+---
+title: 'Save Instrument'
+api: 'PUT /instruments/api/{tokenAddress}'
+description: 'Publish the instrument record every lender reads for a token'
+---
+
+Publishes the token's instrument record: its identifiers, legal terms, ranking, term, redemption, register and offering documents. There is one record per token and chain, and it is what a lender of record reads before it takes a market on the token. Your instance's overview can be sent with it under `presentation`.
+
+Only the token's controller publishes the record. A save is accepted on one of two authorities:
+
+- **Your instance controls the token.** One of its verified wallets is the token's `owner()`, a T-REX agent or a holder of `DEFAULT_ADMIN_ROLE`, or the token was issued through your instance. Send the record alone.
+- **The controller signed it.** Send `issuerApproval` with the controller's signature over the message from [Request Instrument Approval](/endpoints/tokenization/request-instrument-approval). Your instance carries the record and needs no role on the token. See the [issuer-signed flow](/endpoints/tokenization/issuer-signed-record).
+
+<Warning>
+  Everything in the record is an assertion of the instance that publishes it. Identifiers are checked for format and check digits, the issuer identity is resolved from GLEIF, and nothing else is verified against a register or a regulator.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="tokenAddress" type="string" required>The token contract address. It has to be an active import of your instance, or issued through it.</ParamField>
+
+## Body Parameters
+
+<ParamField body="instrument" type="object">Record fields by key, from [Get Instrument Schema](/endpoints/tokenization/get-instrument-schema). A field you send is set, `null` or an empty string clears it, and a field you leave out keeps its value.</ParamField>
+<ParamField body="documents" type="array">The full document list. Sending it replaces every document; leaving it out keeps them. Each entry is `{ docType, uri, contentHash, mimeType, bytes, language, issuedAt, cid?, version? }`, with `contentHash` the sha256 of the file as 64 lower-case hex characters. At most 40.</ParamField>
+<ParamField body="presentation" type="object">Your overview, as in [Update Profile](/endpoints/tokenization/update-profile). Left out, the overview stays as it is.</ParamField>
+<ParamField body="takeOver" type="boolean">Replace a record another instance asserts. Without `issuerApproval` this works only when that instance released the record or no longer controls the token. With `issuerApproval` the controller's signature is enough.</ParamField>
+<ParamField body="issuerApproval" type="object">
+  The token controller's approval of exactly this body.
+  <Expandable>
+    <ParamField body="signer" type="string" required>The controller's address: the wallet or contract wallet that signed.</ParamField>
+    <ParamField body="signature" type="string" required>The signature over `message` as 0x-prefixed hex: 65 bytes from `personal_sign`, or at most 2048 bytes for a contract wallet that verifies through ERC-1271.</ParamField>
+    <ParamField body="recordVersion" type="integer" required>The `recordVersion` from the approval request.</ParamField>
+    <ParamField body="signedAt" type="string" required>The `signedAt` from the approval request, unchanged.</ParamField>
+  </Expandable>
+</ParamField>
+
+## How an issuer approval is checked
+
+Every check runs before anything is written, cheapest first:
+
+1. The shape of `issuerApproval`.
+2. Freshness: signed at most ten minutes ago, at most two minutes in the future.
+3. `recordVersion` equals the record's current version, checked again inside the save.
+4. The content digest is rebuilt from the body you sent.
+5. The signature: an ECDSA signature that recovers to `signer`, or an ERC-1271 `isValidSignature` answer from the `signer` contract.
+6. The signer's role on the token, read on chain now: `owner()`, `isAgent(signer)` or `hasRole(DEFAULT_ADMIN_ROLE, signer)`. A former owner or a revoked agent is refused.
+
+The record then stands as asserted by your instance, on the authority of the signer. Its provenance keeps `authority { basis, wallet: signer, via: "ISSUER_SIGNATURE" }` and the `approval` with the signature, the digest, the record version, the signing time and the signed message, so any lender can check the signature independently.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="instrument" type="object">The saved record, as in [Get Instrument](/endpoints/tokenization/get-instrument).</ResponseField>
+    <ResponseField name="presentation" type="object">The overview that was saved with it.</ResponseField>
+    <ResponseField name="authority" type="object">The authority the save was accepted on: `basis`, `wallet`, and `via: "ISSUER_SIGNATURE"` for an issuer approval.</ResponseField>
+    <ResponseField name="issuerApproval" type="object">For an issuer approval: `signer`, `method` (`ECDSA` or `ERC1271`), `recordVersion` and `signedAt`.</ResponseField>
+    <ResponseField name="tookOver" type="boolean">`true` when the save replaced a record another instance asserted.</ResponseField>
+    <ResponseField name="issuedHere" type="boolean">`true` when the token was issued through your instance.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X PUT "https://api.trusset.org/instruments/api/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "instrument": { "securityClass": "BOND", "isin": "DE000A0F5UF5", "currency": "EUR" },
+    "documents": [],
+    "issuerApproval": {
+      "signer": "0x7f6032507e7b098bd80657920656954d5e7f1acd",
+      "signature": "0x5c1e...1b",
+      "recordVersion": 0,
+      "signedAt": "2026-10-07T14:33:39.000Z"
+    }
+  }'
+```
+</RequestExample>
+
+<ResponseExample>
+```json Error - Signer does not control the token
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ISSUER_NOT_CONTROLLER",
+    "message": "0x7f6032507e7b098bd80657920656954d5e7f1acd signed the record but does not control the token on chain right now: it is not the token's owner (the owner is 0x1111111111111111111111111111111111111111), not one of its agents and does not hold its admin role, so nothing was saved. Have the token's current owner, an agent or a holder of the admin role sign the update.",
+    "details": { "signer": "0x7f6032507e7b098bd80657920656954d5e7f1acd", "owner": "0x1111111111111111111111111111111111111111", "checked": ["owner()", "isAgent(address)", "hasRole(DEFAULT_ADMIN_ROLE, address)"] }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `tokenAddress` is not a valid address |
+| `INVALID_INSTRUMENT` | `400` | An unknown body member, or a record field failed validation. `details` names every failing field |
+| `INVALID_DOCUMENTS` | `400` | A document failed validation |
+| `INVALID_PRESENTATION` | `400` | An overview field failed validation |
+| `ISSUER_APPROVAL_INVALID` | `400` | `issuerApproval` is malformed |
+| `IMPORT_NOT_FOUND` | `404` | The token is not an active import of your instance and was not issued through it |
+| `INSTRUMENT_AUTHORITY_REQUIRED` | `403` | No issuer approval, and no verified wallet of your instance controls the token. `details` names the checked wallets, the on-chain owner and the approval request path |
+| `ISSUER_SIGNATURE_INVALID` | `403` | The signature does not prove that `signer` signed this body, token, chain, instance, version and time. `details` carries the digest and the message the server rebuilt |
+| `ISSUER_NOT_CONTROLLER` | `403` | The signer is not the token's owner, an agent or an admin on chain now |
+| `ISSUER_APPROVAL_EXPIRED` | `409` | Signed more than ten minutes ago or in the future |
+| `ISSUER_APPROVAL_STALE` | `409` | The record moved past `recordVersion`. `details.currentVersion` is the version to sign |
+| `INSTRUMENT_CLAIMED_BY_ANOTHER_INSTANCE` | `409` | Another instance asserts the record. `details.canTakeOver` says whether `takeOver: true` succeeds |
+| `INSTRUMENT_WRITE_CONFLICT` | `409` | Another write landed first. Read the record and reapply |
+| `INSTRUMENT_AUTHORITY_UNREADABLE` | `503` | The chain or the wallets could not be read. Nothing was written. Retry shortly |
