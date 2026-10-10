@@ -1,0 +1,118 @@
+---
+title: 'Update Whitelist'
+api: 'PATCH /lending-external-securities-v2/api/access-lists/{listId}'
+description: 'Rename a whitelist record, change its purpose, or archive it'
+---
+
+Changes your instance's record of a whitelist: its name, its purpose, or whether it is archived. Nothing is signed and nothing changes on chain, so the list keeps its owner, its managers and its members. Only the instance that keeps the record can update it. A list another instance keeps answers `404`.
+
+The change is written to the audit log as `LENDING_ACCESS_LIST_RECORD_UPDATED`.
+
+<Warning>
+  Archiving hides the record and stops the list from being named by its ID as a new gate. A list that still gates a market, vault or vault group of your instance cannot be archived: the call answers `ACCESS_LIST_IN_USE` and names those gates in `details.usedBy`. Install another whitelist or a register there first. Archiving never changes the list on chain: its owner and managers can still list and remove wallets, and a product of another instance that installed it keeps admitting its members.
+</Warning>
+
+## What the purpose decides
+
+`purpose` is checked when a list is installed as a gate, by [Set Identity Gates](/endpoints/lending/set-identity-gates#whitelists-as-gates), [Deploy Market](/endpoints/lending/deploy-market#whitelists-as-gates), [Accept Lender Role](/endpoints/operators/accept-lender-role) and vault and vault group creation in the issuer app. A list kept for `DEPOSITOR` is refused as a borrower gate, and one kept for `BORROWER` as a provider or depositor gate, with `ACCESS_LIST_PURPOSE_MISMATCH`.
+
+The same check runs on this call. A purpose that contradicts a gate the list already fills on a market, vault or vault group of your instance is refused with `ACCESS_LIST_PURPOSE_MISMATCH` (`409`), and `details.usedBy` names those gates. `ANY` is always accepted, and so is a purpose that matches every gate the list fills, which is how a list installed under the wrong purpose is put right.
+
+## Path Parameters
+
+<ParamField path="listId" type="string" required>
+  The whitelist ID from [List Whitelists](/endpoints/lending/list-access-lists).
+</ParamField>
+
+## Body Parameters
+
+Send at least one of the three fields.
+
+<ParamField body="name" type="string">
+  New display name, 3 to 64 characters after trimming.
+</ParamField>
+
+<ParamField body="purpose" type="string">
+  `BORROWER`, `DEPOSITOR` or `ANY`.
+</ParamField>
+
+<ParamField body="archived" type="boolean">
+  `true` archives the record, `false` restores it.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="list" type="object">The updated record, with the fields of [List Whitelists](/endpoints/lending/list-access-lists) apart from `own`.</ResponseField>
+    <ResponseField name="changed" type="string[]">The fields this call changed: `name`, `purpose` and `archived`, in that order where present.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X PATCH "https://api.trusset.org/lending-external-securities-v2/api/access-lists/cmv2k8q1d0004l70a3n6p2w9e" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"purpose": "ANY"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/access-lists/${listId}`,
+  {
+    method: 'PATCH',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ purpose: 'ANY' })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "list": {
+      "id": "cmv2k8q1d0004l70a3n6p2w9e",
+      "name": "Depositors Q4",
+      "purpose": "ANY",
+      "address": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+      "ownerWallet": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "pendingOwnerWallet": null,
+      "managers": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+      "memberCount": 148,
+      "archived": false,
+      "createdTxHash": "0x3f6c0e7a91d24b58c06e1f9a7b3d25e48c17a0f9d63e2b51a84c7f0e9d16b23a",
+      "createdBlock": 9384120,
+      "syncedBlock": 9402377,
+      "createdAt": "2026-10-08T14:02:11.000Z",
+      "updatedAt": "2026-10-09T09:30:12.000Z"
+    },
+    "changed": ["purpose"]
+  }
+}
+```
+```json Error - Nothing To Update
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Nothing to update: send a new name, a different purpose or a different archived flag."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | None of the three fields was sent, a field is malformed, or every field sent equals the record already |
+| `ACCESS_LIST_NOT_FOUND` | `404` | No whitelist with this ID is kept by your instance on this network |
+| `ACCESS_LIST_PURPOSE_MISMATCH` | `409` | The new `purpose` contradicts a gate the list fills on a market, vault or vault group of your instance. `details.usedBy` names them |
+| `ACCESS_LIST_IN_USE` | `409` | `archived: true` on a list that still gates a market, vault or vault group of your instance. `details.usedBy` names them |
+| `ACCESS_LIST_UPDATE_FAILED` | `500` | The record could not be updated and no more specific code applied |
+| `ACCESS_LIST_UNREADABLE` | `503` | The gates the list fills could not be read, so a narrower `purpose` or an archive was not applied. Retry shortly |
+| `ACCESS_LISTS_NOT_CONFIGURED` | `503` | The whitelist factory is not deployed on this network |

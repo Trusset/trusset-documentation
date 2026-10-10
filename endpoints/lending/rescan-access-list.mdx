@@ -1,0 +1,102 @@
+---
+title: 'Rescan Whitelist'
+api: 'POST /lending-external-securities-v2/api/access-lists/{listId}/rescan'
+description: 'Catch the whitelist record up with every change on chain, confirmed or not'
+---
+
+Reads the whitelist's events from the last block its record has seen up to the chain's settled head. It records every member listed or removed, every manager added or removed, and the owner and pending owner. Use it after a change signed outside these routes, or when a confirm call was never sent. Nothing is signed.
+
+One call reads at most 20 windows of 10,000 blocks, and stops early once about 4,000 events have been read. `complete: false` means the record has not reached the head yet: call again until it reads `true`. Each recorded change is written to the audit log once per transaction, marked as found by a rescan.
+
+The list must be kept by your instance, or owned, managed or pending to one of its verified wallets.
+
+## Path Parameters
+
+<ParamField path="listId" type="string" required>
+  The whitelist ID from [List Whitelists](/endpoints/lending/list-access-lists).
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="list" type="object">The list after the rescan, as `list` on [Get Whitelist](/endpoints/lending/get-access-list).</ResponseField>
+    <ResponseField name="applied" type="integer">Member rows the rescan wrote or moved forward.</ResponseField>
+    <ResponseField name="events" type="integer">List events read in this call.</ResponseField>
+    <ResponseField name="syncedBlock" type="integer">The block the record has now read up to.</ResponseField>
+    <ResponseField name="head" type="integer">The settled head the rescan read towards.</ResponseField>
+    <ResponseField name="complete" type="boolean">`true` once `syncedBlock` has reached `head`.</ResponseField>
+    <ResponseField name="recorded" type="array">The changes the rescan found, one per transaction and kind: `action` (`LENDING_ACCESS_LIST_MEMBERS_SET`, `LENDING_ACCESS_LIST_MANAGER_SET`, `LENDING_ACCESS_LIST_OWNERSHIP_ACCEPTED` or `LENDING_ACCESS_LIST_OWNER_PROPOSED`), `txHash`, `signer` and `details`.</ResponseField>
+    <ResponseField name="managed" type="boolean">Present and `true` on a list another instance keeps.</ResponseField>
+    <ResponseField name="managedBy" type="string">Your wallet that manages it. Present with `managed`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/access-lists/cmv2k8q1d0004l70a3n6p2w9e/rescan" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/access-lists/${listId}/rescan`;
+const headers = { 'X-API-Key': 'trusset_your_key_here' };
+
+let complete = false;
+while (!complete) {
+  const res = await fetch(url, { method: 'POST', headers });
+  const { success, data, error } = await res.json();
+  if (!success) throw new Error(`${error.code}: ${error.message}`);
+  complete = data.complete;
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "list": {
+      "id": "cmv2k8q1d0004l70a3n6p2w9e",
+      "name": "Depositors Q4",
+      "purpose": "DEPOSITOR",
+      "address": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+      "ownerWallet": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "pendingOwnerWallet": null,
+      "managers": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+      "memberCount": 150,
+      "archived": false,
+      "createdTxHash": "0x3f6c0e7a91d24b58c06e1f9a7b3d25e48c17a0f9d63e2b51a84c7f0e9d16b23a",
+      "createdBlock": 9384120,
+      "syncedBlock": 9411904,
+      "createdAt": "2026-10-08T14:02:11.000Z",
+      "updatedAt": "2026-10-09T12:20:05.000Z",
+      "own": true
+    },
+    "applied": 2,
+    "events": 2,
+    "syncedBlock": 9411904,
+    "head": 9411904,
+    "complete": true,
+    "recorded": [
+      {
+        "action": "LENDING_ACCESS_LIST_MEMBERS_SET",
+        "txHash": "0x6e3a9c1f5b7d20e48a6c3f1b9d7e05c24a8f6b3d1e9c7a05f2b4d8e6a1c3f5b9",
+        "signer": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "details": { "blockNumber": 9411880, "listedCount": 2, "removedCount": 0, "applied": 2 }
+      }
+    ]
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `ACCESS_LIST_NOT_FOUND` | `404` | No whitelist with this ID is kept by your instance, or managed or pending to one of its wallets, on this network |
+| `ACCESS_LIST_RESCAN_FAILED` | `500` | The rescan could not complete and no more specific code applied |
+| `ACCESS_LISTS_NOT_CONFIGURED` | `503` | The whitelist factory is not deployed on this network |
+| `ACCESS_LIST_UNREADABLE` | `503` | The chain head, the list's events or its owner and managers could not be read, so nothing was recorded. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | Your instance's verified wallets could not be read. Retry shortly |

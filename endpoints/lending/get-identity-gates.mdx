@@ -24,7 +24,17 @@ A register can be the eligibility register of one of your [verification profiles
 
 A `MARKET` market lends to professional borrowers only, so its borrower register must qualify as a professional gate: every verification profile that admits wallets to it, on any instance of the market's network and environment, is limited to professional clients and in the `REGISTER` mode, and there is at least one. `borrowerGateCompliant` says whether it qualifies, and `borrowerGateProblem` says what is missing. While it is `false`, the API opens no loan and adds no liquidity on the market: [Open Loan](/endpoints/lending/open-loan), [Borrow More](/endpoints/lending/borrow-more), [Add Liquidity](/endpoints/lending/add-liquidity) and [Register Vault](/endpoints/lending/register-vault) refuse with `PROFESSIONAL_BORROWER_GATE_REQUIRED`, and so do vault allocations, draw caps and rebalances for the market. See [Professional borrowers](/endpoints/lending/set-identity-gates#professional-borrowers).
 
-`borrowerProfile` names only a profile of your own instance. A profile of another instance bound to the same register is not named here, but it counts for `borrowerGateCompliant`.
+`borrowerProfile` names only a profile of your own instance. A register can also be the eligibility register of a profile of another instance on the market's network and environment, for example when a lender of record lends against the professional register a deploying instance keeps. `borrowerProfileElsewhere` is how the lender of record sees that: `{ professionalOnly: true }` when every profile of another instance that admits wallets to the register is limited to professional clients, `{ professionalOnly: false }` when at least one is not. The other instance's profile is not named, and its key, name and requirements are not disclosed. A profile in the `EXTERNAL` mode admits nobody through Trusset and is not counted. `providerProfileElsewhere` does the same for the provider register.
+
+Both read `null` when a profile of your own instance owns the register, which `borrowerProfile` or `providerProfile` then names, when no profile of another instance admits wallets to it, and when the profiles could not be read. Profiles of other instances also count for `borrowerGateCompliant`.
+
+## Gates Built on Whitelists
+
+A register can be a whitelist: a list created through [Create Whitelist](/endpoints/lending/create-access-list) that admits exactly the wallets its owner and managers listed and examines no identity. `borrowerAccessList` or `providerAccessList` then describes it. A whitelist of your own instance carries `id`, `name`, `purpose`, `ownerWallet` and `own: true`. A whitelist another instance keeps carries its `address` with `own: false`, and `id`, `name` and `purpose` read `null`.
+
+A whitelist cannot be the borrower gate of a `MARKET` market and cannot gate a market on the earlier single-register implementation. See [Whitelists as gates](/endpoints/lending/set-identity-gates#whitelists-as-gates).
+
+`accessListSteps` offers the market's lender of record the step that lets it maintain a whitelist gate itself: becoming a manager of the list. There is one entry per whitelist the gates name, while the lender of record is neither the list's owner nor one of its managers, and none while the market has no lender of record. An offered step carries the `setManager` transaction for the list owner to sign. A step is withheld, with `blocked: true` and `code: ACCESS_LIST_SHARED`, when the list also serves the gate of a market of another lender of record, a vault or a vault group. As manager, the lender could admit and remove wallets there too, so `sharedWith` names those products and `reason` explains the alternative. Only products of the instance that keeps the list, of your instance and of the instances that record this market are counted.
 
 ## Older Market Generations
 
@@ -32,9 +42,26 @@ A `MARKET` market lends to professional borrowers only, so its borrower register
 
 A two-register market from before the current generation reports `vaultOnlyLiquidity: false` and `providerGateReadBy: MARKET`. When its pool is open to third-party providers (`operatorOnlyLiquidity: false`), the market itself examines those providers against the provider register, which must then stay installed (`providerGateRequired: true`).
 
+## The Previous Trusset ID Register
+
+The Trusset ID Register on Sepolia moved to `0xEf244c4Bd4d71Bd9A30EDF6Edef7CCC72642291a` on 10 October 2026. A side still gated on the previous register, `0xE9114c40934f6fB6BB317935156b731f7A86D006`, carries `retired: true`, `currentRegistry` and `note` in `borrower` or `provider`:
+
+```json
+"borrower": {
+  "address": "0xe9114c40934f6fb6bb317935156b731f7a86d006",
+  "shape": "tuple",
+  "usable": true,
+  "retired": true,
+  "currentRegistry": "0xef244c4bd4d71bd9a30edf6edef7ccc72642291a",
+  "note": "This is the previous Trusset ID Register. It takes no new identities, so it refuses every customer verified since the register moved to the current Trusset ID Register (0xef244c4bd4d71bd9a30edf6edef7ccc72642291a)."
+}
+```
+
+`usable` stays `true`, because the register still answers for the wallets verified on it before the move. Every customer verified since is refused at that door. The market admin moves the side with [Set Identity Gates](/endpoints/lending/set-identity-gates#the-previous-trusset-id-register).
+
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
 
 ## Response Fields
 
@@ -45,7 +72,7 @@ A two-register market from before the current generation reports `vaultOnlyLiqui
     <ResponseField name="adjustable" type="boolean">Whether the registers can be changed through [Set Identity Gates](/endpoints/lending/set-identity-gates). `true` exactly when `generation` is `TWO_REGISTERS`.</ResponseField>
     <ResponseField name="upgradeRequired" type="boolean">`true` on a `SINGLE_REGISTER` market, which has to be upgraded before its registers can change.</ResponseField>
     <ResponseField name="pendingCurator" type="boolean">`true` while the market has no lender of record, and so no admin who could change the registers.</ResponseField>
-    <ResponseField name="priceSource" type="string">`MARKET`, `NAV` or `ORACLE`.</ResponseField>
+    <ResponseField name="priceSource" type="string">`MARKET`, `NAV`, `ORACLE` or `FIXED`.</ResponseField>
     <ResponseField name="borrowerRegistry" type="string">The borrower register, lowercased, or `null` when none is installed.</ResponseField>
     <ResponseField name="providerRegistry" type="string">The provider register, lowercased, or `null`. On a `SINGLE_REGISTER` market it repeats `borrowerRegistry`.</ResponseField>
     <ResponseField name="operatorOnlyLiquidity" type="boolean">Whether the pool is closed to third-party providers. Always `true` on a current market.</ResponseField>
@@ -58,10 +85,13 @@ A two-register market from before the current generation reports `vaultOnlyLiqui
       <Expandable>
         <ResponseField name="address" type="string">The register, or `null`.</ResponseField>
         <ResponseField name="shape" type="string">`none` with no register, otherwise `bool` or `tuple` for the answer shape it gives. `unknown` means it was reached but does not answer `isVerified(address)`; `unreadable` means it could not be reached.</ResponseField>
-        <ResponseField name="usable" type="boolean">Whether the register answers in a shape the current implementation reads. `true` for `none`, `bool` and `tuple`.</ResponseField>
+        <ResponseField name="usable" type="boolean">Whether the register answers in a shape the current implementation reads. `true` for `none`, `bool` and `tuple`. It stays `true` on the previous Trusset ID Register, which still answers for the wallets verified on it.</ResponseField>
+        <ResponseField name="retired" type="boolean">Present, and `true`, only when the register is the previous Trusset ID Register. See [The Previous Trusset ID Register](#the-previous-trusset-id-register).</ResponseField>
+        <ResponseField name="currentRegistry" type="string">Present with `retired`. The current Trusset ID Register, lowercased.</ResponseField>
+        <ResponseField name="note" type="string">Present with `retired`. Says the register takes no new identities and names the current one.</ResponseField>
       </Expandable>
     </ResponseField>
-    <ResponseField name="provider" type="object">The same three fields for the provider register. Identical to `borrower` when both name the same register.</ResponseField>
+    <ResponseField name="provider" type="object">The same fields for the provider register. Identical to `borrower` when both name the same register.</ResponseField>
     <ResponseField name="borrowerProfile" type="object">
       The verification profile of your instance whose eligibility register the borrower register is, or `null` when there is none or no borrower register.
       <Expandable>
@@ -73,8 +103,42 @@ A two-register market from before the current generation reports `vaultOnlyLiqui
       </Expandable>
     </ResponseField>
     <ResponseField name="providerProfile" type="object">The same for the provider register, or `null`.</ResponseField>
-    <ResponseField name="borrowerGateCompliant" type="boolean">`false` on a `MARKET` market whose borrower register is missing, is admitted to by no verification profile, or is admitted to by a profile, of any instance, that is not limited to professional clients or not in the `REGISTER` mode. `true` otherwise, and always on `NAV` and `ORACLE` markets.</ResponseField>
+    <ResponseField name="borrowerAccessList" type="object">
+      The whitelist the borrower register is, or `null` when it is not a whitelist, when there is no borrower register, or when whitelists are not available on the network. See [Gates Built on Whitelists](#gates-built-on-whitelists).
+      <Expandable>
+        <ResponseField name="id" type="string">The whitelist ID on your instance, for the [whitelist routes](/endpoints/lending/list-access-lists). `null` on a whitelist another instance keeps.</ResponseField>
+        <ResponseField name="name" type="string">Display name. `null` on a whitelist another instance keeps.</ResponseField>
+        <ResponseField name="purpose" type="string">`BORROWER`, `DEPOSITOR` or `ANY`. `null` on a whitelist another instance keeps.</ResponseField>
+        <ResponseField name="address" type="string">The list contract, checksummed.</ResponseField>
+        <ResponseField name="ownerWallet" type="string">The owner on record, lowercased. Present on a whitelist of your own instance only.</ResponseField>
+        <ResponseField name="own" type="boolean">`true` when your instance keeps the list.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="providerAccessList" type="object">The same for the provider register, or `null`.</ResponseField>
+    <ResponseField name="borrowerProfileElsewhere" type="object">`{ professionalOnly }` when the borrower register is the eligibility register of a profile of another instance and of none of yours. `null` otherwise, and when the profiles could not be read. See [Gates Built on Verification Profiles](#gates-built-on-verification-profiles).</ResponseField>
+    <ResponseField name="providerProfileElsewhere" type="object">The same for the provider register, or `null`.</ResponseField>
+    <ResponseField name="borrowerGateCompliant" type="boolean">`false` on a `MARKET` market whose borrower register is missing, is admitted to by no verification profile, or is admitted to by a profile, of any instance, that is not limited to professional clients or not in the `REGISTER` mode. `true` otherwise, and always on `NAV`, `ORACLE` and `FIXED` markets.</ResponseField>
     <ResponseField name="borrowerGateProblem" type="string">Why `borrowerGateCompliant` is `false`, in words. `null` when it is `true`.</ResponseField>
+    <ResponseField name="accessListSteps" type="array">
+      The add-the-lender-as-manager step for each whitelist the gates name. Empty when there is none to offer. See [Gates Built on Whitelists](#gates-built-on-whitelists).
+      <Expandable>
+        <ResponseField name="step" type="string">`addLenderAsListManager`.</ResponseField>
+        <ResponseField name="gate" type="string">`borrower` or `provider`, the side the list serves on this market.</ResponseField>
+        <ResponseField name="listAddress" type="string">The whitelist, checksummed.</ResponseField>
+        <ResponseField name="manager" type="string">The lender of record, checksummed, who would become a manager.</ResponseField>
+        <ResponseField name="listId" type="string">The whitelist ID when your instance keeps the list, otherwise `null`.</ResponseField>
+        <ResponseField name="managerPending" type="boolean">`true` when the lender is not a manager yet. `null` when that could not be read, and `readFailed: true` is set.</ResponseField>
+        <ResponseField name="blocked" type="boolean">`true` when the step is withheld because the list is shared. The entry then carries `code: ACCESS_LIST_SHARED`, `reason` and no transaction.</ResponseField>
+        <ResponseField name="sharedWith" type="object">Every gate the list serves: `markets` (`marketAddress`, `gates`, `lenderOfRecord`, `sameLender`), `vaults` (`vaultAddress`) and `vaultGroups` (`factoryAddress`, `groupId`).</ResponseField>
+        <ResponseField name="requiredRole" type="string">`ACCESS_LIST_OWNER` on an offered step.</ResponseField>
+        <ResponseField name="requiredBy" type="string">The list owner who signs, checksummed.</ResponseField>
+        <ResponseField name="heldByThisInstance" type="boolean">Whether a wallet of your instance is that owner.</ResponseField>
+        <ResponseField name="transaction" type="object">The `setManager(manager, true)` call on the list, with `chainId` and `value`.</ResponseField>
+        <ResponseField name="functionName" type="string">`setManager`.</ResponseField>
+        <ResponseField name="description" type="string">What the step does, naming every gate the list serves.</ResponseField>
+        <ResponseField name="confirmWith" type="object">`{ endpoint, txHash, field, path }` naming [Confirm Whitelist Manager](/endpoints/lending/confirm-access-list-manager) for the list. `null` when your instance does not keep the list.</ResponseField>
+      </Expandable>
+    </ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -128,8 +192,98 @@ const { data } = await res.json();
       "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390"
     },
     "providerProfile": null,
+    "borrowerAccessList": null,
+    "providerAccessList": {
+      "id": "cmv2k8q1d0004l70a3n6p2w9e",
+      "name": "Depositors Q4",
+      "purpose": "DEPOSITOR",
+      "address": "0x7D31E6b09A4c25F8e1B73d0a6C94e2F58b1A0C37",
+      "ownerWallet": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "own": true
+    },
+    "borrowerProfileElsewhere": null,
+    "providerProfileElsewhere": null,
     "borrowerGateCompliant": true,
-    "borrowerGateProblem": null
+    "borrowerGateProblem": null,
+    "accessListSteps": [
+      {
+        "step": "addLenderAsListManager",
+        "gate": "provider",
+        "listAddress": "0x7D31E6b09A4c25F8e1B73d0a6C94e2F58b1A0C37",
+        "manager": "0x4E91A7C05d3B62F18A0c94E7Db2358f1C60a4E93",
+        "listId": "cmv2k8q1d0004l70a3n6p2w9e",
+        "requiredRole": "ACCESS_LIST_OWNER",
+        "requiredBy": "0x1234F9a07C6b53D81e2A4f70C9B385D6014a7E52",
+        "heldByThisInstance": true,
+        "managerPending": true,
+        "blocked": false,
+        "sharedWith": {
+          "markets": [
+            {
+              "marketAddress": "0x70A0E25C7b768B87e658348b3B577678A173e038",
+              "gates": ["provider"],
+              "lenderOfRecord": "0x4E91A7C05d3B62F18A0c94E7Db2358f1C60a4E93",
+              "sameLender": true
+            }
+          ],
+          "vaults": [],
+          "vaultGroups": []
+        },
+        "transaction": {
+          "to": "0x7D31E6b09A4c25F8e1B73d0a6C94e2F58b1A0C37",
+          "data": "0x...",
+          "chainId": 11155111,
+          "value": "0"
+        },
+        "functionName": "setManager",
+        "description": "Add the lender of record as whitelist manager: 0x4E91A7C05d3B62F18A0c94E7Db2358f1C60a4E93 becomes a manager of the whitelist Depositors Q4 (0x7D31E6b09A4c25F8e1B73d0a6C94e2F58b1A0C37), so it can list and remove wallets on every gate this whitelist serves on this network: the provider gate of market 0x70A0E25C7b768B87e658348b3B577678A173e038. Signed by the list owner 0x1234F9a07C6b53D81e2A4f70C9B385D6014a7E52.",
+        "confirmWith": {
+          "endpoint": "managers/confirm",
+          "txHash": true,
+          "field": "txHash",
+          "path": "POST /lending-external-securities-v2/api/access-lists/cmv2k8q1d0004l70a3n6p2w9e/managers/confirm"
+        }
+      }
+    ]
+  }
+}
+```
+```json Response - Professional Profile of Another Instance
+{
+  "success": true,
+  "data": {
+    "marketAddress": "0x1c74f9a2b0e63d581a47c02f9b8de3517a604c2b",
+    "generation": "TWO_REGISTERS",
+    "adjustable": true,
+    "pendingCurator": false,
+    "priceSource": "MARKET",
+    "borrowerRegistry": "0x9cf39640ad6296e4df0fabb764917b6dae5ab7cc",
+    "providerRegistry": null,
+    "operatorOnlyLiquidity": true,
+    "borrowerGateRequired": true,
+    "providerGateRequired": false,
+    "vaultOnlyLiquidity": true,
+    "providerGateReadBy": "VAULTS",
+    "borrower": {
+      "address": "0x9cf39640ad6296e4df0fabb764917b6dae5ab7cc",
+      "shape": "bool",
+      "usable": true
+    },
+    "provider": {
+      "address": null,
+      "shape": "none",
+      "usable": true
+    },
+    "upgradeRequired": false,
+    "borrowerProfile": null,
+    "providerProfile": null,
+    "borrowerAccessList": null,
+    "providerAccessList": null,
+    "borrowerProfileElsewhere": { "professionalOnly": true },
+    "providerProfileElsewhere": null,
+    "borrowerGateCompliant": true,
+    "borrowerGateProblem": null,
+    "accessListSteps": []
   }
 }
 ```
@@ -162,8 +316,13 @@ const { data } = await res.json();
     "upgradeRequired": false,
     "borrowerProfile": null,
     "providerProfile": null,
+    "borrowerAccessList": null,
+    "providerAccessList": null,
+    "borrowerProfileElsewhere": null,
+    "providerProfileElsewhere": null,
     "borrowerGateCompliant": false,
-    "borrowerGateProblem": "This market prices its collateral from a live market price, which carries the free-hand realization path under § 1259 BGB and is only available against professional borrowers. The borrower register 0x9e3c8a15f4d70b2681c5a3f9027d4be8115c7d21 is not the eligibility register of a verification profile limited to professional clients, so nothing records that it admits professional clients only. The market admin marks a profile as limited to professional clients, gives it an eligibility register under Customers › Configure, and chooses that profile as the borrower gate."
+    "borrowerGateProblem": "This market prices its collateral from a live market price, which carries the free-hand realization path under § 1259 BGB and is only available against professional borrowers. The borrower register 0x9e3c8a15f4d70b2681c5a3f9027d4be8115c7d21 is not the eligibility register of a verification profile limited to professional clients, so nothing records that it admits professional clients only. The market admin marks a profile as limited to professional clients, gives it an eligibility register under Customers › Configure, and chooses that profile as the borrower gate.",
+    "accessListSteps": []
   }
 }
 ```
@@ -196,8 +355,13 @@ const { data } = await res.json();
     "upgradeRequired": true,
     "borrowerProfile": null,
     "providerProfile": null,
+    "borrowerAccessList": null,
+    "providerAccessList": null,
+    "borrowerProfileElsewhere": null,
+    "providerProfileElsewhere": null,
     "borrowerGateCompliant": true,
-    "borrowerGateProblem": null
+    "borrowerGateProblem": null,
+    "accessListSteps": []
   }
 }
 ```

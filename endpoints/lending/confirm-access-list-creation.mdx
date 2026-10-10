@@ -1,0 +1,107 @@
+---
+title: 'Confirm Whitelist Creation'
+api: 'POST /lending-external-securities-v2/api/access-lists/confirm-create'
+description: 'Record a whitelist from the mined creation transaction'
+---
+
+Verifies the mined `createAccessList` transaction and records the list on your instance under the `name` and `purpose` you send. The list's address, owner, managers and starting members are read from the receipt, never from the request. From then on the list has an ID, and markets and vaults can name it.
+
+The owner the creation named, or the list's owner on chain now, must be a verified wallet of your instance. A list created for another party's wallet is not recorded here. A transaction sent through a smart account or another contract is accepted when the factory's `AccessListCreated` event proves it.
+
+Confirming the same transaction again returns the record with `created: false` and `200`. A list another instance already recorded is refused with `ACCESS_LIST_ALREADY_REGISTERED`. The exception is a list whose owner wallet your instance holds now and that instance does not. The record then moves to your instance, and the answer carries `recordMoved: true`.
+
+## Body Parameters
+
+<ParamField body="txHash" type="string" required>
+  Hash of the mined creation transaction, 0x followed by 64 hex characters.
+</ParamField>
+
+<ParamField body="name" type="string" required>
+  Display name, 3 to 64 characters. Send the `name` from the build's `confirmWith.body`.
+</ParamField>
+
+<ParamField body="purpose" type="string" default="ANY">
+  `BORROWER`, `DEPOSITOR` or `ANY`. Send the `purpose` from the build's `confirmWith.body`.
+</ParamField>
+
+## Response Fields
+
+Answers `201` when this call recorded the list, `200` when it was already recorded.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="list" type="object">The recorded list, with the fields of [List Whitelists](/endpoints/lending/list-access-lists) apart from `own`.</ResponseField>
+    <ResponseField name="created" type="boolean">`true` when this call recorded the list.</ResponseField>
+    <ResponseField name="recordMoved" type="boolean">Present and `true` when another instance's record of the list moved to your instance.</ResponseField>
+    <ResponseField name="txHash" type="string">The verified transaction.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that sent it. Present when `created` is `true`.</ResponseField>
+    <ResponseField name="seeded" type="object">`{ managers, members }`: how many managers and listed members the creating transaction wrote. Present when `created` is `true`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/access-lists/confirm-create" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "txHash": "0x3f6c0e7a91d24b58c06e1f9a7b3d25e48c17a0f9d63e2b51a84c7f0e9d16b23a",
+    "name": "Depositors Q4",
+    "purpose": "DEPOSITOR"
+  }'
+```
+```typescript TypeScript
+const res = await fetch('https://api.trusset.org/lending-external-securities-v2/api/access-lists/confirm-create', {
+  method: 'POST',
+  headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+  body: JSON.stringify({ txHash, name: 'Depositors Q4', purpose: 'DEPOSITOR' })
+});
+const { data } = await res.json();
+const listId = data.list.id;
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "list": {
+      "id": "cmv2k8q1d0004l70a3n6p2w9e",
+      "name": "Depositors Q4",
+      "purpose": "DEPOSITOR",
+      "address": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+      "ownerWallet": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "pendingOwnerWallet": null,
+      "managers": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+      "memberCount": 1,
+      "archived": false,
+      "createdTxHash": "0x3f6c0e7a91d24b58c06e1f9a7b3d25e48c17a0f9d63e2b51a84c7f0e9d16b23a",
+      "createdBlock": 9384120,
+      "syncedBlock": 9384119,
+      "createdAt": "2026-10-08T14:02:11.000Z",
+      "updatedAt": "2026-10-08T14:02:11.000Z"
+    },
+    "created": true,
+    "txHash": "0x3f6c0e7a91d24b58c06e1f9a7b3d25e48c17a0f9d63e2b51a84c7f0e9d16b23a",
+    "signedBy": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "seeded": { "managers": 1, "members": 1 }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `txHash`, `name` or `purpose` is missing or malformed |
+| `TX_NOT_VERIFIED` | `400` | The transaction created no whitelist on the configured factory, created more than one, created one without an owner, or the factory does not recognise the list |
+| `UNAUTHORIZED_SIGNER` | `403` | Neither the owner the creation named nor the owner now is a verified wallet of your instance. `details` carries `creator` and `owner` |
+| `ACCESS_LIST_ALREADY_REGISTERED` | `409` | Another instance, which holds or held the owner wallet, recorded this list first. A wallet of your instance that manages it finds it under `managed` on [List Whitelists](/endpoints/lending/list-access-lists) |
+| `ACCESS_LIST_CREATE_CONFIRM_FAILED` | `500` | The list could not be recorded and no more specific code applied |
+| `ACCESS_LISTS_NOT_CONFIGURED` | `503` | The whitelist factory is not deployed on this network |
+| `ACCESS_LIST_UNREADABLE` | `503` | The list or the factory could not be read to check the owner or the list's origin. Nothing was recorded. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | Your instance's verified wallets could not be read. Retry shortly |
+
+The confirm call can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

@@ -116,7 +116,7 @@ These are the regulatory argument. Do not soften and do not strengthen.
 | "Your wallet signs every transaction - Trusset holds no key and cannot sign for you" | `protocol/infrastructure/core-infrastructure.mdx` |
 | "Encryption keys never leave your control - Trusset cannot decrypt your data" | `protocol/infrastructure/data-storage.mdx` |
 | "Trusset cannot recover lost keys or decrypt data without them." | `protocol/infrastructure/data-storage.mdx` |
-| "Personal information never stores on-chain to maintain privacy and comply with regulations like GDPR" | `protocol/infrastructure/data-storage.mdx` |
+| ~~"Personal information never stores on-chain to maintain privacy and comply with regulations like GDPR"~~ Corrected: false for an ERC-3643 register, which stores the investor country, and for the residency claim on the investor's ONCHAINID. The GDPR clause was dropped. See OPEN-QUESTIONS item 22. | `protocol/infrastructure/data-storage.mdx` |
 | "Trusset cannot update global contracts (e.g. the Identity Register) as a single party." | `security/overview.mdx` |
 | "Trusset holds no role." | `external-securities-lending/introduction.mdx` |
 | "Trusset is not involved." | `external-securities-lending/introduction.mdx` |

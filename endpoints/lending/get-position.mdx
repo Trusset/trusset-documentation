@@ -10,7 +10,7 @@ On-chain values take precedence where a linked `onChainLoanId` exists. Stored va
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
 <ParamField path="positionId" type="string" required>Position ID, from [List Positions](/endpoints/lending/list-positions). A position of another market returns `POSITION_NOT_FOUND`.</ParamField>
 
 ## Response Fields
@@ -20,10 +20,12 @@ On-chain values take precedence where a linked `onChainLoanId` exists. Stored va
     <ResponseField name="positionId" type="string">Position record ID.</ResponseField>
     <ResponseField name="onChainLoanId" type="string">Numeric loan ID on the market contract, or null when the position has no linked chain loan.</ResponseField>
     <ResponseField name="userAddress" type="string">Borrower address, lowercased.</ResponseField>
+    <ResponseField name="payeeAddress" type="string">The wallet the market pays this loan's draws to when it was opened with a `payToAddress`, lowercased. Null when the loan pays its borrower. See [Pay the proceeds to another wallet](/endpoints/lending/open-loan#pay-the-proceeds-to-another-wallet).</ResponseField>
+    <ResponseField name="payeeCustomer" type="object">The customer of your instance that holds the payee wallet, as its primary or a linked wallet: `id`, `name`, `country`, `status`, `customerType`, `investorType`, `verifiedAt`, `externalId` and `linkedWallet`. Null when the loan has no payee or no customer of your instance holds the wallet.</ResponseField>
     <ResponseField name="borrowedAmount" type="string">Outstanding principal in borrow asset units.</ResponseField>
     <ResponseField name="collateralAmount" type="string">Collateral pledged, in collateral token units.</ResponseField>
     <ResponseField name="accumulatedInterest" type="string">Interest accrued and unpaid, in borrow asset units. The same figure is named `interestAccrued` on List Positions.</ResponseField>
-    <ResponseField name="healthFactor" type="string">Health factor as a decimal string. Below `1.0` the loan is liquidatable on health. Null once the recorded status is not `ACTIVE`.</ResponseField>
+    <ResponseField name="healthFactor" type="string">Health factor as a decimal string. Below `1.0` the loan is liquidatable on health. Null once the recorded status is not `ACTIVE`, and for an open loan with no debt.</ResponseField>
     <ResponseField name="priceAtBorrow" type="string">Collateral price recorded when the loan was opened, in borrow asset units. Useful for computing price movement since origination.</ResponseField>
     <ResponseField name="currentPrice" type="string">The price the market's oracle currently stores, in borrow asset units. It is not checked for staleness here. Null when the market has no configured oracle or the price is zero or unreadable.</ResponseField>
     <ResponseField name="collateralValue" type="string">`collateralAmount` valued at `currentPrice`, in borrow asset units. Null when there is no current price.</ResponseField>
@@ -45,6 +47,20 @@ On-chain values take precedence where a linked `onChainLoanId` exists. Stored va
         <ResponseField name="escrowed" type="string">Surplus the market holds in escrow for this borrower's address, in borrow asset units. It covers every loan of the address on this market, not this loan alone. Read only when collateral was seized from this position, and null otherwise.</ResponseField>
         <ResponseField name="claimable" type="boolean">`true` when `escrowed` is above zero. Claim it with [Claim Surplus](/endpoints/lending/claim-surplus).</ResponseField>
         <ResponseField name="escrowReadFailed" type="boolean">`true` when collateral was seized but the escrow could not be read, so a null `escrowed` means unknown rather than none.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="realizationLoss" type="object">
+      What the realizations of this loan's collateral cost the market, summed over its liquidation records, in borrow asset units. Read only when collateral was seized from this position. Null otherwise, and when no liquidation record of the loan is on file or the figures could not be assembled.
+      <Expandable>
+        <ResponseField name="records" type="integer">Liquidation records found for this loan.</ResponseField>
+        <ResponseField name="pending" type="integer">Records not yet settled or written off.</ResponseField>
+        <ResponseField name="complete" type="boolean">`false` when the market's record of a liquidation could not be read, so the sums below may be short.</ResponseField>
+        <ResponseField name="writtenOffAtSeizure" type="string">Debt the market wrote off at seizure because the collateral did not cover it.</ResponseField>
+        <ResponseField name="seizureReserveCovered" type="string">The part of that write-off the insurance reserve paid.</ResponseField>
+        <ResponseField name="settlementShortfall" type="string">Principal the liquidity pool absorbed at settlement because the proceeds and the insurance reserve together fell short.</ResponseField>
+        <ResponseField name="settlementReserveCovered" type="string">What the insurance reserve paid at settlement.</ResponseField>
+        <ResponseField name="poolLoss" type="string">The loss the liquidity pool bears: the write-off at seizure the reserve did not pay, plus the settlement shortfall.</ResponseField>
+        <ResponseField name="asset" type="object">`symbol` and `decimals` of the borrow asset.</ResponseField>
       </Expandable>
     </ResponseField>
     <ResponseField name="transactions" type="array">Every transaction on this loan, newest first, up to 1,000 rows. Each carries `id`, `marketId`, `positionId`, `txType`, `userAddress`, `amount`, `txHash` and `timestamp`. Where another Trusset instance on the same network also tracks this market, its rows for the same loan are merged in once per transaction. `recordedByThisInstance` tells them apart, and a row recorded only by the other instance carries null `marketId` and `positionId`.</ResponseField>
@@ -80,6 +96,8 @@ const surplusToClaim = data.surplus?.claimable === true ? data.surplus.escrowed 
     "positionId": "secpos_014",
     "onChainLoanId": "5",
     "userAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "payeeAddress": null,
+    "payeeCustomer": null,
     "borrowedAmount": "50000.0",
     "collateralAmount": "1000.0",
     "accumulatedInterest": "961.643835",
@@ -127,6 +145,7 @@ const surplusToClaim = data.surplus?.claimable === true ? data.surplus.escrowed 
       "claimable": false,
       "escrowReadFailed": false
     },
+    "realizationLoss": null,
     "transactions": [
       {
         "id": "sectx_002",

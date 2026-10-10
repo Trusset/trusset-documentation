@@ -10,7 +10,7 @@ The maximum borrow is the collateral value multiplied by the market's collateral
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
 
 ## Body Parameters
 
@@ -27,7 +27,7 @@ The maximum borrow is the collateral value multiplied by the market's collateral
 </ParamField>
 
 <ParamField body="signedPrice" type="object">
-  EIP-712 signed price from [Sign Price](/endpoints/lending/sign-price), applied atomically with the loan. Omit to price against the stored oracle value, which must not be stale. A market that prices from an external feed refuses a signed price with `EXTERNAL_FEED_ACTIVE`.
+  EIP-712 signed price from [Sign Price](/endpoints/lending/sign-price), applied atomically with the loan. Omit to price against the stored oracle value, which must not be stale. A market that prices from an external feed refuses a signed price with `EXTERNAL_FEED_ACTIVE`, and a market with a fixed price refuses one with `FIXED_PRICE_ACTIVE`, because its oracle accepts none.
   <Expandable>
     <ParamField body="price" type="string">Price in base units.</ParamField>
     <ParamField body="timestamp" type="integer">Signing timestamp.</ParamField>
@@ -39,7 +39,11 @@ The maximum borrow is the collateral value multiplied by the market's collateral
 <ParamField body="clientReference" type="string">
   The client this loan is for, as the customer's `referenceKey`, its `externalId` or its customer ID. Up to 120 characters, matched against the customers of your instance that are not archived. Create the record first with [Create Customer](/endpoints/customers/create).
 
-  The attribution is recorded on the confirm call, so send `clientReference` there. On the build call it is only resolved and echoed back with `confirmWithClientReference: true`. The fields `customerId`, `clientId`, `clientReferenceKey` and `externalId` are refused with `CLIENT_REFERENCE_FIELD`, and `onBehalfOf` with `KEY_MATERIAL_REJECTED`.
+  Send it on the build call and again on the confirm call. The build call checks the client before anything is signed and refuses an ineligible one with `409 CLIENT_NOT_ELIGIBLE`, see [Client of record](#client-of-record). The confirm call checks it again and records the attribution. A loan built without it can be signed and mined for a client the confirm call then refuses, and such a loan can only be recorded without a client. The fields `customerId`, `clientId`, `clientReferenceKey` and `externalId` are refused with `CLIENT_REFERENCE_FIELD`, and `onBehalfOf` with `KEY_MATERIAL_REJECTED`.
+</ParamField>
+
+<ParamField body="payToAddress" type="string">
+  Wallet that receives the borrowed amount instead of the signing wallet. The signer stays the borrower of record. See [Pay the proceeds to another wallet](#pay-the-proceeds-to-another-wallet). Omitted, `null`, an empty string or the borrower's own address pays the borrower. Build call only: the confirm call reads the payee from the mined transaction.
 </ParamField>
 
 <ParamField body="reattribute" type="boolean">
@@ -58,7 +62,7 @@ When `txHash` is omitted the response is always `SIGN_TRANSACTIONS` with a `mode
 
 **`FREEZE`** returns one step: `openLoan`. No approval exists because the tokens never leave the borrower's wallet.
 
-Both shapes carry `confirmStepIndex` and `confirmWith: "openLoan"`, naming the step whose hash confirms the loan.
+Both shapes carry `confirmStepIndex`, the index of the `openLoan` step whose hash confirms the loan, and `confirmWith`, which names this route and the body to confirm with.
 
 ## What the loan will cost and when it is due
 
@@ -102,13 +106,41 @@ The calldata response carries a `warnings` array when a preflight found somethin
 | `MATURITY_PASSED_FOREIGN_RECORD` | The recorded maturity has passed, but it was asserted by an instance that is not a party to this market, so the loan is not refused on it |
 | `MATURITY_UNCHECKED` | The recorded maturity could not be read, so this preflight did not check it |
 
-`enforcement` is `OFF_CHAIN` on every one of these. The contract does not know about them, so acting on a warning is the caller's decision. When the market charges an opening fee, the array also carries `transactionFee.message` as a plain string rather than an object.
+`enforcement` is `OFF_CHAIN` on every one of these. The contract does not know about them, so acting on a warning is the caller's decision. When the market charges an opening fee, the array also carries `transactionFee.message` as a plain string rather than an object. With a `payToAddress`, that string is the statement of who receives the proceeds instead, and `transactionFee.message` names the payee.
 
 ## Professional borrowers
 
 On a `MARKET`-priced market the API builds no loan until the market's borrower register qualifies as a professional gate, and refuses with `409 PROFESSIONAL_BORROWER_GATE_REQUIRED`, `details.field: "borrowerRegistry"`. The register qualifies when at least one verification profile admits wallets to it, and every profile that does, on any instance of the market's network and environment, is limited to professional clients and has its admissions signed by its own instance. See [Professional borrowers](/endpoints/lending/set-identity-gates#professional-borrowers).
 
 The check runs right after the lender-of-record check, before the adapter, pause and term checks. It reads the market's price source and borrower register from the chain, and the profiles from Trusset's records. When either read fails the call answers `503`, `MARKET_STATE_UNAVAILABLE` or `STATE_UNAVAILABLE`, and builds nothing. The market contract does not apply this rule, so it holds only for transactions built through this API.
+
+## Client of record
+
+A `clientReference` is checked on the build call and on the confirm call, before anything else: before the market's own checks on the build call, and before the transaction is read on the confirm call. Send it on both. The build call is the one that refuses an ineligible client before anything is signed. The loan is refused with `409 CLIENT_NOT_ELIGIBLE` when the client:
+
+- is recorded as `rejected` or `revoked` (`details.reason` is `REJECTED` or `REVOKED`);
+- is recorded in a country that the verification profile it was onboarded under blocks, or that a profile behind the market's borrower register blocks (`COUNTRY_BLOCKED`). A profile in the `EXTERNAL` mode is not counted;
+- is not a professional client, on a `MARKET`-priced market (`NOT_PROFESSIONAL`, or `NOT_VERIFIED` for a client typed professional whose verification on your instance is not complete).
+
+A client counts as professional when one of its wallets is admitted to a profile of your instance limited to professional clients. It also counts when it is verified on your instance under a profile that is limited to professional clients or registers its investors as Professional or Eligible Counterparty. Verified on your instance means the record reads `verified` and carries the `verifiedAt` of a verification completed here (a verify, an ID link or a registration confirmed on this instance), with no revocation since. A `verified` status set through [Update Customer](/endpoints/customers/update) marks the record only and does not count. An admission recorded by another instance does not count either, even to this market's own borrower register. `details.clientReference` names the client.
+
+The borrower register is read from the market at call time, so a register the market admin changed after the market was recorded is the one applied. When it cannot be read the call answers `503 MARKET_STATE_UNAVAILABLE` and builds nothing.
+
+## Pay the proceeds to another wallet
+
+`payToAddress` sends the borrowed amount, less any opening fee, to a wallet other than the one that signs. The signer stays the borrower of record: it provides the collateral, owes the debt, and receives every collateral return, any liquidation surplus and every escrow or surplus claim. The payee is fixed for the life of the loan and receives every later [Borrow More](/endpoints/lending/borrow-more) draw as well. The calldata calls the `openLoan` overload that takes the payee.
+
+<Warning>
+  The market examines the payee against its borrower register, exactly as it examines the borrower, at opening and at every later draw. A payee the register no longer admits blocks every further draw on the loan until it is admitted again, because the payee cannot be changed. Repaying, adding collateral and closing stay open.
+</Warning>
+
+The build call refuses a payee the transaction could not pay:
+
+- A market whose implementation predates pay-to answers `409 PAY_TO_UNSUPPORTED`. Its admin upgrades it with [Upgrade Market](/endpoints/lending/upgrade-market). `payToSupported` on [List Markets](/endpoints/lending/list-markets) shows which markets take a payee.
+- The payee may not be one of the market's own contracts or a contract it is wired to: the market, its liquidation router, its collateral adapter, its auction venue, its insurance fund, the settlement token (stablecoin), the collateral token, the oracle, the interest rate model or a vault registered on the market. That is refused with `400 PAY_TO_NOT_ALLOWED`, and `details.reason` names which. The market itself refuses the first five. It would pay the others, and the proceeds would be lost to the borrower while the full debt stays owed.
+- A payee that the borrower register does not admit is refused with `400 PAYEE_NOT_VERIFIED`. `details` carries `payee`, `register`, and `requiredProfile` or `accessList` when the register is one of your profiles' eligibility registers or a whitelist. A payee whose removal from that register is pending is refused with `409 ELIGIBILITY_REMOVAL_PENDING`.
+
+The calldata response then carries `payeeAddress` and a `payee` block, and its `warnings` state who receives what. The confirm call returns the payee the market recorded for the loan, read from its `LoanPayeeSet` event, and the ledger books the draw and the opening fee against the payee.
 
 ## Vault draws
 
@@ -126,16 +158,20 @@ Confirming returns `201`.
     <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="steps" type="array">Ordered transactions to broadcast. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="confirmStepIndex" type="integer">Index of the `openLoan` step. `1` in `CUSTODY`, `0` in `FREEZE`.</ResponseField>
-    <ResponseField name="confirmWith" type="string">`openLoan`.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: this route, `txHash` as the field, and a `body` carrying `clientReference` with `txHash: null` when the build call named a client. Confirm with the hash of `steps[confirmStepIndex]`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="payeeAddress" type="string">The payee, checksummed, when `payToAddress` names a wallet other than the borrower. `null` otherwise. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="payee" type="object">`{ address, borrowerOfRecord, receives, netDisbursed, fixedForLife, receivesBorrowMore }`: who receives the proceeds and how much, net of any opening fee. `null` when the borrower is paid. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="offering" type="object">See [What the loan will cost](#what-the-loan-will-cost-and-when-it-is-due).</ResponseField>
     <ResponseField name="transactionFee" type="object">The opening fee, present only when it is not zero.</ResponseField>
     <ResponseField name="warnings" type="array">See [Warnings](#warnings).</ResponseField>
-    <ResponseField name="confirmWithClientReference" type="boolean">`true` when `clientReference` resolved on the build call. Send it again on the confirm call.</ResponseField>
+    <ResponseField name="confirmWithClientReference" type="boolean">`true` when `clientReference` passed the check on the build call. Send it again on the confirm call.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming.</ResponseField>
     <ResponseField name="loanId" type="string">On-chain loan ID, parsed from the `LoanOpened` event. Use this on every subsequent loan operation. Returned when confirming.</ResponseField>
     <ResponseField name="positionId" type="string">Trusset position record ID, or `null` if the record could not be written. Returned when confirming.</ResponseField>
     <ResponseField name="collateralAmount" type="string">Collateral the loan holds, read from the loan after the transaction mined. Returned when confirming.</ResponseField>
     <ResponseField name="borrowAmount" type="string">The loan's principal, read after the transaction mined. It is the full debt, including any opening fee withheld from the payout. Returned when confirming.</ResponseField>
+    <ResponseField name="payeeAddress" type="string">The payee the market recorded for the loan, lowercased, or `null` when the borrower was paid. Returned when confirming.</ResponseField>
+    <ResponseField name="paidTo" type="string">The wallet that received the proceeds: the payee, or the borrower when there is none. Returned when confirming.</ResponseField>
     <ResponseField name="customerId" type="string">Customer the loan is attributed to, or `null`. On the build call, the customer `clientReference` resolved to.</ResponseField>
     <ResponseField name="clientReference" type="string">The resolved client's `externalId`, else its `referenceKey`, else its customer ID. `null` on a confirm call that carried none.</ResponseField>
     <ResponseField name="attribution" type="object">Returned when confirming. `customerId`, `attributedAt`, `changed` (whether this confirm attributed or moved the loan) and `previousCustomerId` (the client it moved from, when it moved).</ResponseField>
@@ -149,7 +185,7 @@ Confirming returns `201`.
 </Warning>
 
 <Note>
-  Minimum and maximum borrow are checked when the calldata is built, not when you confirm. Broadcasting an out-of-range amount reverts on-chain rather than returning `BELOW_MIN_BORROW` or `EXCEEDS_MAX_BORROW`. The maximum borrow check is also skipped whenever a `signedPrice` is supplied, since the contract will price against the signature rather than the stored value.
+  Minimum and maximum borrow are checked when the calldata is built, not when you confirm. Broadcasting an out-of-range amount reverts on-chain rather than returning `BELOW_MIN_BORROW` or `EXCEEDS_MAX_BORROW`. With a `signedPrice`, the maximum borrow is computed at the signed price, because the contract applies it before it prices the collateral.
 </Note>
 
 <RequestExample>
@@ -215,6 +251,8 @@ const { data: loan } = await confirmed.json();
     "positionId": "cmswb4n1e0021cghx9k2t6pdm",
     "collateralAmount": "1000.0",
     "borrowAmount": "50000.0",
+    "payeeAddress": null,
+    "paidTo": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
     "customerId": "cmt0k3b9x0004cghxw7r2d5ya",
     "clientReference": "CL-000417",
     "attribution": {
@@ -262,7 +300,13 @@ const { data: loan } = await confirmed.json();
     ],
     "mode": "CUSTODY",
     "confirmStepIndex": 1,
-    "confirmWith": "openLoan",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/positions/cmssh7p1k0001cghxq2m4v8rz/open-loan",
+      "field": "txHash",
+      "body": { "clientReference": "CL-000417", "txHash": null }
+    },
+    "payeeAddress": null,
+    "payee": null,
     "offering": {
       "approximateDueAt": "1797004800",
       "termGracePeriodSeconds": "259200",
@@ -308,7 +352,86 @@ const { data: loan } = await confirmed.json();
     ],
     "mode": "FREEZE",
     "confirmStepIndex": 0,
-    "confirmWith": "openLoan"
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/positions/cmssh7p1k0001cghxq2m4v8rz/open-loan",
+      "field": "txHash"
+    },
+    "payeeAddress": null,
+    "payee": null
+  }
+}
+```
+```json Calldata Response (Pay to Another Wallet)
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+          "data": "0x...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "openLoan",
+        "description": "Open the loan and pay the proceeds to 0x2B6eD29A95753C3Ad948348e3e7b1A251080Ffb9"
+      }
+    ],
+    "mode": "FREEZE",
+    "confirmStepIndex": 0,
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/positions/cmssh7p1k0001cghxq2m4v8rz/open-loan",
+      "field": "txHash",
+      "body": { "clientReference": "CL-000417", "txHash": null }
+    },
+    "payeeAddress": "0x2B6eD29A95753C3Ad948348e3e7b1A251080Ffb9",
+    "payee": {
+      "address": "0x2B6eD29A95753C3Ad948348e3e7b1A251080Ffb9",
+      "borrowerOfRecord": "0xaBc7f1093D5E26B804a1C3f78dE025916B47C0d3",
+      "receives": "borrowAmount minus the open fee",
+      "netDisbursed": "50000.0",
+      "fixedForLife": true,
+      "receivesBorrowMore": true
+    },
+    "warnings": [
+      "The proceeds are paid to 0x2B6eD29A95753C3Ad948348e3e7b1A251080Ffb9, not to the signing wallet: it receives the full 50000.0 USDC. 0xaBc7f1093D5E26B804a1C3f78dE025916B47C0d3 signs, provides the collateral and stays the borrower of record: every collateral return, any liquidation surplus and every surplus or escrow claim go back to it. The payee is fixed for the life of the loan and also receives every later borrowMore draw."
+    ],
+    "clientReference": "CL-000417",
+    "customerId": "cmt0k3b9x0004cghxw7r2d5ya",
+    "confirmWithClientReference": true
+  }
+}
+```
+```json Error - Client Not Eligible
+{
+  "success": false,
+  "error": {
+    "code": "CLIENT_NOT_ELIGIBLE",
+    "message": "The client CL-000417 is recorded as rejected on this instance, so no loan is booked against it.",
+    "details": { "reason": "REJECTED", "clientReference": "CL-000417" }
+  }
+}
+```
+```json Error - Payee Not Verified
+{
+  "success": false,
+  "error": {
+    "code": "PAYEE_NOT_VERIFIED",
+    "message": "The payee 0x2B6eD29A95753C3Ad948348e3e7b1A251080Ffb9 is not admitted to the Professional eligibility register (0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90), which this market applies to the payee as well as the borrower, so the market would refuse the payout (PayeeNotVerified). Onboard the payee wallet under the Professional profile and admit it, or omit payToAddress to pay the borrower.",
+    "details": {
+      "payee": "0x2B6eD29A95753C3Ad948348e3e7b1A251080Ffb9",
+      "register": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
+      "requiredProfile": {
+        "key": "PROFESSIONAL",
+        "name": "Professional",
+        "entityType": "INDIVIDUAL",
+        "professionalOnly": true,
+        "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390"
+      },
+      "accessList": null
+    }
   }
 }
 ```
@@ -363,17 +486,25 @@ The price, supply-cap, collateral-value and liquidity checks run in the order th
 | `VALIDATION_ERROR` | `400` | `collateralAmount` or `borrowAmount` is missing on the build call, not a positive decimal string, or carries more decimal places than its token supports. Also a malformed address, `txHash` or `clientReference` |
 | `CLIENT_REFERENCE_FIELD` | `400` | The body carries `customerId`, `clientId`, `clientReferenceKey` or `externalId`. Pass the value as `clientReference` |
 | `INVALID_CLIENT_REFERENCE` | `400` | `clientReference` is blank |
+| `INVALID_PAY_TO_ADDRESS` | `400` | `payToAddress` is not 0x followed by 40 hex characters, is the zero address, or fails its EIP-55 checksum |
+| `PAY_TO_NOT_ALLOWED` | `400` | `payToAddress` is the market or a contract it is wired to. `details` carries `reason` (`MARKET`, `ROUTER`, `ADAPTER`, `AUCTION_MODULE`, `INSURANCE_FUND`, `SETTLEMENT_TOKEN`, `COLLATERAL_TOKEN`, `ORACLE`, `INTEREST_MODEL` or `VAULT`) and `payToAddress`. Name the wallet that should receive the proceeds |
+| `PAYEE_NOT_VERIFIED` | `400` | The payee is not admitted to the market's borrower register. `details` carries `payee`, `register`, `requiredProfile` and `accessList`. Admit the payee, or omit `payToAddress` |
 | `COLLATERAL_ADAPTER_NOT_AUTHORIZED` | `400` | The adapter lacks the agent role (`FREEZE`) or allow-listed or verified holder status (`CUSTODY`) on the collateral token |
 | `FREEZE_MODE_UNSUPPORTED_TOKEN` | `400` | The token does not implement the ERC-3643 freeze interface. Use a `CUSTODY` market |
 | `MARKET_PAUSED` | `400` | The market is paused. Its admin must unpause it |
-| `IDENTITY_NOT_VERIFIED` | `400` | `borrowerAddress` is not verified on the market's borrower register. `details.register` names the register and `details.requiredProfile` the verification profile whose eligibility register it is, or `null`. With a profile, the message says to onboard and admit the wallet under it |
+| `IDENTITY_NOT_VERIFIED` | `400` | `borrowerAddress` is not verified on the market's borrower register. `details.register` names the register, `details.requiredProfile` the verification profile whose eligibility register it is, and `details.accessList` the whitelist it is, each `null` when it does not apply. With a profile, the message says to onboard and admit the wallet under it. With a whitelist, it says to have the list's owner or a manager list the wallet |
+| `IDENTITY_GATE_RETIRED` | `409` | Returned instead of `IDENTITY_NOT_VERIFIED` when the borrower register that refuses `borrowerAddress` is the previous Trusset ID Register. It takes no new identities, so the wallet cannot be added to it. `details` carries `register`, `gate` (`identity`), `retired: true` and `currentRegistry`. The market admin moves the gate to the current register with [Set Identity Gates](/endpoints/lending/set-identity-gates#the-previous-trusset-id-register), then retry |
 | `BELOW_MIN_BORROW` | `400` | `borrowAmount` is under the market's `minBorrowAmount` |
 | `PRICE_STALE` | `400` | The price is older than the oracle's staleness window. On an attested market, push a price with [Sync Oracle Price](/endpoints/lending/sync-oracle) or supply a `signedPrice`. On an external-feed market, wait for the feed to publish |
 | `SUPPLY_CAP_EXCEEDED` | `400` | The pledge would push total collateral past `maxTotalCollateral` |
 | `USER_SUPPLY_CAP_EXCEEDED` | `400` | The pledge would push this borrower past `maxUserCollateral` |
-| `EXCEEDS_MAX_BORROW` | `400` | `borrowAmount` exceeds what the collateral supports. Skipped when a `signedPrice` is supplied |
+| `EXCEEDS_MAX_BORROW` | `400` | `borrowAmount` exceeds what the collateral supports, at the signed price when a `signedPrice` is supplied |
+| `INVALID_SIGNED_PRICE` | `400` | The `signedPrice` is malformed, expired, dated in the future or older than the oracle's price age window, or it was signed by a wallet that is not an authorized signer on the market's oracle, which `details.signer` then names. Sign a fresh quote with [Sign Price](/endpoints/lending/sign-price) |
+| `PRICE_DEVIATION_TOO_LARGE` | `400` | The `signedPrice` moves further from the oracle's current price than its `maxDeviationBps` allows |
+| `PRICE_WINDOW_DEVIATION_TOO_LARGE` | `400` | The `signedPrice` falls outside the band the oracle accepts within its current one-hour window |
 | `INSUFFICIENT_LIQUIDITY` | `400` | The pool, after its reserve earmark and any vault draw it could make, holds less than the loan needs |
 | `FIRST_DRAW_BELOW_FLOOR` | `400` | The pool is empty and the vault draw that would fund this borrow is below the first-deposit floor this market's implementation applies to draws |
+| `INSUFFICIENT_FREE_COLLATERAL` | `400` | On a `FREEZE` market, `borrowerAddress` holds fewer unfrozen tokens than `collateralAmount`. `details` carries `holder`, `balance`, `frozen` and `free` |
 | `COLLATERAL_TRANSFER_RESTRICTED` | `400` | The collateral token's compliance rules block moving this collateral into the custody adapter |
 | `CLIENT_REFERENCE_NOT_FOUND` | `404` | `clientReference` matches no customer of your instance |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
@@ -382,8 +513,14 @@ The price, supply-cap, collateral-value and liquidity checks run in the order th
 | `MARKET_TERM_EXPIRED` | `409` | The market's terminal due date has passed, so the contract refuses every new loan. Repayment and withdrawals stay open |
 | `COLLATERAL_MATURED` | `409` | The collateral instrument passed its recorded maturity, and the record was asserted by a party to this market. `error.details` carries `maturityDate` |
 | `EXTERNAL_FEED_ACTIVE` | `409` | A `signedPrice` was sent to a market that prices from an external feed. Retry without it |
+| `FIXED_PRICE_ACTIVE` | `409` | A `signedPrice` was sent to a market with a fixed price, whose oracle refuses every signed price. Retry without it: the loan prices against the fixed price |
+| `SIGNED_PRICE_OUTDATED` | `409` | The `signedPrice` is not dated after the price the oracle already holds, so the oracle would refuse it. Sign a fresh quote |
+| `PAY_TO_UNSUPPORTED` | `409` | `payToAddress` was sent to a market whose implementation predates pay-to. Upgrade the market, or omit `payToAddress` |
+| `ELIGIBILITY_REMOVAL_PENDING` | `409` | The borrower's or the payee's admission to the borrower register is waiting for removal, so no new loan is prepared for it. `details` carries `register` and `wallet`, plus `reason` and `profileKey` when the admission is your instance's |
+| `CLIENT_NOT_ELIGIBLE` | `409` | The client named by `clientReference` may not carry this loan. `details.reason` is `REJECTED`, `REVOKED`, `COUNTRY_BLOCKED`, `NOT_PROFESSIONAL` or `NOT_VERIFIED`. See [Client of record](#client-of-record) |
 | `CLIENT_REFERENCE_CONFLICT` | `409` | On confirm, the loan is already attributed to another client and `reattribute` was not `true` |
-| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to run a check, its price source and borrower register included, so no transaction was prepared. Retry shortly |
-| `STATE_UNAVAILABLE` | `503` | The verification profiles behind a `MARKET` market's borrower register could not be read. Retry shortly |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to run a check, its price source, its borrower register, whether it can pay a third party and the contracts it is wired to included, so no transaction was prepared. Retry shortly |
+| `STATE_UNAVAILABLE` | `503` | The verification profiles behind a `MARKET` market's borrower register could not be read, or the admissions to the borrower register could not be checked for a pending removal. Retry shortly |
+| `PRICE_STATE_UNAVAILABLE` | `503` | The oracle could not be read to check the `signedPrice`, so nothing was built. Retry shortly |
 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

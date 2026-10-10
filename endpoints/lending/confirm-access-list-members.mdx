@@ -1,0 +1,108 @@
+---
+title: 'Confirm Whitelist Members'
+api: 'POST /lending-external-securities-v2/api/access-lists/{listId}/members/confirm'
+description: 'Record the wallets a mined setListed transaction listed or removed'
+---
+
+Verifies a mined `setListed` transaction on the whitelist and records every wallet it listed or removed, read from the list's `AccountListed` events. Confirm each batch of [Set Whitelist Members](/endpoints/lending/set-access-list-members) on its own. A transaction sent through a smart account or another contract is accepted when the list's events prove it.
+
+Each wallet's state is recorded at the position of the event in the chain, so an older event never overwrites a newer one. Confirming a transaction twice, or after a rescan already recorded it, applies nothing and answers the same way. The change is written to the audit log as `LENDING_ACCESS_LIST_MEMBERS_SET`.
+
+The record only follows the chain. The list admits or refuses a wallet from the moment the transaction mines, whether or not it is confirmed here.
+
+## Path Parameters
+
+<ParamField path="listId" type="string" required>
+  The whitelist ID from [List Whitelists](/endpoints/lending/list-access-lists).
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="txHash" type="string" required>
+  Hash of the mined `setListed` transaction, 0x followed by 64 hex characters.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="list" type="object">The list after the change, as `list` on [Get Whitelist](/endpoints/lending/get-access-list).</ResponseField>
+    <ResponseField name="applied" type="integer">Member rows this call wrote or moved forward.</ResponseField>
+    <ResponseField name="skipped" type="integer">Events already reflected in the record.</ResponseField>
+    <ResponseField name="events" type="integer">`AccountListed` events the transaction emitted on the list.</ResponseField>
+    <ResponseField name="listedCount" type="integer">Wallets the transaction left listed.</ResponseField>
+    <ResponseField name="removedCount" type="integer">Wallets the transaction left removed.</ResponseField>
+    <ResponseField name="txHash" type="string">The verified transaction.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that sent the transaction, lowercased. For a transaction sent through a smart account or another contract, the outer sender.</ResponseField>
+    <ResponseField name="managed" type="boolean">Present and `true` on a list another instance keeps.</ResponseField>
+    <ResponseField name="managedBy" type="string">Your wallet that manages it. Present with `managed`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/access-lists/cmv2k8q1d0004l70a3n6p2w9e/members/confirm" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"txHash": "0x8b1e4d2c7a9f05e36d1b8c4a2f7e90d35c6b1a8f4e2d7c09b3a6f1e5d8c2b4a7"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/access-lists/${listId}/members/confirm`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txHash })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "list": {
+      "id": "cmv2k8q1d0004l70a3n6p2w9e",
+      "name": "Depositors Q4",
+      "purpose": "DEPOSITOR",
+      "address": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+      "ownerWallet": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "pendingOwnerWallet": null,
+      "managers": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+      "memberCount": 147,
+      "archived": false,
+      "createdTxHash": "0x3f6c0e7a91d24b58c06e1f9a7b3d25e48c17a0f9d63e2b51a84c7f0e9d16b23a",
+      "createdBlock": 9384120,
+      "syncedBlock": 9402377,
+      "createdAt": "2026-10-08T14:02:11.000Z",
+      "updatedAt": "2026-10-09T10:04:52.000Z",
+      "own": true
+    },
+    "applied": 1,
+    "skipped": 0,
+    "events": 1,
+    "listedCount": 0,
+    "removedCount": 1,
+    "txHash": "0x8b1e4d2c7a9f05e36d1b8c4a2f7e90d35c6b1a8f4e2d7c09b3a6f1e5d8c2b4a7",
+    "signedBy": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `txHash` is missing or malformed |
+| `TX_NOT_VERIFIED` | `400` | The transaction listed or removed no wallet on this list |
+| `ACCESS_LIST_NOT_FOUND` | `404` | No whitelist with this ID is kept by your instance, or managed or pending to one of its wallets, on this network |
+| `ACCESS_LIST_MEMBERS_CONFIRM_FAILED` | `500` | The change could not be recorded and no more specific code applied |
+| `ACCESS_LISTS_NOT_CONFIGURED` | `503` | The whitelist factory is not deployed on this network |
+| `ACCESS_LIST_UNREADABLE` | `503` | The list belongs to another instance and whether your wallets still manage it could not be read. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | Your instance's verified wallets could not be read. Retry shortly |
+
+The confirm call can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

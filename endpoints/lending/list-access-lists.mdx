@@ -1,0 +1,157 @@
+---
+title: 'List Whitelists'
+api: 'GET /lending-external-securities-v2/api/access-lists'
+description: 'The whitelists your instance keeps, and those its wallets manage for another instance'
+---
+
+Returns the whitelists your instance keeps and the whitelists of other instances that one of its verified wallets owns, manages or is named to take over. A whitelist is a list contract that admits exactly the wallets its owner and its managers listed. It examines no identity. Installed as a market's borrower or provider register, or as a vault's depositor register, it is the gate.
+
+A whitelist is a lighter gate than a [verification profile](/endpoints/customers/list-verification-profiles#eligibility-registers): nothing records why a wallet is on it. It cannot be the borrower gate of a `MARKET` market, and it gates liquidity providers or vault depositors only on the attestation of the instance that curates it. See [Whitelists as Gates](/endpoints/lending/set-identity-gates#whitelists-as-gates).
+
+## How whitelists work
+
+The wallet that creates a whitelist owns it, and your instance keeps its record: the name, the purpose and the members it has seen confirmed. The owner adds and removes managers. The owner and every manager list and remove wallets, in batches of at most 200 per transaction. Ownership moves in two steps, proposed by the owner and accepted by the new owner, and a list can never be left without an owner.
+
+Every change is a transaction a wallet you control signs, built and confirmed through these routes:
+
+| Step | Build | Confirm |
+|---|---|---|
+| Create | [Create Whitelist](/endpoints/lending/create-access-list) | [Confirm Whitelist Creation](/endpoints/lending/confirm-access-list-creation) |
+| List or remove wallets | [Set Whitelist Members](/endpoints/lending/set-access-list-members) | [Confirm Whitelist Members](/endpoints/lending/confirm-access-list-members) |
+| Add or remove a manager | [Set Whitelist Manager](/endpoints/lending/set-access-list-manager) | [Confirm Whitelist Manager](/endpoints/lending/confirm-access-list-manager) |
+| Propose or accept a new owner | [Transfer Whitelist Ownership](/endpoints/lending/transfer-access-list-ownership) | [Confirm Whitelist Ownership](/endpoints/lending/confirm-access-list-ownership) |
+
+[Get Whitelist](/endpoints/lending/get-access-list) reads one list with its members, [Rescan Whitelist](/endpoints/lending/rescan-access-list) catches the record up with changes signed elsewhere, and [Update Whitelist](/endpoints/lending/update-access-list) renames, re-purposes or archives the record.
+
+<Warning>
+  A change to a whitelist applies at once to every gate it serves: every market and vault that installed it, also those of other instances. A gate admits the list's members at the moment of each check. Removing a wallet from a list that gates a market's borrowers stops that wallet's next draw there, and listing one admits it everywhere the list is installed.
+</Warning>
+
+## Lists another instance keeps
+
+A whitelist is recorded by the instance that created it. When a verified wallet of your instance manages a list another instance keeps, that list appears under `managed`. Your instance can list and remove wallets on it, confirm those changes and rescan it. Only the instance that keeps the list adds managers and transfers it. A list whose pending transfer names one of your wallets appears under `managed` too, so the transfer can be accepted.
+
+Suppose the list's owner on chain is a verified wallet of your instance, and the instance that kept the record does not hold that wallet. The record then moves to your instance with its name. That happens the first time your instance reads the list with [Get Whitelist](/endpoints/lending/get-access-list), or builds, confirms or rescans a change to it. The move is written to the audit log as `LENDING_ACCESS_LIST_REHOMED`.
+
+## Query Parameters
+
+<ParamField query="includeArchived" type="boolean" default="false">
+  `true` or `1` also returns the lists your instance archived. Any other value leaves them out.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="lists" type="array">
+      The whitelists your instance keeps, newest first. Empty when whitelists are not available on the network.
+      <Expandable>
+        <ResponseField name="id" type="string">Whitelist ID. Every other whitelist route takes it, and a market or vault names a list by it.</ResponseField>
+        <ResponseField name="name" type="string">Display name, 3 to 64 characters. Kept on your record only, never on chain.</ResponseField>
+        <ResponseField name="purpose" type="string">`BORROWER`, `DEPOSITOR` or `ANY`: which gates the list may serve. A list kept for one side is refused as a gate on the other.</ResponseField>
+        <ResponseField name="address" type="string">The list contract, lowercased.</ResponseField>
+        <ResponseField name="ownerWallet" type="string">The owner as last recorded, lowercased.</ResponseField>
+        <ResponseField name="pendingOwnerWallet" type="string">The wallet a proposed transfer names, or `null`.</ResponseField>
+        <ResponseField name="managers" type="string[]">Managers as last recorded, lowercased.</ResponseField>
+        <ResponseField name="memberCount" type="integer">Wallets recorded as listed.</ResponseField>
+        <ResponseField name="archived" type="boolean">Whether your instance archived the record. An archived list still works on chain.</ResponseField>
+        <ResponseField name="createdTxHash" type="string">The creating transaction.</ResponseField>
+        <ResponseField name="createdBlock" type="integer">Its block.</ResponseField>
+        <ResponseField name="syncedBlock" type="integer">The last block the record has read the list's events up to.</ResponseField>
+        <ResponseField name="createdAt" type="string">ISO 8601.</ResponseField>
+        <ResponseField name="updatedAt" type="string">ISO 8601.</ResponseField>
+        <ResponseField name="own" type="boolean">Always `true` here.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="managed" type="array">
+      Lists other instances keep where your verified wallets are recorded as a manager, as the owner or as the pending owner. Up to 200, newest first. The owner instance's name for the list is not disclosed.
+      <Expandable>
+        <ResponseField name="id" type="string">Whitelist ID.</ResponseField>
+        <ResponseField name="name" type="string">Always `null`.</ResponseField>
+        <ResponseField name="purpose" type="string">`BORROWER`, `DEPOSITOR` or `ANY`.</ResponseField>
+        <ResponseField name="address" type="string">The list contract, lowercased.</ResponseField>
+        <ResponseField name="ownerWallet" type="string">The owner as last recorded.</ResponseField>
+        <ResponseField name="managers" type="string[]">Managers as last recorded.</ResponseField>
+        <ResponseField name="memberCount" type="integer">Wallets recorded as listed.</ResponseField>
+        <ResponseField name="own" type="boolean">Always `false`.</ResponseField>
+        <ResponseField name="managedBy" type="string">Your wallet that holds the list, as owner or manager, or `null` when only a pending transfer names one of your wallets.</ResponseField>
+        <ResponseField name="pendingOwnerWallet" type="string">The wallet a proposed transfer names, or `null`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="available" type="boolean">Whether the whitelist factory is configured on this network. Every other whitelist route answers `503 ACCESS_LISTS_NOT_CONFIGURED` while it is `false`.</ResponseField>
+    <ResponseField name="factory" type="string">The whitelist factory, lowercased, or `null`.</ResponseField>
+    <ResponseField name="maxBatch" type="integer">`200`, the most wallets one transaction lists or removes.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  `managers`, `ownerWallet` and `memberCount` are the record, written by the confirm calls and by [Rescan Whitelist](/endpoints/lending/rescan-access-list). A change signed and never confirmed reaches the record only through a rescan. [Get Whitelist](/endpoints/lending/get-access-list) with `wallets` reads the live state from the chain.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/access-lists" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch('https://api.trusset.org/lending-external-securities-v2/api/access-lists', {
+  headers: { 'X-API-Key': 'trusset_your_key_here' }
+});
+const { data } = await res.json();
+if (!data.available) throw new Error('Whitelists are not available on this network');
+const depositorLists = data.lists.filter((list: { purpose: string }) => list.purpose !== 'BORROWER');
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "lists": [
+      {
+        "id": "cmv2k8q1d0004l70a3n6p2w9e",
+        "name": "Depositors Q4",
+        "purpose": "DEPOSITOR",
+        "address": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+        "ownerWallet": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+        "pendingOwnerWallet": null,
+        "managers": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+        "memberCount": 148,
+        "archived": false,
+        "createdTxHash": "0x3f6c0e7a91d24b58c06e1f9a7b3d25e48c17a0f9d63e2b51a84c7f0e9d16b23a",
+        "createdBlock": 9384120,
+        "syncedBlock": 9402377,
+        "createdAt": "2026-10-08T14:02:11.000Z",
+        "updatedAt": "2026-10-09T08:15:40.000Z",
+        "own": true
+      }
+    ],
+    "managed": [
+      {
+        "id": "cmv1x7r3a0002l60b9k4m5t8q",
+        "name": null,
+        "purpose": "BORROWER",
+        "address": "0x5e8a2c1f9b0d73e46a1c8f2b9d04e7a3c6b15f20",
+        "ownerWallet": "0x8c2d4e6f0a1b3c5d7e9f1a2b4c6d8e0f2a4b6c8d",
+        "managers": ["0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52"],
+        "memberCount": 12,
+        "own": false,
+        "managedBy": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+        "pendingOwnerWallet": null
+      }
+    ],
+    "available": true,
+    "factory": "0x2c9e47a1b05d83f6e4a17c3b92d0f68e5a4c1b37",
+    "maxBatch": 200
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `ACCESS_LIST_READ_FAILED` | `500` | The lists could not be read and no more specific code applied |
+| `SERVICE_UNAVAILABLE` | `503` | The whitelist records or your instance's verified wallets could not be read. Retry shortly |

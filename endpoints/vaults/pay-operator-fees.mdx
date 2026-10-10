@@ -38,6 +38,7 @@ The calldata response:
     <ResponseField name="description" type="string">The transaction in words.</ResponseField>
     <ResponseField name="note" type="string">States that the vault pays its owner, never the signer.</ResponseField>
     <ResponseField name="confirmWith" type="object">`endpoint`, this route with the vault ID filled in, and `field`, always `txHash`.</ResponseField>
+    <ResponseField name="steps" type="array">Present instead of `transaction`, with `action: "SIGN_TRANSACTIONS"`, when the vault must first record a market's write-off: one `recordMarketLoss` step per such market, then the payout. Each step is `{ action, transaction, functionName, description }`. `confirmStepIndex` points at the last step, `recordsWriteOffs` lists `{ marketAddress, amountRaw }` per market, and `writeOffNote` explains them. Any wallet may sign every step. Confirm with the hash of the last one.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -68,8 +69,12 @@ const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'applica
 const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({}) });
 const { data } = await res.json();
 
-const tx = await signer.sendTransaction(data.transaction);
-await tx.wait();
+const transactions = data.steps ? data.steps.map((step) => step.transaction) : [data.transaction];
+let tx;
+for (const transaction of transactions) {
+  tx = await signer.sendTransaction(transaction);
+  await tx.wait();
+}
 
 await fetch(url, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.hash }) });
 ```
@@ -136,7 +141,7 @@ await fetch(url, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.ha
 | `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address on record |
 | `VAULT_UPGRADE_REQUIRED` | `409` | The vault runs an implementation from before distributor attribution |
 | `NOTHING_ACCRUED` | `409` | No unattributed distributor fee is waiting for the operator. Collect the vault's slice from its markets first |
-| `VAULT_STATE_UNAVAILABLE` | `503` | The vault implementation, its operator balance or owner, or your standing in an unpublished vault could not be read. Retry shortly |
+| `VAULT_STATE_UNAVAILABLE` | `503` | The vault implementation, its operator balance or owner, whether a market wrote off accrual the vault has not recorded, or your standing in an unpublished vault could not be read. Retry shortly |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read, so nothing was decided. Retry shortly |
 | `SERVICE_UNAVAILABLE` | `503` | The vault records or your instance's verified wallets could not be read. Retry shortly |
 | `VAULT_DISTRIBUTOR_ACTION_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |

@@ -16,7 +16,7 @@ Single transaction in both modes.
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
 
 ## Body Parameters
 
@@ -29,7 +29,7 @@ Single transaction in both modes.
 </ParamField>
 
 <ParamField body="signedPrice" type="object">
-  EIP-712 signed price from [Sign Price](/endpoints/lending/sign-price). Omit to price against the stored oracle value. A market that prices from an external feed refuses a signed price with `EXTERNAL_FEED_ACTIVE`.
+  EIP-712 signed price from [Sign Price](/endpoints/lending/sign-price). Omit to price against the stored oracle value. A market that prices from an external feed refuses a signed price with `EXTERNAL_FEED_ACTIVE`, and a market with a fixed price with `FIXED_PRICE_ACTIVE`.
   <Expandable>
     <ParamField body="price" type="string">Price in base units.</ParamField>
     <ParamField body="timestamp" type="integer">Signing timestamp.</ParamField>
@@ -51,8 +51,9 @@ Single transaction in both modes.
     <ResponseField name="functionName" type="string">`withdrawCollateral`. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="collateralRelease" type="object">Present on a `CUSTODY` market when the collateral token would refuse to return the collateral to the borrower, or when its verdict cannot be read before signing. The withdrawal still succeeds, and the borrower reclaims an escrowed balance through [Claim Escrowed Collateral](/endpoints/lending/claim-escrowed-collateral).</ResponseField>
     <ResponseField name="warning" type="string">Human-readable form of `collateralRelease`, present alongside it.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: this route, `txHash` as the field, and a `body` carrying `loanId` with `txHash: null`. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="loanId" type="integer">Loan ID, echoed back. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="loanId" type="string">Loan ID, echoed back as a string. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="amount" type="string">Collateral released from the loan, read from the mined transaction. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="escrowed" type="boolean">`true` when the adapter escrowed the release instead of delivering it. Present only then, together with `escrowedAmount`, `delivered: false`, `adapterAddress`, `claimAction: "claim-escrowed-collateral"` and a `message`.</ResponseField>
   </Expandable>
@@ -116,7 +117,12 @@ const { data: result } = await confirmed.json();
       "value": "0",
       "chainId": 11155111
     },
-    "functionName": "withdrawCollateral"
+    "functionName": "withdrawCollateral",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/positions/cmssh7p1k0001cghxq2m4v8rz/withdraw-collateral",
+      "field": "txHash",
+      "body": { "loanId": "5", "txHash": null }
+    }
   }
 }
 ```
@@ -125,7 +131,7 @@ const { data: result } = await confirmed.json();
   "success": true,
   "data": {
     "txHash": "0x2d6f8b0a4c1e3957b9d1f3a5c7e9b0d2f4a6c8e1b3d5f7a9c2e4b6d8f0a1c3e5",
-    "loanId": 5,
+    "loanId": "5",
     "amount": "100.0"
   }
 }
@@ -135,7 +141,7 @@ const { data: result } = await confirmed.json();
   "success": true,
   "data": {
     "txHash": "0x2d6f8b0a4c1e3957b9d1f3a5c7e9b0d2f4a6c8e1b3d5f7a9c2e4b6d8f0a1c3e5",
-    "loanId": 5,
+    "loanId": "5",
     "amount": "100.0",
     "escrowed": true,
     "escrowedAmount": "100.0",
@@ -157,12 +163,18 @@ const { data: result } = await confirmed.json();
 | `VALIDATION_ERROR` | `400` | `loanId` is not a positive integer, or `amount` is missing on the build call, not a positive decimal string, or carries more decimal places than the collateral token supports |
 | `LOAN_NOT_ACTIVE` | `400` | The loan is closed and can no longer be modified |
 | `INSUFFICIENT_COLLATERAL` | `400` | `amount` exceeds the collateral the loan holds |
-| `WOULD_BREACH_HEALTH_FACTOR` | `400` | The remaining collateral would support less than the loan's outstanding debt at the market's collateral factor |
+| `WOULD_BREACH_HEALTH_FACTOR` | `400` | The remaining collateral would support less than the loan's outstanding debt at the market's collateral factor, priced at the signed price when a `signedPrice` is supplied |
 | `PRICE_STALE` | `400` | The loan carries debt and the price is older than the oracle's staleness window. On an attested market, push a price with [Sync Oracle Price](/endpoints/lending/sync-oracle) or supply a `signedPrice`. On an external-feed market, wait for the feed to publish |
+| `INVALID_SIGNED_PRICE` | `400` | The `signedPrice` is malformed, expired, dated in the future or older than the oracle's price age window, or it was signed by a wallet that is not an authorized signer on the market's oracle, which `details.signer` then names. Sign a fresh quote with [Sign Price](/endpoints/lending/sign-price) |
+| `PRICE_DEVIATION_TOO_LARGE` | `400` | The `signedPrice` moves further from the oracle's current price than its `maxDeviationBps` allows |
+| `PRICE_WINDOW_DEVIATION_TOO_LARGE` | `400` | The `signedPrice` falls outside the band the oracle accepts within its current one-hour window |
 | `LOAN_NOT_FOUND` | `404` | No loan with that ID exists on this market |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `EXTERNAL_FEED_ACTIVE` | `409` | A `signedPrice` was sent to a market that prices from an external feed. Retry without it |
+| `FIXED_PRICE_ACTIVE` | `409` | A `signedPrice` was sent to a market with a fixed price. Retry without it |
+| `SIGNED_PRICE_OUTDATED` | `409` | The `signedPrice` is not dated after the price the oracle already holds, so the oracle would refuse it. Sign a fresh quote |
 | `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to check its price. Retry shortly |
 | `LOAN_STATE_UNAVAILABLE` | `503` | The loan or the resulting borrow limit could not be read. Retry shortly |
+| `PRICE_STATE_UNAVAILABLE` | `503` | The oracle could not be read to check the `signedPrice`, so nothing was built. Retry shortly |
 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

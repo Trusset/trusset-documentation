@@ -1,0 +1,152 @@
+---
+title: 'Create Whitelist'
+api: 'POST /lending-external-securities-v2/api/access-lists'
+description: 'Build the transaction that deploys a whitelist owned by a wallet of your instance'
+---
+
+Builds the `createAccessList` call on the whitelist factory. The wallet that signs it becomes the list's owner, and it must be a verified wallet of your instance. Record the list afterwards with [Confirm Whitelist Creation](/endpoints/lending/confirm-access-list-creation), sending the same `name` and `purpose`.
+
+Managers and members named here are written by the creating transaction itself, up to 200 of each. Larger member sets follow in batches with [Set Whitelist Members](/endpoints/lending/set-access-list-members) once the list exists.
+
+<Note>
+  `name` and `purpose` are kept on your instance's record, not on chain. The list contract holds only its owner, its managers and its members.
+</Note>
+
+## Body Parameters
+
+<ParamField body="name" type="string" required>
+  Display name, 3 to 64 characters after trimming.
+</ParamField>
+
+<ParamField body="purpose" type="string" default="ANY">
+  `BORROWER`, `DEPOSITOR` or `ANY`. A list kept for `BORROWER` is refused as a provider or depositor gate, and one kept for `DEPOSITOR` as a borrower gate. `ANY` fits both.
+</ParamField>
+
+<ParamField body="managers" type="string[]">
+  Wallets that may list and remove members from the start. Up to 200 addresses. Duplicates are dropped. Only the owner can change managers later.
+</ParamField>
+
+<ParamField body="members" type="string[]">
+  Wallets to list from the start. Up to 200 addresses. Duplicates are dropped.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The wallet that will sign and own the list. Omit it to use your instance's primary verified wallet. A wallet that is not a verified wallet of your instance is refused with `UNAUTHORIZED_SIGNER`.
+</ParamField>
+
+The transaction is simulated against the factory before it is returned. A creation the factory would refuse answers with the refusal instead of calldata.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">The `createAccessList` call on the factory, `{ to, data, chainId, value }`.</ResponseField>
+    <ResponseField name="functionName" type="string">`createAccessList`.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction creates, in words.</ResponseField>
+    <ResponseField name="ownerWallet" type="string">The owner, lowercased. Sign with this wallet.</ResponseField>
+    <ResponseField name="list" type="object">What the list will start with: `name`, `purpose`, `owner`, `managers` and `members`, addresses lowercased.</ResponseField>
+    <ResponseField name="notes" type="string[]">How the list behaves: who changes what, that a removal applies only once signed, and where a whitelist cannot serve.</ResponseField>
+    <ResponseField name="warnings" type="array">`{ code, message }`. `LARGE_CREATION` when more than 100 managers and members together are written by the creating transaction, which pays gas for each.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, txHash, body, field, path }`. `path` is `POST /lending-external-securities-v2/api/access-lists/confirm-create`, and `body` carries the `name` and `purpose` to send with the hash.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/access-lists" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Depositors Q4",
+    "purpose": "DEPOSITOR",
+    "managers": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+    "members": ["0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b"]
+  }'
+```
+```typescript TypeScript
+const base = 'https://api.trusset.org/lending-external-securities-v2/api/access-lists';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const build = await fetch(base, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ name: 'Depositors Q4', purpose: 'DEPOSITOR', members: [investorWallet] })
+});
+const { data } = await build.json();
+
+const tx = await ownerWallet.sendTransaction(data.transaction);
+await tx.wait();
+
+const confirmed = await fetch(`${base}/confirm-create`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ ...data.confirmWith.body, txHash: tx.hash })
+});
+const { data: created } = await confirmed.json();
+const listId = created.list.id;
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x2C9E47a1B05d83F6e4A17C3B92d0F68E5a4C1b37",
+      "data": "0x...",
+      "chainId": 11155111,
+      "value": "0"
+    },
+    "functionName": "createAccessList",
+    "description": "Create the whitelist Depositors Q4, owned by 0x1234F9a07C6b53D81e2A4f70C9B385D6014a7E52",
+    "ownerWallet": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "list": {
+      "name": "Depositors Q4",
+      "purpose": "DEPOSITOR",
+      "owner": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "managers": ["0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"],
+      "members": ["0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b"]
+    },
+    "notes": [
+      "Only the owner adds or removes managers; the owner and every manager list and remove wallets.",
+      "A whitelist installed as a gate admits exactly the wallets it lists, and a removal takes effect on chain only once it is signed.",
+      "A whitelist never satisfies the professional-borrower floor of a Market-priced market and cannot gate a market that reads the older single register."
+    ],
+    "warnings": [],
+    "confirmWith": {
+      "endpoint": "confirm-create",
+      "txHash": true,
+      "body": { "name": "Depositors Q4", "purpose": "DEPOSITOR" },
+      "field": "txHash",
+      "path": "POST /lending-external-securities-v2/api/access-lists/confirm-create"
+    }
+  }
+}
+```
+```json Error - Unauthorized Signer
+{
+  "success": false,
+  "error": {
+    "code": "UNAUTHORIZED_SIGNER",
+    "message": "A whitelist is owned by the wallet that creates it, and that wallet must be a verified wallet of this instance."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `name` is not 3 to 64 characters, `purpose` is not an accepted value, `managers` or `members` holds more than 200 entries or a malformed address, or `signerAddress` is malformed. `details` names each field |
+| `INVALID_ADDRESS` | `400` | A manager, a member or `signerAddress` is the zero address, or fails its EIP-55 checksum |
+| `UNAUTHORIZED_SIGNER` | `403` | The owner would not be a verified wallet of your instance |
+| `TX_WOULD_REVERT` | `409` | The creation would revert for another reason. `details.revert` names the contract error where known |
+| `WALLET_NOT_CONFIGURED` | `412` | No `signerAddress` was sent and your instance has no verified wallet |
+| `ACCESS_LIST_CREATE_FAILED` | `500` | The creation could not be prepared and no more specific code applied |
+| `ACCESS_LISTS_NOT_CONFIGURED` | `503` | The whitelist factory is not deployed on this network |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read to simulate the creation. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | Your instance's verified wallets could not be read. Retry shortly |

@@ -1,0 +1,172 @@
+---
+title: 'Deposit to Vault Group'
+api: 'POST /lending-external-securities-v2/api/vaults/groups/{groupId}/deposit'
+description: 'Approve-and-deposit calldata for the pocket of a vault group that holds the chosen currency'
+---
+
+Picks the pocket of a vault group that holds the currency or asset you name. It builds the deposit into that pocket exactly as [Deposit](/endpoints/vaults/deposit) does for a single vault: an approval, then the deposit, attributed to your instance as the depositor's distributor. Every check and refusal of Deposit applies, and so does the attribution table there. The depositor receives the pocket's shares, in the pocket's currency.
+
+Name the pocket by exactly one of `currency` and `asset`. A `currency` matches a pocket's asset symbol first, for example `USDC`, and otherwise its settlement currency, for example `USD`. When two pockets settle in the same currency, naming the currency is ambiguous and is refused with `GROUP_CURRENCY_AMBIGUOUS`, which lists the candidates. Name the asset symbol or address then.
+
+Confirm the deposit on the pocket with [Confirm Transaction](/endpoints/vaults/confirm-transaction), using the pocket's vault ID that `vaultId` and `confirmWith` name.
+
+## Path Parameters
+
+<ParamField path="groupId" type="string" required>
+  Vault group ID from [List Vaults](/endpoints/vaults/list-vaults) or [Get Vault Group](/endpoints/vaults/get-vault-group).
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="amount" type="string" required>
+  Amount to deposit as a decimal string greater than zero, in the pocket's asset and at its decimals.
+</ParamField>
+
+<ParamField body="currency" type="string">
+  An asset symbol such as `USDC` or `EURC`, or a currency such as `USD` or `EUR`: 2 to 12 letters, digits or `.`. Not accepted beside `asset`.
+</ParamField>
+
+<ParamField body="asset" type="string">
+  The settlement asset address of the pocket. Not accepted beside `currency`.
+</ParamField>
+
+<ParamField body="holderAddress" type="string">
+  Wallet that will sign, checked as on [Deposit](/endpoints/vaults/deposit). When sent, it must be a `0x` address of 40 hex characters, otherwise `VALIDATION_ERROR`.
+</ParamField>
+
+## Response Fields
+
+The fields of [Deposit](/endpoints/vaults/deposit), plus:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="groupId" type="string">The vault group.</ResponseField>
+    <ResponseField name="vaultId" type="string">The pocket's vault ID. Confirm the deposit on it.</ResponseField>
+    <ResponseField name="pocket" type="object">`{ vaultId, vaultAddress, assetAddress, assetSymbol, assetDecimals, settlementCurrency }` of the pocket the deposit goes into.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, txHash, txType }`: `POST /lending-external-securities-v2/api/vaults/{vaultId}/confirm-tx` for the pocket, with `txType: "DEPOSIT"`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/vaults/groups/cmv3a1b2c0007l80d4e5f6g7h/deposit" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": "1000", "currency": "EURC", "holderAddress": "0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b"}'
+```
+```typescript TypeScript
+const base = 'https://api.trusset.org/lending-external-securities-v2/api/vaults';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(`${base}/groups/${groupId}/deposit`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ amount: '1000', currency: 'EURC', holderAddress: await signer.getAddress() })
+});
+const { data } = await res.json();
+
+let depositHash = '';
+for (const [index, step] of data.steps.entries()) {
+  const tx = await signer.sendTransaction(step.transaction);
+  await tx.wait();
+  if (index === data.confirmStepIndex) depositHash = tx.hash;
+}
+
+await fetch(`${base}/${data.vaultId}/confirm-tx`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ txHash: depositHash, txType: 'DEPOSIT' })
+});
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x08210f9170f89ab7658f0b5e3ff39b0e03c594d4",
+          "data": "0x095ea7b3...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "approve",
+        "description": "Approve the vault to pull 1000 EURC"
+      },
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x7a1c3e5f9b2d40e68c1a3f5b7d9e02c46a8f1b3d",
+          "data": "0x6e553f65...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "deposit",
+        "description": "Deposit 1000 EURC into Prime Liquidity EURC"
+      }
+    ],
+    "functionName": "deposit",
+    "confirmStepIndex": 1,
+    "attribution": {
+      "supported": true,
+      "requestedDistributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+      "binding": "ALREADY_BOUND",
+      "distributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
+      "creditsThisInstance": true,
+      "gates": []
+    },
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/vaults/cmv3a1b2c0009l80d1q3r5s7t/confirm-tx",
+      "txHash": true,
+      "txType": "DEPOSIT"
+    },
+    "groupId": "cmv3a1b2c0007l80d4e5f6g7h",
+    "vaultId": "cmv3a1b2c0009l80d1q3r5s7t",
+    "pocket": {
+      "vaultId": "cmv3a1b2c0009l80d1q3r5s7t",
+      "vaultAddress": "0x7a1c3e5f9b2d40e68c1a3f5b7d9e02c46a8f1b3d",
+      "assetAddress": "0x08210f9170f89ab7658f0b5e3ff39b0e03c594d4",
+      "assetSymbol": "EURC",
+      "assetDecimals": 6,
+      "settlementCurrency": "EUR"
+    }
+  }
+}
+```
+```json Error - Currency Ambiguous
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "GROUP_CURRENCY_AMBIGUOUS",
+    "message": "2 pockets of this vault group settle in USD (USDC, USDT). Name the pocket by its asset symbol or its asset address.",
+    "details": {
+      "currency": "USD",
+      "candidates": [
+        { "vaultId": "cmv3a1b2c0008l80d9k2m4n6p", "assetAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a", "assetSymbol": "USDC", "settlementCurrency": "USD" },
+        { "vaultId": "cmv3a1b2c0010l80d7u9w1y3z", "assetAddress": "0xaa8e23fb1079ea71e0a56f48a2aa51851d8433d0", "assetSymbol": "USDT", "settlementCurrency": "USD" }
+      ]
+    }
+  }
+}
+```
+</ResponseExample>
+
+The example shortens `attribution`.
+
+## Error Codes
+
+Every code of [Deposit](/endpoints/vaults/deposit) can be returned for the chosen pocket. The group adds:
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `amount` is not a positive decimal string, neither or both of `currency` and `asset` were sent, `currency` is not 2 to 12 letters, digits or `.`, or an address is malformed |
+| `VAULT_GROUP_NOT_FOUND` | `404` | No such group, it is archived, or it belongs to another operator and is unpublished or on another network or environment |
+| `GROUP_POCKET_NOT_FOUND` | `404` | No deployed pocket of the group matches the currency or asset. `details.pockets` lists the pockets on offer |
+| `GROUP_CURRENCY_AMBIGUOUS` | `409` | More than one pocket matches the currency. `details` carries `currency` and `candidates`; name the asset symbol or address instead |
+| `VAULT_GROUP_DEPOSIT_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |

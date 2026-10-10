@@ -1,0 +1,143 @@
+---
+title: 'Set Whitelist Manager'
+api: 'POST /lending-external-securities-v2/api/access-lists/{listId}/managers'
+description: 'Build the transaction that adds or removes a manager of a whitelist'
+---
+
+Builds the `setManager` transaction that makes a wallet a manager of a whitelist, or removes it. Only the list's owner signs it, and only the instance that keeps the list builds it. Record the change with [Confirm Whitelist Manager](/endpoints/lending/confirm-access-list-manager).
+
+A manager lists and removes wallets on the list, with the same reach as the owner, and cannot add or remove managers or transfer the list. Adding the market's lender of record as a manager is how a whitelist gate gets maintained by the lender itself. [Get Identity Gates](/endpoints/lending/get-identity-gates#gates-built-on-whitelists) offers that step ready-built.
+
+<Warning>
+  A manager decides who passes every gate the list serves, also on a market or vault of another instance that installed the list. Managers stay in place when ownership moves, until the new owner removes them.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="listId" type="string" required>
+  The whitelist ID from [List Whitelists](/endpoints/lending/list-access-lists). The list must be kept by your instance.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="account" type="string" required>
+  The wallet to add or remove as manager.
+</ParamField>
+
+<ParamField body="enabled" type="boolean" required>
+  `true` adds the manager, `false` removes it.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The owner wallet that will sign. Omit it to use the verified wallet of your instance that owns the list on chain. Any other signer is refused with `NOT_ACCESS_LIST_OWNER`.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">The `setManager` call on the list, `{ to, data, chainId, value }`.</ResponseField>
+    <ResponseField name="functionName" type="string">`setManager`.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction does, naming the list.</ResponseField>
+    <ResponseField name="listId" type="string">The whitelist ID.</ResponseField>
+    <ResponseField name="listAddress" type="string">The list contract, checksummed.</ResponseField>
+    <ResponseField name="account" type="string">The manager, lowercased.</ResponseField>
+    <ResponseField name="enabled" type="boolean">Echoes the request.</ResponseField>
+    <ResponseField name="alreadySet" type="boolean">`true` when the account is already in the requested state, so the transaction would change nothing. `null` when that could not be read.</ResponseField>
+    <ResponseField name="signer" type="string">The owner that must sign, checksummed.</ResponseField>
+    <ResponseField name="warnings" type="array">`{ code, message }`. Adding a manager carries `MANAGER_SCOPE`. It names the markets, vaults and vault groups of your instance that the list gates. It also states that a manager decides who passes on any other instance's product that installed the list.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, txHash, field, path }`, with `path` naming [Confirm Whitelist Manager](/endpoints/lending/confirm-access-list-manager) for this list.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/access-lists/cmv2k8q1d0004l70a3n6p2w9e/managers" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"account": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93", "enabled": true}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/access-lists/${listId}`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(`${url}/managers`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ account: lenderWallet, enabled: true })
+});
+const { data } = await res.json();
+for (const warning of data.warnings) console.warn(warning.message);
+
+const tx = await ownerWallet.sendTransaction(data.transaction);
+await tx.wait();
+await fetch(`${url}/managers/confirm`, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.hash }) });
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x7D31E6b09A4c25F8e1B73d0a6C94e2F58b1A0C37",
+      "data": "0x...",
+      "chainId": 11155111,
+      "value": "0"
+    },
+    "functionName": "setManager",
+    "description": "Make 0x4E91A7C05d3B62F18A0c94E7Db2358f1C60a4E93 a manager of the whitelist Depositors Q4",
+    "listId": "cmv2k8q1d0004l70a3n6p2w9e",
+    "listAddress": "0x7D31E6b09A4c25F8e1B73d0a6C94e2F58b1A0C37",
+    "account": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+    "enabled": true,
+    "alreadySet": false,
+    "signer": "0x1234F9a07C6b53D81e2A4f70C9B385D6014a7E52",
+    "warnings": [
+      {
+        "code": "MANAGER_SCOPE",
+        "message": "0x4E91A7C05d3B62F18A0c94E7Db2358f1C60a4E93 can then list and remove wallets on every gate this whitelist serves, here: the provider gate of market 0x70A0E25C7b768B87e658348b3B577678A173e038. A product of another instance that installed this whitelist follows its members too, so a manager decides who passes there as well."
+      }
+    ],
+    "confirmWith": {
+      "endpoint": "managers/confirm",
+      "txHash": true,
+      "field": "txHash",
+      "path": "POST /lending-external-securities-v2/api/access-lists/cmv2k8q1d0004l70a3n6p2w9e/managers/confirm"
+    }
+  }
+}
+```
+```json Error - Not The Owner Instance
+{
+  "success": false,
+  "error": {
+    "code": "NOT_ACCESS_LIST_OWNER",
+    "message": "Only the instance that holds the owner wallet of this whitelist (0x8C2D4E6F0A1B3C5d7E9F1A2b4C6D8e0F2a4B6C8D) adds or removes managers and transfers it. This instance manages it through 0x1234F9a07C6b53D81e2A4f70C9B385D6014a7E52, which lists and removes wallets.",
+    "details": {
+      "managedBy": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "owner": "0x8c2d4e6f0a1b3c5d7e9f1a2b4c6d8e0f2a4b6c8d"
+    }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `account` or `signerAddress` is malformed, or `enabled` is not a boolean |
+| `INVALID_ADDRESS` | `400` | `account` or `signerAddress` is the zero address or fails its EIP-55 checksum |
+| `NOT_ACCESS_LIST_OWNER` | `403` | Another instance keeps the list, or the signer is not its owner on chain. `details` names the owner, and `managedBy` or `pendingOwner` when one of your wallets manages the list or is named by a pending transfer |
+| `ACCESS_LIST_NOT_FOUND` | `404` | No whitelist with this ID is kept by your instance, or managed or pending to one of its wallets, on this network |
+| `TX_WOULD_REVERT` | `409` | The transaction would revert for another reason. `details.revert` names the contract error where known |
+| `WALLET_NOT_CONFIGURED` | `412` | Your instance has no verified wallet to sign |
+| `ACCESS_LIST_MANAGER_FAILED` | `500` | The change could not be prepared and no more specific code applied |
+| `ACCESS_LISTS_NOT_CONFIGURED` | `503` | The whitelist factory is not deployed on this network |
+| `ACCESS_LIST_UNREADABLE` | `503` | The list's owner could not be read. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read to simulate the transaction. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | Your instance's verified wallets could not be read. Retry shortly |

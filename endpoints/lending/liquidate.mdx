@@ -10,6 +10,8 @@ Where the seized collateral goes depends on the market's `useDutchAuction` setti
 
 With Dutch auctions **disabled**, collateral is seized and transferred to the market's liquidation router, and a pending liquidation is created on the market and on the router. The response carries the router's `liquidationId`, `collateralSeized` and `debtRepaid`, and settlement becomes a manual operator workflow.
 
+On a market whose router runs the atomic sale, the seized collateral is sold to the sale recipient at its standing bid in the same transaction, and the record settles at once. See [Atomic sale](#atomic-sale).
+
 With Dutch auctions **enabled**, the collateral goes to the market's auction venue and a Dutch auction opens. The market records its pending liquidation at the seizure, but the router holds nothing. The response carries `auctionId`, and `liquidationId` is the market's own record ID rather than a router ID. The router takes part only if the auction expires with collateral unsold and [Settle Expired Auction](/endpoints/lending/settle-expired-auction) hands the remainder to it. A market priced from a live market price cannot enable Dutch auctions, and none can run before an auction venue is wired.
 
 <Warning>
@@ -18,13 +20,13 @@ With Dutch auctions **enabled**, the collateral goes to the market's auction ven
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID. At most 100 characters.</ParamField>
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids). At most 100 characters.</ParamField>
 <ParamField path="loanId" type="integer" required>On-chain loan ID. Must be a positive integer.</ParamField>
 
 ## Body Parameters
 
 <ParamField body="signedPrice" type="object">
-  EIP-712 signed price built with [Sign Price](/endpoints/lending/sign-price) and signed by the oracle's authorized signer. The contract applies it atomically with the liquidation, and only when it is newer than the stored price. Omit it to price against the stored oracle value. A stale stored price is refused with `PRICE_STALE` even when a `signedPrice` is supplied. Push a NAV with [Sync Oracle Price](/endpoints/lending/sync-oracle) first.
+  EIP-712 signed price built with [Sign Price](/endpoints/lending/sign-price) and signed by the oracle's authorized signer. The contract applies it atomically with the liquidation, before it reads the price. Omit it to price against the stored oracle value. Before building, the API checks the quote against the oracle: it must verify against an authorized signer, be dated after the stored price, and stay inside the oracle's deviation band. Otherwise the call is refused with `INVALID_SIGNED_PRICE`, `SIGNED_PRICE_OUTDATED` or `PRICE_DEVIATION_TOO_LARGE`. An accepted quote lifts the `PRICE_STALE` refusal, since the liquidation then runs on the quoted price. Without one, push a fresh price with [Sync Oracle Price](/endpoints/lending/sync-oracle) first. A market that prices from an external feed refuses a signed price with `EXTERNAL_FEED_ACTIVE`, and a market with a fixed price with `FIXED_PRICE_ACTIVE`.
   <Expandable>
     <ParamField body="price" type="string">Price in base units.</ParamField>
     <ParamField body="timestamp" type="integer">Signing timestamp.</ParamField>
@@ -38,7 +40,7 @@ With Dutch auctions **enabled**, the collateral goes to the market's auction ven
 </ParamField>
 
 <ParamField body="txHash" type="string">
-  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata. A value that is not a `0x`-prefixed 64-character hex string is ignored, and the call answers as if it were omitted.
+  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata. A value that is not `0x` followed by 64 hex characters is refused with `400 VALIDATION_ERROR` and nothing is built or recorded. `null` or an empty string counts as omitted.
 </ParamField>
 
 ## Response Fields
@@ -61,6 +63,7 @@ Without `txHash` the response is the unsigned `liquidate` call, alongside a `rea
         <ResponseField name="priceStale" type="boolean">Whether the oracle price is outside its window.</ResponseField>
         <ResponseField name="readFailed" type="boolean">`true` when at least one gate could not be read. `unverifiedReason` says which.</ResponseField>
         <ResponseField name="blockedReason" type="string">The first gate that fails, in words. `null` when nothing blocks.</ResponseField>
+        <ResponseField name="atomic" type="object">The atomic sale state, as on [Get Atomic Sale](/endpoints/lending/get-atomic-sale), with `saleBasis` when it was read and without `saleRecipientLenderSide`. Its `available`, `reasonCode` and `reason` describe the router, the market and the sale recipient; the sale basis is reported in `saleBasis` alone. `null` when the router could not be resolved.</ResponseField>
       </Expandable>
     </ResponseField>
     <ResponseField name="loanId" type="string">Loan ID, read from the mined transaction. Returned when confirming with `txHash`.</ResponseField>
@@ -70,8 +73,27 @@ Without `txHash` the response is the unsigned `liquidate` call, alongside a `rea
     <ResponseField name="collateralSeized" type="string">Collateral moved to the router, or put up for auction in Dutch auction mode, in collateral token units. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="debtRepaid" type="string">Debt the seizure discharged on the router path, or the debt the auction must cover, in borrow asset units. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="borrower" type="string">Borrower address, or `null` when it could not be resolved. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="status" type="string">`SETTLED` when the liquidation sold the collateral atomically, `PENDING` otherwise. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="realization" type="string">`ATOMIC`, `ROUTER` or `VENUE`: how the seized collateral is realized. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="buyer" type="string">The sale recipient that bought, on an atomic sale. `null` otherwise.</ResponseField>
+    <ResponseField name="proceeds" type="string">What the market received from the atomic sale, in borrow asset units. `null` otherwise. `usdcProceeds` repeats it.</ResponseField>
+    <ResponseField name="surplus" type="object">On an atomic sale, `{ returned, escrowed }`: surplus paid to the borrower, or escrowed for it. `null` otherwise.</ResponseField>
+    <ResponseField name="reserve" type="object">On an atomic sale, `{ seizureCovered, settlementCovered, reimbursed }`: what the insurance fund paid in and was paid back. `null` otherwise.</ResponseField>
+    <ResponseField name="settlement" type="object">On an atomic sale only: the market's settlement of the record, as on [Sell Pending Liquidation](/endpoints/lending/sell-pending-liquidation). Present with `sale`, `settledTxHash` and `settledAt`. `sale` carries `collateralAmount`, `payment`, `price` and `priceFactor`, each also in base units, and `priceFactorBps`.</ResponseField>
   </Expandable>
 </ResponseField>
+
+## Atomic sale
+
+A market priced from a live market price (`MARKET`) whose lender of record declared `EXCHANGE_SALE` can run its router in atomic mode, switched on with [Set Atomic Mode](/endpoints/lending/set-atomic-mode). A liquidation there sells the seized collateral to the sale recipient at its standing bid inside the liquidation transaction, and the record settles in the same block: `status: SETTLED`, `realization: ATOMIC`. If the sale recipient cannot buy, the whole liquidation reverts and the loan stays liquidatable.
+
+The calldata is refused before anything is signed:
+
+- `409 ATOMIC_SALE_UNAVAILABLE` when the router runs atomic mode on a market where the atomic sale is not offered: not `MARKET`-priced, or not declared `EXCHANGE_SALE`. `details` carries `loanId`, `priceSource`, `realizationMode` and `reasonCode`. The router administrator switches the router back to two-step first, then the loan is liquidated the two-step way.
+- `409 ATOMIC_BUYER_UNAVAILABLE` when the sale recipient cannot buy. On the market's state, `details` carries `reasonCode`, `saleRecipient` and `routerAddress`. Without a `signedPrice`, the loan itself is checked too. For this loan, `details` adds `loanId`, `expectedPayment` (`{ amount, raw }`) and `collateralAmount` (in base units), and `reasonCode` can also be `INTAKE_CLOSED`: the market reports that the router would not take this sale although every buyer fact readable here passes. The sale recipient can post or renew its bid with [Set Sale Bid](/endpoints/lending/set-sale-bid), or the router administrator can switch to two-step.
+- `409 LIQUIDATION_NOT_READY` when, on that same loan check, the collateral token refuses delivery of the loan's seized collateral to the router.
+
+A confirm that sees an atomic sale it cannot read back answers `503 ROUTER_UNREADABLE` and records nothing, so the liquidation is never booked as two-step by mistake. Retry the confirm.
 
 ## What One Call Realizes
 
@@ -81,7 +103,7 @@ On the term trigger the whole debt is realized in one call, marked up by the loa
 
 On the auction path the venue takes `closeFactor` of the collateral against the same share of the debt, or all of it when the collateral is worth less than that debt. A term realization routed to an auction sizes its slice at the auction's floor price rather than at the oracle price.
 
-There is no auto-sell for external securities. Once collateral reaches the router it stays there until an operator sells it and settles the proceeds. See [Settle Liquidation](/endpoints/lending/settle-liquidation). An auction sells only to verified bidders who take the price the venue quotes through [Bid on Auction](/endpoints/lending/bid-on-auction).
+There is no auto-sell for external securities. Once collateral reaches the router in two-step mode it stays there until an operator sells it and settles the proceeds. See [Settle Liquidation](/endpoints/lending/settle-liquidation). The atomic sale above sells to the sale recipient's standing bid inside the liquidation, and only where the router administrator switched it on. An auction sells only to verified bidders who take the price the venue quotes through [Bid on Auction](/endpoints/lending/bid-on-auction).
 
 <RequestExample>
 ```bash cURL
@@ -177,7 +199,25 @@ const { data: liquidation } = await confirmed.json();
       "errors": null,
       "canSeizeNow": true,
       "canRealizeNow": true,
-      "blockedReason": null
+      "blockedReason": null,
+      "atomic": {
+        "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+        "available": true,
+        "mode": 0,
+        "modeName": "TWO_STEP",
+        "effective": false,
+        "saleRecipient": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
+        "buyerAvailable": false,
+        "code": null,
+        "reasonCode": "NO_BID",
+        "saleBasis": {
+          "available": true,
+          "priceSource": "MARKET",
+          "realizationMode": "EXCHANGE_SALE",
+          "reasonCode": null,
+          "reason": null
+        }
+      }
     }
   }
 }
@@ -192,7 +232,58 @@ const { data: liquidation } = await confirmed.json();
     "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
     "collateralSeized": "220.0",
     "debtRepaid": "21159.2",
-    "borrower": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"
+    "borrower": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "status": "PENDING",
+    "realization": "ROUTER",
+    "buyer": null,
+    "proceeds": null,
+    "usdcProceeds": null,
+    "surplus": null,
+    "reserve": null
+  }
+}
+```
+```json Response - Atomic Sale
+{
+  "success": true,
+  "data": {
+    "loanId": "7",
+    "liquidationId": "15",
+    "auctionId": null,
+    "txHash": "0x7e2a4c9f1b3d50e86a2c4f1b7d9e03c58a1f6b2d4e8c7a09f5b3d1e6a2c8f4b7",
+    "collateralSeized": "220.0",
+    "debtRepaid": "21159.2",
+    "borrower": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "status": "SETTLED",
+    "realization": "ATOMIC",
+    "buyer": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
+    "proceeds": "21560.0",
+    "usdcProceeds": "21560.0",
+    "surplus": { "returned": "0.0", "escrowed": "0.0" },
+    "reserve": { "seizureCovered": "0.0", "settlementCovered": "0.0", "reimbursed": "0.0" },
+    "settlement": {
+      "marketLiquidationId": "9",
+      "routerLiquidationId": "15",
+      "proceedsReceived": "21560.0",
+      "routerProceeds": "21560.0",
+      "shortfall": null,
+      "debtApplied": "21159.2",
+      "writeOffRecovered": null,
+      "reserve": null,
+      "reserveReimbursed": null
+    },
+    "sale": {
+      "collateralAmount": "220.0",
+      "collateralAmountRaw": "220000000000000000000",
+      "payment": "21560.0",
+      "paymentRaw": "21560000000",
+      "price": "100.0",
+      "priceRaw": "100000000",
+      "priceFactor": "0.98",
+      "priceFactorBps": 9800
+    },
+    "settledTxHash": "0x7e2a4c9f1b3d50e86a2c4f1b7d9e03c58a1f6b2d4e8c7a09f5b3d1e6a2c8f4b7",
+    "settledAt": "2026-10-09T13:41:07.000Z"
   }
 }
 ```
@@ -206,7 +297,14 @@ const { data: liquidation } = await confirmed.json();
     "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
     "collateralSeized": "250.0",
     "debtRepaid": "21159.2",
-    "borrower": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"
+    "borrower": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "status": "PENDING",
+    "realization": "VENUE",
+    "buyer": null,
+    "proceeds": null,
+    "usdcProceeds": null,
+    "surplus": null,
+    "reserve": null
   }
 }
 ```
@@ -253,24 +351,33 @@ const { data: liquidation } = await confirmed.json();
 
 ## Error Codes
 
-Errors raised while building calldata carry the full `readiness` object alongside `code` and `message`, so the failing gate can be inspected without a second call. The examples above shorten it. The loan-level refusals also carry `loan`. When the loan itself cannot be read, the calldata is returned and the contract decides.
+Refusals from the readiness, loan and atomic checks carry the full `readiness` object alongside `code` and `message`, so the failing gate can be inspected without a second call. The examples above shorten it, and the calldata example shortens `readiness.atomic`. The loan-level refusals also carry `loan`. When the loan itself cannot be read, the calldata is returned and the contract decides.
 
 | Code | HTTP | Cause |
 |---|---|---|
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_CONFIGURED` | `400` | The market has no address or no oracle recorded |
 | `INVALID_LOAN_ID` | `400` | `loanId` is not a positive integer |
-| `VALIDATION_ERROR` | `400` | A `signedPrice` field has the wrong type |
-| `LIQUIDATION_NOT_READY` | `400` | The router is not authorized on the market, or the collateral token will not let the router hold the seized tokens |
+| `VALIDATION_ERROR` | `400` | A `signedPrice` field has the wrong type, or `txHash` is present but malformed |
+| `INVALID_SIGNED_PRICE` | `400` | The `signedPrice` is malformed, expired, or not signed by an authorized signer of the market's oracle |
+| `PRICE_DEVIATION_TOO_LARGE`, `PRICE_WINDOW_DEVIATION_TOO_LARGE` | `400` | The `signedPrice` moves further from the stored price than the oracle accepts, in one step or within its current hour. `details` carries the band |
+| `LIQUIDATION_NOT_READY` | `400` | The router is not authorized on the market, or the collateral token will not let the router hold the seized tokens. `409` when the router runs atomic mode and the token refuses delivery of this loan's seizure. See [Atomic sale](#atomic-sale) |
 | `COLLATERAL_TRANSFER_RESTRICTED` | `400` | The collateral token's compliance rules block the seizure transfer to the router |
-| `PRICE_STALE` | `400` | The oracle price is stale, so `liquidate` reverts. Push a NAV first; a `signedPrice` does not lift this refusal |
+| `PRICE_STALE` | `400` | The oracle price is stale, so `liquidate` reverts. Push a fresh price first, or carry an accepted `signedPrice` |
 | `AUCTION_VENUE_NOT_ADMITTED` | `400` | Dutch auctions are on, but the collateral token does not admit the auction venue as a holder |
+| `EXTERNAL_FEED_ACTIVE` | `409` | A `signedPrice` was sent to a market that prices from an external feed. Retry without it |
+| `FIXED_PRICE_ACTIVE` | `409` | A `signedPrice` was sent to a market with a fixed price. Retry without it |
+| `SIGNED_PRICE_OUTDATED` | `409` | The `signedPrice` is not dated after the price the oracle holds. Sign a fresh quote |
+| `ATOMIC_SALE_UNAVAILABLE` | `409` | The router runs atomic mode, but the market is not `MARKET`-priced or not declared `EXCHANGE_SALE`. Switch the router to two-step first. See [Atomic sale](#atomic-sale) |
+| `ATOMIC_BUYER_UNAVAILABLE` | `409` | The router runs atomic mode and the sale recipient cannot buy, so the liquidation would revert. `details.reasonCode` names the gap. See [Atomic sale](#atomic-sale) |
 | `LOAN_IN_AUCTION` | `400` | An auction is already realizing this loan. The error carries `loan.auction` |
 | `LOAN_NOT_ACTIVE` | `400` | The loan is closed, so there is nothing to realize. The error carries `loan` |
 | `LOAN_NOT_LIQUIDATABLE` | `400` | The loan's health factor is at or above `1.0` and it carries no enforceable term. The error carries `loan`, including its `term` when it has one |
 | `TX_NOT_VERIFIED` | `400` | The confirmed transaction liquidates a different loan |
 | `LIQUIDATION_FAILED` | `400` | Confirming failed for a reason no more specific code covers, such as a chain read that did not answer |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `PRICE_STATE_UNAVAILABLE` | `503` | The oracle could not be read to check the `signedPrice`. Nothing was built. Retry shortly |
+| `ROUTER_UNREADABLE` | `503` | Confirming: the transaction carries an atomic sale that could not be read back, so nothing was recorded. Retry |
 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).
 

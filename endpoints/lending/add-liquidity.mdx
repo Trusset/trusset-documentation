@@ -16,20 +16,20 @@ Every other liquidity provider funds the market through one of the operator's va
 
 No liquidity can be added to a `MARKET`-priced market until its borrower register qualifies as a professional gate: at least one verification profile admits wallets to it, and every profile that does, on any instance of the market's network and environment, is limited to professional clients and has its admissions signed by its own instance. Until then a deposit is refused with `409 PROFESSIONAL_BORROWER_GATE_REQUIRED`, also from the operator wallet. The check runs after the depositor checks, and the market contract does not apply it. See [Professional borrowers](/endpoints/lending/set-identity-gates#professional-borrowers).
 
-A market still running an implementation from before this rule answers with its own gate instead. `LIQUIDITY_OPERATOR_ONLY` means it takes liquidity only from its lender of record and the providers it admitted. `IDENTITY_REGISTRY_REQUIRED` means it is open to third parties but has no provider register yet. `IDENTITY_NOT_VERIFIED` means the wallet is not verified on the register the market checks.
+A market still running an implementation from before this rule answers with its own gate instead. `LIQUIDITY_OPERATOR_ONLY` means it takes liquidity only from its lender of record and the providers it admitted. `IDENTITY_REGISTRY_REQUIRED` means it is open to third parties but has no provider register yet. `IDENTITY_NOT_VERIFIED` means the wallet is not verified on the register the market checks, and `ELIGIBILITY_REMOVAL_PENDING` that its admission to that register is waiting for removal.
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
 
 ## Body Parameters
 
-<ParamField body="amount" type="string" required>
-  Amount to deposit as a positive decimal string, for example `"250000"`. Denominated in the market's borrow asset and parsed at its decimals. Required on the confirm call too, where it is validated but not used: the recorded amount comes from the mined transaction.
+<ParamField body="amount" type="string">
+  Amount to deposit as a positive decimal string, for example `"250000"`. Denominated in the market's borrow asset and parsed at its decimals. Required when building calldata. The confirm call needs only `txHash`: the recorded amount comes from the mined transaction, and an `amount` sent alongside is validated but not used.
 </ParamField>
 
 <ParamField body="provider" type="string">
-  Wallet that will sign the deposit. Required when building calldata on a current market: without it the deposit cannot be checked against the operator wallet and the registered vaults, and the call returns `PROVIDER_REQUIRED`. On a market running an earlier implementation it is optional, and supplying it runs that market's own gate before a transaction is offered. Not needed on the confirm call, where the provider is taken from the mined transaction.
+  Wallet that will sign the deposit. Required when building calldata on a current market: without it the deposit cannot be checked against the operator wallet and the registered vaults, and the call returns `PROVIDER_REQUIRED`. On a market running an earlier implementation it is optional, and supplying it runs that market's own gate before a transaction is offered. When supplied, the API also checks that the wallet holds `amount` of the borrow asset, and refuses with `INSUFFICIENT_BALANCE` when it holds less. Not needed on the confirm call, where the provider is taken from the mined transaction.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -43,7 +43,7 @@ A market still running an implementation from before this rule answers with its 
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` when `txHash` is omitted.</ResponseField>
     <ResponseField name="steps" type="array">Ordered transactions to broadcast. Returned when `txHash` is omitted. The first approves the market to pull exactly `amount` of the borrow asset, the second calls `addLiquidity`.</ResponseField>
     <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm with. Always `1`.</ResponseField>
-    <ResponseField name="confirmWith" type="string">`addLiquidity`.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field }`: this route, with `txHash` as the field. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="txHash" type="string">Deposit transaction hash. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="amount" type="string">Amount actually deposited, read from the `LiquidityAdded` event rather than from the request. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
@@ -129,7 +129,10 @@ await fetch(url, {
       }
     ],
     "confirmStepIndex": 1,
-    "confirmWith": "addLiquidity"
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/positions/cmssh7p1k0001cghxq2m4v8rz/add-liquidity",
+      "field": "txHash"
+    }
   }
 }
 ```
@@ -168,18 +171,21 @@ await fetch(url, {
 |---|---|---|
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
-| `VALIDATION_ERROR` | `400` | `amount` is not a positive decimal string or carries more decimal places than the borrow asset supports, or `provider` or `txHash` is malformed |
+| `VALIDATION_ERROR` | `400` | `amount` is missing without `txHash`, is not a positive decimal string or carries more decimal places than the borrow asset supports, or `provider` or `txHash` is malformed |
 | `BELOW_MIN_DEPOSIT` | `400` | This is the first deposit into an empty or fully consumed pool and it is under the floor |
 | `MARKET_PAUSED` | `400` | The market is paused. Its admin must unpause it |
 | `PROVIDER_REQUIRED` | `400` | `provider` was omitted on a market that takes direct deposits only from its operator wallet and registered vaults |
-| `IDENTITY_NOT_VERIFIED` | `400` | Earlier implementations only. `provider` is not verified on the register the market checks |
+| `INSUFFICIENT_BALANCE` | `400` | `provider` holds less of the borrow asset than `amount`, so the deposit would revert after the approval. `details` carries `payer`, `balance` and `required`. Skipped when the balance cannot be read |
+| `IDENTITY_NOT_VERIFIED` | `400` | Earlier implementations only. `provider` is not verified on the register the market checks. On the single-register implementation `details` carries `register`, `requiredProfile` and `accessList`, and the message names the verification profile or whitelist behind the register when there is one |
+| `IDENTITY_GATE_RETIRED` | `409` | Earlier implementations only. Returned instead of `IDENTITY_NOT_VERIFIED` when the register that refuses `provider` is the previous Trusset ID Register, which takes no new identities. `details` carries `register`, `gate`, `retired: true` and `currentRegistry`. `gate` is `identity` on the single-register implementation, where the admin first moves the market on with [Upgrade Market](/endpoints/lending/upgrade-market), and `provider` on a market that reads its provider register itself. The admin then installs the current register with [Set Identity Gates](/endpoints/lending/set-identity-gates#the-previous-trusset-id-register) |
 | `LIQUIDITY_VAULT_ONLY` | `403` | `provider` is neither the operator wallet nor a registered vault. Deposit through one of the operator's vaults |
 | `LIQUIDITY_OPERATOR_ONLY` | `403` | Earlier implementations only. The market takes liquidity only from its lender of record and the providers it admitted |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet. See [Lender of record](/endpoints/lending/introduction#lender-of-record) |
 | `IDENTITY_REGISTRY_REQUIRED` | `409` | Earlier implementations only. The pool is open to third parties but carries no provider register yet |
+| `ELIGIBILITY_REMOVAL_PENDING` | `409` | Earlier implementations only. `provider` is verified on the register the market checks, but its admission is waiting for removal, so no new liquidity is prepared for it. `details` carries `register` and `wallet` |
 | `PROFESSIONAL_BORROWER_GATE_REQUIRED` | `409` | The market is `MARKET`-priced and its borrower register does not qualify as a professional gate. `details.field` is `borrowerRegistry` |
 | `MARKET_STATE_UNAVAILABLE` | `503` | The market could not be read to check the first-deposit minimum, whether it is paused, who may deposit, or its price source and borrower register. Retry shortly |
-| `STATE_UNAVAILABLE` | `503` | The verification profiles behind a `MARKET` market's borrower register could not be read. Retry shortly |
+| `STATE_UNAVAILABLE` | `503` | The verification profiles behind a `MARKET` market's borrower register, or the pending removals on the register that checks `provider`, could not be read. Retry shortly |
 
 A deposit that reached the market through another contract, such as a multisig wallet, confirms from the market's `LiquidityAdded` event in the receipt. Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

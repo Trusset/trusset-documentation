@@ -24,6 +24,24 @@ Sending only `borrowerRegistry` therefore changes the borrower side and leaves t
 
 Instead of an address, a side can name one of your [verification profiles](/endpoints/customers/list-verification-profiles#eligibility-registers) in `borrowerProfile` or `providerProfile`. The profile's eligibility register is then installed, so the side admits exactly the wallets admitted under that profile. An address sent beside a profile must name the same register, or the request is refused with `GATE_PROFILE_CONFLICT`. A profile without an eligibility register is refused with `ELIGIBILITY_REGISTER_NOT_SET`.
 
+A side can also name one of your whitelists by its ID in `borrowerAccessList` or `providerAccessList`. See [Whitelists as Gates](#whitelists-as-gates). A side takes a profile or a whitelist, not both: sending both is refused with `GATE_SOURCE_CONFLICT`, and so is an address beside a whitelist that names a different contract.
+
+## Whitelists as Gates
+
+A whitelist admits exactly the wallets its owner and managers listed, and examines no identity. Create and maintain one with the [whitelist routes](/endpoints/lending/list-access-lists). Only a whitelist your instance keeps and has not archived can be named by its ID. Any other is refused with `404 ACCESS_LIST_NOT_FOUND`, `details.field` naming the field you sent. A whitelist of another instance can still be installed by its address.
+
+- **Borrower side.** A whitelist cannot be the borrower gate of a `MARKET` market, which lends to professional borrowers only and needs a professional gate. That is refused with `409 ACCESS_LIST_NOT_ALLOWED`, `details.reason: MARKET_PRICE_BORROWER_GATE`.
+- **Purpose.** A whitelist kept for depositors (`purpose: DEPOSITOR`) cannot become the borrower register, and one kept for borrowers (`BORROWER`) cannot become the provider register. That is refused with `409 ACCESS_LIST_PURPOSE_MISMATCH`. A list kept for `ANY` fits both. The owner changes the purpose with [Update Whitelist](/endpoints/lending/update-access-list).
+- **Provider side.** A whitelist gates the market's liquidity providers only on the attestation of whoever curates its members. A list your instance neither keeps nor controls through a verified wallet that owns or manages it is refused with `403 ACCESS_LIST_NOT_CONTROLLED`. Every request that installs a whitelist as the provider register must send `attestIdentifiedMembers: true`, which confirms that the list holds identified wallets only, or it is refused with `400 ACCESS_LIST_ATTESTATION_REQUIRED`. The first attestation of a list by your instance is written to the audit log as `LENDING_ACCESS_LIST_ATTESTED`.
+
+The purpose, control and attestation checks run only on a side the request changes. When whether an address is a whitelist, or whether your wallets control it, cannot be read, the request answers `503 ACCESS_LIST_UNREADABLE` and decides nothing.
+
+<Warning>
+  The confirm call runs the provider-side checks again on a whitelist the transaction installed, and records nothing when one fails. The transaction has already changed the market on chain by then. Send `attestIdentifiedMembers: true` on the confirm call as well: `confirmWith.body` carries it when the build was attested.
+</Warning>
+
+Once a whitelist gates the market, its lender of record can maintain it only as a manager of the list. [Get Identity Gates](/endpoints/lending/get-identity-gates#gates-built-on-whitelists) offers that step in `accessListSteps`.
+
 ## Professional Borrowers
 
 A `MARKET`-priced market carries the free-hand realization path under § 1259 BGB, which is open against professional borrowers only. Its borrower register must therefore admit professional clients and nobody else. The API judges that from the verification profiles bound to the register as their eligibility register, read across every instance on the market's network and environment, not only yours. The register qualifies when:
@@ -59,6 +77,29 @@ On a current market the provider register can be cleared, since the market takes
 
 A market on the earlier single-register implementation examines both sides through one register and cannot change it. It is refused with `MARKET_UPGRADE_REQUIRED` until the admin moves it onto the current implementation with [Upgrade Market](/endpoints/lending/upgrade-market).
 
+## The Previous Trusset ID Register
+
+The Trusset ID Register on Sepolia moved to `0xEf244c4Bd4d71Bd9A30EDF6Edef7CCC72642291a` on 10 October 2026. The previous register, `0xE9114c40934f6fB6BB317935156b731f7A86D006`, takes no new identities. A gate that still reads it admits the wallets verified on it before the move and refuses every customer verified since 10 October 2026. [Get Identity Gates](/endpoints/lending/get-identity-gates#the-previous-trusset-id-register) marks such a side with `retired: true`.
+
+Until the side moves, a wallet that register does not admit is refused with `409 IDENTITY_GATE_RETIRED`, and the refusal names the move to the current register. [Open Loan](/endpoints/lending/open-loan), [Borrow More](/endpoints/lending/borrow-more), [Add Liquidity](/endpoints/lending/add-liquidity) and [Deposit to Vault](/endpoints/lending/deposit-to-vault) return it.
+
+Install the current register on both sides:
+
+```json
+{
+  "borrowerRegistry": "0xEf244c4Bd4d71Bd9A30EDF6Edef7CCC72642291a",
+  "providerRegistry": "0xEf244c4Bd4d71Bd9A30EDF6Edef7CCC72642291a"
+}
+```
+
+Or send only the side that reads the previous register. The other rules on this page still apply: the borrower side of a `MARKET` market must qualify as a [professional gate](#professional-borrowers), and a new provider register must fit the [vaults registered on the market](#vaults-registered-on-the-market).
+
+Naming the previous register as a new gate, on a side the request changes, is refused with `422 IDENTITY_REGISTRY_RETIRED`. `details` carries `field`, `registry` and `currentRegistry`. A side the transaction leaves on the previous register is not refused, for example when only the other side changes. The calldata response then carries one `warnings` entry per such side, `{ code: "RETIRED_REGISTRY_KEPT", field, registry, message }`.
+
+<Warning>
+  A vault keeps its register for life. A vault registered on the market whose own register is the previous Trusset ID Register needs the provider register to be that register or none, so moving the provider side to the current register is refused with `PROVIDER_GATE_MISMATCH` while that vault is registered.
+</Warning>
+
 ## Checks Before the Calldata
 
 Every register named is probed first. One that cannot be reached is refused with `IDENTITY_REGISTRY_UNREADABLE`, and one that does not answer `isVerified(address)` with `IDENTITY_REGISTRY_INCOMPATIBLE`, because as a gate it would refuse every party. ERC-3643 identity registries, ONCHAINID-based registers and the Trusset register all answer.
@@ -67,7 +108,7 @@ A request that would leave both registers as they are is refused with `IDENTITY_
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
 
 ## Body Parameters
 
@@ -87,8 +128,20 @@ A request that would leave both registers as they are is refused with `IDENTITY_
   A verification profile key whose eligibility register is installed as the provider register.
 </ParamField>
 
+<ParamField body="borrowerAccessList" type="string">
+  The ID of a whitelist of your instance, 1 to 64 letters, digits, `-` or `_`, installed as the borrower register. Not accepted beside `borrowerProfile`.
+</ParamField>
+
+<ParamField body="providerAccessList" type="string">
+  The ID of a whitelist of your instance, installed as the provider register. Not accepted beside `providerProfile`.
+</ParamField>
+
+<ParamField body="attestIdentifiedMembers" type="boolean">
+  `true` confirms that the whitelist installed as the provider register lists identified wallets only. Required whenever the provider register changes to a whitelist, whether named by ID or by address. Send it on the confirm call too.
+</ParamField>
+
 <ParamField body="txHash" type="string">
-  Hash of the mined transaction, as a 0x-prefixed 64-character hex string. Send it to confirm; the registers are then read from the chain, so the other fields are not needed. Omit it to receive the calldata.
+  Hash of the mined transaction, as a 0x-prefixed 64-character hex string. Send it to confirm; the registers are then read from the transaction's `IdentityGatesUpdated` event, so the other fields are not needed, apart from `attestIdentifiedMembers` for a whitelist provider gate. Omit it to receive the calldata.
 </ParamField>
 
 ## Response Fields
@@ -108,6 +161,9 @@ The calldata response:
     <ResponseField name="providerRegistry" type="string">The provider register the transaction installs, lowercased, or `null` for none.</ResponseField>
     <ResponseField name="borrowerProfile" type="object">`{ key, name, entityType, professionalOnly, requirementsHash }` of the profile whose eligibility register becomes the borrower register, or `null` when it belongs to no profile of your instance.</ResponseField>
     <ResponseField name="providerProfile" type="object">The same for the provider register, or `null`.</ResponseField>
+    <ResponseField name="borrowerAccessList" type="object">The whitelist that becomes the borrower register, as on [Get Identity Gates](/endpoints/lending/get-identity-gates), or `null`.</ResponseField>
+    <ResponseField name="providerAccessList" type="object">The whitelist that becomes the provider register, or `null`.</ResponseField>
+    <ResponseField name="attestedIdentifiedMembers" type="boolean">`true` when the request carried `attestIdentifiedMembers: true`. Absent otherwise.</ResponseField>
     <ResponseField name="unchanged" type="boolean">Always `false`, since a request that changes nothing is refused.</ResponseField>
     <ResponseField name="description" type="string">What the transaction sets, in words.</ResponseField>
     <ResponseField name="requiredRole" type="string">`DEFAULT_ADMIN_ROLE`.</ResponseField>
@@ -115,7 +171,8 @@ The calldata response:
     <ResponseField name="heldByThisInstance" type="boolean">Whether a wallet registered on this instance holds `DEFAULT_ADMIN_ROLE` on the market. `null` when the check could not be read.</ResponseField>
     <ResponseField name="signerAddress" type="string">The instance wallet that holds the role, or `null`.</ResponseField>
     <ResponseField name="note" type="string">Why no instance wallet can sign, or why that is unknown. `null` when an instance wallet holds the role.</ResponseField>
-    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: the POST to send back with the transaction hash in `txHash`.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: the POST to send back with the transaction hash in `txHash`. `body` carries the two registers, and `attestIdentifiedMembers: true` when the build was attested.</ResponseField>
+    <ResponseField name="warnings" type="array">Present only when the transaction leaves a side on the previous Trusset ID Register. One entry per side: `code` (`RETIRED_REGISTRY_KEPT`), `field` (`borrowerRegistry` or `providerRegistry`), `registry`, lowercased, and `message`. See [The Previous Trusset ID Register](#the-previous-trusset-id-register).</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -127,15 +184,21 @@ The confirmed response:
   <Expandable>
     <ResponseField name="txHash" type="string">The verified transaction hash.</ResponseField>
     <ResponseField name="signedBy" type="string">The wallet that sent it.</ResponseField>
-    <ResponseField name="borrowerRegistry" type="string">The borrower register now on the market, or `null`.</ResponseField>
-    <ResponseField name="providerRegistry" type="string">The provider register now on the market, or `null`.</ResponseField>
-    <ResponseField name="borrowerProfile" type="object">The profile behind the borrower register now on the market, or `null`.</ResponseField>
-    <ResponseField name="providerProfile" type="object">The profile behind the provider register now on the market, or `null`.</ResponseField>
-    <ResponseField name="gates" type="object">The full [Get Identity Gates](/endpoints/lending/get-identity-gates) answer after the change, or `null` when it could not be read.</ResponseField>
+    <ResponseField name="borrowerRegistry" type="string">The borrower register the transaction set, lowercased, or `null` for none. Read from its `IdentityGatesUpdated` event, or from the call when the receipt carries none.</ResponseField>
+    <ResponseField name="providerRegistry" type="string">The provider register the transaction set, or `null`.</ResponseField>
+    <ResponseField name="previousBorrowerRegistry" type="string">The borrower register at the block before the transaction, or `null` for none. Also `null` when that block could not be read, see `previousReadable`.</ResponseField>
+    <ResponseField name="previousProviderRegistry" type="string">The provider register at the block before the transaction, or `null`.</ResponseField>
+    <ResponseField name="previousReadable" type="boolean">Whether the registers before the transaction could be read.</ResponseField>
+    <ResponseField name="borrowerProfile" type="object">The profile behind the new borrower register, or `null`.</ResponseField>
+    <ResponseField name="providerProfile" type="object">The profile behind the new provider register, or `null`.</ResponseField>
+    <ResponseField name="borrowerAccessList" type="object">The whitelist the new borrower register is, or `null`.</ResponseField>
+    <ResponseField name="providerAccessList" type="object">The whitelist the new provider register is, or `null`.</ResponseField>
+    <ResponseField name="attestedIdentifiedMembers" type="boolean">Present when the transaction installed a whitelist as the provider register: `true` once your instance has attested it.</ResponseField>
+    <ResponseField name="gates" type="object">The full [Get Identity Gates](/endpoints/lending/get-identity-gates) answer after the change, `borrowerProfileElsewhere` and `providerProfileElsewhere` included, or `null` when it could not be read. It carries no `accessListSteps`.</ResponseField>
   </Expandable>
 </ResponseField>
 
-Confirming records an `IDENTITY_GATES_SET` transaction on the market, visible through [List Transactions](/endpoints/lending/list-transactions), once per transaction hash.
+Confirming records an `IDENTITY_GATES_SET` transaction on the market, visible through [List Transactions](/endpoints/lending/list-transactions), once per transaction hash, with the registers before and after the change.
 
 <RequestExample>
 ```bash cURL
@@ -194,6 +257,8 @@ await fetch(url, {
       "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390"
     },
     "providerProfile": null,
+    "borrowerAccessList": null,
+    "providerAccessList": null,
     "unchanged": false,
     "description": "Set borrower register 0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90 and provider register 0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37 (every registered vault examines its depositors against it) on this market; every entry is a live read against the register at call time (requires DEFAULT_ADMIN_ROLE)",
     "requiredSigner": null,
@@ -222,6 +287,9 @@ await fetch(url, {
     "signedBy": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
     "borrowerRegistry": "0x4f2a9c81d06e3b75a1c8e24d9b07f56e3a1d8c90",
     "providerRegistry": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+    "previousBorrowerRegistry": "0x9e3c8a15f4d70b2681c5a3f9027d4be8115c7d21",
+    "previousProviderRegistry": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+    "previousReadable": true,
     "borrowerProfile": {
       "key": "PROFESSIONAL",
       "name": "Professional",
@@ -230,6 +298,8 @@ await fetch(url, {
       "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390"
     },
     "providerProfile": null,
+    "borrowerAccessList": null,
+    "providerAccessList": null,
     "gates": {
       "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
       "generation": "TWO_REGISTERS",
@@ -262,6 +332,10 @@ await fetch(url, {
         "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390"
       },
       "providerProfile": null,
+      "borrowerAccessList": null,
+      "providerAccessList": null,
+      "borrowerProfileElsewhere": null,
+      "providerProfileElsewhere": null,
       "borrowerGateCompliant": true,
       "borrowerGateProblem": null
     }
@@ -288,6 +362,16 @@ await fetch(url, {
   }
 }
 ```
+```json Error - Attestation Required
+{
+  "success": false,
+  "error": {
+    "code": "ACCESS_LIST_ATTESTATION_REQUIRED",
+    "message": "A whitelist admits every wallet it lists without examining an identity, so it can gate liquidity providers or vault depositors only once you confirm that it lists identified wallets only. Send attestIdentifiedMembers: true with the request to confirm it.",
+    "details": { "field": "providerRegistry" }
+  }
+}
+```
 ```json Error - Upgrade Required
 {
   "success": false,
@@ -297,33 +381,56 @@ await fetch(url, {
   }
 }
 ```
+```json Error - Previous Trusset ID Register
+{
+  "success": false,
+  "error": {
+    "code": "IDENTITY_REGISTRY_RETIRED",
+    "message": "0xe9114c40934f6fb6bb317935156b731f7a86d006 is the previous Trusset ID Register, which takes no new identities, so a gate on it refuses every customer verified since the register moved. Name the current Trusset ID Register (0xef244c4bd4d71bd9a30edf6edef7ccc72642291a) instead, or another register.",
+    "details": {
+      "field": "providerRegistry",
+      "registry": "0xe9114c40934f6fb6bb317935156b731f7a86d006",
+      "currentRegistry": "0xef244c4bd4d71bd9a30edf6edef7ccc72642291a"
+    }
+  }
+}
+```
 </ResponseExample>
 
 ## Error Codes
 
-Refusals from the checks above carry `details` as an object: `field` for the side concerned, `registry` on `IDENTITY_REGISTRY_INCOMPATIBLE`, `priceSource` on `PROFESSIONAL_BORROWER_GATE_REQUIRED`, and `conflicts` on `PROVIDER_GATE_MISMATCH`. `IDENTITY_GATES_UNCHANGED` carries the two registers the market already has.
+Refusals from the checks above carry `details` as an object: `field` for the side concerned, `registry` on `IDENTITY_REGISTRY_INCOMPATIBLE`, `priceSource` on `PROFESSIONAL_BORROWER_GATE_REQUIRED`, and `conflicts` on `PROVIDER_GATE_MISMATCH`. `IDENTITY_GATES_UNCHANGED` carries the two registers the market already has. The whitelist codes are explained in [Whitelists as Gates](#whitelists-as-gates).
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | A register is not 0x followed by 40 hex characters, fails its EIP-55 checksum, a profile key is not 1 to 60 letters, digits, `-` or `_`, or `txHash` is malformed |
+| `VALIDATION_ERROR` | `400` | A register is not 0x followed by 40 hex characters, fails its EIP-55 checksum, a profile key is not 1 to 60 letters, digits, `-` or `_`, a whitelist ID is not 1 to 64 of them, or `txHash` is malformed |
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
 | `GATE_PROFILE_CONFLICT` | `400` | A register address names a different register than the profile sent for the same side |
 | `GATE_PROFILE_UNRESOLVED` | `400` | A profile key could not be resolved for a reason that carries no code of its own |
 | `IDENTITY_GATES_FAILED` | `400` | The change could not be prepared or confirmed and no more specific code applied |
+| `GATE_SOURCE_CONFLICT` | `400` | One side names both a verification profile and a whitelist, or an address that differs from the whitelist named beside it |
+| `ACCESS_LIST_ATTESTATION_REQUIRED` | `400` | The provider register would become a whitelist and `attestIdentifiedMembers` is not `true`. On the confirm call, also when your instance never attested the list. Send it and retry |
+| `ACCESS_LIST_NOT_CONTROLLED` | `403` | The provider register would become a whitelist that another instance curates: neither its owner nor any of its managers is a verified wallet of your instance. Install a whitelist you own or manage, or a register |
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `PROFILE_NOT_FOUND` | `404` | `borrowerProfile` or `providerProfile` names no verification profile of your instance |
+| `ACCESS_LIST_NOT_FOUND` | `404` | `borrowerAccessList` or `providerAccessList` names no whitelist of your instance on this network that is not archived. `details` carries `field` and `accessListId` |
 | `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds the admin role that sets its registers. Skipped when confirming with `txHash` |
 | `MARKET_UPGRADE_REQUIRED` | `409` | The market runs the earlier single-register implementation |
 | `ELIGIBILITY_REGISTER_NOT_SET` | `409` | The named profile has no eligibility register |
 | `IDENTITY_REGISTRY_REQUIRED` | `409` | The request would clear a register the market must keep |
 | `PROFESSIONAL_BORROWER_GATE_REQUIRED` | `409` | A `MARKET` market would be left with a borrower register that does not qualify as a professional gate. See [Professional borrowers](#professional-borrowers) |
 | `PROVIDER_GATE_MISMATCH` | `409` | The new provider register does not fit a vault registered on the market. `details.conflicts` lists them |
+| `ACCESS_LIST_NOT_ALLOWED` | `409` | The borrower register of a `MARKET` market would be a whitelist. `details` carries `field`, `reason` (`MARKET_PRICE_BORROWER_GATE`) and `address`. Choose the register of a profile limited to professional clients |
+| `ACCESS_LIST_PURPOSE_MISMATCH` | `409` | The whitelist is kept for the other side: `DEPOSITOR` on the borrower side or `BORROWER` on the provider side. `details` carries `field`, `purpose`, `gate` and `address`. Change the list's purpose or choose another list |
 | `IDENTITY_GATES_UNCHANGED` | `409` | The request would leave both registers as they are |
 | `IDENTITY_REGISTRY_INCOMPATIBLE` | `422` | A named register does not answer `isVerified(address)` |
+| `IDENTITY_REGISTRY_RETIRED` | `422` | A side the request changes would be gated on the previous Trusset ID Register, which takes no new identities. `details` carries `field`, `registry` and `currentRegistry`. Name the current register. See [The Previous Trusset ID Register](#the-previous-trusset-id-register) |
 | `IDENTITY_GATES_UNREADABLE` | `503` | The market's current registers could not be read. Retry |
 | `IDENTITY_REGISTRY_UNREADABLE` | `503` | A named register could not be reached to be checked. Retry |
 | `MARKET_STATE_UNAVAILABLE` | `503` | The vaults registered on the market, or one of their registers, could not be read. Retry |
+| `ACCESS_LIST_UNREADABLE` | `503` | Whether a named address is a whitelist, or whether a wallet of your instance owns or manages it, could not be read. Nothing was decided. Retry |
+| `ACCESS_LISTS_NOT_CONFIGURED` | `503` | A whitelist ID was sent on a network where the whitelist factory is not deployed |
 | `STATE_UNAVAILABLE` | `503` | The verification profiles behind the borrower register could not be read. Retry |
 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction), with the status listed there.

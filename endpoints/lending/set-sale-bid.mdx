@@ -1,0 +1,260 @@
+---
+title: 'Set Sale Bid'
+api: 'POST /lending-external-securities-v2/api/liquidations/{marketId}/sale-bid'
+description: 'Post, renew or withdraw the sale recipient''s standing bid for seized collateral'
+---
+
+Builds the transactions that post the sale recipient's standing bid on the market's liquidation router, or withdraw it, and confirms them with `txHash`. The bid is a price factor of the oracle price with an expiry. In atomic mode every liquidation sells the seized collateral to the sale recipient at that bid, and [Sell Pending Liquidation](/endpoints/lending/sell-pending-liquidation) sells an open record at it. Only the sale recipient can bid: the router refuses any other sender.
+
+The money stays in the sale recipient's wallet. The router takes the payment from its allowance on the settlement asset only when a liquidation sells to it. Send `allowance` to add the approve step, and keep the allowance bounded and the expiry short.
+
+A bid above `0`, or a non-zero `allowance`, is built only where the atomic sale is offered: on a market priced from a live market price whose realization path is `EXCHANGE_SALE`, as `saleBasis` on [Get Atomic Sale](/endpoints/lending/get-atomic-sale) reports. Anywhere else no sale buys at a standing bid, so the call answers `409 ATOMIC_SALE_UNAVAILABLE` and builds nothing. Withdrawing with `0`, with `allowance` `0` to revoke the approval as well, stays available on every market. See [Withdraw and Revoke](#withdraw-and-revoke).
+
+<Warning>
+  A bid below 100 percent costs the borrower a larger seizure. The market seizes enough collateral at the bid price to cover the debt and the liquidation charge. The pool is made whole either way, and the borrower loses the difference.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
+
+## Body Parameters
+
+<ParamField body="priceFactorBps" type="integer">
+  The bid as basis points of the oracle price: `9500` to `20000`, 95 to 200 percent. `0` withdraws the bid. It must also reach the market's sale floor, which is its `auctionMinPremium` held between 95 and 100 percent. Required when building calldata.
+</ParamField>
+
+<ParamField body="validUntil" type="integer">
+  Unix time in seconds the bid expires. Required for a bid above `0`, and at least 60 seconds ahead of now, because the router refuses a bid that has already expired. Ignored when withdrawing with `0`.
+</ParamField>
+
+<ParamField body="allowance" type="string">
+  The settlement asset amount, as a decimal string, the router may take from the sale recipient. When it differs from the allowance now set, the response adds the approve step. Where the current allowance is not zero, it adds an approve to zero first, because tokens such as USDT refuse to change one non-zero allowance to another. Omit it to keep the allowance as it is.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The wallet you intend to sign with. A wallet other than the sale recipient is refused with `NOT_SALE_RECIPIENT`.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined `setSaleBid` transaction, or of the approve that sets the router's allowance to zero when `confirmWith` is `approve`. Send it to confirm; the bid is then read from the router's `SaleBidSet` event. Omit it to receive the calldata.
+</ParamField>
+
+## Withdraw and Revoke
+
+Send `priceFactorBps: 0` with `allowance: "0"` to withdraw the bid and revoke the router's allowance together. The response builds only the steps that change something:
+
+- The approve step reads as a revocation, for example "Revoke the liquidation router's USDC allowance of 869.5 USDC, so it can no longer take funds from the sale recipient". It is left out when no allowance is left.
+- The `setSaleBid(0)` step is built only when the sale recipient has a standing bid, or when the bid could not be read.
+
+When the revocation is the only step, `confirmWith` is `approve`. Confirm with the hash of that approve transaction. The answer carries `allowanceRevoked: true`, `bid: null`, `currentBid: null` and the live `allowance`.
+
+When the sale recipient has no standing bid and no allowance is left to revoke, nothing is built. The call answers `409 SALE_BID_UNCHANGED` with `details: { bidSet: false, allowance }`.
+
+## Response Fields
+
+The calldata response:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="steps" type="array">Up to three transactions in order: an approve to zero where needed, the approve of `allowance`, then `setSaleBid` on the router. A withdrawal leaves out `setSaleBid` when no bid stands, see [Withdraw and Revoke](#withdraw-and-revoke). Each carries `transaction`, `functionName` and `description`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm, always the last.</ResponseField>
+    <ResponseField name="confirmWith" type="string">`setSaleBid`, or `approve` when no `setSaleBid` step is built, as on a revocation alone.</ResponseField>
+    <ResponseField name="confirmEndpoint" type="object">`{ endpoint, field, body }`: this route, `txHash` as the field.</ResponseField>
+    <ResponseField name="signer" type="string">The sale recipient, which must sign every step.</ResponseField>
+    <ResponseField name="saleRecipient" type="string">The router's sale recipient, lowercased.</ResponseField>
+    <ResponseField name="routerAddress" type="string">The router, lowercased.</ResponseField>
+    <ResponseField name="bid" type="object">`{ priceFactorBps, priceFactorE18, validUntil, validUntilIso }` as the transaction will set it.</ResponseField>
+    <ResponseField name="floor" type="object">`{ priceFactorBps, priceFactorE18 }`: the market's sale floor.</ResponseField>
+    <ResponseField name="currentAllowance" type="object">`{ amount, raw }`: the allowance set now, or `null` when it could not be read.</ResponseField>
+    <ResponseField name="settlementAsset" type="object">`{ address, symbol, decimals }`.</ResponseField>
+    <ResponseField name="warnings" type="array">`{ code, message }` entries. See [Warnings](#warnings).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+The confirmed response carries `txHash`, `signedBy`, `bidder`, `bid` as the transaction set it, `currentBid` as the router holds it now, `allowance` (`{ amount, raw }` or `null`) and `routerAddress`. `bid` and `currentBid` carry `priceFactorBps`, `priceFactorE18`, `validUntil`, `validUntilIso`, `set`, `live` and `expired`. A confirmed revocation carries `allowanceRevoked: true`, with `bid` and `currentBid` `null`. The bid is written to the audit log as `LENDING_SALE_BID_SET`, and so is a revocation, with `allowanceRevoked: true`.
+
+## Warnings
+
+| `code` | When |
+|---|---|
+| `BID_BELOW_PAR` | The bid is below 100 percent, so the borrower loses more collateral to a sale at it |
+| `SALE_RECIPIENT_LENDER_SIDE` | With a bid below 100 percent, when the sale recipient is also the lender of record, collateral agent, liquidation operator or controller. Carries `roles` |
+| `NO_ALLOWANCE` | A bid above `0` with no allowance behind it: the sale recipient has not approved the router and no `allowance` was sent, or `allowance` is `0`, so every sale would fail |
+| `BID_CLEARED_IN_ATOMIC_MODE` | The bid is withdrawn while the router runs atomic mode, so every liquidation reverts until a new bid is posted or the router returns to two-step |
+| `FUNDS_STAY_IN_WALLET` | The request posts a bid above `0` or a non-zero `allowance`. The router takes the payment from the allowance only when a liquidation sells to the sale recipient |
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidations/{marketId}/sale-bid" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"priceFactorBps": 10000, "validUntil": 1792195200, "allowance": "250000"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/liquidations/${marketId}/sale-bid`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+const validUntil = Math.floor(Date.now() / 1000) + 7 * 24 * 3600;
+
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ priceFactorBps: 10000, validUntil, allowance: '250000' })
+});
+const { data } = await res.json();
+
+let bidHash = '';
+for (const step of data.steps) {
+  const tx = await saleRecipientWallet.sendTransaction(step.transaction);
+  await tx.wait();
+  bidHash = tx.hash;
+}
+await fetch(url, { method: 'POST', headers, body: JSON.stringify({ txHash: bidHash }) });
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "action": "SIGN_TRANSACTIONS",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+          "data": "0x...",
+          "chainId": 11155111,
+          "value": "0"
+        },
+        "functionName": "approve",
+        "description": "Approve the liquidation router to take up to 250000 USDC from the sale recipient, only when a liquidation sells to it"
+      },
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+          "data": "0x...",
+          "chainId": 11155111,
+          "value": "0"
+        },
+        "functionName": "setSaleBid",
+        "description": "Post a standing bid of 100 percent of the oracle price, valid until 2026-10-17T00:00:00.000Z"
+      }
+    ],
+    "confirmStepIndex": 1,
+    "confirmWith": "setSaleBid",
+    "signer": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
+    "saleRecipient": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
+    "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+    "bid": {
+      "priceFactorBps": 10000,
+      "priceFactorE18": "1000000000000000000",
+      "validUntil": 1792195200,
+      "validUntilIso": "2026-10-17T00:00:00.000Z"
+    },
+    "floor": { "priceFactorBps": 9800, "priceFactorE18": "980000000000000000" },
+    "currentAllowance": { "amount": "0.0", "raw": "0" },
+    "settlementAsset": {
+      "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "symbol": "USDC",
+      "decimals": 6
+    },
+    "warnings": [
+      {
+        "code": "FUNDS_STAY_IN_WALLET",
+        "message": "The money stays in the sale recipient's wallet. The router takes the payment from the allowance only when a liquidation sells to it; a bounded allowance and a short expiry are recommended."
+      }
+    ],
+    "confirmEndpoint": {
+      "endpoint": "POST /lending-external-securities-v2/api/liquidations/cmuvtwr29002ds2mft47ye2yl/sale-bid",
+      "field": "txHash",
+      "body": { "txHash": null }
+    }
+  }
+}
+```
+```json Calldata Response - Revocation Only
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "action": "SIGN_TRANSACTIONS",
+    "steps": [
+      {
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+          "data": "0x...",
+          "chainId": 11155111,
+          "value": "0"
+        },
+        "functionName": "approve",
+        "description": "Revoke the liquidation router's USDC allowance of 869.5 USDC, so it can no longer take funds from the sale recipient"
+      }
+    ],
+    "confirmStepIndex": 0,
+    "confirmWith": "approve",
+    "signer": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
+    "saleRecipient": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
+    "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+    "bid": {
+      "priceFactorBps": 0,
+      "priceFactorE18": "0",
+      "validUntil": 0,
+      "validUntilIso": null
+    },
+    "floor": { "priceFactorBps": 9800, "priceFactorE18": "980000000000000000" },
+    "currentAllowance": { "amount": "869.5", "raw": "869500000" },
+    "settlementAsset": {
+      "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "symbol": "USDC",
+      "decimals": 6
+    },
+    "warnings": [],
+    "confirmEndpoint": {
+      "endpoint": "POST /lending-external-securities-v2/api/liquidations/cmuvtwr29002ds2mft47ye2yl/sale-bid",
+      "field": "txHash",
+      "body": { "txHash": null }
+    }
+  }
+}
+```
+```json Error - Below Floor
+{
+  "success": false,
+  "error": {
+    "code": "SALE_BID_BELOW_FLOOR",
+    "message": "A bid of 96 percent is below this market's sale floor of 98 percent. The router would record it, but every sale would revert (BidBelowFloor). Bid at least 9800 basis points.",
+    "txHash": null,
+    "details": { "floorBps": 9800, "priceFactorBps": 9600 }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `priceFactorBps` is missing on the build call or outside `0` to `20000`, `validUntil` is negative or not an integer, `allowance` is not a decimal string, or an address or hash is malformed |
+| `INVALID_SALE_BID` | `400` | `priceFactorBps` is between `1` and `9499`, `validUntil` is missing or less than 60 seconds ahead for a bid above `0`, or `allowance` carries more decimals than the settlement asset or is too large |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction posted no bid on this market's router |
+| `SALE_BID_FAILED` | `400` | The bid could not be prepared or confirmed and no more specific code applied |
+| `NOT_SALE_RECIPIENT` | `403` | `signerAddress` is not the router's sale recipient. `details.saleRecipient` names it |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance. See [Market IDs](/endpoints/lending/list-markets#market-ids) |
+| `ATOMIC_UNSUPPORTED` | `409` | The router's implementation predates the atomic sale. `details` carries `routerAddress` and `routerUpgrade` |
+| `SALE_RECIPIENT_NOT_SET` | `409` | The router has no sale recipient yet, so nobody can bid |
+| `ATOMIC_SALE_UNAVAILABLE` | `409` | A bid above `0`, or a non-zero `allowance`, on a market where the atomic sale is not offered. `details` carries `priceSource`, `realizationMode` and `reasonCode` |
+| `SALE_BID_BELOW_FLOOR` | `409` | The bid is below the market's sale floor, so every sale at it would revert. `details` carries `floorBps` and `priceFactorBps` |
+| `SALE_BID_UNCHANGED` | `409` | `priceFactorBps` is `0` and there is nothing to sign: the sale recipient has no standing bid, and `allowance` was not sent or is already in place, for example `0` with no allowance left to revoke. `details` carries `bidSet: false` and `allowance` (`{ amount, raw }`, or `null` when unread) |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market's price source, its realization path or its configuration could not be read, so whether the bid has a use or where the sale floor sits is unknown. Retry shortly |
+| `ROUTER_UNREADABLE` | `503` | The router or its sale recipient could not be read. Retry shortly |
+| `ROUTER_UNRESOLVED` | `503` | The market's liquidation router could not be read. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

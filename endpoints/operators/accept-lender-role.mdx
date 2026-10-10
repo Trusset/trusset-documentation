@@ -65,7 +65,7 @@ Seven parties are required. Each is a checksum-valid address that is not the zer
 <ParamField body="realizationMode" type="string" required>
   How seized collateral is turned into money on default: `EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION`.
 
-  The price source limits the choice. `EXCHANGE_SALE` is available only on a `MARKET`-priced market, and `AUCTION` is refused there because such a market cannot run Dutch auctions. The declaration puts the path on the record before any loan exists. No contract logic branches on it.
+  The price source limits the choice. `EXCHANGE_SALE` is available only on a `MARKET`-priced market, and `AUCTION` is refused there because such a market cannot run Dutch auctions. A `FIXED` market therefore takes `ISSUER_REDEMPTION` or `AUCTION`. The declaration puts the path on the record before any loan exists. Beyond these checks at adoption, no contract logic branches on it. The API offers the atomic sale only where `EXCHANGE_SALE` is declared, see [Get Atomic Sale](/endpoints/lending/get-atomic-sale#when-the-atomic-sale-is-offered).
 </ParamField>
 
 <ParamField body="liquidityCommitment" type="string" default="0">
@@ -84,6 +84,8 @@ Seven parties are required. Each is a checksum-valid address that is not the zer
   Borrower register for a market that has none. Only a nominated wallet may bring one. It is ignored when the deployer already installed a register, which stands. A `MARKET`-priced market must end up with one, and it must qualify as a professional gate, see [Professional borrowers](#professional-borrowers).
 
   It must answer `isVerified(address)`, as an ERC-3643 identity registry, an ONCHAINID-based register and the Trusset register all do. Omit it, or send the zero address, to adopt without one where the price source allows.
+
+  The previous Trusset ID Register, `0xE9114c40934f6fB6BB317935156b731f7A86D006`, takes no new identities and is refused with `IDENTITY_REGISTRY_RETIRED`, here and in `providerRegistry`. Name the current one, `0xEf244c4Bd4d71Bd9A30EDF6Edef7CCC72642291a`. A borrower register the deployer installed is not refused when it is the previous one: the adoption goes through, `installedRegister` carries `retired: true`, and the market admin moves the gate afterwards. See [The Previous Trusset ID Register](/endpoints/lending/set-identity-gates#the-previous-trusset-id-register).
 </ParamField>
 
 <ParamField body="identityRegistryProfile" type="string">
@@ -98,6 +100,18 @@ Seven parties are required. Each is a checksum-valid address that is not the zer
   A verification profile key whose eligibility register is used as `providerRegistry`, with the same rules as `identityRegistryProfile`.
 </ParamField>
 
+<ParamField body="identityRegistryAccessList" type="string">
+  The ID of a whitelist of your instance, 1 to 64 letters, digits, `-` or `_`, used as `identityRegistry`. Not accepted beside `identityRegistryProfile`, and refused on a `MARKET`-priced market. See [Whitelists as Gates](/endpoints/lending/set-identity-gates#whitelists-as-gates).
+</ParamField>
+
+<ParamField body="providerRegistryAccessList" type="string">
+  The ID of a whitelist of your instance, used as `providerRegistry`. Not accepted beside `providerRegistryProfile`.
+</ParamField>
+
+<ParamField body="attestIdentifiedMembers" type="boolean">
+  `true` confirms that the whitelist named as `providerRegistry` lists identified wallets only. Required whenever `providerRegistry` is a whitelist, whether named by ID or by address. `confirmWith.body` carries it to [Confirm Lender Role](/endpoints/operators/confirm-lender-role), which writes it to the audit record of the adoption.
+</ParamField>
+
 <ParamField body="liquidator" type="string">
   Wallet granted `LIQUIDATOR_ROLE` on the market in the same transaction. It can trigger a seizure and configure nothing. Omitted or zero on a `TWO_REGISTERS` market, the API names the signing wallet.
 </ParamField>
@@ -107,6 +121,8 @@ Seven parties are required. Each is a checksum-valid address that is not the zer
 
   The vault's investors must meet the market's provider gate, under the rules of [Register Vault](/endpoints/lending/register-vault#provider-gate). A vault with its own register needs `providerRegistry` to be that register or none (`PROVIDER_GATE_MISMATCH`). A vault without one needs a `providerRegistry`, since nothing else would examine its depositors (`DEPOSITOR_GATE_REQUIRED`). It must be the register the vault adopted from the first market it funded, or, before it adopted one, the provider register of every market it funds (`PROVIDER_GATE_MISMATCH`).
 </ParamField>
+
+A whitelist is checked as on [Set Identity Gates](/endpoints/lending/set-identity-gates#whitelists-as-gates): never the borrower register of a `MARKET` market (`ACCESS_LIST_NOT_ALLOWED`), never a register on the earlier single-register implementation (`ACCESS_LIST_NOT_ALLOWED`), kept for the right side (`ACCESS_LIST_PURPOSE_MISMATCH`), and as provider register only when your instance keeps it or one of its wallets owns or manages it (`ACCESS_LIST_NOT_CONTROLLED`) and with `attestIdentifiedMembers: true` (`ACCESS_LIST_ATTESTATION_REQUIRED`). Once the role is taken, [Confirm Lender Role](/endpoints/operators/confirm-lender-role) offers the step that makes the lender of record a manager of each whitelist gate.
 
 `providerRegistry`, `liquidator` and `vault` need the current market implementation. A market on the earlier implementation, reported as `SINGLE_REGISTER` by [Get Queued Market](/endpoints/operators/get-queued-market), refuses them with `MARKET_UPGRADE_REQUIRED`. It also needs a borrower register whatever its price source.
 
@@ -135,11 +151,15 @@ How that is enforced depends on who installs the register:
 
 When the profiles behind the register cannot be read, the call answers `503 STATE_UNAVAILABLE` and builds nothing.
 
+## Fixed price markets
+
+A `FIXED` market prices its collateral at the price fixed at deployment for its whole life, and the adoption underwrites that value. The response carries it in `fixedPrice` and warns with `FIXED_PRICE_MARK_DOWN_ONLY`: after adoption the oracle owner and the price signer you name can only lower the price, within the deviation bound, and the oracle owner also holds the oracle's upgrade authority. Name an oracle owner your institution controls itself, never the issuer or a borrower. When the asset data version you acknowledge states a different fixed price than the oracle holds, the response warns with `FIXED_PRICE_NOT_AS_ATTESTED`. The market lends against the oracle value. When the fixed price cannot be read, the call answers `503 ORACLE_STATE_UNREADABLE` and builds nothing.
+
 ## Approve the asset data
 
 A market that carries an issuer attestation cannot be adopted silently. Without `assetDataHash`, the call is refused with `422 ASSET_DATA_ACKNOWLEDGEMENT_REQUIRED`, and `error.details` names the standing hash and version. Read the bundle with [Get Asset Data Bundle](/endpoints/lending/get-asset-data-bundle), then send the hash you read. Send `acknowledgeAssetData: false` instead only if the adoption should approve no version.
 
-A hash that no longer stands is refused with `409 ASSET_DATA_STALE`, with `details.reviewed`, `details.standing` and `details.standingVersion`. The issuer can still re-attest after the transaction is built. The factory then refuses the whole adoption on-chain, so a stale approval can never pass.
+A hash other than the standing attestation is refused with `409 ASSET_DATA_STALE`, with `details.reviewed`, `details.standing` and `details.standingVersion`. The issuer can still re-attest after the transaction is built. The factory then refuses the whole adoption on-chain, so a stale approval can never pass.
 
 ## Claim an open market
 
@@ -179,15 +199,19 @@ The adoption transaction:
     <ResponseField name="providerRegistry" type="string">The provider register the terms install, or `null`.</ResponseField>
     <ResponseField name="borrowAsset" type="object">`{ address, symbol, decimals }` of the market's settlement asset, or `null` when it could not be read.</ResponseField>
     <ResponseField name="generation" type="string">`TWO_REGISTERS` or `SINGLE_REGISTER`.</ResponseField>
-    <ResponseField name="installedRegister" type="object">The borrower register the deployer installed, `{ address, shape, usable, note }`, or `null`.</ResponseField>
+    <ResponseField name="installedRegister" type="object">The borrower register the deployer installed, `{ address, shape, usable, note }`, or `null`. When it is the previous Trusset ID Register it also carries `retired: true` and `currentRegistry`, the current register lowercased, and `note` says that it takes no new identities.</ResponseField>
     <ResponseField name="borrowerProfile" type="object">`{ key, name, entityType, professionalOnly, requirementsHash }` of your verification profile whose eligibility register the borrower register is, or `null`.</ResponseField>
     <ResponseField name="providerProfile" type="object">The same for the provider register, or `null`.</ResponseField>
+    <ResponseField name="borrowerAccessList" type="object">The whitelist the borrower register is, as on [Get Identity Gates](/endpoints/lending/get-identity-gates), or `null`.</ResponseField>
+    <ResponseField name="providerAccessList" type="object">The whitelist the provider register is, or `null`.</ResponseField>
+    <ResponseField name="attestedIdentifiedMembers" type="boolean">Present and `true` when the request carried `attestIdentifiedMembers: true`.</ResponseField>
+    <ResponseField name="fixedPrice" type="object">`FIXED` markets only. The fixed price as the oracle holds it: `priceWei`, `price`, `settlementSymbol`, `updatedAt`, `fixed`, `maxDeviationBps`, `realizationPaths`, `authority` (`{ oracleOwner, priceSigner }` as named in the terms), `note`, and, when an asset data version is acknowledged, `acknowledgedPriceWei` and `matchesAcknowledgedPrice`. `perWholeToken`, `neverStale`, `markDownOnly` and `oracleOwnerCanUpgrade` are always `true`.</ResponseField>
     <ResponseField name="requiredFollowUp" type="object">`{ action: "SET_IDENTITY_GATES", reason: "BORROWER_GATE_NOT_PROFESSIONAL" }` when the deployer's borrower register must be replaced after adoption, otherwise `null`. See [Professional borrowers](#professional-borrowers).</ResponseField>
     <ResponseField name="terms" type="object">The terms as encoded: the seven parties, `identityRegistry`, `providerRegistry`, `liquidator`, `vault`, `liquidityCommitment` in the borrow asset's smallest unit, `realizationMode`, `claimSalt`, `maxFixedRateBps` and `assetDataHash`. Absent optional values read `null`.</ResponseField>
     <ResponseField name="assetData" type="object">`{ acknowledged, contentHash, version, attestor, factorySupport, note }`. `acknowledged` says whether this adoption approves a version.</ResponseField>
     <ResponseField name="handoverNote" type="string">What the transaction hands over. On a `TWO_REGISTERS` market the oracle, rate model and insurance fund pass to their named owners inside the transaction. On a `SINGLE_REGISTER` market each named owner must accept ownership afterwards.</ResponseField>
-    <ResponseField name="warnings" type="array">Present only when there is something to say, each `{ code, message }`. `VAULT_PREDATES_DISTRIBUTOR` flags a vault that cannot yet collect the distributor share this market books for it, and also names the `vault`. `BORROWER_GATE_NOT_PROFESSIONAL` flags a `MARKET` market whose installed borrower register does not qualify as a professional gate. Its message says why.</ResponseField>
-    <ResponseField name="confirmWith" type="object">`{ endpoint: "confirm-accept", txHash: true }`. See [Confirm Lender Role](/endpoints/operators/confirm-lender-role).</ResponseField>
+    <ResponseField name="warnings" type="array">Present only when there is something to say, each `{ code, message }`. `VAULT_PREDATES_DISTRIBUTOR` flags a vault that cannot yet collect the distributor share this market books for it, and also names the `vault`. `BORROWER_GATE_NOT_PROFESSIONAL` flags a `MARKET` market whose installed borrower register does not qualify as a professional gate. Its message says why. `FIXED_PRICE_MARK_DOWN_ONLY` and `FIXED_PRICE_NOT_AS_ATTESTED` are explained in [Fixed price markets](#fixed-price-markets).</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint: "confirm-accept", txHash: true }`, with `body: { attestIdentifiedMembers: true }` when the request attested a whitelist. See [Confirm Lender Role](/endpoints/operators/confirm-lender-role).</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -385,33 +409,39 @@ A malformed body is refused by its first offending field. The four `INVALID_` co
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | `marketAddress`, `maxFixedRateBps`, `claimSalt`, `identityRegistryProfile` or `providerRegistryProfile` failed validation |
+| `VALIDATION_ERROR` | `400` | `marketAddress`, `maxFixedRateBps`, `claimSalt`, `identityRegistryProfile`, `providerRegistryProfile`, a whitelist ID or `attestIdentifiedMembers` failed validation |
 | `INVALID_CURATOR_TERMS` | `400` | A party address, `identityRegistry`, `providerRegistry`, `liquidator` or `vault` is missing where required, malformed, the zero address where a party is required, or fails its checksum |
 | `INVALID_REALIZATION_MODE` | `400` | `realizationMode` is missing or not `EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION` |
 | `INVALID_LIQUIDITY_COMMITMENT` | `400` | `liquidityCommitment` is not a non-negative decimal, or carries more decimal places than the borrow asset |
 | `INVALID_CONTENT_HASH` | `400` | `assetDataHash` is not a 32-byte hex hash, or `acknowledgeAssetData` is not a boolean |
 | `GATE_PROFILE_CONFLICT` | `400` | `identityRegistry` or `providerRegistry` names a different register than the profile sent beside it |
 | `GATE_PROFILE_UNRESOLVED` | `400` | A profile key could not be resolved for a reason that carries no code of its own |
+| `GATE_SOURCE_CONFLICT` | `400` | One side names both a verification profile and a whitelist, or an address that differs from the whitelist named beside it |
+| `ACCESS_LIST_ATTESTATION_REQUIRED` | `400` | `providerRegistry` is a whitelist and `attestIdentifiedMembers` is not `true` |
 | `ACCEPT_FAILED` | `400` | The transaction could not be built for a reason that carries no code of its own |
 | `CURATOR_NOT_APPROVED` | `403` | Trusset has not approved this account to act as a lender of record |
 | `NOT_NOMINATED` | `403` | No verified wallet of this instance is nominated, and the market is not open |
+| `ACCESS_LIST_NOT_CONTROLLED` | `403` | `providerRegistry` is a whitelist another instance curates, and no verified wallet of yours owns or manages it |
 | `NOMINATION_REQUIRED` | `403` | A claimant nobody nominated brought a borrower register, or the open market has no borrower register to admit one |
 | `CANDIDATE_NOT_VERIFIED` | `403` | None of the wallets checked is verified on the register the open market admits claimants through |
 | `MARKET_NOT_V2` | `404` | The address is not a market of the v2 lending factory this instance deploys to |
 | `MARKET_NOT_DEPLOYED` | `404` | No deployment for this market could be read from the lending factory |
 | `PROFILE_NOT_FOUND` | `404` | `identityRegistryProfile` or `providerRegistryProfile` names no verification profile of this instance |
+| `ACCESS_LIST_NOT_FOUND` | `404` | `identityRegistryAccessList` or `providerRegistryAccessList` names no whitelist of this instance on this network that is not archived |
 | `VAULT_NOT_FOUND` | `404` | `vault` is not a vault of this instance, or it is archived |
 | `NOT_SEEKING_CURATOR` | `409` | The market already has a lender of record. The message names it |
 | `REALIZATION_MODE_UNAVAILABLE` | `409` | `AUCTION` was declared on a `MARKET`-priced market |
-| `REALIZATION_BASIS_UNAVAILABLE` | `409` | `EXCHANGE_SALE` was declared on a `NAV` or `ORACLE` market |
+| `REALIZATION_BASIS_UNAVAILABLE` | `409` | `EXCHANGE_SALE` was declared on a `NAV`, `ORACLE` or `FIXED` market. Declare `ISSUER_REDEMPTION` or `AUCTION` |
 | `SIGNER_SET_NOT_CLEAN` | `409` | The market's oracle reports a different number of authorized signers than adoption requires |
 | `MARKET_UPGRADE_REQUIRED` | `409` | `providerRegistry`, `liquidator` or `vault` was sent for a market on the earlier implementation |
+| `ACCESS_LIST_NOT_ALLOWED` | `409` | A whitelist was named as the borrower register of a `MARKET` market, or as a register of a market on the earlier single-register implementation. `details` carries `field`, `reason` and `address` |
+| `ACCESS_LIST_PURPOSE_MISMATCH` | `409` | A whitelist is kept for the other side: `DEPOSITOR` as `identityRegistry`, or `BORROWER` as `providerRegistry` |
 | `ELIGIBILITY_REGISTER_NOT_SET` | `409` | The named profile has no eligibility register |
 | `PROVIDER_GATE_MISMATCH` | `409` | `providerRegistry` differs from the register `vault` admits its depositors against: its own, the one it adopted, or the provider register of a market it funds. Also a `vault` without a register of its own that funds no market while its shares are still held. The message starts with the vault's name |
 | `DEPOSITOR_GATE_REQUIRED` | `409` | `vault` has no register of its own and the terms name no provider register |
 | `ASSET_MISMATCH` | `409` | `vault` settles in a different asset than the market |
 | `VAULT_NOT_OPERATORS` | `409` | `vault` is operated by a different wallet than the one signing the adoption |
-| `ASSET_DATA_STALE` | `409` | `assetDataHash` is no longer the standing attestation. `details` carries `reviewed`, `standing`, `standingVersion` and `attestedAt` |
+| `ASSET_DATA_STALE` | `409` | `assetDataHash` is not the standing attestation. `details` carries `reviewed`, `standing`, `standingVersion` and `attestedAt` |
 | `ASSET_DATA_NONE` | `409` | `assetDataHash` was sent but the issuer attested no asset data for this market |
 | `FACTORY_UPGRADE_REQUIRED` | `409` | `assetDataHash` was sent but the factory records no asset data attestation |
 | `CLAIM_PENDING` | `409` | The open-market claim was announced less than `claimDelaySeconds` ago. The message names the moment it becomes actionable |
@@ -420,11 +450,14 @@ A malformed body is refused by its first offending field. The four `INVALID_` co
 | `IDENTITY_REGISTRY_REQUIRED` | `422` | The market ends up without a borrower register where one is required: a `MARKET`-priced market, or a market on the earlier implementation |
 | `PROFESSIONAL_BORROWER_GATE_REQUIRED` | `422` | On a `MARKET` market without an installed register, the borrower register in the terms does not qualify as a professional gate. `details` carries `field` and `priceSource` |
 | `IDENTITY_REGISTRY_INCOMPATIBLE` | `422` | A register named in the terms does not answer `isVerified(address)` in a shape the market reads |
+| `IDENTITY_REGISTRY_RETIRED` | `422` | `identityRegistry` or `providerRegistry` in the terms is the previous Trusset ID Register, which takes no new identities. `details` carries `field`, `registry` and `currentRegistry`. Name the current register |
 | `SALE_RECIPIENT_NOT_ELIGIBLE` | `422` | The collateral token refuses delivery from the market's router to `saleRecipient`. The message names the blocked party and the remedy |
 | `ORACLE_FEED_UNUSABLE` | `422` | On an `ORACLE` market, the feed cannot answer a price inside the staleness window right now |
 | `ASSET_DATA_ACKNOWLEDGEMENT_REQUIRED` | `422` | The market carries an attestation and neither `assetDataHash` nor `acknowledgeAssetData: false` was sent. `details` carries `standing` and `standingVersion` |
 | `MARKET_VERIFICATION_UNAVAILABLE` | `503` | The address could not be checked against the v2 factory. Retry shortly |
-| `ORACLE_STATE_UNREADABLE` | `503` | The market's oracle could not be read to check its signer set. Retry shortly |
+| `ORACLE_STATE_UNREADABLE` | `503` | The market's oracle could not be read to check its signer set, or on a `FIXED` market its fixed price. Retry shortly |
+| `ACCESS_LIST_UNREADABLE` | `503` | Whether a named address is a whitelist, or whether your wallets own or manage it, could not be read. Retry shortly |
+| `ACCESS_LISTS_NOT_CONFIGURED` | `503` | A whitelist ID was sent on a network where the whitelist factory is not deployed |
 | `IDENTITY_REGISTRY_UNREADABLE` | `503` | The market's borrower register, or a register named in the terms, could not be reached. Retry shortly |
 | `MARKET_IMPLEMENTATION_UNREADABLE` | `503` | The market implementation could not be read. Retry shortly |
 | `MARKET_STATE_UNAVAILABLE` | `503` | The register of `vault`, the register it adopted, its share supply, or the markets it funds and their provider registers could not be read. Retry shortly |

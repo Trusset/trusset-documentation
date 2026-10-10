@@ -1,0 +1,194 @@
+---
+title: 'Sell Pending Liquidation'
+api: 'POST /lending-external-securities-v2/api/liquidations/liquidation/{liquidationId}/sell'
+description: 'Sell an open router record to the sale recipient at its standing bid and settle it in one transaction'
+---
+
+Builds the router's `sellPending` call. It sells all the collateral of an open liquidation record to the sale recipient at its standing bid, and settles the record in the same transaction. Send the hash back to record the sale. It is the atomic sale for a record that is already on the router: one seized in two-step mode, or the remainder of an expired auction. A holder of the router's `OPERATOR_ROLE` signs.
+
+The sale is priced at the oracle price times the bid. The payment goes through the market's settlement waterfall like any settlement. It repays the pool, draws on the insurance fund for a shortfall, and returns any surplus to the borrower. The record is recorded as `SETTLED` with `realization: ATOMIC` and the sale recipient as `buyer`.
+
+## When a sale is refused
+
+The atomic sale is offered only on a market priced from a live market price (`MARKET`) whose lender of record declared `EXCHANGE_SALE` as its realization mode. Any other market is refused with `409 ATOMIC_SALE_UNAVAILABLE`, `details.reasonCode` `PRICE_SOURCE_NOT_MARKET` or `REALIZATION_PATH_NOT_EXCHANGE_SALE`, and settles the two-step way through [Withdraw Collateral for Sale](/endpoints/lending/withdraw-collateral-for-sale) and [Settle Liquidation](/endpoints/lending/settle-liquidation). When the price source, or the realization path a `MARKET` market declared, cannot be read, the call answers `503 MARKET_STATE_UNAVAILABLE`.
+
+The router sells only a whole record. Once any of its collateral left the router for sale, the record is refused with `409 COLLATERAL_ALREADY_OUT_FOR_SALE` and settles the two-step way.
+
+Before calldata is returned, the API checks that the sale recipient can buy this record. It needs a bid at or above the market's floor that stays live for at least another 60 seconds, a fresh price, enough allowance and balance for the payment, room under the router's sale rate limit, and a delivery the collateral token admits. The record's borrower cannot be the sale recipient. A sale it cannot pay is refused with `409 ATOMIC_BUYER_UNAVAILABLE`, `details.reasonCode` naming the gap and `details.expectedPayment` the amount. The transaction is then simulated from the signer, and a revert the router would raise is named the same way, with `details.revert` naming the contract error.
+
+## Path Parameters
+
+<ParamField path="liquidationId" type="string" required>
+  Liquidation ID on the market's router.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="marketId" type="string">
+  The market whose liquidation you mean, as its record ID. Every market runs its own router and IDs restart at `1` on each. Supply it when the same ID exists on several of your markets, or the call is refused with `AMBIGUOUS_LIQUIDATION_ID`. Also accepted as a query parameter.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The router operator that will sign. Omit it to check your instance's primary verified wallet. A wallet without `OPERATOR_ROLE` is refused with `ROUTER_OPERATOR_ROLE_MISSING`, and the error carries the `calldata` that grants it. Also accepted as a query parameter.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined `sellPending` transaction. Send it to confirm; the sale is read from the router's `AtomicSaleExecuted` event and the market's settlement. Omit it to receive the calldata.
+</ParamField>
+
+## Response Fields
+
+The calldata response:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="liquidationId" type="string">The router record.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">The `sellPending` call on the router, `{ to, data, chainId, value }`.</ResponseField>
+    <ResponseField name="functionName" type="string">`sellPending`.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction does.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`OPERATOR_ROLE`.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet that holds it.</ResponseField>
+    <ResponseField name="routerAddress" type="string">The router, lowercased.</ResponseField>
+    <ResponseField name="buyer" type="string">The sale recipient that buys, lowercased.</ResponseField>
+    <ResponseField name="expectedPayment" type="object">`{ amount, raw }`: what the buyer pays at the current price and bid.</ResponseField>
+    <ResponseField name="collateralAmount" type="string">The collateral sold, in collateral units. `collateralAmountRaw` carries it in base units.</ResponseField>
+    <ResponseField name="price" type="object">`{ amount, raw }`: the oracle price the sale is priced at.</ResponseField>
+    <ResponseField name="priceFactor" type="object">`{ priceFactorBps, priceFactorE18 }`: the standing bid.</ResponseField>
+    <ResponseField name="settlementAsset" type="object">`{ address, symbol, decimals }`.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: this route, `txHash` as the field, and a `body` carrying the record's `marketId`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+The confirmed response:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="liquidationId" type="string">The router record.</ResponseField>
+    <ResponseField name="marketId" type="string">The market's record ID.</ResponseField>
+    <ResponseField name="status" type="string">`SETTLED`.</ResponseField>
+    <ResponseField name="realization" type="string">`ATOMIC`.</ResponseField>
+    <ResponseField name="usdcProceeds" type="string">What the market received, in borrow asset units.</ResponseField>
+    <ResponseField name="buyer" type="string">The sale recipient that bought, lowercased.</ResponseField>
+    <ResponseField name="payment" type="string">What the buyer paid.</ResponseField>
+    <ResponseField name="price" type="string">The oracle price the sale used.</ResponseField>
+    <ResponseField name="priceFactor" type="string">The bid as a decimal factor, for example `0.98`.</ResponseField>
+    <ResponseField name="collateralAmount" type="string">The collateral sold, in collateral units.</ResponseField>
+    <ResponseField name="surplus" type="object">`{ returned, escrowed }`: surplus paid to the borrower, or escrowed for it when the transfer failed.</ResponseField>
+    <ResponseField name="reserve" type="object">`{ seizureCovered, settlementCovered, reimbursed }`: what the insurance fund paid in and was paid back.</ResponseField>
+    <ResponseField name="settlement" type="object">The market's settlement of the record: `marketLiquidationId`, `routerLiquidationId`, `proceedsReceived`, `routerProceeds`, `shortfall`, `debtApplied`, `writeOffRecovered`, `reserve` (`{ requested, covered, uncovered }` or `null`) and `reserveReimbursed`.</ResponseField>
+    <ResponseField name="settledAt" type="string">ISO 8601 block time of the sale.</ResponseField>
+    <ResponseField name="txHash" type="string">The verified transaction.</ResponseField>
+    <ResponseField name="signedBy" type="string">The wallet that sent it.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+The sale is written to the audit log as `LENDING_PENDING_SOLD_ATOMICALLY`.
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidations/liquidation/14/sell" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"marketId": "cmuvtwr29002ds2mft47ye2yl"}'
+```
+```typescript TypeScript
+const url = 'https://api.trusset.org/lending-external-securities-v2/api/liquidations/liquidation/14/sell';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ marketId }) });
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+
+const tx = await operatorWallet.sendTransaction(data.transaction);
+await tx.wait();
+const confirmed = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ ...data.confirmWith.body, txHash: tx.hash })
+});
+const { data: sale } = await confirmed.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "liquidationId": "14",
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+      "data": "0x...",
+      "chainId": 11155111,
+      "value": "0"
+    },
+    "functionName": "sellPending",
+    "description": "Sell the collateral of liquidation 14 to the sale recipient at its standing bid and settle the record in the same transaction",
+    "requiredRole": "OPERATOR_ROLE",
+    "signer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+    "buyer": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
+    "expectedPayment": { "amount": "21560.0", "raw": "21560000000" },
+    "collateralAmount": "220.0",
+    "collateralAmountRaw": "220000000000000000000",
+    "price": { "amount": "100.0", "raw": "100000000" },
+    "priceFactor": { "priceFactorBps": 9800, "priceFactorE18": "980000000000000000" },
+    "settlementAsset": {
+      "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "symbol": "USDC",
+      "decimals": 6
+    },
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/liquidations/liquidation/14/sell",
+      "field": "txHash",
+      "body": { "txHash": null, "marketId": "cmuvtwr29002ds2mft47ye2yl" }
+    }
+  }
+}
+```
+```json Error - Buyer Unavailable
+{
+  "success": false,
+  "error": {
+    "code": "ATOMIC_BUYER_UNAVAILABLE",
+    "message": "The sale recipient 0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473 allows the router to take 5000.0 USDC, short of the 21560.0 USDC this sale costs, so the payment fails. It raises its allowance to the router.",
+    "txHash": null,
+    "details": {
+      "reasonCode": "ALLOWANCE_SHORT",
+      "saleRecipient": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
+      "expectedPayment": { "amount": "21560.0", "raw": "21560000000" }
+    }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `marketId` is longer than 100 characters, or an address or hash is malformed |
+| `AMBIGUOUS_LIQUIDATION_ID` | `400` | This ID exists on more than one of your markets. The error carries `candidates`; resend with `marketId` |
+| `ALREADY_SETTLED` | `400` | The record is already settled or written off, here or on the router |
+| `ROUTER_OPERATOR_ROLE_MISSING` | `400` | The signer lacks `OPERATOR_ROLE` on the router. The error carries grant `calldata`. When the simulated sale is what the router refuses for the role, the same code answers `403` |
+| `WALLET_NOT_CONFIGURED` | `400` | No `signerAddress` was sent and your instance has no verified wallet |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction sells a different liquidation, or carries no atomic sale of this one |
+| `SELL_PENDING_FAILED` | `400` | The sale could not be prepared or recorded and no more specific code applied |
+| `LIQUIDATION_NOT_FOUND` | `404` | No liquidation with that ID on your instance, or the router has none |
+| `MARKET_NOT_FOUND` | `404` | `marketId` names no market on your instance, or the market the record settles into could not be identified |
+| `ATOMIC_SALE_UNAVAILABLE` | `409` | The market is not `MARKET`-priced, or its realization mode is not `EXCHANGE_SALE`. `details` carries `priceSource`, `realizationMode` and `reasonCode`. Settle the two-step way |
+| `ATOMIC_UNSUPPORTED` | `409` | The router's implementation predates the atomic sale. `details` carries `routerAddress` and `routerUpgrade` |
+| `ATOMIC_BUYER_UNAVAILABLE` | `409` | The sale recipient cannot buy this record. `details` carries `reasonCode` (`NO_BID`, `BID_EXPIRED`, `SELF_PURCHASE`, `BID_BELOW_FLOOR`, `PRICE_STALE`, `RATE_LIMITED`, `ALLOWANCE_SHORT`, `BALANCE_SHORT` or `DELIVERY_REFUSED`), `saleRecipient` and `expectedPayment`. When the simulation raised it, `details` carries `revert` and `reasonCode` instead |
+| `COLLATERAL_ALREADY_OUT_FOR_SALE` | `409` | Part or all of the record's collateral already left the router for sale. Report the sale and settle the two-step way |
+| `SALE_RECIPIENT_NOT_SET` | `409` | The router has no sale recipient, so there is no buyer |
+| `LIQUIDATION_ON_VENUE` | `409` | The record's Dutch auction is still open, so the router holds none of its collateral |
+| `TX_WOULD_REVERT` | `409` | The simulated sale reverts for a reason no other code covers. `details.revert` names it |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market's price source, its declared realization path or its oracle could not be read. Nothing was signed. Retry shortly |
+| `ROUTER_UNREADABLE` | `503` | The router, the bid, the price or the buyer's funds could not be read, or the sale could not be simulated. Retry shortly |
+| `ROUTER_UNRESOLVED` | `503` | The market's liquidation router could not be read. Retry shortly |
+| `ROLE_UNVERIFIABLE` | `503` | The signer's role on the router could not be read. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

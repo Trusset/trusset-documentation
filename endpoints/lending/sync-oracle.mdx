@@ -8,6 +8,8 @@ Writes a new price to the market's oracle. This is how a `NAV`- or `MARKET`-pric
 
 An `ORACLE`-priced market reads an external feed instead, and its oracle refuses every attested price. This endpoint refuses it with `EXTERNAL_FEED_ACTIVE`.
 
+A `FIXED` market holds the price set at deployment for its whole life, and it never goes stale. This endpoint can only mark that price down. See [Mark down a fixed price](#mark-down-a-fixed-price).
+
 Like every other write on this surface, nothing is submitted for you. The call returns the unsigned transaction, you broadcast it, then confirm it with `txHash`. `price` is required on both calls.
 
 <Warning>
@@ -18,7 +20,7 @@ Price authority does not have to be your instance's primary wallet. When the len
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
 
 ## Body Parameters
 
@@ -31,7 +33,7 @@ Price authority does not have to be your instance's primary wallet. When the len
 </ParamField>
 
 <ParamField body="txHash" type="string">
-  Hash of the mined transaction, sent together with `price` to confirm it and record the push. Omit it to receive the calldata. A value that is not a 0x-prefixed 64-character hex string is ignored, and the call builds calldata instead.
+  Hash of the mined transaction, sent together with `price` to confirm it and record the push. Omit it to receive the calldata. `null` or an empty string counts as omitted. Any other value that is not a 0x-prefixed 64-character hex string is refused with `VALIDATION_ERROR`, and nothing is built or recorded.
 </ParamField>
 
 ## Response Fields
@@ -44,8 +46,11 @@ Price authority does not have to be your instance's primary wallet. When the len
     <ResponseField name="functionName" type="string">`updatePrice`, or `updatePriceWithSignature` when a recorded attestation is carried. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="signer" type="string">The wallet the authorization check ran against, or the key that signed the carried attestation. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="attestationId" type="string">The recorded attestation being submitted. Present only with `updatePriceWithSignature`.</ResponseField>
-    <ResponseField name="previousPrice" type="string">The on-chain price before this write. Null when confirming, because the prior value is no longer readable from the receipt.</ResponseField>
+    <ResponseField name="previousPrice" type="string">The on-chain price before this write. When confirming, read from the oracle's `PriceUpdated` event in the receipt, and `null` only when the receipt carries none.</ResponseField>
     <ResponseField name="newPrice" type="string">The price to be written, as sent. Read from the mined transaction when confirming.</ResponseField>
+    <ResponseField name="markDown" type="boolean">`true` on a `FIXED` market, where the write lowers the fixed price. Absent otherwise.</ResponseField>
+    <ResponseField name="markDownOnly" type="boolean">`true` on a `FIXED` market. Absent otherwise.</ResponseField>
+    <ResponseField name="description" type="string">On a `FIXED` market, the mark-down in words, naming the old and the new price. Absent otherwise.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
@@ -56,13 +61,25 @@ A price signer that keeps its key outside this instance can sign the payload fro
 
 The attestation is used only while it is unexpired, not yet pushed, and recorded through this instance. It must also be dated after the oracle's current price, be at most 15 minutes old, and still pass the oracle's own signature check. Otherwise the call falls back to a plain `updatePrice`. An attested price is dated at its signed timestamp, so its age runs from signing, not from broadcast.
 
+## Mark down a fixed price
+
+On a `FIXED` market the oracle owner or an authorized price signer can lower the price, and nothing can raise it again through a price update. `price` must be below the current fixed price. An equal or higher price is refused with `409 FIXED_PRICE_ACTIVE`, and `details` carries `currentPrice` and `markDownOnly: true`. A mark-down is bounded by the circuit breaker below, and no recorded attestation is ever carried, because the oracle accepts no signed price on a fixed market.
+
+<Warning>
+  A mark-down is final. The market lends and liquidates against the lower price as soon as the transaction mines, and no price update can restore the old one. Mark down only on a decision the lender of record stands behind, and push one step at a time when the move is large.
+</Warning>
+
+The deviation bound itself is set in the Issuer Portal and is not on this API. On a `FIXED` market the Issuer Portal only tightens it, because it is the only limit on how far one mark-down, or the mark-downs of one hour, can move the price. A wider bound is refused there with `409 FIXED_PRICE_BOUND_LOCKED`, and with `503 ORACLE_STATE_UNAVAILABLE` when the bound in force cannot be read. An oracle on the current implementation refuses a wider bound sent to it directly as well, reverting `FixedPriceActive`. A fixed oracle created before the factory carried that implementation runs the one it was created with until its owner upgrades it, and until then only the Issuer Portal holds the bound. Read the bound in force as `maxDeviationBps` on [Get Oracle Status](/endpoints/lending/get-oracle-status) before you rely on it.
+
+When whether the oracle holds a fixed price cannot be read, the call answers `503 PRICE_STATE_UNAVAILABLE` and prepares nothing.
+
 ## Circuit Breaker
 
 The oracle rejects a price that deviates from the current price by more than `maxDeviationBps`, defaulting to 5000 basis points, which is 50 percent. This guards against a fat-fingered NAV wiping out healthy loans in one transaction. The same limit also bounds the total movement within a rolling one-hour window, measured from the price that opened the window.
 
-Every push-mode oracle is initialized with a positive price at deployment, so even the first push is measured against it. The API runs the step check before building calldata and refuses with `PRICE_DEVIATION_TOO_LARGE`. It does not run the window check, so a push inside the step limit can still revert on-chain after earlier moves in the same hour.
+Every push-mode oracle is initialized with a positive price at deployment, so even the first push is measured against it. The API runs both checks before building calldata. A step too large is refused with `PRICE_DEVIATION_TOO_LARGE`, and a push that would take the hour's movement past the limit with `PRICE_WINDOW_DEVIATION_TOO_LARGE`.
 
-The refusal names the on-chain price, the new price and the allowed percentage in `message` only. The error object carries no separate fields for them.
+Both refusals carry `currentPrice` and `maxDeviationPercent` on the error object. The window refusal adds `windowAnchorPrice`, `windowStartedAt`, `windowResetsAt`, `acceptedLow` and `acceptedHigh`. On a `FIXED` market they also carry `details.markDownOnly: true`.
 
 A genuine repricing beyond the limit requires the oracle owner to widen `maxDeviationBps`, or a sequence of smaller steps. Steps that land within one hour count against the same window. Do not retry a rejected push unchanged. Surface the deviation to an operator, because a retry sends the same price into the same breaker.
 
@@ -143,9 +160,41 @@ await fetch(url, {
 {
   "success": true,
   "data": {
-    "previousPrice": null,
+    "previousPrice": "104.82",
     "newPrice": "105.4",
     "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b"
+  }
+}
+```
+```json Calldata Response - Fixed Price Mark-Down
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+      "data": "0x...",
+      "chainId": 11155111,
+      "value": "0"
+    },
+    "functionName": "updatePrice",
+    "previousPrice": "100.0",
+    "newPrice": "96.5",
+    "signer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "markDown": true,
+    "markDownOnly": true,
+    "description": "Mark down the fixed price from 100.0 to 96.5 USDC"
+  }
+}
+```
+```json Error - Fixed Price Not Lowered
+{
+  "success": false,
+  "error": {
+    "code": "FIXED_PRICE_ACTIVE",
+    "message": "This market has a fixed price of 100.0 USDC, set at deployment. It can only be marked down: send a price below 100.0 USDC.",
+    "details": { "currentPrice": "100.0", "markDownOnly": true }
   }
 }
 ```
@@ -163,7 +212,9 @@ await fetch(url, {
   "success": false,
   "error": {
     "code": "PRICE_DEVIATION_TOO_LARGE",
-    "message": "Price deviation exceeds circuit breaker. On-chain: $104.82, new: $250. Max allowed: 50%"
+    "message": "Price deviation exceeds circuit breaker. On-chain: 104.82 USDC, new: 250 USDC. Max allowed: 50%",
+    "currentPrice": "104.82",
+    "maxDeviationPercent": 50
   }
 }
 ```
@@ -196,9 +247,13 @@ await fetch(url, {
 | `EXTERNAL_FEED_ACTIVE` | `400` | The market's oracle reads an external feed and refuses pushed prices |
 | `WALLET_NOT_CONFIGURED` | `400` | No `signerAddress` was given, the market declared no price signer, this instance has no verified wallet, and no recorded attestation matched |
 | `PRICE_DEVIATION_TOO_LARGE` | `400` | The step from the on-chain price exceeds `maxDeviationBps` |
+| `PRICE_WINDOW_DEVIATION_TOO_LARGE` | `400` | The movement within the current one-hour window would exceed `maxDeviationBps`. The error names the accepted band |
 | `SYNC_FAILED` | `400` | The update could not be prepared, or the confirm call failed verification. `message` carries the reason |
+| `VALIDATION_ERROR` | `400` | `txHash` is present but not a 0x-prefixed 64-character hex string. `details` names the field |
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `SIGNER_NOT_AUTHORIZED` | `403` | The resolved signer is neither an authorized signer nor the owner. Checked before the calldata is built; skipped when a recorded attestation is carried and when confirming |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `FIXED_PRICE_ACTIVE` | `409` | The market has a fixed price and `price` is not below it. `details` carries `currentPrice` and `markDownOnly: true`. Send a lower price |
+| `PRICE_STATE_UNAVAILABLE` | `503` | Whether the oracle holds a fixed price could not be read, so nothing was prepared. Retry shortly |
 
 Confirming does not return the typed [transaction verification codes](/endpoints/introduction#confirm-a-transaction). A receipt that is missing, reverted, sent to another contract or calling another function answers `SYNC_FAILED`, with the verification message such as `Transaction not found or not yet mined`.

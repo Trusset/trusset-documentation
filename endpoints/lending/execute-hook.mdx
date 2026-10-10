@@ -4,7 +4,7 @@ api: 'POST /lending-external-securities-v2/api/hooks/{marketId}/{hookId}/execute
 description: 'Run a hook now and return its outcome'
 ---
 
-Runs one hook immediately and returns the outcome synchronously. It runs whether or not the hook is active, which makes it the way to test a new hook. The response is HTTP `200` whenever the hook ran, including when the hook itself failed: read the outcome from `data.success` and `data.result`.
+Runs one hook immediately and returns the outcome synchronously, except that an `inform` action returns the delivery it queued. It runs whether or not the hook is active, which makes it the way to test a new hook. The response is HTTP `200` whenever the hook ran, including when the hook itself failed: read the outcome from `data.success` and `data.result`.
 
 <Warning>
   A `buy` hook never bids. It returns an approval and a `bidOnAuction` step for a wallet to sign, priced when they were built. The auction module charges its price at the moment the bid lands. It reverts if the auction has ended, the market is paused, the price is stale, or the signer is the loan's borrower. Delivery is a compliance-gated token transfer, so a wallet the collateral token does not admit reverts too. The balance check before the steps reads only the instance's registered wallet, whichever wallet signs.
@@ -20,7 +20,7 @@ What the body must carry depends on the hook type:
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
 <ParamField path="hookId" type="string" required>Hook ID.</ParamField>
 
 ## Body Parameters
@@ -30,42 +30,46 @@ What the body must carry depends on the hook type:
 </ParamField>
 
 <ParamField body="liquidationData" type="object">
-  Required for `afterLiquidation` hooks. Its values are passed through as sent.
+  Required for `afterLiquidation` hooks. An `inform` body carries the fields a liquidation's delivery carries, listed under [Signed deliveries](/endpoints/lending/create-hook#signed-deliveries), and a field left out reads `null`. `marketLiquidationId`, `txHash` and `marketAddress` are forwarded as sent, like the fields below. `realization`, `buyer`, `proceeds`, `surplus`, `reserve` and `payee` are forwarded only when valid: `ATOMIC`, `ROUTER` or `VENUE`, a non-zero address, or a non-negative decimal amount. Anything else reads `null`.
   <Expandable>
     <ParamField body="loanId" type="string">On-chain loan ID, written to the log and to an `inform` body.</ParamField>
     <ParamField body="auctionId" type="string">Auction ID on the market's auction module. Required for a `buy` action to have anything to price.</ParamField>
     <ParamField body="collateralAmount" type="string">Collateral seized, forwarded in an `inform` body.</ParamField>
     <ParamField body="debtOwed" type="string">Debt outstanding at liquidation, forwarded in an `inform` body.</ParamField>
     <ParamField body="borrower" type="string">Borrower address, forwarded in an `inform` body.</ParamField>
+    <ParamField body="eventKey" type="string">Makes an `inform` call idempotent. A second call with the same `eventKey` for this hook queues nothing and returns `duplicate: true`. Without it, every call queues its own delivery.</ParamField>
   </Expandable>
 </ParamField>
 
 ## What each type does
 
-**`monitorRisk`** sends a `GET` to `riskUri` with `Accept: application/json`, a 10-second timeout and a 5 MB cap on the body. A non-2xx status, a body that is not JSON, a refused host or a timeout returns `success: false` with the reason in `error`, and sets the hook's `lastResult` to `null`. A completed evaluation lists each field in `fields`, up to the first that fails. When it evaluates to `false`, the run also executes every active `afterLiquidation` hook that lists this monitor in `triggerHookIds`. Their outcomes go to their own logs, not into this response.
+**`monitorRisk`** sends a `GET` to `riskUri` with `Accept: application/json`, a 10-second timeout and a 5 MB cap on the body. A non-2xx status, a body that is not JSON, a refused host or a timeout returns `success: false` with the reason in `error`, and sets the hook's `lastResult` to `null`. A completed evaluation lists each field in `fields`, up to the first that fails. When it evaluates to `false`, every active `afterLiquidation` hook that lists this monitor in `triggerHookIds` acts on the breach. Their outcomes go to their own logs, not into this response.
 
 **`beforeLiquidation`** evaluates every check, and `result` is `true` only when all pass. `checkResults` lists `{ parameter, value, pass }` per check, with `value` as sent. A hook with no `parameterChecks` returns `result: true` without logging a run.
 
 **`afterLiquidation`** first checks `triggerHookIds`. If it lists any, it acts only when every listed hook is active and its last counted run returned `false`. Otherwise it returns `result: false` with `reason: "Trigger condition not met"`.
 
-An `inform` action sends a `POST` to `webhookUrl` with a 15-second timeout. The JSON body holds the `webhookPayload` fields plus `hookId`, `marketId`, `loanId`, `auctionId`, `collateralAmount`, `debtOwed`, `borrower` and an ISO `timestamp`. The headers include `X-Hook-Id` and `X-Hook-Type: afterLiquidation`. `result` is `true` for any 2xx answer, and `status` carries the code. The request carries no signature, so verify anything it reports against the chain before acting on it.
+An `inform` action queues a signed delivery to `webhookUrl` and returns at once, before anything is sent: `result: null`, `queued: true`, the `deliveryId` and `status: "PENDING"`. A worker sends and retries it as [Signed deliveries](/endpoints/lending/create-hook#signed-deliveries) describes, and [List Hook Deliveries](/endpoints/lending/list-hook-deliveries) shows how it went. A repeated `eventKey` returns `queued: false` and `duplicate: true` instead. The delivery is signed like any other but reports `liquidationData` as sent, so a receiver checks a reported liquidation against the chain before acting on it.
 
-A `buy` action reads `liquidationData.auctionId` on the market's auction module. It returns `success: false` when the market has no auction module wired or the auction is not active. Above `maxBuyPrice` it returns `result: false` with `reason: "Price exceeds max buy price"`. When the registered wallet holds less of the borrow asset than the bid needs, it returns `success: false` and an `error` naming the asset. Otherwise it returns two steps. The first approves the auction module to pull the borrow asset for the remaining collateral at the current price. The second is `bidOnAuction` for all remaining collateral. The run records `result: false` with `reason: "requires_wallet_signature"`, because nothing has been bought. The hook does not record the bid; confirm the mined bid with [Bid on Auction](/endpoints/lending/bid-on-auction).
+A `buy` action reads `liquidationData.auctionId` on the market's auction module. Without an `auctionId` it returns `result: false` with `reason: "This liquidation opened no auction, so there is nothing to buy"`. It returns `success: false` when the market has no auction module wired or the auction is not active. Above `maxBuyPrice` it returns `result: false` with `reason: "Price exceeds max buy price"`. When the registered wallet holds less of the borrow asset than the bid needs, it returns `success: false` and an `error` naming the asset. Otherwise it returns two steps. The first approves the auction module to pull the borrow asset for the remaining collateral at the current price. The second is `bidOnAuction` for all remaining collateral. The run records `result: false` with `reason: "requires_wallet_signature"`, because nothing has been bought. The hook does not record the bid; confirm the mined bid with [Bid on Auction](/endpoints/lending/bid-on-auction).
 
-A run started by a monitor's `false` evaluation carries no loan or auction: `loanId` and `auctionId` are `null`, `collateralAmount` and `debtOwed` are `"0"`, and `borrower` is `"0x0"`. An `inform` hook posts those values. A `buy` hook has no auction to read and fails.
+A monitor's breach takes neither path above and skips the trigger check. An `inform` hook queues a `riskBreach` delivery that carries the monitor and its failing fields instead of loan data. A `buy` hook only logs that a breach carries no auction to act on.
 
-Counted runs, unmet triggers, skipped bids, a short wallet balance and runs that raised an error are written to [Get Hook Executions](/endpoints/lending/get-hook-executions). A refusal before anything is evaluated is returned but not logged. That covers a missing risk config, no parameter checks, no webhook URL, no auction module and an inactive auction.
+Counted runs, unmet triggers, skipped bids, a `buy` run without an auction, a short wallet balance and runs that raised an error are written to [Get Hook Executions](/endpoints/lending/get-hook-executions). An `inform` run is logged when its delivery is delivered or fails for good, not when it is queued. A refusal before anything is evaluated is returned but not logged. That covers a missing risk config, no parameter checks, no webhook URL, no auction module and an inactive auction.
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="success" type="boolean">Whether the hook ran without an error.</ResponseField>
-    <ResponseField name="result" type="boolean">Outcome of the evaluation or action.</ResponseField>
+    <ResponseField name="result" type="boolean | null">Outcome of the evaluation or action. `null` for a queued `inform` delivery, whose outcome is not known yet.</ResponseField>
     <ResponseField name="fields" type="array">`monitorRisk`. One `{ path, operator, threshold, value, pass }` per field evaluated.</ResponseField>
     <ResponseField name="checkResults" type="array">`beforeLiquidation`. One `{ parameter, value, pass }` per check.</ResponseField>
-    <ResponseField name="status" type="integer">`inform`. HTTP status the webhook answered with.</ResponseField>
-    <ResponseField name="reason" type="string">Why a run that did not error returned `result: false`: `Trigger condition not met`, `Price exceeds max buy price` or `requires_wallet_signature`.</ResponseField>
+    <ResponseField name="queued" type="boolean">`inform`. `true` when a delivery was queued, `false` for a duplicate.</ResponseField>
+    <ResponseField name="deliveryId" type="string">`inform`. The queued delivery's `id`, as on [List Hook Deliveries](/endpoints/lending/list-hook-deliveries).</ResponseField>
+    <ResponseField name="status" type="string">`inform`. `PENDING`, the delivery's status when queued.</ResponseField>
+    <ResponseField name="duplicate" type="boolean">`inform`. `true` when `liquidationData.eventKey` was already queued for this hook.</ResponseField>
+    <ResponseField name="reason" type="string">Why a run that did not error returned `result: false`: `Trigger condition not met`, `This liquidation opened no auction, so there is nothing to buy`, `Price exceeds max buy price` or `requires_wallet_signature`. On a duplicate `inform`, `This liquidation was already announced to the hook`.</ResponseField>
     <ResponseField name="error" type="string">Why the run failed, when `success` is `false`.</ResponseField>
     <ResponseField name="requiresUserAction" type="boolean">`buy`. `true` when steps are returned.</ResponseField>
     <ResponseField name="action" type="string">`buy`. `SIGN_TRANSACTIONS`.</ResponseField>
@@ -140,8 +144,10 @@ if (data.requiresUserAction) {
   "success": true,
   "data": {
     "success": true,
-    "result": true,
-    "status": 200
+    "result": null,
+    "queued": true,
+    "deliveryId": "86c63be2-bb94-4109-af7d-c3bc3b420d23",
+    "status": "PENDING"
   }
 }
 ```

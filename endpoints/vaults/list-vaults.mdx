@@ -6,13 +6,15 @@ description: 'Your instance''s vaults first, then every vault published on your 
 
 Returns every vault visible to the instance behind the API key, in three groups:
 
-1. Vaults this instance operates, marked `own: true`, newest first. An instance runs at most three live vaults.
+1. Vaults this instance operates, marked `own: true`, newest first. An instance runs at most three live vault products, and a vault group counts as one.
 2. Vaults other operators published, on the same network and in the same environment (production or not), newest first.
 3. Unpublished vaults of other operators in which this instance is a distributor of record. One of its verified wallets still has attributed shares or unpaid distributor fees there. These rows carry `distributorView: true`, no risk disclosure, and take no deposit from this instance.
 
 Any other unpublished vault is visible only to its operator. Archived vaults are left out.
 
 Every row carries an `onChain` block read from the vault contract, so a directory can show share price and size without a call per vault. It carries no per-holder position and none of the operator-only blocks. Those are on [Get Vault](/endpoints/vaults/get-vault).
+
+The pockets of a [vault group](/endpoints/vaults/get-vault-group) are vaults too, so each appears as a row with `groupId` set. `groups` gathers them per group with totals per currency.
 
 ## Response Fields
 
@@ -29,6 +31,11 @@ Every row carries an `onChain` block read from the vault contract, so a director
     <ResponseField name="assetDecimals" type="integer">Asset decimals. Every amount you send is parsed at this precision, shares included, and every amount returned is formatted with it.</ResponseField>
     <ResponseField name="identityRegistryAddress" type="string">The vault's own identity register, or `null` when the vault names none. Fixed for the life of the vault.</ResponseField>
     <ResponseField name="depositorGate" type="object">`kind` is `REGISTER` when the vault names an identity register and `NONE` when it names none. Carries `register` and a display `statement`. A `NONE` vault on the current implementation adopts the provider register of the first market it funds or consents to draw for, keeps it for good, and refuses every deposit until then. It examines each depositor against that register and the provider register of every market it funds. On an earlier implementation a `NONE` vault admits any wallet, and the API prepares no deposit into it.</ResponseField>
+    <ResponseField name="depositorProfile" type="object">The verification profile of your instance whose eligibility register `identityRegistryAddress` is, as `{ key, name, entityType, professionalOnly, requirementsHash }`, or `null`.</ResponseField>
+    <ResponseField name="depositorAccessList" type="object">The whitelist `identityRegistryAddress` is, as `{ id, name, purpose, address, own }`, or `null`. On a whitelist your instance keeps, `id`, `name` and `purpose` come from your record. On any other they read `null`.</ResponseField>
+    <ResponseField name="depositorRegisterRetired" type="boolean">Present, and `true`, only when `identityRegistryAddress` is the previous Trusset ID Register, `0xE9114c40934f6fB6BB317935156b731f7A86D006`. That register takes no new identities, so the vault refuses every depositor verified since 10 October 2026. See [The Previous Trusset ID Register](/endpoints/lending/set-identity-gates#the-previous-trusset-id-register).</ResponseField>
+    <ResponseField name="currentRegistry" type="string">Present with `depositorRegisterRetired`. The current Trusset ID Register, lowercased.</ResponseField>
+    <ResponseField name="depositorRegisterNote" type="string">Present with `depositorRegisterRetired`. Says that a depositor verified since then can only enter through a vault gated on the current register, and that holders already in the vault redeem as before. Show it next to the deposit control.</ResponseField>
     <ResponseField name="name" type="string">Vault name.</ResponseField>
     <ResponseField name="symbol" type="string">Share token symbol.</ResponseField>
     <ResponseField name="performanceFeeBps" type="integer">The vault operator's cut of share-price growth above the high-water mark, in basis points. The contract only accepts decreases.</ResponseField>
@@ -38,10 +45,39 @@ Every row carries an `onChain` block read from the vault contract, so a director
     <ResponseField name="settlementCurrency" type="string">The fiat currency the vault's asset settles in, resolved from the asset address rather than guessed from its symbol. `null` when the address is not a known settlement asset.</ResponseField>
     <ResponseField name="riskDisclosure" type="string">The operator's risk statement. Show it before any deposit control. `null` on a `distributorView` row.</ResponseField>
     <ResponseField name="riskDisclosureUrl" type="string">Link to the operator's full risk disclosure. Always `https`. `null` on a `distributorView` row.</ResponseField>
+    <ResponseField name="groupId" type="string">The vault group this vault is a pocket of, or `null` for a standalone vault.</ResponseField>
+    <ResponseField name="group" type="object">`{ id, name, onChainGroupId }` of that group, or `null`.</ResponseField>
     <ResponseField name="operatedBy" type="object">`instanceName`, `issuerName`, `isBank`, plus `image` and `profileImage`. Display the operator next to the vault name.</ResponseField>
     <ResponseField name="onChain" type="object">Live vault state, identical in shape to the block on [Get Vault](/endpoints/vaults/get-vault#response-fields), where every field is described. It is `null` for a vault with no recorded address. It carries `readFailed: true` when the chain could not be read for that vault alone, and one vault failing does not empty the others.</ResponseField>
     <ResponseField name="createdAt" type="string">When the vault was registered, ISO 8601.</ResponseField>
     <ResponseField name="updatedAt" type="string">Last change to the record, ISO 8601.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="data.groups" type="array">
+  One entry per vault group among the rows, with its pockets. Empty when no row belongs to a group.
+  <Expandable>
+    <ResponseField name="id" type="string">Vault group ID, for [Get Vault Group](/endpoints/vaults/get-vault-group) and [Deposit to Vault Group](/endpoints/vaults/deposit-to-vault-group).</ResponseField>
+    <ResponseField name="name" type="string">Group name.</ResponseField>
+    <ResponseField name="onChainGroupId" type="integer">The group's ID on the vault factory.</ResponseField>
+    <ResponseField name="own" type="boolean">`true` when your instance operates the group.</ResponseField>
+    <ResponseField name="identityRegistryAddress" type="string">The depositor register every pocket shares.</ResponseField>
+    <ResponseField name="active" type="boolean">`true` when every listed pocket is published.</ResponseField>
+    <ResponseField name="pocketCount" type="integer">Pockets listed.</ResponseField>
+    <ResponseField name="currencies" type="string[]">The settlement currencies of the pockets.</ResponseField>
+    <ResponseField name="pockets" type="array">Each `{ id, vaultAddress, assetAddress, assetSymbol, assetDecimals, settlementCurrency, totalAssets, owner }`. `totalAssets` and `owner` are `null` when the pocket could not be read.</ResponseField>
+    <ResponseField name="tvl" type="object">Total assets per currency, keyed by currency code.</ResponseField>
+    <ResponseField name="tvlByCurrency" type="array">The same per currency, with `pockets`, `symbols` and `readFailed`.</ResponseField>
+    <ResponseField name="approximateTotal" type="object">Only for a group of exactly EUR and USD pockets: a total at the ECB euro reference rate, labelled as an approximation. `null` otherwise. See [Get Vault Group](/endpoints/vaults/get-vault-group).</ResponseField>
+    <ResponseField name="operatorDiverged" type="boolean">`true` when the pockets are owned by different wallets, `null` when an owner could not be read.</ResponseField>
+    <ResponseField name="currentOperator" type="string">The one wallet that owns every pocket, or `null`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="data.capabilities" type="object">
+  <Expandable>
+    <ResponseField name="vaultGroups" type="boolean">Whether the vault factory on this network creates vault groups. `null` when it could not be read.</ResponseField>
+    <ResponseField name="maxPocketsPerGroup" type="integer">`4`.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -85,12 +121,14 @@ for (const vault of data.vaults) {
         "assetAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
         "assetSymbol": "USDC",
         "assetDecimals": 6,
-        "identityRegistryAddress": "0xe9114c40934f6fb6bb317935156b731f7a86d006",
+        "identityRegistryAddress": "0xef244c4bd4d71bd9a30edf6edef7ccc72642291a",
         "depositorGate": {
           "kind": "REGISTER",
-          "register": "0xe9114c40934f6fb6bb317935156b731f7a86d006",
+          "register": "0xef244c4bd4d71bd9a30edf6edef7ccc72642291a",
           "statement": "Deposits and share transfers are examined against this register."
         },
+        "depositorProfile": null,
+        "depositorAccessList": null,
         "name": "Trusset Prime Demo Vault",
         "symbol": "TPV",
         "performanceFeeBps": 500,
@@ -98,6 +136,8 @@ for (const vault of data.vaults) {
         "archived": false,
         "riskDisclosure": "Deposits fund overcollateralized lending markets. Redemptions can fill partially under high utilization.",
         "riskDisclosureUrl": "https://bank.example/vault-risk",
+        "groupId": null,
+        "group": null,
         "network": "ETHEREUM",
         "settlementCurrency": "USD",
         "operatedBy": {
@@ -123,7 +163,12 @@ for (const vault of data.vaults) {
           "assetsFullyReadable": true
         }
       }
-    ]
+    ],
+    "groups": [],
+    "capabilities": {
+      "vaultGroups": true,
+      "maxPocketsPerGroup": 4
+    }
   },
   "error": null,
   "metadata": {

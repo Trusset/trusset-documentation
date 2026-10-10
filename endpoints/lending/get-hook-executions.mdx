@@ -4,13 +4,13 @@ api: 'GET /lending-external-securities-v2/api/hooks/{marketId}/{hookId}/executio
 description: 'Retrieve the execution log of a hook'
 ---
 
-Returns the hook's execution log, newest first, with pagination counters. Scheduled runs, chained runs and calls to [Execute Hook](/endpoints/lending/execute-hook) all write to it.
+Returns the hook's execution log, newest first, with pagination counters. Scheduled runs, liquidations, a monitor's breach, finished deliveries and calls to [Execute Hook](/endpoints/lending/execute-hook) all write to it.
 
-The log is not the same count as the hook's `executionCount`. An unmet trigger, a skipped bid and a short wallet balance add a log entry without counting as a run, and a refusal before anything is evaluated adds neither.
+The log is not the same count as the hook's `executionCount`. An unmet trigger, a skipped bid, a `buy` run without an auction, a breach a `buy` hook cannot act on and a short wallet balance each add a log entry without counting as a run. A refusal before anything is evaluated adds neither. A queued `inform` delivery adds its entry and its count when it is delivered or fails for good.
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
 <ParamField path="hookId" type="string" required>Hook ID.</ParamField>
 
 ## Query Parameters
@@ -34,7 +34,7 @@ The log is not the same count as the hook's `executionCount`. An unmet trigger, 
         <ResponseField name="hookId" type="string">Hook that ran.</ResponseField>
         <ResponseField name="marketId" type="string">Market the hook belongs to.</ResponseField>
         <ResponseField name="loanId" type="string | null">Loan ID from the data the run was given, or `null`.</ResponseField>
-        <ResponseField name="executionType" type="string">The hook type: `monitorRisk`, `beforeLiquidation` or `afterLiquidation`.</ResponseField>
+        <ResponseField name="executionType" type="string">The hook type: `monitorRisk`, `beforeLiquidation` or `afterLiquidation`. An `afterLiquidation` hook's entry for a monitor's breach reads `riskBreach`.</ResponseField>
         <ResponseField name="result" type="boolean">Outcome. A `buy` run that returned steps is logged as `false`, because nothing was bought.</ResponseField>
         <ResponseField name="data" type="object | null">What the run saw or did. Shapes are listed below.</ResponseField>
         <ResponseField name="error" type="string | null">Error message when the run failed.</ResponseField>
@@ -50,15 +50,20 @@ The log is not the same count as the hook's `executionCount`. An unmet trigger, 
 
 A `monitorRisk` entry holds `{ fields }`, one `{ path, operator, threshold, value, pass }` per field evaluated. It is `null` when the fetch failed, and `error` says why.
 
-A `beforeLiquidation` entry holds `{ loanData, results }`: the data sent and one `{ parameter, value, pass }` per check.
+A `beforeLiquidation` entry holds `{ loanData, results }`: the data the checks were given and one `{ parameter, value, pass }` per check.
 
 An `afterLiquidation` entry holds one of these, or `null` when the run raised an error:
 
-- `{ action: "inform", status }` after a webhook answered.
+- `{ action: "inform", deliveryId, status, attempts }` when a delivery was delivered, with `status` the HTTP status. A delivery that failed for good adds `error`, its `result` is `false`, and `status` is `null` when no answer came.
 - `{ action: "buy", reason: "requires_wallet_signature", auctionId, currentPrice }` after bid steps were returned.
+- `{ action: "buy", reason: "This liquidation opened no auction, so there is nothing to buy" }` for a `buy` run without an `auctionId`.
 - `{ reason: "Price exceeds max", currentPrice }` when the price was above `maxBuyPrice`.
 - `{ reason: "Insufficient USDC" }` when the registered wallet held too little of the borrow asset, named by its symbol.
 - `{ reason: "Trigger condition not met" }`, with `triggerId` when a listed hook's last result was not `false`.
+
+A `riskBreach` entry holds the outcome of the breach's `inform` delivery, in the shape above. For a hook whose action is not `inform` it holds `{ action, monitorHookId, reason }`, with `result` `false`, because a breach carries no auction to act on.
+
+An entry a liquidation wrote can also carry the liquidation's `eventKey`, which keeps the liquidation from running the hook twice.
 
 <RequestExample>
 ```bash cURL

@@ -10,7 +10,7 @@ A market deployed through [Deploy Market](/endpoints/lending/deploy-market) is b
 
 No market exists yet, so there is no market access check. The token must be one this instance imported and holds as active, with a published profile. Otherwise the call is refused with `TOKEN_PROFILE_REQUIRED`, the same refusal a deployment gets. Import the token with [Import Token](/endpoints/tokenization/import-token) and fill its profile with [Update Profile](/endpoints/tokenization/update-profile).
 
-The preview stores nothing. Pass the same `mode`, `priceSource` and `borrowAssetAddress` the deployment will use, because each of them is part of the bundle. The deployment response carries its own `assetData.contentHash`, so compare the two before the issuer signs.
+The preview stores nothing. Pass the same `mode`, `priceSource` and `borrowAssetAddress` the deployment will use, because each of them is part of the bundle. On a `FIXED` deployment pass the same `initialPrice` too: the bundle commits to the fixed price itself. The deployment response carries its own `assetData.contentHash`, so compare the two before the issuer signs.
 
 ## Query Parameters
 
@@ -23,7 +23,11 @@ The preview stores nothing. Pass the same `mode`, `priceSource` and `borrowAsset
 </ParamField>
 
 <ParamField query="priceSource" type="string" default="NAV">
-  Price source of the planned market: `MARKET`, `NAV` or `ORACLE`.
+  Price source of the planned market: `MARKET`, `NAV`, `ORACLE` or `FIXED`.
+</ParamField>
+
+<ParamField query="initialPrice" type="string">
+  Required with `FIXED`: the fixed price of one whole collateral token in the settlement token (stablecoin), as a decimal string greater than zero with no more decimal places than the settlement token has. Ignored for every other price source.
 </ParamField>
 
 <ParamField query="borrowAssetAddress" type="string">
@@ -32,14 +36,15 @@ The preview stores nothing. Pass the same `mode`, `priceSource` and `borrowAsset
 
 ## What the bundle contains
 
-The bundle follows schema `1.0.0` and has four members. Its rules are fixed per schema version, so a stored bundle re-hashes to the same value for as long as it is kept.
+A bundle this API builds follows schema `1.1.0` and has up to five members. A bundle stored under schema `1.0.0` has no `instrument` member. The rules are fixed per schema version, so a stored bundle re-hashes to the same value for as long as it is kept.
 
 | Member | Contents |
 |---|---|
-| `schemaVersion` | `1.0.0` |
-| `market` | What the deployment fixes: `chainId`, `factory`, `family` (always `FUNGIBLE` on this surface), `borrowAsset`, `collateralMode` and `priceSource` |
+| `schemaVersion` | `1.1.0` |
+| `market` | What the deployment fixes: `chainId`, `factory`, `family` (always `FUNGIBLE` on this surface), `borrowAsset`, `collateralMode` and `priceSource`. A `FIXED` deployment adds `fixedPrice`, the price in the settlement token's smallest unit, so the lender of record acknowledges the value itself at adoption |
 | `token` | The facts recorded when the token was imported: `tokenAddress`, `name`, `symbol`, `decimals`, `framework`, `assetType`, `totalSupply` |
 | `profile` | The issuer's published profile, limited to `issuerName`, `jurisdiction`, `sector`, `description`, `isin`, `lei`, `website`, `ammAddress`, `reserveURI`, `prospectusURI` and `documents`, each document reduced to `name` and `uri` |
+| `instrument` | The token's [instrument record](/endpoints/tokenization/get-instrument) on this network: its string and true-or-false fields, dates as `YYYY-MM-DD`, its call and put schedules as dated entries, and its documents reduced to `docType`, `uri`, `contentHash`, `language`, `version` and `issuedAt`. Left out when the token has no record |
 
 The market's own address is not a member. The first attestation travels inside the transaction that creates that address, and the factory's own record binds the hash to the market.
 
@@ -50,11 +55,14 @@ The market's own address is not a member. The first attestation travels inside t
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="contentHash" type="string">keccak256 over the UTF-8 bytes of `canonicalJson`. The value the deployment writes as its first attestation.</ResponseField>
-    <ResponseField name="schemaVersion" type="string">`1.0.0`.</ResponseField>
+    <ResponseField name="schemaVersion" type="string">`1.1.0`.</ResponseField>
     <ResponseField name="canonicalJson" type="string">The exact bytes the hash commits to.</ResponseField>
     <ResponseField name="bundle" type="object">The same bundle as an object, for display.</ResponseField>
     <ResponseField name="token" type="object">`address`, `name` and `symbol` of the imported token.</ResponseField>
     <ResponseField name="factorySupport" type="boolean">`true` when the lending factory records asset data attestations. `false` when its implementation predates them, in which case a deployment is refused with `FACTORY_UPGRADE_REQUIRED` until the factory is upgraded. `null` when the factory could not be read.</ResponseField>
+    <ResponseField name="fixedPrice" type="object">`FIXED` only. The price the bundle commits to: `priceWei`, `price`, `settlementSymbol`, `settlementDecimals`, and `perWholeToken`, `neverStale` and `markDownOnly`, each `true`, with a `note`.</ResponseField>
+    <ResponseField name="fixedPriceCheck" type="object">`FIXED` only. The checks [Deploy Market](/endpoints/lending/deploy-market#fixed-price) runs on the price: `tokenCurrency` from the instrument record, `settlementCurrency`, `currencyKnown`, `currencyMatches`, `nominalPerUnit`, `redemptionPricePct` with `redemptionPricePctAssumed`, `expectedPrice` and `expectedPriceWei` (nominal times redemption percent over 100), `matchesNominal`, and the `formula`. A `null` comparison means the instrument record lacks the figure. The price checked is repeated as `priceWei` and `price`, with `settlementSymbol` and `perWholeToken`.</ResponseField>
+    <ResponseField name="fixedSupported" type="boolean">`FIXED` only. Whether the lending factory creates oracles that can hold a fixed price. `null` when it could not be read.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -84,11 +92,11 @@ console.log(`The deployment will attest ${data.contentHash}`);
 {
   "success": true,
   "data": {
-    "contentHash": "0x65ed3a41511863cfbeacd3617041f1ccfcf281ab1a29bd7c08002a15cb427ccb",
-    "schemaVersion": "1.0.0",
-    "canonicalJson": "{\"market\":{\"borrowAsset\":\"0x98ad0ca091552e23c564b41c74282e5343d03e8a\",\"chainId\":11155111,\"collateralMode\":\"FREEZE\",\"factory\":\"0xf1ad12f5698f58badd8a662acffccb067a2ddb8a\",\"family\":\"FUNGIBLE\",\"priceSource\":\"NAV\"},\"profile\":{\"documents\":[{\"name\":\"Annual report 2025\",\"uri\":\"https://acme-capital.example/nyf1/annual-report-2025.pdf\"}],\"isin\":\"DE000A0F5UF5\",\"issuerName\":\"ACME Capital AG\",\"jurisdiction\":\"DE\",\"prospectusURI\":\"https://acme-capital.example/nyf1/prospectus.pdf\",\"sector\":\"Real estate\",\"website\":\"https://acme-capital.example\"},\"schemaVersion\":\"1.0.0\",\"token\":{\"assetType\":\"REAL_ESTATE\",\"decimals\":18,\"framework\":\"erc3643\",\"name\":\"Nyala Fund I\",\"symbol\":\"NYF1\",\"tokenAddress\":\"0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9\",\"totalSupply\":\"250000.0\"}}",
+    "contentHash": "0x724c8f151f757f20e5fc2f01f67bdaaa281d6d866debc6db1f77464cd62c136a",
+    "schemaVersion": "1.1.0",
+    "canonicalJson": "{\"market\":{\"borrowAsset\":\"0x98ad0ca091552e23c564b41c74282e5343d03e8a\",\"chainId\":11155111,\"collateralMode\":\"FREEZE\",\"factory\":\"0xf1ad12f5698f58badd8a662acffccb067a2ddb8a\",\"family\":\"FUNGIBLE\",\"priceSource\":\"NAV\"},\"profile\":{\"documents\":[{\"name\":\"Annual report 2025\",\"uri\":\"https://acme-capital.example/nyf1/annual-report-2025.pdf\"}],\"isin\":\"DE000A0F5UF5\",\"issuerName\":\"ACME Capital AG\",\"jurisdiction\":\"DE\",\"prospectusURI\":\"https://acme-capital.example/nyf1/prospectus.pdf\",\"sector\":\"Real estate\",\"website\":\"https://acme-capital.example\"},\"schemaVersion\":\"1.1.0\",\"token\":{\"assetType\":\"REAL_ESTATE\",\"decimals\":18,\"framework\":\"erc3643\",\"name\":\"Nyala Fund I\",\"symbol\":\"NYF1\",\"tokenAddress\":\"0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9\",\"totalSupply\":\"250000.0\"}}",
     "bundle": {
-      "schemaVersion": "1.0.0",
+      "schemaVersion": "1.1.0",
       "market": {
         "chainId": 11155111,
         "factory": "0xf1ad12f5698f58badd8a662acffccb067a2ddb8a",
@@ -136,12 +144,20 @@ console.log(`The deployment will attest ${data.contentHash}`);
   "data": null,
   "error": {
     "code": "TOKEN_PROFILE_REQUIRED",
-    "message": "NYF1 has no published profile, so there is no asset data to attest and no market can be created against it. Open the token in Assets, fill in the issuer, jurisdiction, identifiers and offering documents under its profile (PUT /external-tokens/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9/profile), then create the market: the issuer's own wallet attests that data inside the deployment signature.",
+    "message": "NYF1 has no published profile, so there is no asset data to attest and no market can be created against it. Open the token in Assets and fill in at least one field of its published profile, the overview this instance can always edit: the description, the issuer name, the sector, the website, the AMM contract or the reserve document (PUT /external-tokens/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9/profile from the issuer app, or PUT /external-tokens/api/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9/profile with an API key), then create the market: the issuer's own wallet attests that data inside the deployment signature. The instrument record with the identifiers, the jurisdiction and the offering documents is published by the token's controller only: by this instance when one of its verified wallets controls the token (PUT /instruments/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9 from the issuer app, or PUT /instruments/api/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9 with an API key), otherwise through the API with the controller's signature (POST /instruments/api/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9/approval-request, then PUT /instruments/api/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9 with issuerApproval). A record already published for the token is part of the asset data either way.",
     "details": {
       "field": "profile",
       "tokenAddress": "0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9",
       "imported": true,
-      "editProfile": "/external-tokens/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9/profile"
+      "nextStep": "FILL_PROFILE",
+      "overviewFields": ["description", "issuerName", "sector", "website", "ammAddress", "reserveURI"],
+      "editProfile": "/external-tokens/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9/profile",
+      "instrumentRecord": "/instruments/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9",
+      "apiPaths": {
+        "editProfile": "/external-tokens/api/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9/profile",
+        "instrumentRecord": "/instruments/api/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9",
+        "instrumentApprovalRequest": "/instruments/api/0x5b2e4c9a1d7f38e06b4a92c1f0d83e7a64c5b1d9/approval-request"
+      }
     }
   }
 }
@@ -154,11 +170,13 @@ The asset data routes report a validation failure with the first failing rule as
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | `collateralTokenAddress` is missing or malformed, `mode` or `priceSource` is not an accepted value, or `borrowAssetAddress` is malformed |
+| `VALIDATION_ERROR` | `400` | `collateralTokenAddress` is missing or malformed, `mode` or `priceSource` is not an accepted value, `initialPrice` is not a decimal greater than zero with at most 18 decimal places, or `borrowAssetAddress` is malformed |
 | `INVALID_BORROW_ASSET` | `400` | `borrowAssetAddress` fails the address checksum |
 | `BORROW_ASSET_NOT_CONTRACT` | `400` | No contract is deployed at `borrowAssetAddress` |
 | `BORROW_ASSET_NOT_ERC20` | `400` | `borrowAssetAddress` does not answer `decimals` and `balanceOf` |
 | `BORROW_ASSET_DECIMALS_UNSUPPORTED` | `400` | The settlement token (stablecoin) has fewer than 6 or more than 18 decimals |
-| `INVALID_ASSET_DATA` | `400` | A stored token fact or profile field cannot enter the bundle, for example an `ammAddress` that is not an address |
-| `TOKEN_PROFILE_REQUIRED` | `422` | The token is not imported and active on this instance, or its profile is empty. `details.imported` says which, and `details.editProfile` names the profile path |
+| `INVALID_ASSET_DATA` | `400` | A stored token fact, profile field or instrument date cannot enter the bundle, for example an `ammAddress` that is not an address |
+| `INVALID_INITIAL_PRICE` | `400` | `priceSource` is `FIXED` and `initialPrice` is missing, or carries more decimal places than the settlement token |
+| `TOKEN_PROFILE_REQUIRED` | `422` | The token is not imported and active on this instance, or its profile is empty. `details.imported` and `details.nextStep` (`IMPORT_TOKEN` or `FILL_PROFILE`) say which, and `details.apiPaths` names the routes to fix it with an API key |
 | `ASSET_DATA_PREVIEW_FAILED` | `500` | The preview could not be computed for a reason the service did not classify |
+| `INSTRUMENT_UNREADABLE` | `503` | The token's instrument record could not be read, so the bundle could not be built. Retry shortly |

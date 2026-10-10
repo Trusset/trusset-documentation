@@ -1,0 +1,195 @@
+---
+title: 'Set Atomic Mode'
+api: 'POST /lending-external-securities-v2/api/liquidations/{marketId}/atomic-mode'
+description: 'Switch a market''s liquidation router between atomic and two-step settlement'
+---
+
+Builds the `setAtomicMode` transaction on the market's liquidation router, or confirms it with `txHash`. The wallet holding `DEFAULT_ADMIN_ROLE` on the router signs. In atomic mode (`1`) a liquidation sells the seized collateral to the sale recipient at its standing bid and settles the record in the same transaction, or reverts. In two-step mode (`0`) seized collateral waits on the router for the sale desk. Every router starts in two-step mode.
+
+<Warning>
+  In atomic mode a liquidation succeeds only while the sale recipient can buy. Without a live bid, enough allowance and balance, or a fresh price, every liquidation reverts and loans stay liquidatable, also loans the pool is losing money on. Read the state with [Get Atomic Sale](/endpoints/lending/get-atomic-sale) before switching, and switch back to two-step when the sale recipient stops bidding.
+</Warning>
+
+## When atomic mode is refused
+
+Switching atomic mode on is refused with `409 ATOMIC_SALE_UNAVAILABLE` unless the market's price source is `MARKET` and its lender of record declared `EXCHANGE_SALE` as its realization mode. `details.reasonCode` is `PRICE_SOURCE_NOT_MARKET` or `REALIZATION_PATH_NOT_EXCHANGE_SALE`, with `priceSource` and `realizationMode` beside it. When the price source, or the realization path a `MARKET` market declared, cannot be read, the call answers `503 MARKET_STATE_UNAVAILABLE`. Switching back to two-step is never refused on this ground.
+
+A router whose implementation predates the atomic sale is refused with `409 ATOMIC_UNSUPPORTED`, and `details.routerUpgrade` carries its upgrade status. The router administrator upgrades it first.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
+
+## Body Parameters
+
+<ParamField body="mode" type="integer">
+  `1` atomic or `0` two-step. Required when building calldata.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The router administrator that will sign. Omit it to check your instance's primary verified wallet. The wallet must hold `DEFAULT_ADMIN_ROLE` on the router, or the call is refused with `ROUTER_ADMIN_ROLE_MISSING`.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined transaction. Send it to confirm; `mode` is then read from the router's `AtomicModeSet` event. Omit it to receive the calldata.
+</ParamField>
+
+## Response Fields
+
+The calldata response:
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">The `setAtomicMode` call on the router, `{ to, data, chainId, value }`.</ResponseField>
+    <ResponseField name="functionName" type="string">`setAtomicMode`.</ResponseField>
+    <ResponseField name="description" type="string">What the new mode does, in words.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`DEFAULT_ADMIN_ROLE`.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet that holds the role.</ResponseField>
+    <ResponseField name="mode" type="integer">The mode requested.</ResponseField>
+    <ResponseField name="modeName" type="string">`ATOMIC` or `TWO_STEP`.</ResponseField>
+    <ResponseField name="previousMode" type="integer">The mode the router holds now.</ResponseField>
+    <ResponseField name="routerAddress" type="string">The router, lowercased.</ResponseField>
+    <ResponseField name="atomic" type="object">The atomic sale state as on [Get Atomic Sale](/endpoints/lending/get-atomic-sale), without `saleBasis` and `saleRecipientLenderSide`. Its `available`, `reasonCode` and `reason` describe the router, the market and the sale recipient, and leave the sale basis out.</ResponseField>
+    <ResponseField name="warnings" type="array">`{ code, message }` entries when switching to atomic mode. See [Warnings](#warnings). Empty when switching to two-step.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: this route, `txHash` as the field.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+When the router already runs the requested mode, nothing is built: the answer carries `alreadySet: true`, `mode`, `modeName`, `routerAddress` and `atomic`.
+
+The confirmed response carries `txHash`, `signedBy`, `mode` and `modeName` as the transaction set them, `currentMode` and `currentModeName` as the router answers now, and `routerAddress`. The change is written to the audit log as `LENDING_ATOMIC_MODE_SET`. The calldata example below shortens `atomic`.
+
+## Warnings
+
+| `code` | When |
+|---|---|
+| `MARKET_UPGRADE_REQUIRED` | The market runs an implementation without the atomic sale, so liquidations stay two-step even in atomic mode until the market is upgraded |
+| `DUTCH_AUCTIONS_ON` | The market opens Dutch auctions, which take precedence: liquidations keep opening auctions instead of selling atomically. The remainder of an expired auction reaches the router two-step, and [Sell Pending Liquidation](/endpoints/lending/sell-pending-liquidation) can sell it |
+| `ATOMIC_BUYER_UNAVAILABLE` | The sale recipient cannot buy now, so every atomic liquidation would revert. Carries `reasonCode` |
+| `ATOMIC_BUYER_UNVERIFIED` | Whether the sale recipient can buy could not be read |
+| `SELF_PURCHASE_TWO_STEP_ONLY` | Always on atomic mode. The sale recipient's own loans can be liquidated only in two-step mode |
+| `SALE_RECIPIENT_LENDER_SIDE` | The sale recipient is also the lender of record, collateral agent, liquidation operator, controller or router administrator. Carries `roles`. See [Get Atomic Sale](/endpoints/lending/get-atomic-sale) |
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidations/{marketId}/atomic-mode" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": 1}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/liquidations/${marketId}/atomic-mode`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ mode: 1 }) });
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+if (data.alreadySet) return;
+if (data.warnings.some((w: { code: string }) => w.code === 'ATOMIC_BUYER_UNAVAILABLE')) {
+  throw new Error('The sale recipient cannot buy yet');
+}
+
+const tx = await routerAdminWallet.sendTransaction(data.transaction);
+await tx.wait();
+await fetch(url, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.hash }) });
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+      "data": "0x...",
+      "chainId": 11155111,
+      "value": "0"
+    },
+    "functionName": "setAtomicMode",
+    "description": "Switch the liquidation router to atomic mode: a liquidation sells the seized collateral to the sale recipient at its standing bid and settles in the same transaction, or reverts.",
+    "requiredRole": "DEFAULT_ADMIN_ROLE",
+    "signer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "mode": 1,
+    "modeName": "ATOMIC",
+    "previousMode": 0,
+    "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+    "atomic": {
+      "marketId": "cmuvtwr29002ds2mft47ye2yl",
+      "available": true,
+      "mode": 0,
+      "modeName": "TWO_STEP",
+      "effective": false,
+      "saleRecipient": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
+      "buyerAvailable": true,
+      "code": null,
+      "reasonCode": null
+    },
+    "warnings": [
+      {
+        "code": "SELF_PURCHASE_TWO_STEP_ONLY",
+        "message": "The sale recipient's own loans can only be liquidated in two-step mode."
+      }
+    ],
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/liquidations/cmuvtwr29002ds2mft47ye2yl/atomic-mode",
+      "field": "txHash",
+      "body": { "txHash": null }
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0x4a7c1e9f3b5d02e68c1a4f7b9d3e05c28a6f1b4d7e9c2a05f3b8d6e1a4c7f9b2",
+    "signedBy": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "mode": 1,
+    "modeName": "ATOMIC",
+    "currentMode": 1,
+    "currentModeName": "ATOMIC",
+    "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf"
+  }
+}
+```
+```json Error - Atomic Sale Unavailable
+{
+  "success": false,
+  "error": {
+    "code": "ATOMIC_SALE_UNAVAILABLE",
+    "message": "This market prices its collateral from a fixed price set at deployment, which is neither a stock-exchange nor a market price, so the free-hand sale under § 1259 BGB, which the atomic sale carries out, is not available on it. Liquidations stay two-step and realize through the path its adoption terms declare.",
+    "txHash": null,
+    "details": {
+      "priceSource": "FIXED",
+      "realizationMode": "ISSUER_REDEMPTION",
+      "reasonCode": "PRICE_SOURCE_NOT_MARKET"
+    }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `mode` is not `0` or `1`, neither `mode` nor `txHash` was sent, or an address or hash is malformed |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `ROUTER_ADMIN_ROLE_MISSING` | `400` | The signer does not hold `DEFAULT_ADMIN_ROLE` on the router |
+| `WALLET_NOT_CONFIGURED` | `400` | No `signerAddress` was sent and your instance has no verified wallet |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction set no atomic mode on this market's router |
+| `ATOMIC_MODE_FAILED` | `400` | The change could not be prepared or confirmed and no more specific code applied |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance. See [Market IDs](/endpoints/lending/list-markets#market-ids) |
+| `ATOMIC_SALE_UNAVAILABLE` | `409` | Atomic mode was requested on a market that is not `MARKET`-priced, or whose realization mode is not `EXCHANGE_SALE`. `details` carries `priceSource`, `realizationMode` and `reasonCode`. Keep the market two-step |
+| `ATOMIC_UNSUPPORTED` | `409` | The router's implementation predates the atomic sale. `details` carries `routerAddress` and `routerUpgrade` |
+| `MARKET_STATE_UNAVAILABLE` | `503` | The market's price source, or the realization path a `MARKET` market declared, could not be read. Nothing was signed. Retry shortly |
+| `ROUTER_UNREADABLE` | `503` | The router, or its current mode, could not be read. Retry shortly |
+| `ROUTER_UNRESOLVED` | `503` | The market's liquidation router could not be read. Retry shortly |
+| `ROLE_UNVERIFIABLE` | `503` | The signer's role on the router could not be read. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

@@ -21,7 +21,7 @@ A collateral token can back several markets as long as they differ in collateral
 ## Body Parameters
 
 <ParamField body="collateralTokenAddress" type="string" required>
-  Security token accepted as collateral. Must be imported into this instance with a published profile, and must not be the same token as the borrow asset. Required on the confirm call as well.
+  Security token accepted as collateral. Must be imported into this instance with a published profile, and must not be the same token as the borrow asset. On the confirm call it is an optional cross-check.
 
   `CUSTODY` mode needs only an ERC-20 surface (`balanceOf` and `decimals`), so ERC-20, ERC-1400 and ERC-3643 tokens all qualify. `FREEZE` mode also needs the ERC-3643 freeze surface (`isAgent` or `getFrozenTokens`). See [Collateral token standards](/endpoints/lending/introduction#collateral-token-standards).
 </ParamField>
@@ -29,7 +29,7 @@ A collateral token can back several markets as long as they differ in collateral
 <ParamField body="initialPrice" type="string">
   Opening collateral price as a decimal string, for example `"104.82"`. Must be greater than zero, with at most 18 decimal places. It is denominated in the borrow asset and parsed at its decimals. A market settling in USDC therefore accepts at most 6 decimal places here.
 
-  Required for the `NAV` and `MARKET` price sources. An `ORACLE` market takes its first price from the feed and ignores this field.
+  Required for the `NAV`, `MARKET` and `FIXED` price sources. An `ORACLE` market takes its first price from the feed and ignores this field. On a `FIXED` market it is the price of one whole collateral token for the life of the market. See [Fixed price](#fixed-price).
 </ParamField>
 
 <ParamField body="candidates" type="array" default="[]">
@@ -47,11 +47,15 @@ A collateral token can back several markets as long as they differ in collateral
 </ParamField>
 
 <ParamField body="priceSource" type="string" default="NAV">
-  `NAV`, `MARKET` or `ORACLE`. Cannot be changed after deployment.
+  `NAV`, `MARKET`, `ORACLE` or `FIXED`. Cannot be changed after deployment.
 
-  `NAV` is a price the issuer publishes. `MARKET` signals an observable market price: the contract then refuses Dutch auctions and holds the auction floor premium at 98 percent or more. `ORACLE` reads the external feed named in `oracleAddress` and takes no pushed price at all.
+  `NAV` is a price the issuer publishes. `MARKET` signals an observable market price: the contract then refuses Dutch auctions and holds the auction floor premium at 98 percent or more. `ORACLE` reads the external feed named in `oracleAddress` and takes no pushed price at all. `FIXED` holds `initialPrice` for the life of the market, never goes stale, and can only be marked down. It is offered only when [Get Deployment Options](/endpoints/lending/get-deployment-options) lists it in `priceSources.options`.
 
   A `MARKET` market lends to professional borrowers only, so it needs a borrower register. See [Borrower register on a MARKET market](#borrower-register-on-a-market-market).
+</ParamField>
+
+<ParamField body="acknowledgeFixedPriceMismatch" type="boolean" default="false">
+  `FIXED` only. `true` deploys an `initialPrice` that differs from the instrument's nominal times its redemption percent, which is otherwise refused with `FIXED_PRICE_NOMINAL_MISMATCH`. See [Fixed price](#fixed-price).
 </ParamField>
 
 <ParamField body="oracleAddress" type="string">
@@ -66,6 +70,8 @@ A collateral token can back several markets as long as they differ in collateral
   The borrower register, installed on the market by this transaction. Borrowers are examined against it on every loan. It must answer `isVerified(address)`, as an ERC-3643 identity registry, an ONCHAINID-based register and the Trusset register all do.
 
   Optional for `NAV` and `ORACLE`. For `MARKET`, see [Borrower register on a MARKET market](#borrower-register-on-a-market-market). Omitted, the collateral token's own compliance alone governs who may borrow. A register installed here stands at adoption: the lender of record cannot bring a different one. The market admin can change it afterwards with [Set Identity Gates](/endpoints/lending/set-identity-gates).
+
+  The previous Trusset ID Register, `0xE9114c40934f6fB6BB317935156b731f7A86D006`, takes no new identities and is refused with `IDENTITY_REGISTRY_RETIRED`. Name the current one, `0xEf244c4Bd4d71Bd9A30EDF6Edef7CCC72642291a`. See [The Previous Trusset ID Register](/endpoints/lending/set-identity-gates#the-previous-trusset-id-register).
 </ParamField>
 
 <ParamField body="identityRegistryProfile" type="string">
@@ -73,11 +79,23 @@ A collateral token can back several markets as long as they differ in collateral
 </ParamField>
 
 <ParamField body="providerRegistry" type="string">
-  The register the deployer proposes for liquidity providers. It is recorded on the factory and installed by nothing: which provider register the market uses is the lender of record's decision at adoption. It must answer `isVerified(address)`, exactly like `identityRegistry`.
+  The register the deployer proposes for liquidity providers. It is recorded on the factory and installed by nothing: which provider register the market uses is the lender of record's decision at adoption. It must answer `isVerified(address)`, exactly like `identityRegistry`, and the previous Trusset ID Register is refused here too.
 </ParamField>
 
 <ParamField body="providerRegistryProfile" type="string">
   A verification profile key whose eligibility register is proposed as `providerRegistry`. The same rules as `identityRegistryProfile` apply.
+</ParamField>
+
+<ParamField body="identityRegistryAccessList" type="string">
+  The ID of a whitelist of this instance, 1 to 64 letters, digits, `-` or `_`, installed as the borrower register instead of an address. Not accepted beside `identityRegistryProfile`, and refused on a `MARKET` market. See [Whitelists as gates](#whitelists-as-gates).
+</ParamField>
+
+<ParamField body="providerRegistryAccessList" type="string">
+  The ID of a whitelist of this instance, proposed as `providerRegistry`. Not accepted beside `providerRegistryProfile`.
+</ParamField>
+
+<ParamField body="attestIdentifiedMembers" type="boolean">
+  `true` confirms that the whitelist proposed as `providerRegistry` lists identified wallets only. Required whenever `providerRegistry` is a whitelist, whether named by ID or by address.
 </ParamField>
 
 <ParamField body="fallbackDecimals" type="integer" default="0">
@@ -95,6 +113,27 @@ A `MARKET` market carries the free-hand realization path, which is open against 
 A `MARKET` deployment that nominates `candidates` and leaves `openToAnyCurator` off may omit `identityRegistry`. The nominee then brings its professional register with its adoption terms, and [Accept Lender Role](/endpoints/operators/accept-lender-role) checks it. Any other `MARKET` deployment must install a register, or it is refused with `IDENTITY_REGISTRY_REQUIRED`.
 
 The deployment does not check whether a register it installs qualifies. A register installed here stands at adoption, so when it does not, the lender of record is warned with `BORROWER_GATE_NOT_PROFESSIONAL` and must replace it through [Set Identity Gates](/endpoints/lending/set-identity-gates) before loans are opened or liquidity is added. Nominating the lender of record and letting it bring the register avoids that step.
+
+## Fixed price
+
+A `FIXED` market prices its collateral at `initialPrice`, per whole collateral token in the settlement token, for its whole life. The price never goes stale, the oracle refuses every signed price, and the price authority can only mark it down through [Sync Oracle Price](/endpoints/lending/sync-oracle#mark-down-a-fixed-price), within the deviation bound. No price update can raise it again, so a price set too low stays. Whoever owns the oracle could still replace its implementation through an upgrade, so the lender of record keeps the oracle owner in its own control. A fixed price is neither a stock-exchange nor a market price, so the free-hand exchange sale is not available as the market's realization path, and neither is the atomic sale.
+
+The deployment checks the price before building anything:
+
+- The factory must create oracles that can hold a fixed price, or the request is refused with `409 FIXED_PRICE_UNSUPPORTED`. `503 FACTORY_READ_FAILED` when that cannot be read.
+- The token's instrument record must name its currency, and the settlement token's currency must be known to Trusset, or the request is refused with `422 FIXED_PRICE_CURRENCY_UNKNOWN`. `details.missing` is `TOKEN` or `SETTLEMENT`. A fixed price converts nothing, so both currencies must be the same, or the request is refused with `422 FIXED_PRICE_CURRENCY_MISMATCH`.
+- `initialPrice` is compared with the instrument's nominal per unit times its redemption percent over 100, assuming one whole token is one unit of the instrument. A price that differs is refused with `409 FIXED_PRICE_NOMINAL_MISMATCH`, and `details` carries `initialPrice`, `expectedPrice`, `nominal`, `redemptionPct` and `currency`. Send `acknowledgeFixedPriceMismatch: true` to deploy it anyway. A record without a nominal is not compared, and `warnings` says so.
+
+The bundle the deployment attests commits to the exact fixed price, so the lender of record acknowledges the value itself when it takes the role. [Preview Asset Data](/endpoints/lending/preview-asset-data) runs the same checks with `priceSource=FIXED`.
+
+## Whitelists as gates
+
+`identityRegistryAccessList` and `providerRegistryAccessList` name one of this instance's whitelists by ID instead of a register address. The rules are those of [Set Identity Gates](/endpoints/lending/set-identity-gates#whitelists-as-gates):
+
+- A whitelist cannot be the borrower register of a `MARKET` market: `409 ACCESS_LIST_NOT_ALLOWED`.
+- A whitelist kept for depositors cannot be the borrower register, and one kept for borrowers cannot be the provider register: `409 ACCESS_LIST_PURPOSE_MISMATCH`.
+- A whitelist proposed as `providerRegistry` must be kept by this instance, or owned or managed by one of its verified wallets: otherwise `403 ACCESS_LIST_NOT_CONTROLLED`. It also needs `attestIdentifiedMembers: true`: otherwise `400 ACCESS_LIST_ATTESTATION_REQUIRED`.
+- A whitelist ID that names no active whitelist of this instance answers `404 ACCESS_LIST_NOT_FOUND`, and a profile key beside it `400 GATE_SOURCE_CONFLICT`.
 
 ## Rate offering
 
@@ -146,7 +185,7 @@ The operator share is paid to the wallet that takes the lender-of-record role. T
 
 ## Asset data
 
-The deployment builds the market's asset data bundle from the token as this instance imported it. The bundle holds the chain, factory, collateral mode, price source and settlement asset, the token's recorded facts, and the issuer's published profile. The bundle's `contentHash` rides inside `deployMarket`, so the signature that creates the market also attests the data. A token without a published profile is refused with `TOKEN_PROFILE_REQUIRED`.
+The deployment builds the market's asset data bundle from the token as this instance imported it. The bundle holds the chain, factory, collateral mode, price source and settlement asset, the token's recorded facts, the issuer's published profile, and the token's instrument record. See [What the bundle contains](/endpoints/lending/preview-asset-data#what-the-bundle-contains). The bundle's `contentHash` rides inside `deployMarket`, so the signature that creates the market also attests the data. A token without a published profile is refused with `TOKEN_PROFILE_REQUIRED`.
 
 The calldata response returns the exact bytes being attested under `assetData`, so the deploying wallet sees what it signs for. [Preview Asset Data](/endpoints/lending/preview-asset-data) returns the same bundle before anything is built. A lender of record reviews it and names the hash it read when it takes the role.
 
@@ -161,7 +200,10 @@ Without `txHash`, the response is the unsigned factory transaction.
     <ResponseField name="functionName" type="string">`deployMarket`.</ResponseField>
     <ResponseField name="collateralTokenAddress" type="string">Collateral token, lowercased.</ResponseField>
     <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`.</ResponseField>
-    <ResponseField name="priceSource" type="string">`NAV`, `MARKET` or `ORACLE`.</ResponseField>
+    <ResponseField name="priceSource" type="string">`NAV`, `MARKET`, `ORACLE` or `FIXED`.</ResponseField>
+    <ResponseField name="fixedPrice" type="object">`FIXED` only. `{ priceWei, price, settlementSymbol, settlementCurrency, tokenCurrency, perWholeToken, neverStale, markDownOnly, oracleOwnerCanUpgrade, check }`. `check` carries `nominal`, `redemptionPct`, `expectedPrice`, `matchesNominal` and `acknowledgedMismatch`.</ResponseField>
+    <ResponseField name="warnings" type="array">`FIXED` only. Plain-language statements of what a fixed price means, and of an acknowledged or unchecked nominal. Show them before the deployment is signed.</ResponseField>
+    <ResponseField name="attestedIdentifiedMembers" type="boolean">`true` when the request carried `attestIdentifiedMembers: true`. Absent otherwise.</ResponseField>
     <ResponseField name="externalOracle" type="object">The probed feed, `{ feedAddress, decimals, answer, updatedAt, shape }`. `shape` is `latestRoundData` or `legacy`. Present only for an `ORACLE` market.</ResponseField>
     <ResponseField name="borrowAsset" type="object">`{ address, symbol, decimals }` for the settlement asset the market will use.</ResponseField>
     <ResponseField name="signer" type="string">The instance's registered wallet, which is the address this transaction expects to be signed by.</ResponseField>
@@ -169,9 +211,9 @@ Without `txHash`, the response is the unsigned factory transaction.
       The asset data this deployment attests.
       <Expandable>
         <ResponseField name="contentHash" type="string">keccak256 of `canonicalJson`. This is the hash the deployment writes to the factory.</ResponseField>
-        <ResponseField name="schemaVersion" type="string">Bundle schema version, `1.0.0`.</ResponseField>
+        <ResponseField name="schemaVersion" type="string">Bundle schema version, `1.1.0`.</ResponseField>
         <ResponseField name="canonicalJson" type="string">The exact bytes hashed: the bundle as RFC 8785 canonical JSON.</ResponseField>
-        <ResponseField name="bundle" type="object">The same bundle as an object, with `schemaVersion`, `market`, `token` and `profile`. Empty members are omitted.</ResponseField>
+        <ResponseField name="bundle" type="object">The same bundle as an object, with `schemaVersion`, `market`, `token`, `profile` and `instrument`. Empty members are omitted.</ResponseField>
         <ResponseField name="attestor" type="string">The wallet the attestation will name, the same as `signer`.</ResponseField>
         <ResponseField name="note" type="string">What the signature attests.</ResponseField>
       </Expandable>
@@ -202,7 +244,7 @@ Without `txHash`, the response is the unsigned factory transaction.
   </Expandable>
 </ResponseField>
 
-Confirm by sending `txHash` together with `collateralTokenAddress`. Every other field is an optional cross-check against the deployment the receipt proves: a supplied `mode` or `borrowAssetAddress` that differs returns `TX_WRONG_ARGS`. Drop any `confirmWith.body` field that is `null` before sending it, because this endpoint's schema refuses `null` for an address.
+Confirm by sending `txHash`. Every other field is an optional cross-check against the deployment the receipt proves: a supplied `collateralTokenAddress`, `mode` or `borrowAssetAddress` that differs returns `TX_WRONG_ARGS`. Drop any `confirmWith.body` field that is `null` before sending it, because this endpoint's schema refuses `null` for an address.
 
 Confirming returns `201` with the recorded market and its readiness state.
 
@@ -303,11 +345,11 @@ const { data: recorded } = await confirm.json();
     },
     "signer": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
     "assetData": {
-      "contentHash": "0xa93f4d51d67f4f88cb447fd06bccff45483fb5a9f04fa67dd1c8cdcd1127ae90",
-      "schemaVersion": "1.0.0",
-      "canonicalJson": "{\"market\":{\"borrowAsset\":\"0x98ad0ca091552e23c564b41c74282e5343d03e8a\",\"chainId\":11155111,\"collateralMode\":\"FREEZE\",\"factory\":\"0xf1ad12f5698f58badd8a662acffccb067a2ddb8a\",\"family\":\"FUNGIBLE\",\"priceSource\":\"NAV\"},\"profile\":{\"isin\":\"DE000A2YN900\",\"issuerName\":\"ACME Industrial AG\"},\"schemaVersion\":\"1.0.0\",\"token\":{\"decimals\":18,\"name\":\"ACME Industrial Bond 2031\",\"symbol\":\"ACME\",\"tokenAddress\":\"0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f\"}}",
+      "contentHash": "0x5ec0cb1ff9fff28a94e834046e4b31f3e539afb47eafe70fc9a06983b04147c3",
+      "schemaVersion": "1.1.0",
+      "canonicalJson": "{\"market\":{\"borrowAsset\":\"0x98ad0ca091552e23c564b41c74282e5343d03e8a\",\"chainId\":11155111,\"collateralMode\":\"FREEZE\",\"factory\":\"0xf1ad12f5698f58badd8a662acffccb067a2ddb8a\",\"family\":\"FUNGIBLE\",\"priceSource\":\"NAV\"},\"profile\":{\"isin\":\"DE000A2YN900\",\"issuerName\":\"ACME Industrial AG\"},\"schemaVersion\":\"1.1.0\",\"token\":{\"decimals\":18,\"name\":\"ACME Industrial Bond 2031\",\"symbol\":\"ACME\",\"tokenAddress\":\"0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f\"}}",
       "bundle": {
-        "schemaVersion": "1.0.0",
+        "schemaVersion": "1.1.0",
         "market": {
           "chainId": 11155111,
           "factory": "0xf1ad12f5698f58badd8a662acffccb067a2ddb8a",
@@ -427,7 +469,7 @@ const { data: recorded } = await confirm.json();
       }
     },
     "assetData": {
-      "contentHash": "0xa93f4d51d67f4f88cb447fd06bccff45483fb5a9f04fa67dd1c8cdcd1127ae90",
+      "contentHash": "0x5ec0cb1ff9fff28a94e834046e4b31f3e539afb47eafe70fc9a06983b04147c3",
       "previousHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
       "version": 1,
       "attestor": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
@@ -450,12 +492,20 @@ const { data: recorded } = await confirm.json();
   "success": false,
   "error": {
     "code": "TOKEN_PROFILE_REQUIRED",
-    "message": "ACME has no published profile, so there is no asset data to attest and no market can be created against it. Open the token in Assets, fill in the issuer, jurisdiction, identifiers and offering documents under its profile (PUT /external-tokens/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f/profile), then create the market: the issuer's own wallet attests that data inside the deployment signature.",
+    "message": "ACME has no published profile, so there is no asset data to attest and no market can be created against it. Open the token in Assets and fill in at least one field of its published profile, the overview this instance can always edit: the description, the issuer name, the sector, the website, the AMM contract or the reserve document (PUT /external-tokens/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f/profile from the issuer app, or PUT /external-tokens/api/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f/profile with an API key), then create the market: the issuer's own wallet attests that data inside the deployment signature. The instrument record with the identifiers, the jurisdiction and the offering documents is published by the token's controller only: by this instance when one of its verified wallets controls the token (PUT /instruments/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f from the issuer app, or PUT /instruments/api/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f with an API key), otherwise through the API with the controller's signature (POST /instruments/api/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f/approval-request, then PUT /instruments/api/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f with issuerApproval). A record already published for the token is part of the asset data either way.",
     "details": {
       "field": "profile",
       "tokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
       "imported": true,
-      "editProfile": "/external-tokens/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f/profile"
+      "nextStep": "FILL_PROFILE",
+      "overviewFields": ["description", "issuerName", "sector", "website", "ammAddress", "reserveURI"],
+      "editProfile": "/external-tokens/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f/profile",
+      "instrumentRecord": "/instruments/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+      "apiPaths": {
+        "editProfile": "/external-tokens/api/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f/profile",
+        "instrumentRecord": "/instruments/api/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
+        "instrumentApprovalRequest": "/instruments/api/0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f/approval-request"
+      }
     }
   }
 }
@@ -481,9 +531,10 @@ const { data: recorded } = await confirm.json();
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | A field failed schema validation, including a rate or term offering that mixes modes, a missing `initialPrice` for `NAV` or `MARKET`, `oracleAddress` sent or missing against the price source, and a profile key that is not 1 to 60 letters, digits, `-` or `_`. `error.details` names each offending field |
+| `VALIDATION_ERROR` | `400` | A field failed schema validation, including a rate or term offering that mixes modes, a missing `initialPrice` for `NAV`, `MARKET` or `FIXED`, `oracleAddress` sent or missing against the price source, a profile key that is not 1 to 60 letters, digits, `-` or `_`, and a whitelist ID that is not 1 to 64 of them. `error.details` names each offending field |
+| `GATE_SOURCE_CONFLICT` | `400` | One side names both a verification profile and a whitelist, or an address that differs from the whitelist named beside it |
+| `ACCESS_LIST_ATTESTATION_REQUIRED` | `400` | `providerRegistry` is a whitelist and `attestIdentifiedMembers` is not `true` |
 | `OPERATOR_SHARE_FIXED` | `400` | `operatorShareBps` was sent. The shares are fixed by the contracts |
-| `TOKEN_NOT_IMPORTED` | `400` | `collateralTokenAddress` is not a security token this instance imported or issued |
 | `BORROW_ASSET_IS_COLLATERAL` | `400` | `borrowAssetAddress` and `collateralTokenAddress` are the same token |
 | `COLLATERAL_TOKEN_NOT_CONTRACT` | `400` | No deployed bytecode at `collateralTokenAddress` on this network |
 | `COLLATERAL_TOKEN_NOT_ERC20` | `400` | The token does not answer `balanceOf` and `decimals`, so the factory would refuse it |
@@ -496,8 +547,15 @@ const { data: recorded } = await confirm.json();
 | `INVALID_IDENTITY_REGISTRY` | `400` | `identityRegistry` or `providerRegistry` fails its EIP-55 checksum |
 | `GATE_PROFILE_CONFLICT` | `400` | `identityRegistry` or `providerRegistry` names a different register than the profile sent beside it. `details.field` names the side |
 | `GATE_PROFILE_UNRESOLVED` | `400` | A profile key could not be resolved for a reason that carries no code of its own |
+| `ACCESS_LIST_NOT_CONTROLLED` | `403` | `providerRegistry` is a whitelist another instance curates, and no verified wallet of this instance owns or manages it |
+| `IMPORT_NOT_FOUND` | `404` | `collateralTokenAddress` is not a security token this instance imported or issued |
 | `PROFILE_NOT_FOUND` | `404` | `identityRegistryProfile` or `providerRegistryProfile` names no verification profile of this instance |
+| `ACCESS_LIST_NOT_FOUND` | `404` | `identityRegistryAccessList` or `providerRegistryAccessList` names no whitelist of this instance on this network that is not archived |
 | `ELIGIBILITY_REGISTER_NOT_SET` | `409` | The named profile has no eligibility register |
+| `ACCESS_LIST_NOT_ALLOWED` | `409` | The borrower register of a `MARKET` deployment is a whitelist |
+| `ACCESS_LIST_PURPOSE_MISMATCH` | `409` | A whitelist is kept for the other side: `DEPOSITOR` as the borrower register or `BORROWER` as `providerRegistry` |
+| `FIXED_PRICE_UNSUPPORTED` | `409` | `priceSource` is `FIXED` and the factory still creates oracles that cannot hold a fixed price. Deploy with `NAV` |
+| `FIXED_PRICE_NOMINAL_MISMATCH` | `409` | `initialPrice` differs from the instrument's nominal times its redemption percent. Check the price, then send `acknowledgeFixedPriceMismatch: true` to deploy it |
 | `INVALID_ORACLE_ADDRESS` | `400` | `oracleAddress` is the zero address or fails its checksum |
 | `INVALID_INITIAL_PRICE` | `400` | `initialPrice` carries more decimal places than the borrow asset supports, or rounds to zero at its scale |
 | `INVALID_RATE_OFFERING` | `400` | A `CLAMPED` cap below its floor |
@@ -510,13 +568,19 @@ const { data: recorded } = await confirm.json();
 | `TOKEN_PROFILE_REQUIRED` | `422` | The token has no published profile, so there is no asset data to attest. `details.editProfile` names where to add it |
 | `IDENTITY_REGISTRY_REQUIRED` | `422` | `priceSource` is `MARKET`, no borrower register was named, and the deployment does not nominate its lender of record (no `candidates`, or `openToAnyCurator` on). `details` carries `field` and `priceSource` |
 | `IDENTITY_REGISTRY_INCOMPATIBLE` | `422` | `identityRegistry` or `providerRegistry` does not answer `isVerified(address)`. `details` names the field and the register |
+| `IDENTITY_REGISTRY_RETIRED` | `422` | `identityRegistry` or `providerRegistry` is the previous Trusset ID Register, which takes no new identities. `details` carries `field`, `registry` and `currentRegistry`. Name the current register |
 | `ORACLE_FEED_NOT_A_CONTRACT` | `422` | No contract at `oracleAddress` |
 | `ORACLE_FEED_UNUSABLE` | `422` | The feed does not answer `decimals()`, answers neither price shape, or answers a non-positive or undated price |
 | `ORACLE_FEED_STALE` | `422` | The feed's price is older than 24 hours |
+| `FIXED_PRICE_CURRENCY_UNKNOWN` | `422` | `FIXED` only. The token's instrument record names no currency, or the settlement token's currency is not known. `details.missing` is `TOKEN` or `SETTLEMENT` |
+| `FIXED_PRICE_CURRENCY_MISMATCH` | `422` | `FIXED` only. The token's currency and the settlement token's currency differ |
 | `PROVIDER_UNAVAILABLE` | `503` | The collateral token could not be read on-chain, so no transaction was prepared |
 | `IDENTITY_REGISTRY_UNREADABLE` | `503` | A named register could not be reached to check it. Retry shortly |
 | `ORACLE_FEED_UNVERIFIABLE` | `503` | The feed could not be checked right now. Retry shortly |
-| `FACTORY_READ_FAILED` | `503` | The factory could not be read to validate the offering, to confirm the fixed shares, or to tell whether an existing market is still operable. Nothing was built. Retry shortly |
+| `INSTRUMENT_UNREADABLE` | `503` | The token's instrument record could not be read, so the asset data bundle could not be built. Retry shortly |
+| `ACCESS_LIST_UNREADABLE` | `503` | Whether a named address is a whitelist, or whether a wallet of this instance owns or manages it, could not be read. Retry shortly |
+| `ACCESS_LISTS_NOT_CONFIGURED` | `503` | A whitelist ID was sent on a network where the whitelist factory is not deployed |
+| `FACTORY_READ_FAILED` | `503` | The factory could not be read to validate the offering, to confirm the fixed shares, to tell whether it creates fixed-price oracles, or to tell whether an existing market is still operable. Nothing was built. Retry shortly |
 | `FACTORY_UPGRADE_REQUIRED` | `503` | The factory runs an implementation without a liquidation router, without asset data attestation, or without fixed fee shares. Nothing was built |
 
 Confirming with `txHash` can also return:

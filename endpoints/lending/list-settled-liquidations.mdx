@@ -10,7 +10,7 @@ Before answering, the endpoint re-reads each settled record's figure from the ma
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID. At most 100 characters.</ParamField>
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids). At most 100 characters.</ParamField>
 
 ## Query Parameters
 
@@ -46,6 +46,8 @@ Before answering, the endpoint re-reads each settled record's figure from the ma
         <ResponseField name="auctionId" type="string">The Dutch auction that sold some or all of the collateral, or `null`.</ResponseField>
         <ResponseField name="txHash" type="string">Seizure transaction hash, or `chain-adopted` when it could not be located.</ResponseField>
         <ResponseField name="status" type="string">`SETTLED` or `WRITTEN_OFF`.</ResponseField>
+        <ResponseField name="realization" type="string">How the collateral was realized: `ROUTER`, `VENUE`, or `ATOMIC` for a sale to the sale recipient at its standing bid, in the liquidation or through [Sell Pending Liquidation](/endpoints/lending/sell-pending-liquidation). `null` when the record does not state it.</ResponseField>
+        <ResponseField name="buyer" type="string">The sale recipient that bought, lowercased, on an `ATOMIC` record. `null` otherwise.</ResponseField>
         <ResponseField name="usdcProceeds" type="string">What the market's record settled over, in borrow asset units, where known. A write-off records none.</ResponseField>
         <ResponseField name="settledTxHash" type="string">The transaction that settled, closed or wrote off the record, when known.</ResponseField>
         <ResponseField name="settledAt" type="string">ISO 8601 timestamp of that transaction's block, when known.</ResponseField>
@@ -57,13 +59,19 @@ Before answering, the endpoint re-reads each settled record's figure from the ma
         <ResponseField name="proceedsCollected" type="string">Cash the router collected for this record, in borrow asset units.</ResponseField>
         <ResponseField name="collateralStranded" type="boolean">`true` when the router closed the record with collateral still on it. That collateral can no longer be withdrawn.</ResponseField>
         <ResponseField name="reopenable" type="boolean">`true` when the collateral is stranded and the record collected nothing, which is when [Reopen Liquidation](/endpoints/lending/reopen-liquidation) accepts it.</ResponseField>
+        <ResponseField name="totalDebtAtSeizure" type="string">The loan's whole debt when it was seized, in borrow asset units. Present when the market's record could be read, like the five fields below.</ResponseField>
+        <ResponseField name="principalOwed" type="string">The principal the record claimed, in borrow asset units.</ResponseField>
+        <ResponseField name="writtenOffAtSeizure" type="string">Debt the seizure wrote off at once because the collateral could not cover it, or `null`.</ResponseField>
+        <ResponseField name="seizureReserveCovered" type="string">What the insurance fund paid toward that write-off, or `null`.</ResponseField>
+        <ResponseField name="shortfall" type="string">Principal neither the sale nor the insurance fund covered, which the pool bore. `null` when there is none, or while the market's record is still open.</ResponseField>
+        <ResponseField name="reserveCovered" type="string">What the insurance fund paid when the market's record settled, or `null`.</ResponseField>
       </Expandable>
     </ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  The router fields are absent, not `false`, when the router could not be read and on `venue-` records. Read `collateralStranded` only where `routerAddress` is present.
+  The router fields are absent, not `false`, when the router could not be read and on `venue-` records. Read `collateralStranded` only where `routerAddress` is present. The loss fields from `totalDebtAtSeizure` on are absent when the market's record could not be read.
 </Note>
 
 <RequestExample>
@@ -104,6 +112,8 @@ const toReopen = data.settledLiquidations.filter((l) => l.reopenable === true);
         "status": "SETTLED",
         "usdcProceeds": "0.0",
         "settledTxHash": null,
+        "realization": "ROUTER",
+        "buyer": null,
         "createdAt": "2026-07-02T14:05:12.000Z",
         "updatedAt": "2026-07-03T08:40:31.000Z",
         "settledAt": "2026-07-03T08:40:31.000Z",
@@ -113,6 +123,12 @@ const toReopen = data.settledLiquidations.filter((l) => l.reopenable === true);
         "routerSettled": true,
         "collateralStranded": true,
         "reopenable": true,
+        "totalDebtAtSeizure": "16240.0",
+        "principalOwed": "8000.0",
+        "writtenOffAtSeizure": null,
+        "seizureReserveCovered": null,
+        "shortfall": null,
+        "reserveCovered": null,
         "settledOn": "router"
       },
       {
@@ -132,6 +148,8 @@ const toReopen = data.settledLiquidations.filter((l) => l.reopenable === true);
         "status": "SETTLED",
         "usdcProceeds": "21400.0",
         "settledTxHash": "0x2d7c90e14b3a65f8d1e02c7b49f3a86e5d1c04b7f29e38a6c50d1f47b8e92a3c",
+        "realization": "ROUTER",
+        "buyer": null,
         "createdAt": "2026-06-14T09:12:00.000Z",
         "updatedAt": "2026-06-18T16:02:11.000Z",
         "settledAt": "2026-06-18T16:02:00.000Z",
@@ -141,6 +159,12 @@ const toReopen = data.settledLiquidations.filter((l) => l.reopenable === true);
         "routerSettled": true,
         "collateralStranded": false,
         "reopenable": false,
+        "totalDebtAtSeizure": "42318.4",
+        "principalOwed": "20900.0",
+        "writtenOffAtSeizure": null,
+        "seizureReserveCovered": null,
+        "shortfall": null,
+        "reserveCovered": null,
         "settledOn": "router"
       }
     ],
@@ -160,4 +184,4 @@ const toReopen = data.settledLiquidations.filter((l) => l.reopenable === true);
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 
-A failed database read answers `200` with an empty list rather than an error.
+A failed database read answers `500 INTERNAL_ERROR`. A failed chain read never fails the request: the fields that depend on it are left out.

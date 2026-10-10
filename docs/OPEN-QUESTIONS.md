@@ -352,6 +352,59 @@ The pages describe what the code does. These points look unintended, and each pa
 
 ---
 
+## 22. A locked negative capability claim about on-chain personal data was false
+
+**File:** `protocol/infrastructure/data-storage.mdx`.
+
+Locked: "Personal information never stores on-chain to maintain privacy and comply with regulations like GDPR".
+
+Every ID link registration on an ERC-3643 instance writes the investor's country on-chain: `registerIdentity(wallet, identity, country)` stores the ISO 3166-1 numeric code in the register (`services/customers/trexRegistry.js`), and the residency claim added to the investor's ONCHAINID carries keccak256 of the three-letter code (`services/customers/linkOnboardingService.js`, `identityService.buildCountryHash`), which hashing each code reverses. Reported as r1008d-13.
+
+The sentence now names both exceptions and says they sit on the instance's own register under its signature. The GDPR clause was dropped rather than reworded: whether a hashed country code linked to a wallet stays personal data is for counsel. Same reasoning as item 13.
+
+**Needed:** confirmation of the replacement wording, and a decision from counsel on whether any compliance statement belongs on the page.
+
+---
+
+## 23. The atomic sale qualifies the liquidation sentences
+
+**Files:** `endpoints/lending/introduction.mdx`, `endpoints/lending/liquidate.mdx`.
+
+A liquidation router can now run in atomic mode (`setAtomicMode(1)` on the router, built by `liquidationService.buildAtomicModeTransaction`). A liquidation then sells the seized collateral to the sale recipient at its standing bid and settles the record in the same transaction. Every router starts in two-step mode, and the API builds the switch to atomic mode only for a `MARKET`-priced market whose lender of record declared `EXCHANGE_SALE`. Reported as r1009b-01.
+
+Locked and kept byte for byte, in both files: "There is no auto-sell for external securities." Once the router administrator has switched atomic mode on, the sale runs without an operator step. The buyer is the sale recipient the lender of record fixed, at the bid that buyer posted. Whether that is an auto-sell in the sense of the regulatory argument is for whoever owns the argument to decide. Both pages now describe the atomic sale near the locked sentence: the introduction after the settlement steps, `liquidate.mdx` in the same paragraph.
+
+Two sentences that are not registered were false for a router in atomic mode and now name the mode:
+
+- `introduction.mdx`: "Once collateral reaches the router it does not sell itself." now reads "Once collateral reaches a router in two-step mode, where every router starts, it does not sell itself." It is a negative capability claim by the style guide's definition.
+- `liquidate.mdx`: "Once collateral reaches the router it stays there until an operator sells it and settles the proceeds." now reads "Once collateral reaches the router in two-step mode it stays there until an operator sells it and settles the proceeds."
+- `withdraw-collateral-for-sale.mdx`: "External securities have no automatic sale path through the router." now reads "A record on a router in two-step mode does not sell itself." The paragraph then names [Sell Pending Liquidation](/endpoints/lending/sell-pending-liquidation) for a market where the atomic sale is offered. The old sentence was false wherever the atomic sale runs (`sellPending` on the router, `liquidationService.buildSellPendingTransaction`).
+
+**Needed:** a decision on the locked sentence (keep, qualify or replace), and confirmation of the three qualified sentences.
+
+---
+
+## 24. The Tier 1 Lending introduction took the proposal round
+
+**File:** `endpoints/lending/introduction.mdx`.
+
+Tier 1 lets headings, ordering, tables and cross-links change. This round added two rows to the Base Path table, a whitelist paragraph under Identity gates, a `FIXED` paragraph under Pricing, the atomic sale paragraph of item 23, and an Error codes section with one reference table. Three existing sentences were false after the round and were corrected:
+
+- "Seven resource groups sit under that path:" now says eight, for the `/access-lists` group.
+- "Prices come from one of three sources, fixed at deployment as `priceSource`." now says four, for `FIXED`.
+- "On every source the oracle's `maxPriceAge` decides when a price is stale, 24 hours by default." now begins "On every source but `FIXED`". A fixed oracle never reports a stale price (`isPriceStale` returns `false` when `priceFixed` is set, `SecurityPriceOracle.sol`). The 24 hour default, a locked numeric bound, is unchanged.
+
+The verification pass against backend `435a471` (r1010b) added one paragraph under Identity gates on the previous Trusset ID Register (`retiredRegistry.js`), and changed two more existing sentences that had become incomplete:
+
+- "They save or unpublish terms of use, record a price attestation, configure hooks, and update a bot's record." now ends "update a bot's record, and rename, repurpose, archive or rescan a whitelist." `PATCH /access-lists/{listId}` and `POST /access-lists/{listId}/rescan` write nothing on chain (`access-lists.api.js`).
+- "The asset data and bot confirms do too." now reads "The asset data, whitelist and bot confirms do too." Every whitelist build names its confirm route in `confirmWith` (`accessListService.js`).
+
+The same pass changed the Lending card on `endpoints/introduction.mdx`, also Tier 1. It named three price sources and two liquidation paths. It now names the fixed price, gates by register or whitelist, and the atomic sale.
+
+**Needed:** re-approval of the changed sentences, as for item 15.
+
+---
+
 ## Not open, for the record
 
 Two things flagged early that turned out to be non-issues, recorded so they do not get re-raised.

@@ -6,9 +6,11 @@ description: 'Approve-and-deposit calldata that names your instance as the depos
 
 Builds the two transactions a deposit needs: an ERC-20 approval for the vault to pull its asset, a settlement token (stablecoin), then the deposit itself. The depositor's wallet signs both, in order, and receives vault shares at the current share price. On a vault that supports distributor attribution, the deposit also names your instance as the depositor's distributor.
 
+When a market the vault funded wrote off distributor accrual that the vault has not recorded yet, one `recordMarketLoss` step per such market comes first. Recording the loss before the deposit keeps the interest this deposit earns from being charged with a loss from before it arrived. Any wallet may sign those steps.
+
 The vault admits a depositor only when every register it reads verifies the wallet. That is the vault's own identity register, when the vault names one, and the provider register of every market the vault funds or has consented to draw for. The vault operator's register provider and each market's register provider admit depositors.
 
-A vault without a register of its own takes its depositor gate from its markets. On the current vault implementation it adopts the provider register of the first market it funds or consents to draw for, and keeps it for good, also once it no longer funds that market. Every deposit and share transfer is then examined against the adopted register as well. Until it has adopted one, a vault that funds no market with a provider register refuses every deposit and share transfer on-chain (`DepositorGateRequired`), and the API refuses such a deposit first with `DEPOSITOR_GATE_REQUIRED`. The API also prepares no deposit into a vault without a register of its own on an earlier implementation, which would admit any wallet.
+A vault without a register of its own takes its depositor gate from its markets. On the current vault implementation it adopts the provider register of the first market it funds or consents to draw for, and keeps it for good, also after it stops funding that market. Every deposit and share transfer is then examined against the adopted register as well. Until it has adopted one, a vault that funds no market with a provider register refuses every deposit and share transfer on-chain (`DepositorGateRequired`), and the API refuses such a deposit first with `DEPOSITOR_GATE_REQUIRED`. The API also prepares no deposit into a vault without a register of its own on an earlier implementation, which would admit any wallet.
 
 `DEPOSITOR_NOT_VERIFIED` names the register that refused the wallet: the vault's own, the one it adopted, or a market's provider register together with the market. When that register is the eligibility register of one of your verification profiles, the refusal names the profile as well. Onboard the wallet under that profile and admit it with [Request Admission](/endpoints/customers/request-admission) before the deposit. [Get Wallet Eligibility](/endpoints/customers/get-wallet-eligibility) shows where a wallet stands.
 
@@ -23,7 +25,7 @@ A vault without a register of its own takes its depositor gate from its markets.
 </ParamField>
 
 <ParamField body="holderAddress" type="string">
-  Wallet that will sign. When it is a `0x` address, the API checks it against the vault's register and, on a vault with distributor attribution, against the register the vault adopted when it has none of its own and each market's provider register. It refuses with `DEPOSITOR_NOT_VERIFIED` when the deposit would revert, and reads whether the wallet is already bound to a distributor. Omit it to skip both; the contract enforces the registers either way. Any other value is ignored.
+  Wallet that will sign. When it is a `0x` address, the API checks it against the vault's register and, on a vault with distributor attribution, against the register the vault adopted when it has none of its own and each market's provider register. It refuses with `DEPOSITOR_NOT_VERIFIED` when the deposit would revert, and with `ELIGIBILITY_REMOVAL_PENDING` when the wallet's admission to one of those registers waits for removal. It also checks that the wallet holds `amount` of the asset, and reads whether the wallet is already bound to a distributor. Omit it to skip these checks; the contract enforces the registers either way. Any other value is ignored.
 </ParamField>
 
 ## When a deposit is refused on the vault's own state
@@ -64,8 +66,11 @@ The binding follows the wallet that signs the deposit, not `holderAddress`. Name
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
-    <ResponseField name="steps" type="array">Ordered transactions to sign and broadcast: the approval on the asset, then the deposit on the vault. Each carries `to`, `data`, `value` (`"0"`), `chainId` and a human-readable `description`.</ResponseField>
+    <ResponseField name="steps" type="array">Ordered transactions to sign and broadcast: any `recordMarketLoss` steps, the approval on the asset, then the deposit on the vault. Each step is `{ action, transaction, functionName, description }`, with `transaction` carrying `to`, `data`, `value` (`"0"`) and `chainId`.</ResponseField>
     <ResponseField name="functionName" type="string">`deposit`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">Index of the deposit step, the last one. Confirm with its hash.</ResponseField>
+    <ResponseField name="recordsWriteOffs" type="array">Present only when `steps` starts with `recordMarketLoss` steps: one `{ marketAddress, amountRaw }` per market whose write-off the vault records first, the amount in the asset's smallest unit.</ResponseField>
+    <ResponseField name="writeOffNote" type="string">Present with `recordsWriteOffs`. The reason for those steps, in words.</ResponseField>
     <ResponseField name="attribution" type="object">
       <Expandable>
         <ResponseField name="supported" type="boolean">`false` when the vault runs an implementation from before distributor attribution. The deposit then names no distributor, and `warning` says so.</ResponseField>
@@ -103,10 +108,10 @@ const { data } = await res.json();
 if (data.attribution.warning) console.warn(data.attribution.warning);
 
 let depositHash = '';
-for (const step of data.steps) {
-  const tx = await signer.sendTransaction({ to: step.to, data: step.data, value: step.value, chainId: step.chainId });
+for (const [index, step] of data.steps.entries()) {
+  const tx = await signer.sendTransaction(step.transaction);
   await tx.wait();
-  depositHash = tx.hash;
+  if (index === data.confirmStepIndex) depositHash = tx.hash;
 }
 
 await fetch(`${base}/${vaultId}/confirm-tx`, {
@@ -125,21 +130,30 @@ await fetch(`${base}/${vaultId}/confirm-tx`, {
     "action": "SIGN_TRANSACTIONS",
     "steps": [
       {
-        "to": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
-        "data": "0x095ea7b3...",
-        "description": "Approve the vault to pull 1000 USDC",
-        "chainId": 11155111,
-        "value": "0"
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+          "data": "0x095ea7b3...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "approve",
+        "description": "Approve the vault to pull 1000 USDC"
       },
       {
-        "to": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
-        "data": "0x6e553f65...",
-        "description": "Deposit 1000 USDC into Trusset Prime Demo Vault",
-        "chainId": 11155111,
-        "value": "0"
+        "action": "SIGN_TRANSACTION",
+        "transaction": {
+          "to": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
+          "data": "0x6e553f65...",
+          "value": "0",
+          "chainId": 11155111
+        },
+        "functionName": "deposit",
+        "description": "Deposit 1000 USDC into Trusset Prime Demo Vault"
       }
     ],
     "functionName": "deposit",
+    "confirmStepIndex": 1,
     "attribution": {
       "supported": true,
       "requestedDistributor": "0x83fd50068b2fc776bbf237f8163495b2247408c1",
@@ -161,7 +175,7 @@ await fetch(`${base}/${vaultId}/confirm-tx`, {
   "data": null,
   "error": {
     "code": "DEPOSITOR_NOT_VERIFIED",
-    "message": "Wallet 0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b is not verified on this vault's identity register (0xe9114c40934f6fb6bb317935156b731f7a86d006), so the deposit would revert. The vault operator's register provider admits depositors."
+    "message": "Wallet 0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b is not verified on this vault's identity register (0xef244c4bd4d71bd9a30edf6edef7ccc72642291a), so the deposit would revert. The vault operator's register provider admits depositors."
   }
 }
 ```
@@ -192,15 +206,19 @@ await fetch(`${base}/${vaultId}/confirm-tx`, {
 | Code | HTTP | Cause |
 |---|---|---|
 | `VALIDATION_ERROR` | `400` | `amount` is missing, not a positive decimal string, finer than the asset's decimals, or too large. `error.details` names the field |
+| `INSUFFICIENT_BALANCE` | `400` | `holderAddress` holds less of the asset than `amount`, so the deposit would revert after the approval. `details` carries `holder`, `balance` and `required` |
 | `DEPOSITOR_NOT_VERIFIED` | `403` | `holderAddress` is not verified on the vault's identity register, on the register the vault adopted, or on the provider register of a market the vault funds. The message names the register, the market where a market's register refused, and your verification profile when the register is one of your profiles' eligibility registers. Show it verbatim |
+| `IDENTITY_GATE_RETIRED` | `409` | Returned instead of `DEPOSITOR_NOT_VERIFIED` when the register that refuses `holderAddress` is the previous Trusset ID Register, which takes no new identities. `details` carries `register`, `gate`, `retired: true` and `currentRegistry`. With `gate: vault`, the vault's own register or the register it adopted refused: a vault keeps its register for life, so deposit through a vault gated on the current register. With `gate: provider`, the provider gate of a market the vault funds refused, named in `details.marketAddress`: that market's admin moves the gate to the current register with [Set Identity Gates](/endpoints/lending/set-identity-gates#the-previous-trusset-id-register), then retry |
 | `VAULT_NOT_PUBLISHED` | `403` | The vault is unpublished and your instance sees it only as a distributor of record. It takes deposits only through its operator's instance until published. Redemptions stay open |
 | `VAULT_NOT_FOUND` | `404` | No such vault, or it is not visible to your instance |
+| `ELIGIBILITY_REMOVAL_PENDING` | `409` | The admission of `holderAddress` to one of the registers the vault examines it against waits for removal, so no new deposit is prepared for it. `details` carries `register` and `wallet`, plus `reason` and `profileKey` when the admission is your instance's |
 | `DEPOSITOR_GATE_REQUIRED` | `409` | No register would examine the depositor: the vault has no register of its own, has adopted none and funds no market with a provider register, or it runs an earlier implementation without a register of its own |
 | `DEPOSITS_PAUSED` | `409` | The operator paused deposits. Redemptions stay open |
 | `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address on record |
 | `VAULT_BOOK_INCOMPLETE` | `409` | A market the vault funds is not answering, so its book cannot be totalled |
 | `VAULT_WIPED_OUT` | `409` | Shares are in issue against zero assets |
-| `VAULT_STATE_UNAVAILABLE` | `503` | The vault implementation, its markets, the register it adopted, whether it admits your distributor wallet, or your standing in an unpublished vault could not be read. Retry shortly |
+| `VAULT_STATE_UNAVAILABLE` | `503` | The vault implementation, its markets, the register it adopted, whether it admits your distributor wallet, whether a market wrote off accrual the vault has not recorded, or your standing in an unpublished vault could not be read. Retry shortly |
+| `STATE_UNAVAILABLE` | `503` | The admissions behind a register could not be checked for a pending removal. Retry shortly |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read, so nothing was decided. Retry shortly |
 | `SERVICE_UNAVAILABLE` | `503` | The vault records or your instance's verified wallets could not be read. Retry shortly |
 | `VAULT_DEPOSIT_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |

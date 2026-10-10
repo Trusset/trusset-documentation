@@ -14,7 +14,7 @@ Deregistering stops further draws and withdraws the vault's admission as a provi
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
 
 <ParamField path="action" type="string" required>
   `register` to admit the vault, `deregister` to remove it. No other value is accepted.
@@ -32,7 +32,7 @@ Registration runs these checks in order. Deregistration runs none beyond the add
 
 1. The address must be a vault created by the v2 vault factory, otherwise the call is refused with `NOT_A_VAULT`. When the factory cannot be read, this check is skipped.
 2. The market's implementation must be readable, otherwise the call is refused with `MARKET_STATE_UNAVAILABLE`.
-3. On a market still running the earlier single-register implementation, the vault must be verified on the market's identity registry, otherwise the call is refused with `IDENTITY_NOT_VERIFIED`.
+3. On a market still running the earlier single-register implementation, the vault must be verified on the market's identity registry, otherwise the call is refused with `IDENTITY_NOT_VERIFIED`, or with `IDENTITY_GATE_RETIRED` when that registry is the previous Trusset ID Register. A vault whose admission to that registry is waiting for removal is refused with `ELIGIBILITY_REMOVAL_PENDING`.
 4. On a `MARKET`-priced market, the borrower register must qualify as a professional gate, otherwise the call is refused with `PROFESSIONAL_BORROWER_GATE_REQUIRED`. See [Professional borrowers](/endpoints/lending/set-identity-gates#professional-borrowers).
 5. The vault's investors must meet the market's provider gate, read live from the vault and the market. See [Provider gate](#provider-gate).
 
@@ -46,7 +46,7 @@ A vault examines its depositors against its own register, when it has one, and a
 - A vault without a register of its own needs the market to name a provider register, or `DEPOSITOR_GATE_REQUIRED`. Unless the vault already funds this market, that register must be the one the vault adopted. A vault that has adopted none yet needs it to be the provider register of every market it funds or has consented to draw for. Otherwise `PROVIDER_GATE_MISMATCH`.
 - A vault without a register of its own that has adopted none, funds no market and still has shares in issue cannot be registered until its holders have redeemed, because nothing records which register they were examined against. It is refused with `PROVIDER_GATE_MISMATCH`.
 
-The vault contract holds its operator to the same rule when funds are allocated or a draw cap is set, so a vault registered against it could never be funded from. The message names each register, and the verification profile of your instance behind it when there is one.
+The vault contract holds its operator to the same rule when funds are allocated or a draw cap is set, so a vault registered against it could never be funded from. The message names each register, and the verification profile of your instance or the whitelist behind it when there is one.
 
 ## Draw order
 
@@ -54,7 +54,7 @@ The market draws on its registered vaults in the order they were registered. Der
 
 ## Check the result
 
-This API has no confirm call for registration. A `txHash` in the body is ignored and the call answers with calldata again. Once the transaction is mined, look for the vault in `registeredVaults` on [Get Vault Liquidity](/endpoints/lending/get-vault-liquidity).
+This API has no confirm call for registration. A well-formed `txHash` in the body is ignored and the call answers with calldata again. A malformed one is refused with `VALIDATION_ERROR`. Once the transaction is mined, look for the vault in `registeredVaults` on [Get Vault Liquidity](/endpoints/lending/get-vault-liquidity).
 
 ## Response Fields
 
@@ -85,7 +85,7 @@ This API has no confirm call for registration. A `txHash` in the body is ignored
 </ResponseField>
 
 <Warning>
-  A market still seeking a lender of record has no admin, so this call is refused with `MARKET_PENDING_CURATOR` before any check runs. When `heldByThisInstance` is `false`, a transaction signed by an instance wallet reverts on-chain. Hand the calldata to the wallet the lender of record placed `DEFAULT_ADMIN_ROLE` with.
+  A market still seeking a lender of record has no admin, so this call is refused with `MARKET_PENDING_CURATOR` before any registration check runs. When `heldByThisInstance` is `false`, a transaction signed by an instance wallet reverts on-chain. Hand the calldata to the wallet the lender of record placed `DEFAULT_ADMIN_ROLE` with.
 </Warning>
 
 <RequestExample>
@@ -196,16 +196,18 @@ const registered = status.registeredVaults.some(
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | `vaultAddress` is missing or not `0x` followed by 40 hex characters. `error.details` names the field |
+| `VALIDATION_ERROR` | `400` | `vaultAddress` is missing or not `0x` followed by 40 hex characters, or a `txHash` is present that is not `0x` followed by 64 hex characters. `error.details` names the field |
 | `INVALID_VAULT` | `400` | `vaultAddress` is the zero address, or a mixed-case address that fails its EIP-55 checksum |
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `NOT_A_VAULT` | `400` | `register` only. The address is not a vault from the v2 vault factory |
-| `IDENTITY_NOT_VERIFIED` | `400` | `register` only, on a market running the earlier single-register implementation. The vault is not verified on the market's identity registry |
+| `IDENTITY_NOT_VERIFIED` | `400` | `register` only, on a market running the earlier single-register implementation. The vault is not verified on the market's identity registry. `details` carries `register`, `requiredProfile` and `accessList` |
+| `IDENTITY_GATE_RETIRED` | `409` | `register` only, on the earlier single-register implementation. Returned instead of `IDENTITY_NOT_VERIFIED` when the market's register is the previous Trusset ID Register, which takes no new identities. `details` carries `register`, `gate` (`identity`), `retired: true` and `currentRegistry`. The admin moves the market onto the current implementation with [Upgrade Market](/endpoints/lending/upgrade-market), then installs the current register with [Set Identity Gates](/endpoints/lending/set-identity-gates#the-previous-trusset-id-register) |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so no admin exists to sign. See [Lender of record](/endpoints/lending/introduction#lender-of-record) |
 | `PROFESSIONAL_BORROWER_GATE_REQUIRED` | `409` | `register` only. The market is `MARKET`-priced and its borrower register does not qualify as a professional gate. `details.field` is `borrowerRegistry` |
 | `PROVIDER_GATE_MISMATCH` | `409` | `register` only. The vault's own register, the register it adopted, or the provider register of a market it already funds differs from this market's provider register. Also a vault with no register of its own that funds no market while its shares are still held |
 | `DEPOSITOR_GATE_REQUIRED` | `409` | `register` only. The vault has no register of its own and the market names no provider register |
+| `ELIGIBILITY_REMOVAL_PENDING` | `409` | `register` only, on the earlier single-register implementation. The vault's admission to the market's identity registry is waiting for removal. `details` carries `register` and `wallet` |
 | `MARKET_STATE_UNAVAILABLE` | `503` | `register` only. The market's implementation, its price source and borrower register, the vault's register, the register it adopted, its share supply, this market's provider register or the markets the vault funds could not be read. Retry shortly |
-| `STATE_UNAVAILABLE` | `503` | `register` only. The verification profiles behind a `MARKET` market's borrower register could not be read. Retry shortly |
+| `STATE_UNAVAILABLE` | `503` | `register` only. The verification profiles behind a `MARKET` market's borrower register, or the pending removals on the single-register implementation's identity registry, could not be read. Retry shortly |
 | `VAULTS_NOT_CONFIGURED` | `503` | `register` only. Operator vaults are not configured on your instance's network |

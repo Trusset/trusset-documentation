@@ -1,0 +1,204 @@
+---
+title: 'Get Atomic Sale'
+api: 'GET /lending-external-securities-v2/api/liquidations/{marketId}/atomic-sale'
+description: 'Whether liquidations on a market sell to the sale recipient in the same transaction, and whether it can buy'
+---
+
+Reports whether the market's liquidation router runs the atomic sale, and whether the sale recipient can buy right now. In atomic mode a liquidation sells the seized collateral to the sale recipient at its standing bid and settles the record in the same transaction. If the sale recipient cannot buy, the liquidation reverts and the loan stays liquidatable. In two-step mode, the default, seized collateral waits on the router for the sale desk. See [Liquidations](/endpoints/lending/introduction#liquidations).
+
+The sale recipient is the wallet the lender of record fixed when it took the role. It buys from its own wallet. It posts a standing bid with [Set Sale Bid](/endpoints/lending/set-sale-bid), a price factor of the oracle price with an expiry, and approves the router to take the payment. The money stays in its wallet until a liquidation sells to it.
+
+## When the atomic sale is offered
+
+The atomic sale carries out the free-hand sale of a `MARKET`-priced market, described under [Professional Borrowers](/endpoints/lending/set-identity-gates#professional-borrowers), in one transaction. It is offered only on a market priced from a live market price (`MARKET`) whose lender of record declared `EXCHANGE_SALE` as its realization mode. The market and its router must both run the implementation that carries it. `saleBasis` reports the first condition and `supported` the second, and `available` is `true` only when both hold.
+
+On any other market [Set Atomic Mode](/endpoints/lending/set-atomic-mode) refuses to switch atomic mode on, [Set Sale Bid](/endpoints/lending/set-sale-bid) refuses a bid above `0` or a non-zero allowance, and [Sell Pending Liquidation](/endpoints/lending/sell-pending-liquidation) refuses to sell, all with `409 ATOMIC_SALE_UNAVAILABLE`. The router contract itself does not apply this rule. A router that runs atomic mode on such a market, for example one switched directly on chain, reads `effective: true` with `available: false`. [Liquidate Loan](/endpoints/lending/liquidate#atomic-sale) refuses every liquidation there until the router administrator switches the router back to two-step.
+
+<Warning>
+  The sale recipient can also be the market's lender of record, collateral agent, liquidation operator or controller. An atomic sale then sells the seized collateral to the lender's own side, and `saleRecipientLenderSide` names the roles where the atomic sale can run. Whether such a sale at the standing bid is a free-hand sale at the current price is open with counsel. It may instead be an appropriation that credits the claim at the full price. Until counsel confirms, keep the bid at 100 percent or above, or name an independent sale recipient.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
+
+## Query Parameters
+
+<ParamField query="signerAddress" type="string">
+  A wallet whose router roles to report in `signer`. Anything that is not a `0x` address is ignored.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="marketId" type="string">The market's record ID.</ResponseField>
+    <ResponseField name="marketAddress" type="string">The market, lowercased.</ResponseField>
+    <ResponseField name="routerAddress" type="string">Its liquidation router, lowercased.</ResponseField>
+    <ResponseField name="supported" type="object">`{ router, market }`: whether each runs the implementation that carries the atomic sale. `null` when it could not be read.</ResponseField>
+    <ResponseField name="available" type="boolean">`true` when both implementations carry the atomic sale and `saleBasis.available` is `true`.</ResponseField>
+    <ResponseField name="saleBasis" type="object">
+      Whether the market's pricing and its declared realization path allow the atomic sale.
+      <Expandable>
+        <ResponseField name="available" type="boolean">`true`, `false`, or `null` when the price source, or on a `MARKET` market the declared realization path, could not be read.</ResponseField>
+        <ResponseField name="priceSource" type="string">`MARKET`, `NAV`, `ORACLE` or `FIXED`, read from the market. `null` when unreadable.</ResponseField>
+        <ResponseField name="realizationMode" type="string">The realization mode the lender of record declared, `EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION`, or `null`.</ResponseField>
+        <ResponseField name="reasonCode" type="string">`PRICE_SOURCE_NOT_MARKET`, `REALIZATION_PATH_NOT_EXCHANGE_SALE`, `PRICE_SOURCE_UNREAD` or `REALIZATION_PATH_UNREAD`. `null` when available.</ResponseField>
+        <ResponseField name="reason" type="string">The same in words, or `null`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="mode" type="integer">`0` two-step or `1` atomic, as the router holds it. `0` on a router without the atomic sale. `null` when unreadable.</ResponseField>
+    <ResponseField name="modeName" type="string">`TWO_STEP` or `ATOMIC`, or `null`.</ResponseField>
+    <ResponseField name="effective" type="boolean">`true` when both implementations carry the atomic sale, the router runs atomic mode and Dutch auctions are off: liquidations then sell to the sale recipient.</ResponseField>
+    <ResponseField name="dutchAuctionEnabled" type="boolean">Whether the market opens Dutch auctions, which take precedence over the atomic sale.</ResponseField>
+    <ResponseField name="saleRecipient" type="string">The router's fixed sale recipient, lowercased, or `null`.</ResponseField>
+    <ResponseField name="bid" type="object">The sale recipient's standing bid: `priceFactorBps`, `priceFactorE18`, `validUntil` (unix seconds), `validUntilIso`, `set`, `live` and `expired`. `null` when the router has no sale recipient or the bid could not be read.</ResponseField>
+    <ResponseField name="floor" type="object">`{ priceFactorBps, priceFactorE18 }`: the lowest bid the router sells at. It is the market's `auctionMinPremium`, held between 95 and 100 percent of the price.</ResponseField>
+    <ResponseField name="limits" type="object">`{ minSaleFactorBps, maxSaleFactorBps }`: `9500` and `20000`, the range a bid may take.</ResponseField>
+    <ResponseField name="settlementAsset" type="object">`{ address, symbol, decimals }` of the asset the sale is paid in.</ResponseField>
+    <ResponseField name="allowance" type="object">`{ amount, raw }`: what the sale recipient allows the router to take.</ResponseField>
+    <ResponseField name="balance" type="object">`{ amount, raw }`: the sale recipient's settlement balance.</ResponseField>
+    <ResponseField name="expectedPayment" type="object">Always `null` here. A loan's payment is quoted by [Liquidate Loan](/endpoints/lending/liquidate) when it refuses.</ResponseField>
+    <ResponseField name="buyerAvailable" type="boolean">Whether the sale recipient can buy: a live bid at or above the floor, a fresh price, an allowance and a balance above zero, and delivery the collateral token admits. `null` when a fact could not be read, when the token's verdict on delivery depends on the size of a loan's seizure, or when the router has no atomic sale.</ResponseField>
+    <ResponseField name="code" type="string">`ATOMIC_BUYER_UNAVAILABLE` when `effective` is `true` and `buyerAvailable` is `false`, otherwise `null`.</ResponseField>
+    <ResponseField name="reasonCode" type="string">Where `saleBasis.available` is not `true`, the sale basis code, because no bid can buy on such a market. Otherwise why the sale recipient cannot buy: `NO_BID`, `BID_EXPIRED`, `BID_BELOW_FLOOR`, `PRICE_STALE`, `ALLOWANCE_SHORT`, `BALANCE_SHORT` or `DELIVERY_REFUSED`. `null` otherwise. The loan-level codes `SELF_PURCHASE` and `RATE_LIMITED` come only from [Liquidate Loan](/endpoints/lending/liquidate#atomic-sale) and [Sell Pending Liquidation](/endpoints/lending/sell-pending-liquidation).</ResponseField>
+    <ResponseField name="reason" type="string">The same in words, with the remedy. Also says why the answer is unknown, or that the router predates the atomic sale.</ResponseField>
+    <ResponseField name="upgrade" type="object">`{ routerRequired, marketRequired }`, plus `router` with the router's upgrade status when its implementation predates the atomic sale.</ResponseField>
+    <ResponseField name="signer" type="object">With `signerAddress`: `{ address, routerAdmin, routerOperator, saleRecipient }`, whether that wallet holds the router's admin or operator role and is the sale recipient. `null` otherwise.</ResponseField>
+    <ResponseField name="readFailed" type="boolean">`true` when a section could not be read. `unverifiedSections` names it.</ResponseField>
+    <ResponseField name="unverifiedSections" type="string[]">The sections that could not be read, or `null`.</ResponseField>
+    <ResponseField name="saleRecipientLenderSide" type="object">Present when the sale recipient also holds a lender-side role, unless `saleBasis.available` is `false`: a market whose sale basis rules the atomic sale out carries no advice about a bid level. `roles` (`lender of record`, `collateral agent`, `liquidation operator`, `controller`) and `message`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/liquidations/{marketId}/atomic-sale" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/liquidations/${marketId}/atomic-sale`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+if (data.effective && data.buyerAvailable === false) {
+  console.warn(`Liquidations revert until the sale recipient can buy: ${data.reason}`);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "marketId": "cmuvtwr29002ds2mft47ye2yl",
+    "marketAddress": "0x5b1f0c8e2a7d93e46b1c8f2a9d04e7a3c6b15f21",
+    "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+    "supported": { "router": true, "market": true },
+    "available": true,
+    "mode": 1,
+    "modeName": "ATOMIC",
+    "effective": true,
+    "dutchAuctionEnabled": false,
+    "saleRecipient": "0x5a72e0b41d3f8c62079ae4b1d38f0c95261ba473",
+    "bid": {
+      "priceFactorBps": 9800,
+      "priceFactorE18": "980000000000000000",
+      "validUntil": 1792195200,
+      "validUntilIso": "2026-10-17T00:00:00.000Z",
+      "set": true,
+      "live": true,
+      "expired": false
+    },
+    "floor": { "priceFactorBps": 9800, "priceFactorE18": "980000000000000000" },
+    "limits": { "minSaleFactorBps": 9500, "maxSaleFactorBps": 20000 },
+    "settlementAsset": {
+      "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "symbol": "USDC",
+      "decimals": 6
+    },
+    "allowance": { "amount": "250000.0", "raw": "250000000000" },
+    "balance": { "amount": "412000.0", "raw": "412000000000" },
+    "expectedPayment": null,
+    "buyerAvailable": true,
+    "code": null,
+    "reasonCode": null,
+    "reason": null,
+    "upgrade": { "routerRequired": false, "marketRequired": false },
+    "signer": null,
+    "readFailed": false,
+    "unverifiedSections": null,
+    "saleBasis": {
+      "available": true,
+      "priceSource": "MARKET",
+      "realizationMode": "EXCHANGE_SALE",
+      "reasonCode": null,
+      "reason": null
+    }
+  }
+}
+```
+```json Response - Not Offered On A NAV Market
+{
+  "success": true,
+  "data": {
+    "marketId": "cmssh7p1k0001cghxq2m4v8rz",
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "routerAddress": "0x9d4e2a1c7b3f06e58a1d4c7b2e9f03a6d5c8b1e4",
+    "supported": { "router": true, "market": true },
+    "available": false,
+    "mode": 0,
+    "modeName": "TWO_STEP",
+    "effective": false,
+    "dutchAuctionEnabled": false,
+    "saleRecipient": "0x9c3e5a7f1b2d4068e0c2a4f6b8d9e1c3a5f70b11",
+    "bid": {
+      "priceFactorBps": 0,
+      "priceFactorE18": "0",
+      "validUntil": 0,
+      "validUntilIso": null,
+      "set": false,
+      "live": false,
+      "expired": false
+    },
+    "floor": { "priceFactorBps": 9800, "priceFactorE18": "980000000000000000" },
+    "limits": { "minSaleFactorBps": 9500, "maxSaleFactorBps": 20000 },
+    "settlementAsset": {
+      "address": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "symbol": "USDC",
+      "decimals": 6
+    },
+    "allowance": { "amount": "0.0", "raw": "0" },
+    "balance": { "amount": "0.0", "raw": "0" },
+    "expectedPayment": null,
+    "buyerAvailable": false,
+    "code": null,
+    "reasonCode": "PRICE_SOURCE_NOT_MARKET",
+    "reason": "This market prices its collateral from a NAV attestation rather than a live exchange price, so the free-hand sale under § 1259 BGB, which the atomic sale carries out, is not available on it. Liquidations stay two-step and realize through the path its adoption terms declare.",
+    "upgrade": { "routerRequired": false, "marketRequired": false },
+    "signer": null,
+    "readFailed": false,
+    "unverifiedSections": null,
+    "saleBasis": {
+      "available": false,
+      "priceSource": "NAV",
+      "realizationMode": "ISSUER_REDEMPTION",
+      "reasonCode": "PRICE_SOURCE_NOT_MARKET",
+      "reason": "This market prices its collateral from a NAV attestation rather than a live exchange price, so the free-hand sale under § 1259 BGB, which the atomic sale carries out, is not available on it. Liquidations stay two-step and realize through the path its adoption terms declare."
+    }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance. See [Market IDs](/endpoints/lending/list-markets#market-ids) |
+
+A fact that cannot be read never fails the request. It comes back as `null` with `readFailed: true`, which is not a verdict either way.

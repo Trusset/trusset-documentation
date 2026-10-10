@@ -1,0 +1,191 @@
+---
+title: 'List Hook Deliveries'
+api: 'GET /lending-external-securities-v2/api/hooks/{marketId}/{hookId}/deliveries'
+description: 'List the signed webhook deliveries of a hook with their status and attempts'
+---
+
+Returns the hook's webhook deliveries, newest first, with pagination counters. Each one is an event queued for the hook's `webhookUrl`: a liquidation announced to an `inform` hook, an [Execute Hook](/endpoints/lending/execute-hook) call on one, or a monitor's breach. Every field of a delivery is read from Trusset's queue, and nothing is sent or retried by this call.
+
+Only an `inform` action queues deliveries, so a hook that never ran one returns an empty list. [Signed deliveries](/endpoints/lending/create-hook#signed-deliveries) describes the request each attempt sends.
+
+Delivered and failed deliveries are kept for at least 30 days after they were queued and removed after that, and `total` counts only what is kept. [Delete Hook](/endpoints/lending/delete-hook) removes all of the hook's deliveries at once.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
+<ParamField path="hookId" type="string" required>Hook ID.</ParamField>
+
+## Query Parameters
+
+<ParamField query="limit" type="integer" default="50">
+  Records to return, 1 to 200. Out-of-range values are clamped rather than refused: above 200 returns 200, a negative value returns 1, and `0` or a non-number falls back to 50.
+</ParamField>
+
+<ParamField query="offset" type="integer" default="0">
+  Records to skip. A negative value or a non-number counts as 0.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="deliveries" type="array">
+      Deliveries ordered by `createdAt`, newest first.
+      <Expandable>
+        <ResponseField name="id" type="string">Delivery ID. The body's `id` and the `x-trusset-delivery-id` header carry the same value on every attempt.</ResponseField>
+        <ResponseField name="eventType" type="string">`afterLiquidation` or `riskBreach`, as sent in `x-hook-type`.</ResponseField>
+        <ResponseField name="status" type="string">`PENDING`, `RETRYING`, `DELIVERED` or `FAILED`. See [Delivery status](#delivery-status).</ResponseField>
+        <ResponseField name="statusCode" type="integer | null">HTTP status of the last answer. `null` before the first answer, and when the last attempt got no HTTP answer.</ResponseField>
+        <ResponseField name="attempts" type="integer">Attempts started, at most 8. An attempt still under way already counts.</ResponseField>
+        <ResponseField name="nextAttemptAt" type="string | null">When the next attempt is due. While an attempt is under way, it already holds the time of the retry that attempt would need. `null` once the delivery is `DELIVERED` or `FAILED`.</ResponseField>
+        <ResponseField name="lastAttemptAt" type="string | null">When the last attempt started. `null` before the first.</ResponseField>
+        <ResponseField name="deliveredAt" type="string | null">When the endpoint answered `2xx`. `null` until then.</ResponseField>
+        <ResponseField name="error" type="string | null">Why the last attempt failed. `null` before the first failure and once delivered. See [Retries](#retries).</ResponseField>
+        <ResponseField name="createdAt" type="string">When the event was queued.</ResponseField>
+        <ResponseField name="payload" type="object">The JSON body every attempt sends: the hook's `webhookPayload` fields, the event's fields and the fixed fields, as [Signed deliveries](/endpoints/lending/create-hook#signed-deliveries) lists them.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="total" type="integer">Total deliveries kept for this hook.</ResponseField>
+    <ResponseField name="limit" type="integer">Page size applied.</ResponseField>
+    <ResponseField name="offset" type="integer">Offset applied.</ResponseField>
+    <ResponseField name="hasMore" type="boolean">Whether more deliveries exist beyond this page.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Delivery status
+
+| `status` | Meaning |
+|---|---|
+| `PENDING` | Queued, and no attempt has failed yet. An attempt may be under way |
+| `RETRYING` | An attempt failed in a way that is retried. The next one is due at `nextAttemptAt` |
+| `DELIVERED` | The endpoint answered `2xx`. Final |
+| `FAILED` | An attempt failed in a way that is not retried, or the eighth attempt failed. Final |
+
+A delivery that reaches `DELIVERED` or `FAILED` also writes one entry to [Get Hook Executions](/endpoints/lending/get-hook-executions) and counts as a run in the hook's `executionCount`. Nothing re-sends a `FAILED` delivery.
+
+## Retries
+
+Each attempt waits up to 15 seconds for an answer. A retried failure makes the next attempt due a set time after the failed one started: 10 seconds after the first attempt, then 30 seconds, 1 minute, 5, 15 and 30 minutes, and 1 hour after the seventh. The eighth attempt is the last.
+
+| `error` | Retried |
+|---|---|
+| `HTTP` and the status, for a `5xx`, `408`, `425` or `429` answer | Yes |
+| `HTTP` and the status, for any other `4xx` answer | No |
+| `Endpoint answered with a redirect (HTTP 3xx); redirects are not followed`, with the actual status | No |
+| `No answer within 15 seconds` | Yes |
+| `Endpoint host could not be resolved` | Yes |
+| `Could not connect to the endpoint`, with the network error code in parentheses when there is one | Yes |
+| `Endpoint must be a public host` | No |
+| `Endpoint answered with a body larger than 64 KB` | No |
+
+Each attempt goes to the `webhookUrl` the hook holds when it is sent, signed with the secret the hook holds at that moment.
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/hooks/{marketId}/{hookId}/deliveries?limit=10" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/hooks/${marketId}/${hookId}/deliveries?limit=10&offset=0`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const failed = data.deliveries.filter((d) => d.status === 'FAILED');
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "deliveries": [
+      {
+        "id": "afc8ba30-3b31-4573-94f0-e153c02eb568",
+        "eventType": "afterLiquidation",
+        "status": "RETRYING",
+        "statusCode": 503,
+        "attempts": 2,
+        "nextAttemptAt": "2026-10-10T09:15:42.000Z",
+        "lastAttemptAt": "2026-10-10T09:15:12.000Z",
+        "deliveredAt": null,
+        "error": "HTTP 503",
+        "createdAt": "2026-10-10T09:15:01.000Z",
+        "payload": {
+          "id": "afc8ba30-3b31-4573-94f0-e153c02eb568",
+          "event": "afterLiquidation",
+          "hookId": "hook_004",
+          "marketId": "clx_secmarket_001",
+          "emittedAt": "2026-10-10T09:15:01.000Z",
+          "timestamp": "2026-10-10T09:15:01.000Z",
+          "loanId": "5",
+          "marketLiquidationId": "3",
+          "auctionId": null,
+          "collateralAmount": "48.5",
+          "debtOwed": "4272.5",
+          "borrower": "0xe119d9413af9d1ddc0c2115c3f160460c8fa28bd",
+          "txHash": "0x3708bf7927965ce95c5bf8c315f8294092e31c93a35d4e958af5be0c47723257",
+          "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+          "realization": "ROUTER",
+          "buyer": null,
+          "proceeds": null,
+          "surplus": null,
+          "reserve": null,
+          "payee": null
+        }
+      },
+      {
+        "id": "1a9955ca-2e84-4844-bc15-649018cb50be",
+        "eventType": "riskBreach",
+        "status": "DELIVERED",
+        "statusCode": 200,
+        "attempts": 1,
+        "nextAttemptAt": null,
+        "lastAttemptAt": "2026-10-09T06:00:00.412Z",
+        "deliveredAt": "2026-10-09T06:00:00.731Z",
+        "error": null,
+        "createdAt": "2026-10-09T06:00:00.120Z",
+        "payload": {
+          "id": "1a9955ca-2e84-4844-bc15-649018cb50be",
+          "event": "riskBreach",
+          "hookId": "hook_004",
+          "marketId": "clx_secmarket_001",
+          "emittedAt": "2026-10-09T06:00:00.120Z",
+          "timestamp": "2026-10-09T06:00:00.120Z",
+          "monitorHookId": "hook_003",
+          "monitorName": "NAV Publication Monitor",
+          "riskUri": "https://nav.example.com/funds/NYF1",
+          "checkedAt": "2026-10-09T06:00:00.098Z",
+          "breached": [
+            { "path": "ageHours", "operator": "<", "threshold": 36, "value": 51, "pass": false }
+          ],
+          "fields": [
+            { "path": "ageHours", "operator": "<", "threshold": 36, "value": 51, "pass": false }
+          ]
+        }
+      }
+    ],
+    "total": 2,
+    "limit": 10,
+    "offset": 0,
+    "hasMore": false
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-10T09:15:30.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MISSING_HOOK_ID` | `400` | `hookId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID belongs to your instance |
+| `HOOK_NOT_FOUND` | `404` | No hook with this ID exists on this market |

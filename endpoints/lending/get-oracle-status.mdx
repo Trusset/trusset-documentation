@@ -10,7 +10,7 @@ A stale price makes opening a loan, borrowing more, liquidating, and withdrawing
 
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
 
 ## Response Fields
 
@@ -21,10 +21,12 @@ A stale price makes opening a loan, borrowing more, liquidating, and withdrawing
     <ResponseField name="priceRaw" type="string">Same price in base units.</ResponseField>
     <ResponseField name="timestamp" type="integer">Unix seconds the current price is dated at. A pushed price carries its block time and a signed price its signed `timestamp`. On an `ORACLE`-priced market it is the external feed's own date.</ResponseField>
     <ResponseField name="lastUpdate" type="string">The same instant as an ISO 8601 string. `null` only when `configured` is `false`.</ResponseField>
-    <ResponseField name="isStale" type="boolean">Whether the price is older than `maxPriceAge`. An external feed that cannot answer reads as stale.</ResponseField>
+    <ResponseField name="isStale" type="boolean">Whether the price is older than `maxPriceAge`. An external feed that cannot answer reads as stale. Always `false` on a fixed price, which never goes stale.</ResponseField>
     <ResponseField name="priceAge" type="integer">Seconds since the price's date. Conditional on `configured`.</ResponseField>
     <ResponseField name="maxPriceAge" type="integer">Staleness threshold in seconds, read from the oracle. It is an oracle setting and is not part of the market config struct. It defaults to 24 hours, and the oracle owner can set it between 1 minute and 30 days. Conditional on `configured`.</ResponseField>
-    <ResponseField name="maxDeviationBps" type="integer">Circuit breaker limit in basis points. A price push differing from the current price by more than this is rejected, and the same limit bounds the total movement within any one-hour window. Reported as `5000` when the oracle does not expose the value. It does not apply to an external feed. Conditional on `configured`.</ResponseField>
+    <ResponseField name="maxDeviationBps" type="integer">Circuit breaker limit in basis points. A price push differing from the current price by more than this is rejected, and the same limit bounds the total movement within any one-hour window. Reported as `5000` when the oracle does not expose the value. It does not apply to an external feed. On a fixed price it bounds each mark-down, and the Issuer Portal only tightens it. See [Mark down a fixed price](/endpoints/lending/sync-oracle#mark-down-a-fixed-price). Conditional on `configured`.</ResponseField>
+    <ResponseField name="fixed" type="boolean">Whether the oracle holds a fixed price set at deployment. `true` on a `FIXED` market, `false` on any other, `null` when it could not be read. Conditional on `configured`.</ResponseField>
+    <ResponseField name="markDownOnly" type="boolean">`true` when `fixed` is `true`: the price can only be lowered. Conditional on `configured`.</ResponseField>
     <ResponseField name="owner" type="string">Oracle owner address. The owner is implicitly an authorized signer. Conditional on `configured`.</ResponseField>
     <ResponseField name="ownerIsInstanceWallet" type="boolean">Whether that owner is a verified wallet of your instance. When `false`, the oracle belongs to another party and no wallet of this instance can authorize signers on it. Conditional on `configured`.</ResponseField>
     <ResponseField name="signerAddress" type="string">This instance's first verified wallet, primary wallet first, or `null` when none is verified. Conditional on `configured`.</ResponseField>
@@ -36,7 +38,7 @@ A stale price makes opening a loan, borrowing more, liquidating, and withdrawing
 </ResponseField>
 
 <Warning>
-  The failure response is a different shape, not an error status. When `configured` is `false` the endpoint still returns `200` with `price: "0"`, `isStale: true`, and no `priceAge`, `maxPriceAge`, `maxDeviationBps`, `owner`, `ownerIsInstanceWallet` or `signerAddress`. Guard on `configured` before reading those fields.
+  The failure response is a different shape, not an error status. When `configured` is `false` the endpoint still returns `200` with `price: "0"`, `isStale: true`, and no `priceAge`, `maxPriceAge`, `maxDeviationBps`, `fixed`, `markDownOnly`, `owner`, `ownerIsInstanceWallet` or `signerAddress`. Guard on `configured` before reading those fields.
 </Warning>
 
 A healthy answer is held for up to 15 seconds per market and instance. Any successful write through this API clears it, so a read right after a confirmed price push reaches the chain.
@@ -44,6 +46,10 @@ A healthy answer is held for up to 15 seconds per market and instance. Any succe
 ## Price Decimals
 
 Oracle prices carry the market's borrow asset decimals, not a fixed precision. The price is per whole collateral token, in the smallest unit of the settlement token (stablecoin): a 6-decimal token prices at 6 decimals, an 18-decimal one at 18. Read `borrowAssetDecimals` from [Get Market](/endpoints/lending/get-market) rather than assuming.
+
+## Fixed Price Markets
+
+A market deployed with the `FIXED` price source holds the price stated at deployment for its whole life. `fixed` and `markDownOnly` read `true`, and the answer adds `stale: false` and `staleness: null`. The price never goes stale and accepts no signed price. The oracle owner or an authorized signer can only mark it down with [Sync Oracle Price](/endpoints/lending/sync-oracle#mark-down-a-fixed-price), within `maxDeviationBps`. Whoever owns the oracle, `owner` here, could still replace its implementation through an upgrade and with it the fixed price, so the lender of record keeps the oracle owner in its own control.
 
 ## External Feed Markets
 

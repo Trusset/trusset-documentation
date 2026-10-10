@@ -1,0 +1,164 @@
+---
+title: 'Transfer Whitelist Ownership'
+api: 'POST /lending-external-securities-v2/api/access-lists/{listId}/owner'
+description: 'Build the transaction that proposes a new owner of a whitelist, or accepts a pending transfer'
+---
+
+Ownership of a whitelist moves in two steps. The owner proposes a new owner with `transferOwnership`, and the proposed wallet accepts with `acceptOwnership`. Send `newOwner` to build the first, or `accept: true` to build the second. Record either with [Confirm Whitelist Ownership](/endpoints/lending/confirm-access-list-ownership).
+
+Until the new owner accepts, the current owner keeps every right over the list, and a later proposal replaces a pending one. A list can never be left without an owner.
+
+<Warning>
+  A transfer does not change the managers. Every manager keeps listing and removing wallets after the new owner accepts, until the new owner removes it. The build names the managers that stay in `MANAGERS_KEEP_LISTING`. Remove a manager first with [Set Whitelist Manager](/endpoints/lending/set-access-list-manager) if it should not keep that power.
+</Warning>
+
+## Propose a new owner
+
+Only the instance that keeps the list proposes, and its owner wallet signs. When `newOwner` is not a verified wallet of your instance, the instance that holds that wallet takes over the record once the transfer is accepted. The name goes with it, and so do the manager and transfer rights. Your instance then keeps only what its own wallets can do as managers. The build warns with `OWNER_LEAVES_INSTANCE`.
+
+## Accept a pending transfer
+
+The wallet the pending transfer names signs. Your instance can accept on a list it keeps, or on a list another instance keeps when the pending transfer names one of your verified wallets. Once the proposal is recorded, that list appears under `managed` on [List Whitelists](/endpoints/lending/list-access-lists) with `pendingOwnerWallet` set. No pending transfer, or a signer other than the pending owner, is refused with `NOT_PENDING_OWNER`.
+
+## Path Parameters
+
+<ParamField path="listId" type="string" required>
+  The whitelist ID from [List Whitelists](/endpoints/lending/list-access-lists).
+</ParamField>
+
+## Body Parameters
+
+Send exactly one of `newOwner` and `accept`.
+
+<ParamField body="newOwner" type="string">
+  The wallet to propose as owner. It must differ from the current owner.
+</ParamField>
+
+<ParamField body="accept" type="boolean">
+  `true` builds the acceptance of the pending transfer.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The wallet that will sign: the owner for a proposal, the pending owner for an acceptance. Omit it to use the verified wallet of your instance in that position.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">The call on the list, `{ to, data, chainId, value }`.</ResponseField>
+    <ResponseField name="functionName" type="string">`transferOwnership` or `acceptOwnership`.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction does.</ResponseField>
+    <ResponseField name="step" type="string">`PROPOSE` or `ACCEPT`.</ResponseField>
+    <ResponseField name="listId" type="string">The whitelist ID.</ResponseField>
+    <ResponseField name="listAddress" type="string">The list contract, checksummed.</ResponseField>
+    <ResponseField name="currentOwner" type="string">The owner on chain, lowercased.</ResponseField>
+    <ResponseField name="newOwner" type="string">The proposed owner, or the pending owner that accepts, lowercased.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet that must sign, checksummed.</ResponseField>
+    <ResponseField name="warnings" type="array">`{ code, message }` entries. See [Warnings](#warnings).</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, txHash, field, path }`, with `path` naming [Confirm Whitelist Ownership](/endpoints/lending/confirm-access-list-ownership) for this list.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Warnings
+
+| `code` | When |
+|---|---|
+| `TWO_STEP_TRANSFER` | On every proposal. The transfer completes only when the new owner accepts |
+| `REPLACES_PENDING_TRANSFER` | The proposal replaces a pending transfer to another wallet |
+| `OWNER_LEAVES_INSTANCE` | `newOwner` is not a verified wallet of your instance, so the record moves to the instance that holds it once the transfer is accepted |
+| `MANAGERS_KEEP_LISTING` | On a proposal or an acceptance, when recorded managers stay managers after the transfer. Carries `managers`, and `unread` for managers whose standing could not be read |
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/access-lists/cmv2k8q1d0004l70a3n6p2w9e/owner" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"newOwner": "0x8c2d4e6f0a1b3c5d7e9f1a2b4c6d8e0f2a4b6c8d"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/access-lists/${listId}`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(`${url}/owner`, { method: 'POST', headers, body: JSON.stringify({ accept: true }) });
+const { data } = await res.json();
+
+const tx = await pendingOwnerWallet.sendTransaction(data.transaction);
+await tx.wait();
+await fetch(`${url}/owner/confirm`, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.hash }) });
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - Proposal
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x7D31E6b09A4c25F8e1B73d0a6C94e2F58b1A0C37",
+      "data": "0x...",
+      "chainId": 11155111,
+      "value": "0"
+    },
+    "functionName": "transferOwnership",
+    "description": "Propose 0x8C2D4E6F0A1B3C5d7E9F1A2b4C6D8e0F2a4B6C8D as the new owner of the whitelist Depositors Q4",
+    "step": "PROPOSE",
+    "listId": "cmv2k8q1d0004l70a3n6p2w9e",
+    "listAddress": "0x7D31E6b09A4c25F8e1B73d0a6C94e2F58b1A0C37",
+    "currentOwner": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "newOwner": "0x8c2d4e6f0a1b3c5d7e9f1a2b4c6d8e0f2a4b6c8d",
+    "signer": "0x1234F9a07C6b53D81e2A4f70C9B385D6014a7E52",
+    "warnings": [
+      {
+        "code": "TWO_STEP_TRANSFER",
+        "message": "The transfer completes only when 0x8C2D4E6F0A1B3C5d7E9F1A2b4C6D8e0F2a4B6C8D signs acceptOwnership; until then the current owner keeps every right over the list."
+      },
+      {
+        "code": "OWNER_LEAVES_INSTANCE",
+        "message": "0x8C2D4E6F0A1B3C5d7E9F1A2b4C6D8e0F2a4B6C8D is not a verified wallet of this instance. Once it accepts, the instance that holds 0x8C2D4E6F0A1B3C5d7E9F1A2b4C6D8e0F2a4B6C8D takes over the record of this whitelist, its name included, with the manager and transfer rights; this instance keeps only what its own wallets can do as managers."
+      },
+      {
+        "code": "MANAGERS_KEEP_LISTING",
+        "message": "A transfer does not change the managers of this whitelist. 0x4E91A7C05d3B62F18A0c94E7Db2358f1C60a4E93 keeps listing and removing wallets after 0x8C2D4E6F0A1B3C5d7E9F1A2b4C6D8e0F2a4B6C8D accepts, until the new owner removes it as manager. Remove a manager first if it should not keep that power.",
+        "managers": ["0x4E91A7C05d3B62F18A0c94E7Db2358f1C60a4E93"]
+      }
+    ],
+    "confirmWith": {
+      "endpoint": "owner/confirm",
+      "txHash": true,
+      "field": "txHash",
+      "path": "POST /lending-external-securities-v2/api/access-lists/cmv2k8q1d0004l70a3n6p2w9e/owner/confirm"
+    }
+  }
+}
+```
+```json Error - No Pending Transfer
+{
+  "success": false,
+  "error": {
+    "code": "NOT_PENDING_OWNER",
+    "message": "No ownership transfer is pending on this whitelist, so there is nothing to accept.",
+    "details": { "pendingOwner": null }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | Neither or both of `newOwner` and `accept` were sent, or an address is malformed |
+| `INVALID_ADDRESS` | `400` | `newOwner` or `signerAddress` is the zero address or fails its EIP-55 checksum, or `newOwner` already owns the list |
+| `NOT_ACCESS_LIST_OWNER` | `403` | A proposal on a list another instance keeps, or a signer that is not the owner on chain. `details` names the owner |
+| `NOT_PENDING_OWNER` | `403` | No transfer is pending, no wallet of your instance is the pending owner, or the signer is not the pending owner. `details.pendingOwner` names it |
+| `ACCESS_LIST_NOT_FOUND` | `404` | No whitelist with this ID is kept by your instance, or managed or pending to one of its wallets, on this network |
+| `TX_WOULD_REVERT` | `409` | The transaction would revert for another reason. `details.revert` names the contract error where known |
+| `WALLET_NOT_CONFIGURED` | `412` | Your instance has no verified wallet to sign |
+| `ACCESS_LIST_OWNER_FAILED` | `500` | The transaction could not be prepared and no more specific code applied |
+| `ACCESS_LISTS_NOT_CONFIGURED` | `503` | The whitelist factory is not deployed on this network |
+| `ACCESS_LIST_UNREADABLE` | `503` | The list's owner, pending owner or managers could not be read. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read to simulate the transaction. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | Your instance's verified wallets could not be read. Retry shortly |

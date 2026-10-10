@@ -14,9 +14,11 @@ This is the alternative to [Sync Oracle Price](/endpoints/lending/sync-oracle). 
 
 An `ORACLE`-priced market reads an external feed and refuses every attested price. This endpoint refuses it with `EXTERNAL_FEED_ACTIVE`.
 
+A `FIXED` market's oracle refuses every signed price too, so there is nothing to sign. This endpoint answers `409 FIXED_PRICE_ACTIVE` with `details.markDownOnly: true`. The price authority can only mark a fixed price down, through [Sync Oracle Price](/endpoints/lending/sync-oracle#mark-down-a-fixed-price).
+
 ## Path Parameters
 
-<ParamField path="marketId" type="string" required>Market ID.</ParamField>
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
 
 ## Body Parameters
 
@@ -77,6 +79,8 @@ The signature is bound to one oracle on one chain through `verifyingContract` an
 ## What the Oracle Checks When the Price Lands
 
 The oracle judges the signature again inside the transaction that carries it, and a refusal reverts that whole transaction. It refuses a signature past `validUntil`, one dated in the future or older than `maxPriceAge`, and one whose signer is neither an authorized signer nor the owner. It also refuses a price outside the deviation limit, both against the current price and against the price that opened the current one-hour window.
+
+The API runs both deviation checks before it builds the payload, whenever the oracle's price can be read. A price outside them is refused with `PRICE_DEVIATION_TOO_LARGE` or `PRICE_WINDOW_DEVIATION_TOO_LARGE`, carrying the same fields as on [Sync Oracle Price](/endpoints/lending/sync-oracle#circuit-breaker).
 
 A signed price dated no later than the price the oracle already holds is skipped rather than refused. The transaction then runs against the stored price, which must not be stale.
 
@@ -202,6 +206,10 @@ Every refusal from the signing step carries `signerAddress` in the error object.
 | `EXTERNAL_FEED_ACTIVE` | `400` | The market's oracle reads an external feed and refuses signed prices |
 | `SIGNER_NOT_AUTHORIZED` | `400` | The resolved signer is neither an authorized signer nor the owner of the market's oracle |
 | `WALLET_NOT_CONFIGURED` | `400` | No `signerAddress` was given, the market declared no price signer, and this instance has no verified wallet |
+| `PRICE_DEVIATION_TOO_LARGE` | `400` | The step from the on-chain price exceeds `maxDeviationBps`. The error carries `currentPrice` and `maxDeviationPercent` |
+| `PRICE_WINDOW_DEVIATION_TOO_LARGE` | `400` | The movement within the current one-hour window would exceed `maxDeviationBps`. The error adds `windowAnchorPrice`, `windowStartedAt`, `windowResetsAt`, `acceptedLow` and `acceptedHigh` |
 | `SIGNING_FAILED` | `400` | The payload could not be built and no more specific code applied |
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `FIXED_PRICE_ACTIVE` | `409` | The market has a fixed price, and its oracle refuses every signed price. `details.markDownOnly` is `true`. Mark the price down through Sync Oracle Price instead |
+| `PRICE_STATE_UNAVAILABLE` | `503` | Whether the market's oracle holds a fixed price could not be read. Retry shortly |

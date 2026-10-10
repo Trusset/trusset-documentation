@@ -4,9 +4,9 @@ api: 'GET /lending-external-securities-v2/api/markets/deployment-options'
 description: 'Read the choices and limits that apply before deploying a market'
 ---
 
-Returns what a deployment on this instance can choose and what the factory fixes, before any calldata is built. Read it before [Deploy Market](/endpoints/lending/deploy-market). It carries the factory's live rate ceiling and the fixed fee shares. It also carries the ranges the term offering accepts, the identity register this instance resolves to, and the verification profiles whose eligibility registers a market can gate on.
+Returns what a deployment on this instance can choose and what the factory fixes, before any calldata is built. Read it before [Deploy Market](/endpoints/lending/deploy-market). It carries the factory's live rate ceiling and the fixed fee shares. It also carries the ranges the term offering accepts, the identity register this instance resolves to, the verification profiles and whitelists a market can gate on, and whether vault groups can be created.
 
-Most of the answer is fixed by the contracts and the backend, and is returned so a deployment form does not hard-code it. Three values are read live from the factory: `creatorRateCeilingBps` and the two share `bps` figures. A factory that cannot be read answers `null` in those fields rather than failing the request.
+Most of the answer is fixed by the contracts and the backend, and is returned so a deployment form does not hard-code it. `creatorRateCeilingBps`, the two share `bps` figures, `priceSources.fixedSupported` and `vaultGroups.supported` are read live from the chain. A contract that cannot be read answers `null` in those fields rather than failing the request, and `priceSources.options` then leaves `FIXED` out.
 
 ## Response Fields
 
@@ -22,12 +22,21 @@ Most of the answer is fixed by the contracts and the backend, and is returned so
     </ResponseField>
     <ResponseField name="priceSources" type="object">
       <Expandable>
-        <ResponseField name="options" type="array">`NAV`, `MARKET` and `ORACLE`.</ResponseField>
+        <ResponseField name="options" type="array">`NAV`, `MARKET`, `ORACLE` and `FIXED`. `FIXED` is listed only when `fixedSupported` is `true`.</ResponseField>
         <ResponseField name="default" type="string">`NAV`.</ResponseField>
         <ResponseField name="marketRequiresIdentityRegistry" type="boolean">`true`. A `MARKET` market must carry a borrower register. The deployment installs it, unless it nominates `candidates` and is not open to any curator: the nominated lender of record then brings it with its adoption terms. See `professionalBorrowerGate`.</ResponseField>
         <ResponseField name="identityRegistryAlwaysOptional" type="boolean">`false`, for the same reason.</ResponseField>
         <ResponseField name="oracleRequiresFeedAddress" type="boolean">`true`. An `ORACLE` deployment must name its feed in `oracleAddress`.</ResponseField>
         <ResponseField name="oracleInitialPriceFromFeed" type="boolean">`true`. An `ORACLE` market takes its first price from the feed, so it takes no `initialPrice`.</ResponseField>
+        <ResponseField name="fixedSupported" type="boolean">Whether the factory creates oracles that can hold a fixed price. `null` when no factory is configured or it could not be read.</ResponseField>
+        <ResponseField name="fixedRequiresInitialPrice" type="boolean">`true`. A `FIXED` deployment states its price in `initialPrice`.</ResponseField>
+        <ResponseField name="fixedRefusesOracleAddress" type="boolean">`true`. A `FIXED` deployment takes no `oracleAddress`.</ResponseField>
+        <ResponseField name="fixedNeverStale" type="boolean">`true`. A fixed price never goes stale.</ResponseField>
+        <ResponseField name="fixedMarkDownOnly" type="boolean">`true`. A price update can only lower a fixed price.</ResponseField>
+        <ResponseField name="fixedCurrencyMustMatchSettlement" type="boolean">`true`. The token's currency must be the currency of the settlement token (stablecoin).</ResponseField>
+        <ResponseField name="fixedNominalCheck" type="object">`{ formula, override }`: the price is compared with `nominal per token x redemption percent / 100`, and `acknowledgeFixedPriceMismatch` overrides a mismatch.</ResponseField>
+        <ResponseField name="fixedOracleOwnerCanUpgrade" type="boolean">`true`. Whoever owns the oracle could replace its implementation, and with it the fixed price.</ResponseField>
+        <ResponseField name="fixedNote" type="string">The same in words, for display beside the choice.</ResponseField>
       </Expandable>
     </ResponseField>
     <ResponseField name="identityGates" type="object">
@@ -102,6 +111,36 @@ Most of the answer is fixed by the contracts and the backend, and is returned so
         <ResponseField name="admissionMode" type="string">`REGISTER`, `INSTANCE_REGISTER` or `EXTERNAL`, recorded when the register was bound. See [Which registers can be signed here](/endpoints/customers/introduction#which-registers-can-be-signed-here).</ResponseField>
       </Expandable>
     </ResponseField>
+    <ResponseField name="gateProfiles" type="array">
+      Every enabled verification profile of this instance, with or without an eligibility register, so a form can show which can be chosen as a gate and which cannot yet. Empty when the profiles could not be read.
+      <Expandable>
+        <ResponseField name="key" type="string">Profile key.</ResponseField>
+        <ResponseField name="name" type="string">Display name.</ResponseField>
+        <ResponseField name="entityType" type="string">`INDIVIDUAL` or `COMPANY`.</ResponseField>
+        <ResponseField name="professionalOnly" type="boolean">Whether the profile is limited to professional clients.</ResponseField>
+        <ResponseField name="requirementsHash" type="string">The hash of the profile's current requirements.</ResponseField>
+        <ResponseField name="registryAddress" type="string">The eligibility register, checksummed, or `null` when the profile has none yet.</ResponseField>
+        <ResponseField name="admissionMode" type="string">`REGISTER`, `INSTANCE_REGISTER` or `EXTERNAL`, or `null` without a register.</ResponseField>
+        <ResponseField name="registerAvailable" type="boolean">Whether this instance can deploy or bind a register for a profile, which needs an identity register of its own (`identityRegistry.mode: OWN`).</ResponseField>
+        <ResponseField name="marketBorrowerGateEligible" type="boolean">`true` when the profile can be the borrower gate of a `MARKET` market: limited to professional clients, with a register in the `REGISTER` mode.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="accessLists" type="object">
+      Whether whitelists can gate a market on this network. See [Whitelists](/endpoints/lending/list-access-lists).
+      <Expandable>
+        <ResponseField name="available" type="boolean">Whether the whitelist factory is configured on this network.</ResponseField>
+        <ResponseField name="factory" type="string">The whitelist factory, lowercased, or `null`.</ResponseField>
+        <ResponseField name="maxBatch" type="integer">`200`, the most wallets one transaction lists or removes.</ResponseField>
+        <ResponseField name="refusedOn" type="array">Where a whitelist is refused as a gate: `MARKET_PRICE_BORROWER_GATE` (the borrower gate of a `MARKET` market) and `SINGLE_REGISTER_MARKET` (a market on the earlier single-register implementation).</ResponseField>
+        <ResponseField name="lists" type="array">This instance's whitelists that are not archived, as on [List Whitelists](/endpoints/lending/list-access-lists). Empty when `available` is `false`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="vaultGroups" type="object">
+      <Expandable>
+        <ResponseField name="supported" type="boolean">Whether the vault factory on this network creates vault groups. `null` when it could not be read.</ResponseField>
+        <ResponseField name="maxPockets" type="integer">`4`, the most currency pockets a group holds on Trusset.</ResponseField>
+      </Expandable>
+    </ResponseField>
     <ResponseField name="professionalBorrowerGate" type="object">
       The rule a `MARKET` market's borrower gate follows. See [Professional borrowers](/endpoints/lending/set-identity-gates#professional-borrowers).
       <Expandable>
@@ -138,12 +177,24 @@ const ceiling = data.rateOffering.creatorRateCeilingBps;
       "creatorRateCeilingBps": 50000
     },
     "priceSources": {
-      "options": ["NAV", "MARKET", "ORACLE"],
+      "options": ["NAV", "MARKET", "ORACLE", "FIXED"],
       "default": "NAV",
       "marketRequiresIdentityRegistry": true,
       "identityRegistryAlwaysOptional": false,
       "oracleRequiresFeedAddress": true,
-      "oracleInitialPriceFromFeed": true
+      "oracleInitialPriceFromFeed": true,
+      "fixedSupported": true,
+      "fixedRequiresInitialPrice": true,
+      "fixedRefusesOracleAddress": true,
+      "fixedNeverStale": true,
+      "fixedMarkDownOnly": true,
+      "fixedCurrencyMustMatchSettlement": true,
+      "fixedNominalCheck": {
+        "formula": "nominal per token x redemption percent / 100",
+        "override": "acknowledgeFixedPriceMismatch"
+      },
+      "fixedOracleOwnerCanUpgrade": true,
+      "fixedNote": "A fixed price never goes stale, and the price authority can only mark it down through a price update, within the deviation breaker. Whoever owns the oracle could still replace its implementation through an upgrade, so the lender of record keeps the oracle owner in its own control."
     },
     "identityGates": {
       "borrowerGateRequiredFor": ["MARKET"],
@@ -198,6 +249,41 @@ const ceiling = data.rateOffering.creatorRateCeilingBps;
         "admissionMode": "REGISTER"
       }
     ],
+    "gateProfiles": [
+      {
+        "key": "RETAIL",
+        "name": "Retail",
+        "entityType": "INDIVIDUAL",
+        "professionalOnly": false,
+        "requirementsHash": "0x0898d40218bb23e08b12b0261dd235eacdbf02f8463ca93381a3eb55e9112f7c",
+        "registryAddress": null,
+        "admissionMode": null,
+        "registerAvailable": true,
+        "marketBorrowerGateEligible": false
+      },
+      {
+        "key": "PROFESSIONAL",
+        "name": "Professional",
+        "entityType": "INDIVIDUAL",
+        "professionalOnly": true,
+        "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390",
+        "registryAddress": "0x4f2A9c81D06e3b75A1C8E24D9B07f56E3a1d8C90",
+        "admissionMode": "REGISTER",
+        "registerAvailable": true,
+        "marketBorrowerGateEligible": true
+      }
+    ],
+    "accessLists": {
+      "available": true,
+      "factory": "0x2c9e47a1b05d83f6e4a17c3b92d0f68e5a4c1b37",
+      "maxBatch": 200,
+      "refusedOn": ["MARKET_PRICE_BORROWER_GATE", "SINGLE_REGISTER_MARKET"],
+      "lists": []
+    },
+    "vaultGroups": {
+      "supported": true,
+      "maxPockets": 4
+    },
     "professionalBorrowerGate": {
       "requiredFor": ["MARKET"],
       "rule": "A Market-priced market lends only to professional borrowers, so its borrower gate must be the eligibility register of a verification profile limited to professional clients."
