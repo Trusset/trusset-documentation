@@ -337,7 +337,6 @@ The pages describe what the code does. These points look unintended, and each pa
 - Close Liquidation refuses a record marked `WRITTEN_OFF`. The router record of a write-off made through this API can therefore never be closed through it, and the router never becomes quiet enough to rotate its sale recipient.
 - The v2 hook service re-arms the v1 job name, so a new or edited monitor waits for the scheduler's next wake-up.
 - Confirm Bot Deployment writes a duplicate record when called twice, and its signer check cannot fire.
-- The API's nomination check reads the factory's deployer register, which the contract says it no longer consults.
 - The contracts repository's own documentation is stale in places the pages contradict. `docs/OPERATOR-CONFIG.md` says a binding `CLAMPED` cap suspends borrows, and that the auction venue checks every bidder against the identity registry. `contracts/evm/README.md` says the sale recipient has no setter and that `settleExpiredAuction` needs `LIQUIDATOR_ROLE`. It also says a non-vault provider's distributor slice goes to the operator wallet. The Solidity says otherwise in each case, and the pages follow the Solidity.
 
 **Needed:** a decision per item from the backend and contract owners. None blocks the documentation.
