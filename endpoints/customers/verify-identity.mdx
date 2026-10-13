@@ -129,7 +129,7 @@ Call once without `txHash` and send `transaction` from a wallet that holds `KYC_
 
 The endpoint picks `updateIdentity` when the wallet already holds an identity that is not revoked, expired ones included. It picks `verifyIdentity` when the wallet has none or was revoked. If the register cannot be read, it falls back to `verifyIdentity`, which reverts for a wallet that already holds an unrevoked identity.
 
-Before handing out calldata, the API checks that one of your instance's wallets holds `KYC_PROVIDER_ROLE`. It refuses with `KYC_PROVIDER_ROLE_MISSING` only when it can read every wallet and none holds the role. With no wallet registered, or when the read fails, it lets the call through. The verdict is cached for 60 seconds, so a refusal can outlast a new role grant by up to a minute.
+When the wallet already holds an active identity, the calldata calls `updateIdentity` instead. On the Trusset ID Register, which instances without a register of their own share, that update is refused with `403 IDENTITY_HELD_BY_ANOTHER_ISSUER` when the identity was registered by a wallet that is not one of your instance's and has not expired. Before handing out calldata, the API checks that one of your instance's wallets holds `KYC_PROVIDER_ROLE`. It refuses with `KYC_PROVIDER_ROLE_MISSING` only when it can read every wallet and none holds the role. With no wallet registered, or when the read fails, it lets the call through. The verdict is cached for 60 seconds, so a refusal can outlast a new role grant by up to a minute.
 
 ## Verify on an ERC-3643 register
 
@@ -172,7 +172,7 @@ The confirm leg reads the mined transaction and refuses it before writing anythi
 - on a Trusset register, the mined investor type differs from this request's (`TX_INVESTOR_TYPE_MISMATCH`)
 - on an ERC-3643 register, the register does not yet report the wallet as verified (`NOT_VERIFIED_ON_REGISTER`)
 
-Then it writes the customer record with `country`, the profile key `investorType` resolved to, `status: "verified"`, `verifiedAt` and the `kycHash` read from the chain. When the profile `investorType` names has an eligibility register, the wallet's admission to it is queued for your wallet to sign. See [Eligibility registers](/endpoints/customers/introduction#eligibility-registers).
+Then it writes the customer record with `country`, the profile key `investorType` resolved to, `status: "verified"`, `verifiedAt` and the `kycHash` read from the chain, and records the write in your instance's verification history as a `VERIFY_DIRECT` entry with the operation (`verify` or `update`), the mined investor type, the transaction and its signer. A reclassification through this endpoint therefore shows in the history like one made in the issuer app. When the profile `investorType` names has an eligibility register, the wallet's admission to it is queued for your wallet to sign. See [Eligibility registers](/endpoints/customers/introduction#eligibility-registers).
 
 <Note>
   Confirming also settles any [pending verification](/endpoints/customers/list-pending-verifications) for the same wallet. Its row is marked confirmed with this transaction, so the queue does not ask for the signature again.
@@ -458,6 +458,7 @@ const confirmed = await post('/verify', { ...request, txHash: hashes[plan.confir
 | `INVALID_INVESTOR_TYPE` | `400` | `investorType` names neither a preset nor one of your verification profiles, or is not a string. The message lists the accepted values. Also a disabled profile, on the build call, for a wallet whose customer is not already under it |
 | `COUNTRY_BLOCKED` | `403` | `country` is blocked on the verification profile named after `investorType` |
 | `KYC_PROVIDER_ROLE_MISSING` | `403` | Trusset register: none of your instance's wallets holds `KYC_PROVIDER_ROLE` |
+| `IDENTITY_HELD_BY_ANOTHER_ISSUER` | `403` | Trusset ID Register: the wallet holds a valid identity another issuer registered, so this instance cannot update it |
 | `REGISTRY_AGENT_MISSING` | `403` | ERC-3643: none of your instance's wallets is an agent of the register |
 | `CLAIM_SIGNER_MISSING` | `403` | ERC-3643: none of your instance's wallets holds a claim key on the trusted issuer |
 | `CLAIM_SIGNER_NOT_TRUSTED` | `403` | ERC-3643: `signerAddress`, or the wallet a claim signature recovers to, holds no claim key on the trusted issuer |

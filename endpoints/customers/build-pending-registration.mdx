@@ -11,7 +11,7 @@ What comes back depends on the register your instance writes to, reported as `re
 <Warning>
   One row from a blocked country refuses the whole call with `COUNTRY_BLOCKED`, and the message names its wallet. Leave that id out to build the rest. Dismissing the row also lets the rest build, but a dismissal cannot be undone. A dismissed approval never reaches the register from the queue.
 
-  On a Trusset register the batch skips some entries without reverting. It skips a wallet that already holds an unrevoked identity, a row whose expiry has passed, and any entry it runs out of gas for. Read what the confirm then does on [Confirm Pending Registration](/endpoints/customers/confirm-pending-registration) before building rows for wallets that were verified before.
+  On a Trusset register the build reads each row's wallet on the register first. A wallet without an active identity goes into the batch. A wallet whose identity your instance registered, or whose identity has expired, gets its own `updateIdentity` step that renews it. On the Trusset ID Register, a wallet another issuer registered and whose identity is still valid refuses the whole call with `409 IDENTITY_HELD_BY_ANOTHER_ISSUER`, naming the wallet and who registered it; dismiss that row to build the rest. The batch still skips a row whose expiry has passed and any entry it runs out of gas for. A row whose wallet belongs only to an archived customer refuses the call with `409 CUSTOMER_ARCHIVED`.
 </Warning>
 
 ## Body Parameters
@@ -30,13 +30,13 @@ What comes back depends on the register your instance writes to, reported as `re
 
 ## Sign for a Trusset register
 
-The answer is `SIGN_TRANSACTIONS` with `registerKind` set to `TRUSSET`. The first step is one `batchVerifyIdentities` call for every row. Each row with a `residencyClaim` adds an `addClaim` step that files its `RESIDENCY` slot.
+The answer is `SIGN_TRANSACTIONS` with `registerKind` set to `TRUSSET`. The first step, `stepType: verify`, is one `batchVerifyIdentities` call for every row whose wallet holds no active identity, and is left out when there is none. Each row whose identity is renewed follows as an `updateIdentity` step, `stepType: update`, carrying the row's `id`. Each row with a `residencyClaim` adds an `addClaim` step, `stepType: residencyClaim`, that files its `RESIDENCY` slot. `operations` maps every row id to `verify` or `update`.
 
-Sign every step with a wallet registered to your instance that holds `KYC_PROVIDER_ROLE` on the register. The build refuses with `KYC_PROVIDER_ROLE_MISSING` when the register reports that none of your registered wallets holds it.
+Sign every step with a wallet registered to your instance that holds `KYC_PROVIDER_ROLE` on the register. The build refuses with `KYC_PROVIDER_ROLE_MISSING` when the register reports that none of your registered wallets holds it. Grant the role with **Grant on-chain roles** on the wallet page of the issuer app (see [Customers](/endpoints/customers/introduction)).
 
 Broadcast the steps in order, and let the batch be mined before the claims. The register refuses a claim for an identity that is not active yet.
 
-Confirm with the batch hash as `txHash` and each claim hash in `claimTxResults`.
+Confirm with the batch hash as `txHash`, each renewal as `updateTxResults: [{ id, txHash }]`, and each claim hash in `claimTxResults`.
 
 ## Sign for an ERC-3643 register
 
@@ -463,6 +463,9 @@ const { data: plan } = await response.json();
 | `REGISTRY_NO_CLAIM_TOPICS` | `409` | The ERC-3643 register requires no claim topic, so there is no claim to sign |
 | `REGISTRY_NO_TRUSTED_ISSUER` | `409` | The register requires a claim topic but names no trusted issuer for it |
 | `ONCHAINID_AUTHORITY_UNKNOWN` | `409` | A wallet needs an ONCHAINID, and no identity on the register shows which implementation authority to deploy it from |
+| `IDENTITY_HELD_BY_ANOTHER_ISSUER` | `409` | Trusset ID Register: a row's wallet holds a valid identity another issuer registered. The whole call is refused |
+| `CUSTOMER_ARCHIVED` | `409` | A row's wallet belongs only to an archived customer. The whole call is refused |
+| `CHAIN_UNAVAILABLE` | `503` | Trusset register: the rows' wallets could not be read on the register. Retry shortly |
 | `REGISTRY_PROBE_FAILED` | `503` | The register or its trusted issuer could not be read. Retry shortly |
 | `PENDING_CALLDATA_FAILED` | `400` | A chain read failed while building |
 | `PENDING_CALLDATA_FAILED` | `500` | Any other failure |

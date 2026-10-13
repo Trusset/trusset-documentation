@@ -7,11 +7,11 @@ description: 'Check the signed registration and mark the queued approvals verifi
 Checks the transactions your wallets broadcast for a set of queued rows, then closes every row whose wallet the register now reports as verified. A confirmed row marks its customer `verified`, and creates the customer record when there is none.
 
 <Warning>
-  On a Trusset register, the batch from [Build Pending Registration](/endpoints/customers/build-pending-registration) skips some entries without reverting. It skips a wallet that already holds an unrevoked identity, and a row whose expiry has passed. It also skips any entry it runs out of gas for.
+  On a Trusset register, [Build Pending Registration](/endpoints/customers/build-pending-registration) puts a wallet that already holds an active identity into its own `updateIdentity` step, so the queued hash, investor type and expiries replace what the register held. Send each of those as `updateTxResults`. The batch still skips a row whose expiry has passed and any entry it runs out of gas for.
 
-  A skipped wallet that the register still reports as verified confirms anyway. Its row closes, the register keeps the hash, investor type and expiries it already held, and the customer record takes that hash. The queued ones are never written. `investorTypeMismatch` flags a different investor type, but nothing in the response flags a different hash or expiry.
+  A batch built before a wallet's identity became active can still skip it. Such a wallet that the register reports as verified confirms anyway: its row closes, the register keeps the hash, investor type and expiries it held, and the customer record takes that hash. `investorTypeMismatch` flags a different investor type, but nothing in the response flags a different hash or expiry. Build the row again instead, so it is renewed.
 
-  Any other skipped row comes back `NOT_REGISTERED_ON_CHAIN` and stays queued. A row skipped for gas can be built again. A row whose wallet holds an identity past its hard expiry or frozen, or whose own expiry has passed, is skipped again every time.
+  Any other skipped row comes back `NOT_REGISTERED_ON_CHAIN` and stays queued. A row skipped for gas, or one whose identity has since become active, can be built again. A row whose own expiry has passed is skipped again every time, and a frozen wallet stays `NOT_REGISTERED_ON_CHAIN` until it is unfrozen.
 
   To put a skipped approval on the register, use [Verify Identity](/endpoints/customers/verify-identity) with the row's `kycHash`. It verifies the wallet or updates the identity it already holds, and closes the row if it is still queued.
 </Warning>
@@ -23,7 +23,11 @@ Checks the transactions your wallets broadcast for a set of queued rows, then cl
 </ParamField>
 
 <ParamField body="txHash" type="string">
-  The registering transaction. On a Trusset register it is required: the batch, or a `verifyIdentity` or `updateIdentity` call. On an ERC-3643 register it is the `registerIdentity` or `batchRegisterIdentity` step. Omit it there when every wallet was already registered.
+  The registering transaction. On a Trusset register it is the batch, or a `verifyIdentity` or `updateIdentity` call, and it is required unless every row is confirmed through `updateTxResults`. On an ERC-3643 register it is the `registerIdentity` or `batchRegisterIdentity` step. Omit it there when every wallet was already registered.
+</ParamField>
+
+<ParamField body="updateTxResults" type="array">
+  Trusset register only. The renewal steps you broadcast, as `[{ id, txHash }]` with the row `id` each `updateIdentity` step carried. Each must be a mined, successful `updateIdentity` for the row's wallet, carrying the row's queued `kycHash`, signed by a verified wallet registered to your instance, or the whole call fails with `TX_ENTRIES_MISMATCH` or `UNAUTHORIZED_SIGNER`. A confirmed renewal also writes the row's investor type name to the customer record, and its history entry carries `operation: update`.
 </ParamField>
 
 <ParamField body="claimTxResults" type="array">
@@ -36,7 +40,7 @@ Checks the transactions your wallets broadcast for a set of queued rows, then cl
 |---|---|---|
 | `txHash` | Required. A mined, successful `batchVerifyIdentities`, `verifyIdentity` or `updateIdentity` call to your register | Optional. A mined, successful `registerIdentity`, `batchRegisterIdentity`, `updateCountry` or `updateIdentity` call to your register. Without it, `claimTxResults` is required |
 | Signer of `txHash` | On the Trusset ID Register, a verified wallet registered to your instance, or the call fails with `UNAUTHORIZED_SIGNER`. On your own register it is logged, not enforced | Logged, not enforced |
-| Coverage | The transaction must name every selected wallet, or the call fails with `TX_ENTRIES_MISMATCH` | Not checked |
+| Coverage | Every selected wallet must be named by `txHash` or renewed by its entry in `updateTxResults`, or the call fails with `TX_ENTRIES_MISMATCH` | Not checked |
 | `claimTxResults` | Read only for rows with a `residencyClaim`. Recorded when the receipt is an `addClaim` on your register for the row's wallet, carrying the queued residency hash | Recorded when the receipt is an `addClaim` on the wallet's ONCHAINID |
 | A row confirms when | The transaction verified or updated the wallet, or the register reports it verified | The register's `isVerified` answers `true` for the wallet, whatever transactions put it there |
 
@@ -194,13 +198,13 @@ for (const row of data.results) {
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | `ids` is not an array of 1 to 200 ids, or on an ERC-3643 register neither `txHash` nor `claimTxResults` was sent |
-| `INVALID_TX` | `400` | `txHash` is missing on a Trusset register, or is not a 32-byte hex hash |
+| `VALIDATION_ERROR` | `400` | `ids` is not an array of 1 to 200 ids, on a Trusset register neither `txHash` nor `updateTxResults` was sent, or on an ERC-3643 register neither `txHash` nor `claimTxResults` was sent |
+| `INVALID_TX` | `400` | `txHash` is not a 32-byte hex hash |
 | `TX_REVERTED` | `400` | The transaction reverted |
 | `TX_WRONG_TARGET` | `400` | Trusset register: the transaction was not sent to your register. ERC-3643 register: it created a contract |
 | `TX_WRONG_FUNCTION` | `400` | The transaction calls a function this confirm does not accept |
 | `TX_TARGET_MISMATCH` | `400` | ERC-3643 register: `txHash` is a claim transaction. Send it in `claimTxResults` |
-| `TX_ENTRIES_MISMATCH` | `400` | Trusset register: the transaction does not cover every selected wallet |
+| `TX_ENTRIES_MISMATCH` | `400` | Trusset register: the transactions do not cover every selected wallet, or a renewal renews a different wallet or carries a different hash than its row queued |
 | `UNAUTHORIZED_SIGNER` | `403` | Trusset ID Register: the transaction was not signed by a verified wallet registered to your instance. The rows stay queued. Register that wallet, then confirm the same `txHash` again |
 | `NOT_FOUND` | `404` | None of the `ids` is a `PENDING` row of your instance, or the instance no longer exists |
 | `TX_NOT_FOUND` | `404` | The transaction is not mined yet, or does not exist |
