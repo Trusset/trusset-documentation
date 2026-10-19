@@ -4,12 +4,12 @@ api: 'POST /lending-external-securities-v2/api/positions/{marketId}/claim-escrow
 description: 'Reclaim collateral held in escrow after a blocked return transfer'
 ---
 
-Builds the transaction that releases escrowed collateral from the custody adapter to its holder. This applies to `CUSTODY` markets only.
+Builds the transaction that releases escrowed collateral from the custody adapter to its holder, and records the claim once it is mined. This applies to `CUSTODY` markets only.
 
 The adapter returns collateral when a repaid loan closes, when the borrower withdraws collateral, and when a liquidation releases the part it did not seize. The collateral token enforces its own compliance rules on that transfer, so the return can be refused. Typical causes are a holder no longer verified on the token's register, a frozen address, a compliance module rejection, or a paused token. Rather than reverting the whole operation, the adapter escrows the amount against the holder's address.
 
 <Warning>
-  A claim is subject to the same token rules that blocked the original return. While the restriction stands, the claim reverts after the holder has paid gas. When `holderAddress` is supplied, the token is asked first and a claim it still refuses is answered with `409 COLLATERAL_TRANSFER_RESTRICTED`, naming the refusal and who lifts it, instead of calldata. The `compliance` block on [Get Loan](/endpoints/lending/get-loan#compliance) names what the token currently blocks for the borrower. Lift that restriction first, then claim.
+  A claim is subject to the same token rules that blocked the original return. While the restriction stands, the claim reverts after the holder has paid gas. When `holderAddress` is supplied, the token is asked first and a claim it still refuses is answered with `409 COLLATERAL_TRANSFER_RESTRICTED`, naming the refusal and who lifts it, instead of calldata. When the token answers none of the transfer checks, or its verdict cannot be read, the claim itself is simulated from `holderAddress`, and a claim that would revert is refused the same way. The `compliance` block on [Get Loan](/endpoints/lending/get-loan#compliance) names what the token currently blocks for the borrower. Lift that restriction first, then claim.
 </Warning>
 
 The transaction targets the custody adapter, not the market contract. `claimEscrowedCollateral()` takes no arguments and pays out the escrow of the wallet that signs it. Signing with any other wallet claims that wallet's own escrow, or reverts when it has none. `holderAddress` only decides whose escrow is checked before the calldata is handed back. It does not appear in the transaction and cannot redirect the claim.
@@ -21,20 +21,31 @@ The transaction targets the custody adapter, not the market contract. `claimEscr
 ## Body Parameters
 
 <ParamField body="holderAddress" type="string">
-  Address whose escrow is to be claimed, `0x` followed by 40 hex characters. When supplied, the adapter's escrow is read first. An empty escrow is refused with `NO_ESCROWED_COLLATERAL`, and an escrow the collateral token still refuses to deliver to this address with `COLLATERAL_TRANSFER_RESTRICTED`, rather than handing back a transaction that reverts once paid for. If the escrow or the token's verdict cannot be read, the calldata is still returned; `escrowedCollateral` is null when the escrow was not read.
+  Address whose escrow is to be claimed, `0x` followed by 40 hex characters. When supplied, the adapter's escrow is read first. An empty escrow is refused with `NO_ESCROWED_COLLATERAL`, and an escrow the collateral token still refuses to deliver to this address with `COLLATERAL_TRANSFER_RESTRICTED`, rather than handing back a transaction that reverts once paid for. If the escrow cannot be read, or neither the token's verdict nor the simulated claim gives an answer, the calldata is still returned; `escrowedCollateral` is null when the escrow was not read.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined `claimEscrowedCollateral` transaction, `0x` followed by 64 hex characters. Send it to confirm the claim and record it. Omit it to receive the calldata. `holderAddress` stays optional on the confirm: when supplied, the receipt must carry a claim for that address, and only that claim is recorded.
 </ParamField>
 
 ## Response Fields
 
-This endpoint always returns calldata. There is no confirm call, and the claim adds no row to the position's history in Trusset. Read the adapter balance afterwards with [Get Escrowed Collateral](/endpoints/lending/get-escrowed-collateral) to see that the claim went through.
+Without `txHash` the endpoint returns calldata. Send the mined transaction's hash back as `txHash`, as `confirmWith` describes, to record the claim. The confirm reads the adapter's `EscrowedCollateralClaimed` event from the receipt rather than the transaction's target, so a claim sent through a smart-contract wallet (Safe, EIP-7702 or ERC-4337) confirms the same way. Each claim is booked as an `ESCROW_CLAIMED` row on the holder's loans on this market that escrowed collateral, oldest escrow first, and appears in the loan's transactions on [Get Position](/endpoints/lending/get-position). A transaction already recorded is not booked again.
+
+A claim that is never confirmed is still booked. When a loan with escrowed collateral is read through [Get Position](/endpoints/lending/get-position) and the adapter holds less than the escrow on record, the adapter's claim events for the borrower are read from the chain and booked the same way. [Get Escrowed Collateral](/endpoints/lending/get-escrowed-collateral) reads what the adapter still holds.
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION` when `txHash` is omitted.</ResponseField>
     <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the custody adapter.</ResponseField>
     <ResponseField name="functionName" type="string">`claimEscrowedCollateral`.</ResponseField>
     <ResponseField name="adapterAddress" type="string">Custody adapter the transaction targets.</ResponseField>
     <ResponseField name="escrowedCollateral" type="string">Amount currently escrowed for `holderAddress`, as a decimal string in collateral token units. Null when `holderAddress` was not supplied or the escrow could not be read.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: this route and `txHash` as the field. `body` is present only when `holderAddress` was supplied, and carries it with `txHash: null`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="blockNumber" type="integer">Block the claim was mined in. Returned when confirming.</ResponseField>
+    <ResponseField name="claims" type="array">Each `EscrowedCollateralClaimed` event the adapter emitted in the transaction, as `{ holder, amount }`: the holder, lowercased, and the amount claimed as a decimal string in collateral token units. Only the claim of `holderAddress` when it was supplied. Returned when confirming.</ResponseField>
+    <ResponseField name="recordedRows" type="integer">`ESCROW_CLAIMED` rows this call wrote. `0` when the claim was already recorded, or when the holder has no loan on this market with escrowed collateral on record. Returned when confirming.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -50,21 +61,28 @@ curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/positio
   -d '{"holderAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"}'
 ```
 ```typescript TypeScript
-const res = await fetch(
-  `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/claim-escrowed-collateral`,
-  {
-    method: 'POST',
-    headers: {
-      'X-API-Key': 'trusset_your_key_here',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ holderAddress: await wallet.getAddress() })
-  }
-);
+const url = `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/claim-escrowed-collateral`;
+const headers = {
+  'X-API-Key': 'trusset_your_key_here',
+  'Content-Type': 'application/json'
+};
+const holderAddress = await wallet.getAddress();
+
+const res = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ holderAddress })
+});
 const { data } = await res.json();
 
 const tx = await wallet.sendTransaction(data.transaction);
 await tx.wait();
+
+await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ holderAddress, txHash: tx.hash })
+});
 ```
 </RequestExample>
 
@@ -82,7 +100,25 @@ await tx.wait();
     },
     "functionName": "claimEscrowedCollateral",
     "adapterAddress": "0x4d2b93f70e18c6a5d34b027fe95c81a6730d77ae",
-    "escrowedCollateral": "250.0"
+    "escrowedCollateral": "250.0",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/positions/cmssh7p1k0001cghxq2m4v8rz/claim-escrowed-collateral",
+      "field": "txHash",
+      "body": { "holderAddress": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3", "txHash": null }
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0x74889e505a7f23e5fe576f64b1fa2fdd0325bf7df9dd1cee9452a8eeef495967",
+    "blockNumber": 9284113,
+    "claims": [
+      { "holder": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3", "amount": "250.0" }
+    ],
+    "recordedRows": 1
   }
 }
 ```
@@ -122,8 +158,12 @@ await tx.wait();
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
 | `NOT_CUSTODY_MODE` | `400` | The market runs in `FREEZE` mode, where collateral never leaves the borrower's wallet |
 | `NO_ADAPTER` | `400` | The market records no custody adapter |
-| `VALIDATION_ERROR` | `400` | `holderAddress` is not `0x` followed by 40 hex characters |
+| `VALIDATION_ERROR` | `400` | `holderAddress` is not `0x` followed by 40 hex characters, or `txHash` is not `0x` followed by 64 hex characters |
 | `NO_ESCROWED_COLLATERAL` | `400` | `holderAddress` was supplied and the adapter holds nothing for it. Claiming would revert |
-| `COLLATERAL_TRANSFER_RESTRICTED` | `409` | `holderAddress` was supplied and the collateral token still refuses to deliver the escrow to it. Claiming would revert until the restriction is lifted |
+| `TX_WRONG_TARGET` | `400` | The confirmed transaction emitted no `EscrowedCollateralClaimed` event from this market's custody adapter |
+| `TX_NOT_VERIFIED` | `400` | `holderAddress` was supplied with `txHash`, and the transaction claims no escrow for that address |
+| `COLLATERAL_TRANSFER_RESTRICTED` | `409` | `holderAddress` was supplied and the collateral token still refuses to deliver the escrow to it, or, where the token's verdict cannot be read, the claim simulated from `holderAddress` reverts. Claiming would revert until the restriction is lifted |
 | `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

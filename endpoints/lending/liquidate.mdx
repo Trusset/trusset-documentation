@@ -14,6 +14,8 @@ On a market whose router runs the atomic sale, the seized collateral is sold to 
 
 With Dutch auctions **enabled**, the collateral goes to the market's auction venue and a Dutch auction opens. The market records its pending liquidation at the seizure, but the router holds nothing. The response carries `auctionId`, and `liquidationId` is the market's own record ID rather than a router ID. The router takes part only if the auction expires with collateral unsold and [Settle Expired Auction](/endpoints/lending/settle-expired-auction) hands the remainder to it. A market priced from a live market price cannot enable Dutch auctions, and none can run before an auction venue is wired.
 
+A market whose lender of record declared `AUCTION` as its realization path is refused with `409 AUCTION_PATH_NOT_ENABLED` while Dutch auctions are off, because the seizure would go to the router for a direct sale instead. Wire the venue with [Wire Auction Module](/endpoints/lending/wire-auction-module) and turn on `useDutchAuction` with [Update Market Config](/endpoints/lending/update-config) first. `readiness.auctionPathMissing` reports this state.
+
 <Warning>
   The signing wallet must hold `LIQUIDATOR_ROLE` on the market. Role state is reported in `readiness` but never blocks the calldata. You sign in your own environment, so the wallet this API knows about is not necessarily the one that will call. A wallet without the role has its transaction reverted on-chain rather than rejected here. Pass `signerAddress` to have `readiness` answer for the wallet you intend to use.
 </Warning>
@@ -36,7 +38,7 @@ With Dutch auctions **enabled**, the collateral goes to the market's auction ven
 </ParamField>
 
 <ParamField body="signerAddress" type="string">
-  Wallet you intend to liquidate with. Used to resolve `readiness` against that address rather than against your instance's primary verified wallet. It does not appear in the transaction and does not gate it. Anything that is not a valid address is ignored.
+  Wallet you intend to liquidate with. Used to resolve `readiness` against that address rather than against your instance's primary verified wallet. It does not appear in the transaction. On a collateral token whose ERC-1400 `granularity()` is above one base unit it is required: the exact liquidation is simulated from it before the calldata is returned, and without it the call is refused with `COLLATERAL_GRANULARITY_UNCHECKED`. When the granularity or the simulation cannot be read, the calldata is returned and the contract decides. Anything that is not a valid address is ignored.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -60,6 +62,7 @@ Without `txHash` the response is the unsigned `liquidate` call, alongside a `rea
         <ResponseField name="canRealizeNow" type="boolean">`canSeizeNow`, plus the router's operator role and onward delivery to the sale recipient.</ResponseField>
         <ResponseField name="liquidatorRoleReady" type="boolean">Whether `signerAddress`, or a connected liquidation bot, holds `LIQUIDATOR_ROLE`. `null` when it could not be read.</ResponseField>
         <ResponseField name="dutchAuctionEnabled" type="boolean">Whether this liquidation would open an auction instead of seizing to the router.</ResponseField>
+        <ResponseField name="auctionPathMissing" type="boolean">`true` when `declaredRealization` is `AUCTION` and Dutch auctions are off. The liquidation is then refused with `AUCTION_PATH_NOT_ENABLED`.</ResponseField>
         <ResponseField name="priceStale" type="boolean">Whether the oracle price is outside its window.</ResponseField>
         <ResponseField name="readFailed" type="boolean">`true` when at least one gate could not be read. `unverifiedReason` says which.</ResponseField>
         <ResponseField name="blockedReason" type="string">The first gate that fails, in words. `null` when nothing blocks.</ResponseField>
@@ -187,6 +190,8 @@ const { data: liquidation } = await confirmed.json();
       "auctionVenueAdmitted": null,
       "auctionVenueRequirement": null,
       "dutchAuctionEnabled": false,
+      "declaredRealization": "EXCHANGE_SALE",
+      "auctionPathMissing": false,
       "priceStale": false,
       "priceAge": 184,
       "seizureConfigured": true,
@@ -351,7 +356,7 @@ const { data: liquidation } = await confirmed.json();
 
 ## Error Codes
 
-Refusals from the readiness, loan and atomic checks carry the full `readiness` object alongside `code` and `message`, so the failing gate can be inspected without a second call. The examples above shorten it, and the calldata example shortens `readiness.atomic`. The loan-level refusals also carry `loan`. When the loan itself cannot be read, the calldata is returned and the contract decides.
+Refusals from the readiness, loan, atomic and granularity checks carry the full `readiness` object alongside `code` and `message`, so the failing gate can be inspected without a second call. The examples above shorten it, and the calldata example shortens `readiness.atomic`. The loan-level refusals also carry `loan`. When the loan itself cannot be read, the calldata is returned and the contract decides.
 
 | Code | HTTP | Cause |
 |---|---|---|
@@ -365,6 +370,10 @@ Refusals from the readiness, loan and atomic checks carry the full `readiness` o
 | `COLLATERAL_TRANSFER_RESTRICTED` | `400` | The collateral token's compliance rules block the seizure transfer to the router |
 | `PRICE_STALE` | `400` | The oracle price is stale, so `liquidate` reverts. Push a fresh price first, or carry an accepted `signedPrice` |
 | `AUCTION_VENUE_NOT_ADMITTED` | `400` | Dutch auctions are on, but the collateral token does not admit the auction venue as a holder |
+| `AUCTION_PATH_NOT_ENABLED` | `409` | The lender of record declared `AUCTION` as the realization path and Dutch auctions are off. `details` carries `declaredRealization` and `auctionVenue`, `null` when no venue is wired |
+| `COLLATERAL_GRANULARITY_UNCHECKED` | `409` | The collateral token's ERC-1400 granularity is above one base unit and no `signerAddress` was sent, so the seizure could not be simulated. `details.granularity` carries it in base units |
+| `COLLATERAL_GRANULARITY_UNSUPPORTED` | `409` | Simulated from `signerAddress`, the seizure is not a whole multiple of the token's granularity and the token refuses it. `details` carries `granularity`, `status` and `reason`. The position can be realized only by a seizure that takes the whole position |
+| `LIQUIDATION_SIMULATION_FAILED` | `409` | On a token with a granularity above one base unit, the liquidation simulated from `signerAddress` reverts for a reason other than the token's transfer refusal. The message quotes the reason. `details` carries `granularity` and `revertData` |
 | `EXTERNAL_FEED_ACTIVE` | `409` | A `signedPrice` was sent to a market that prices from an external feed. Retry without it |
 | `FIXED_PRICE_ACTIVE` | `409` | A `signedPrice` was sent to a market with a fixed price. Retry without it |
 | `SIGNED_PRICE_OUTDATED` | `409` | The `signedPrice` is not dated after the price the oracle holds. Sign a fresh quote |

@@ -30,14 +30,20 @@ A vault without a register of its own takes its depositor gate from its markets.
 
 ## When a deposit is refused on the vault's own state
 
-Two refusals are about the vault rather than the depositor. Both stop shares being issued against a number nobody can stand behind, and neither affects redemptions, which stay open throughout.
+Four refusals are about the vault rather than the depositor. Each stops shares being issued against a number nobody can stand behind, and none affects redemptions, which stay open throughout.
 
 A deposit is refused with `VAULT_BOOK_INCOMPLETE` when a market the vault funds is not answering. The vault cannot total its own book, so it would issue shares at a price computed from a partial book. The message names the market. It clears when that market answers again, or when the operator writes it off.
 
 A deposit is refused with `VAULT_WIPED_OUT` when shares are in issue against assets totalling zero. A deposit into that vault would be absorbed by the existing holders rather than buying a position. A vault whose value is gone cannot be recapitalized, and the operator has to run a new one.
 
+A deposit is refused with `VAULT_MARKET_IMPAIRED` when a market the vault funds carries an open loan whose health factor is below 1, or seized debt still waiting for its sale. The share price still counts that debt at full value, so it does not yet show a loss a liquidation or a sale may realize. `details.markets` lists those markets. It clears once those loans are settled.
+
+A deposit is refused with `VAULT_RECOVERY_PENDING` when the vault wrote off a market that answers again and still holds its pool shares. Value can come back from that market, and it belongs to the holders who bore the write-off. `details.recoverableEvictions` names the markets. It clears once the operator has pulled that value back with a deallocation. [Get Vault](/endpoints/vaults/get-vault) shows both positions in `onChain.impairment`.
+
+These two are the API's own refusals. The contract takes such a deposit, and a check that found nothing refuses nothing, also when it could not read every market.
+
 <Warning>
-  These checks, and the pause check, read the vault's live state. When that read fails, the API still returns calldata. The current vault implementation refuses all three cases on-chain. The earlier one, `supportsNotice: false` on [Get Vault](/endpoints/vaults/get-vault), does not refuse a wiped-out vault, so do not sign there while `onChain.readFailed` is `true`.
+  The book, wipe-out and pause checks read the vault's live state. When that read fails, the API still returns calldata. The current vault implementation refuses all three cases on-chain. The earlier one, `supportsNotice: false` on [Get Vault](/endpoints/vaults/get-vault), does not refuse a wiped-out vault, so do not sign there while `onChain.readFailed` is `true`.
 </Warning>
 
 ## Distributor attribution
@@ -217,6 +223,8 @@ await fetch(`${base}/${vaultId}/confirm-tx`, {
 | `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address on record |
 | `VAULT_BOOK_INCOMPLETE` | `409` | A market the vault funds is not answering, so its book cannot be totalled |
 | `VAULT_WIPED_OUT` | `409` | Shares are in issue against zero assets |
+| `VAULT_MARKET_IMPAIRED` | `409` | A market the vault funds carries an open loan below the liquidation threshold or seized debt waiting for its sale. `details.markets` lists them, as `onChain.impairment.markets` on [Get Vault](/endpoints/vaults/get-vault) |
+| `VAULT_RECOVERY_PENDING` | `409` | The vault wrote off a market that answers again and still holds its pool shares, and the operator has not pulled that value back. `details.recoverableEvictions` lists them. A written-off market that still does not answer never refuses a deposit |
 | `VAULT_STATE_UNAVAILABLE` | `503` | The vault implementation, its markets, the register it adopted, whether it admits your distributor wallet, whether a market wrote off accrual the vault has not recorded, or your standing in an unpublished vault could not be read. Retry shortly |
 | `STATE_UNAVAILABLE` | `503` | The admissions behind a register could not be checked for a pending removal. Retry shortly |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read, so nothing was decided. Retry shortly |

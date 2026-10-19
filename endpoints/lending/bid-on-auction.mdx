@@ -9,18 +9,18 @@ Purchases collateral from a running auction on the market's auction venue. The b
 Bids can be partial. Buy any quantity up to `collateralRemaining`, and the auction stays open for the rest until its end time.
 
 <Warning>
-  The buyer receives a security token, so the token must admit them. Delivery is an ordinary compliance-gated transfer: if the token refuses the bidding wallet, the whole bid reverts and no money moves. The API does not check the bidder, so confirm the wallet is a verified holder on the token's identity registry before submitting.
+  The buyer receives a security token, so the token must admit them. Delivery is an ordinary compliance-gated transfer: if the token refuses the bidding wallet, the whole bid reverts and no money moves. Name the bidding wallet as `bidder` to have the token asked first: a wallet it refuses is answered with `409 BIDDER_CANNOT_RECEIVE` instead of calldata. Without `bidder` the API does not check the wallet, so confirm it is a verified holder on the token's identity registry before submitting.
 </Warning>
 
 ## When a Bid Reverts
 
-The API prices the bid and refuses auctions that are closed or past their end time. It checks nothing about the wallet or the market beyond that, and the venue reverts the bid in each of these cases:
+The API prices the bid and refuses auctions that are closed or past their end time. It checks the wallet only when `bidder` is supplied, and nothing about the market beyond that. The venue reverts the bid in each of these cases:
 
 - The market is paused.
 - The market's oracle price is stale. The auction's schedule was fixed when it opened, but the venue still demands a fresh price. Push one through [Sync Oracle Price](/endpoints/lending/sync-oracle) first.
-- The bidding wallet is the borrower whose collateral is on sale. A borrower cannot buy back their own seized collateral.
+- The bidding wallet is the borrower whose collateral is on sale. A borrower cannot buy back their own seized collateral. With `bidder`, the API refuses this with `SELF_PURCHASE_NOT_ALLOWED`.
 - The auction reached its end time between quoting and mining.
-- The wallet lacks the payment, or the allowance from the first step.
+- The wallet lacks the payment, or the allowance from the first step. With `bidder`, a short balance is refused with `INSUFFICIENT_BALANCE`.
 
 ## Path Parameters
 
@@ -36,17 +36,21 @@ The API prices the bid and refuses auctions that are closed or past their end ti
   Collateral to purchase, as a decimal string in collateral token units, with no more decimals than the collateral token has. Must be greater than zero. Required on the confirm call too, although the confirmation reads the purchased amount from the receipt.
 </ParamField>
 
+<ParamField body="bidder" type="string">
+  The wallet that will sign the bid, `0x` followed by 40 hex characters. When supplied, the bid is checked against it before any calldata is built. The auction's borrower is refused with `SELF_PURCHASE_NOT_ALLOWED`, a borrow asset balance below `estimatedCost` with `INSUFFICIENT_BALANCE`, and a wallet the collateral token refuses to receive the collateral from the venue with `BIDDER_CANNOT_RECEIVE`. When the wallet's allowance to the venue already covers `estimatedCost`, the `approve` step is left out. A balance, allowance or token verdict that cannot be read refuses nothing, and the `approve` step stays. Not used on the confirm call.
+</ParamField>
+
 <ParamField body="txHash" type="string">
   Hash of the `bidOnAuction` transaction you broadcast. Send it with the same `auctionId` to confirm the bid and record the result. Omit it to receive the calldata.
 </ParamField>
 
 ## Sign the Two Steps
 
-Without `txHash` the response is `SIGN_TRANSACTIONS` with two steps. Sign both from the bidding wallet, in order, because the venue pulls the payment from the wallet that calls it.
+Without `txHash` the response is `SIGN_TRANSACTIONS` with two steps, or with the bid alone when the allowance of `bidder` already covers it. Sign them from the bidding wallet, in order, because the venue pulls the payment from the wallet that calls it.
 
 <Steps>
   <Step title="Approve the venue">
-    `approve` on the borrow asset, naming the auction venue as spender, for `estimatedCost`. The venue collects the payment, not the market.
+    `approve` on the borrow asset, naming the auction venue as spender, for `estimatedCost`. The venue collects the payment, not the market. Left out when the allowance of `bidder` to the venue already covers `estimatedCost`.
   </Step>
   <Step title="Bid">
     `bidOnAuction` on the venue, for the clamped `collateralAmount`. Confirm with this step's hash, which `confirmStepIndex` names.
@@ -67,9 +71,11 @@ Only the confirmation of that closing bid carries `auctionSettled: true` with th
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` when `txHash` is omitted.</ResponseField>
     <ResponseField name="auctionId" type="integer">Auction the bid targets.</ResponseField>
-    <ResponseField name="steps" type="array">The two transactions above, each `{ action, transaction: { to, data, value, chainId }, functionName }`. The `approve` step also carries a `description`.</ResponseField>
+    <ResponseField name="steps" type="array">The transactions above, each `{ action, transaction: { to, data, value, chainId }, functionName }`. The `approve` step also carries a `description`.</ResponseField>
     <ResponseField name="venueAddress" type="string">The market's auction venue, lowercased. The approval's spender and the bid's target.</ResponseField>
-    <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm with. Always `1`.</ResponseField>
+    <ResponseField name="bidderChecked" type="boolean">`true` when `bidder` was supplied, so the borrower, balance and token checks ran against it. `false` when it was not. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="note" type="string">Present when `bidderChecked` is `false`. Says that the borrower check, the bidder balance and whether the token admits the bidder were not checked before signing.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm with: `1`, or `0` when the `approve` step was left out.</ResponseField>
     <ResponseField name="confirmWith" type="string">`bidOnAuction`.</ResponseField>
     <ResponseField name="collateralAmount" type="string">Collateral the bid will buy, clamped to what the auction has left.</ResponseField>
     <ResponseField name="pricePerUnit" type="string">The auction's price per whole collateral unit at quote time, in borrow asset units.</ResponseField>
@@ -78,7 +84,7 @@ Only the confirmation of that closing bid carries `auctionSettled: true` with th
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="collateralPurchased" type="string">Collateral actually bought, read from the venue's bid event, or from the transaction's own amount when the event cannot be read. Returned when confirming.</ResponseField>
     <ResponseField name="amountPaid" type="string">Amount actually paid, in borrow asset units, at the price in the block the bid mined in. Returned when confirming, `null` if the bid event could not be read.</ResponseField>
-    <ResponseField name="bidder" type="string">Wallet that sent the bid, lowercased. When the bid was verified from the receipt log, the address the venue recorded as bidder. Returned when confirming.</ResponseField>
+    <ResponseField name="bidder" type="string">Wallet that sent the bid, lowercased. When the bid was verified from the receipt log, the address the venue recorded as bidder. Returned when confirming. Without `txHash`, the `bidder` you supplied, lowercased, and absent when none was supplied.</ResponseField>
     <ResponseField name="auctionSettled" type="boolean">`true` when this bid bought the last unit, closed the auction and settled the liquidation record. Returned when confirming.</ResponseField>
     <ResponseField name="totalProceeds" type="string">Everything the auction raised, settled on the market's record in this transaction. `null` unless `auctionSettled`.</ResponseField>
     <ResponseField name="debtCovered" type="string">The debt the auction was opened against, as the venue's settlement event reports it. It is not reduced by a shortfall; read `shortfall` and `reserve` for that. `null` unless `auctionSettled`.</ResponseField>
@@ -117,7 +123,7 @@ Only the confirmation of that closing bid carries `auctionSettled: true` with th
 curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/liquidations/{marketId}/bid-on-auction" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"auctionId": 3, "collateralAmount": "100"}'
+  -d '{"auctionId": 3, "collateralAmount": "100", "bidder": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3"}'
 ```
 ```typescript TypeScript
 const auctionRes = await fetch(
@@ -137,7 +143,8 @@ if (auction.biddable && Number(auction.currentPrice) <= reservePrice) {
       },
       body: JSON.stringify({
         auctionId: 3,
-        collateralAmount: auction.collateralRemaining
+        collateralAmount: auction.collateralRemaining,
+        bidder: await bidderWallet.getAddress()
       })
     }
   );
@@ -177,6 +184,8 @@ if (auction.biddable && Number(auction.currentPrice) <= reservePrice) {
       }
     ],
     "venueAddress": "0x5c3e8a91d2f04b7e6a1c9d38f0b2e47a6d15c8e3",
+    "bidder": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "bidderChecked": true,
     "confirmStepIndex": 1,
     "confirmWith": "bidOnAuction",
     "collateralAmount": "100.0",
@@ -247,13 +256,16 @@ if (auction.biddable && Number(auction.currentPrice) <= reservePrice) {
 |---|---|---|
 | `MISSING_MARKET_ID` | `400` | The market ID is longer than 100 characters |
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
-| `VALIDATION_ERROR` | `400` | `auctionId` is not a positive integer, `collateralAmount` is not a positive decimal string or carries more decimals than the collateral token, or `txHash` is malformed |
+| `VALIDATION_ERROR` | `400` | `auctionId` is not a positive integer, `collateralAmount` is not a positive decimal string or carries more decimals than the collateral token, `bidder` is not `0x` followed by 40 hex characters, or `txHash` is malformed |
 | `TX_NOT_VERIFIED` | `400` | The confirmed transaction bids on a different auction |
+| `SELF_PURCHASE_NOT_ALLOWED` | `403` | `bidder` is the borrower the venue records for this auction. The venue refuses a borrower buying back its own collateral |
 | `AUCTION_NOT_FOUND` | `404` | The venue has not created an auction with this ID |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `AUCTION_MODULE_NOT_SET` | `409` | The market has no auction venue wired, so no auction can exist on it |
 | `AUCTION_NOT_ACTIVE` | `409` | The auction was fully bought or settled after expiry, or has no collateral left |
 | `AUCTION_EXPIRED` | `409` | The auction passed its end time. The error carries `endTime` and `settleWith` |
+| `INSUFFICIENT_BALANCE` | `409` | `bidder` holds less of the borrow asset than `estimatedCost` at the current auction price |
+| `BIDDER_CANNOT_RECEIVE` | `409` | The collateral token refuses to deliver the auctioned collateral from the venue to `bidder` |
 | `AUCTION_STATE_UNAVAILABLE` | `503` | The auction could not be read on-chain, so the bid could not be priced. Retry shortly |
 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).
