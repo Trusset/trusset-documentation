@@ -1,0 +1,124 @@
+---
+title: 'Cancel Listing'
+api: 'POST /seller-financing/api/markets/{marketId}/listings/{listingId}/cancel'
+description: 'Calldata that cancels an open listing'
+---
+
+<Note>
+  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Builds the cancellation of an `OPEN` listing. The seller or the market's operator signs it. Once mined, the listing reads `CANCELLED` and can no longer be bought.
+
+In freeze mode nothing moves, since nothing was frozen before a purchase. In custody mode the adapter returns the asset to the seller. When the token refuses that return, the adapter keeps the asset in escrow for the seller, who claims it from the adapter with `claimEscrowedCollateral`. This API does not build that call.
+
+Cancellation stays open while the market is paused. An operator uses it to withdraw the open listings of a seller who lost verification.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/seller-financing/list-markets).</ParamField>
+
+<ParamField path="listingId" type="string" required>The listing's ID on the market.</ParamField>
+
+## Body Parameters
+
+<ParamField body="from" type="string" required>The wallet that signs: the seller or a holder of the operator role. Any other wallet answers `409 TX_WOULD_REVERT` with `NotSeller`.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain the step is built for.</ResponseField>
+    <ResponseField name="steps" type="array">One step, `cancelListing` on the market, with `gasLimit`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">`0`.</ResponseField>
+    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/seller-financing/api/markets/cmsg4x7k20003sf9q1d8v6b2e/listings/5/cancel" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"from": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/seller-financing/api/markets/${marketId}/listings/${listingId}/cancel`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: await seller.getAddress() })
+  }
+);
+const { data } = await res.json();
+const step = data.steps[0];
+await (await seller.sendTransaction({ to: step.to, data: step.data, value: 0, gasLimit: step.gasLimit })).wait();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "chainId": 11155111,
+    "steps": [
+      {
+        "to": "0xc35e5f74eC4C1dfB8cE2b8798D6161B706F9B5E1",
+        "data": "0x305a67a8...",
+        "value": "0",
+        "functionName": "cancelListing",
+        "label": "Cancel listing 5",
+        "description": "Cancel listing 5",
+        "gasLimit": "88071",
+        "chainId": 11155111
+      }
+    ],
+    "confirmStepIndex": 0,
+    "preflight": {
+      "simulated": true,
+      "gasEstimate": "67747"
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-19T09:12:04.318Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Not Open
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "INVALID_STATUS",
+    "message": "Listing 4 is active; this action needs it open.",
+    "details": { "status": "ACTIVE" }
+  },
+  "metadata": {
+    "timestamp": "2026-10-19T09:12:04.318Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_LISTING_ID` | `400` | `listingId` is not a positive integer of up to 19 digits |
+| `VALIDATION_ERROR` | `400` | `from` is missing or malformed, or the body carries another field |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
+| `INVALID_STATUS` | `409` | The listing is not `OPEN`. `details.status` names its status |
+| `TX_WOULD_REVERT` | `409` | The cancellation would revert, for example with `NotSeller` when `from` is neither the seller nor an operator, or because the custody adapter cannot return the asset |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `CANCEL_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

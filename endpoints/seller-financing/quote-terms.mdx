@@ -1,0 +1,156 @@
+---
+title: 'Get Quote'
+api: 'GET /seller-financing/api/markets/{marketId}/quote'
+description: 'Preview the terms a listing would be stamped with, before it is created'
+---
+
+<Note>
+  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Asks the market contract which terms a listing with these parameters would get under the market's current configuration: the downpayment, the principal, the rate, the walk-away premium, the interest over the full runtime, and the coverage check. Nothing is built or signed.
+
+Use it to size a listing before [Create Listing](/endpoints/seller-financing/create-listing), and to show a buyer what the loan costs. Terms outside the market's configuration answer `409 TX_WOULD_REVERT` naming the contract error, such as `DownpaymentOutOfRange` or `RateModeDisabled`.
+
+<Warning>
+  A quote with `coverageOk: false` is not refused here, but [Create Listing](/endpoints/seller-financing/create-listing) refuses the same terms. Raise the downpayment, or shorten the interest period or the grace period, until it reads `true`. See [Coverage rule](/endpoints/seller-financing/introduction#coverage-rule).
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/seller-financing/list-markets).</ParamField>
+
+## Query Parameters
+
+<ParamField query="price" type="string" required>The price as a decimal string in whole units of the payment token, for example `"250000"`. Parsed at the payment token's decimals.</ParamField>
+
+<ParamField query="downpaymentBps" type="integer" required>The downpayment, 500 to 9000 basis points of the price, inside the market's `minDownpaymentBps` and `maxDownpaymentBps`.</ParamField>
+
+<ParamField query="durationDays" type="integer" required>The runtime from purchase to maturity, 1 to 3650 days, inside the market's range.</ParamField>
+
+<ParamField query="interestPeriodDays" type="integer" required>The interest period, 1 to 366 days, inside the market's range and not longer than `durationDays`.</ParamField>
+
+<ParamField query="gracePeriodDays" type="integer" required>The grace period after each due date, 0 to 90 days, up to the market's `maxGracePeriodDays`.</ParamField>
+
+<ParamField query="rateMode" type="string" required>`FIXED` or `DERIVED`. The market must enable it.</ParamField>
+
+<ParamField query="fixedRateBps" type="integer">`FIXED` on a market where sellers set the rate: the annual rate, 0 to 5000 basis points, up to the market's `maxFixedRateBps`. Omitted, the rate is `0`. Ignored with `DERIVED`, and on a market where the operator's `fixedRateBps` applies.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="market" type="string">The market contract.</ResponseField>
+    <ResponseField name="terms" type="object">
+      <Expandable>
+        <ResponseField name="downpayment" type="string">The downpayment, rounded up, in the payment token's smallest unit.</ResponseField>
+        <ResponseField name="downpaymentFormatted" type="string">The same in whole units.</ResponseField>
+        <ResponseField name="principal" type="string">The price less the downpayment, in smallest units.</ResponseField>
+        <ResponseField name="principalFormatted" type="string">The same in whole units.</ResponseField>
+        <ResponseField name="rate" type="string">The annual rate the listing would carry, as an 18-decimal fixed-point fraction: the fixed rate for `FIXED`, the base rate for `DERIVED`.</ResponseField>
+        <ResponseField name="rateBps" type="integer">The rate in basis points.</ResponseField>
+        <ResponseField name="premiumA" type="string">The walk-away premium's first coefficient. `"0"` for `FIXED`.</ResponseField>
+        <ResponseField name="premiumB" type="string">Its second coefficient. `"0"` for `FIXED`.</ResponseField>
+        <ResponseField name="fullTermInterest" type="string">The interest charged when the principal is held to maturity, base and premium together, in smallest units.</ResponseField>
+        <ResponseField name="fullTermInterestFormatted" type="string">The same in whole units.</ResponseField>
+        <ResponseField name="aprEquivalent" type="string">`fullTermInterest` over the principal and the runtime, annualized, as an 18-decimal fixed-point fraction.</ResponseField>
+        <ResponseField name="aprEquivalentPercent" type="string">The same as a percentage.</ResponseField>
+        <ResponseField name="aprEquivalentNote" type="string">States that this is a simple annualized figure for comparison, not a regulatory effective annual rate. Show it with the figure.</ResponseField>
+        <ResponseField name="coverageWindowInterest" type="string">The interest of one interest period plus the grace period plus one day, in smallest units.</ResponseField>
+        <ResponseField name="coverageLimit" type="string">The downpayment less the 1.5 percent compensation, in smallest units.</ResponseField>
+        <ResponseField name="coverageOk" type="boolean">`true` when `coverageWindowInterest` does not exceed `coverageLimit`. Only then can the listing be created.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/seller-financing/api/markets/cmsg4x7k20003sf9q1d8v6b2e/quote?price=250000&downpaymentBps=2000&durationDays=730&interestPeriodDays=30&gracePeriodDays=7&rateMode=DERIVED" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const params = new URLSearchParams({
+  price: '250000',
+  downpaymentBps: '2000',
+  durationDays: '730',
+  interestPeriodDays: '30',
+  gracePeriodDays: '7',
+  rateMode: 'DERIVED'
+});
+const res = await fetch(
+  `https://api.trusset.org/seller-financing/api/markets/${marketId}/quote?${params}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+if (!data.terms.coverageOk) console.warn('Raise the downpayment or shorten the period or the grace');
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "market": "0xc35e5f74eC4C1dfB8cE2b8798D6161B706F9B5E1",
+    "terms": {
+      "downpayment": "50000000000",
+      "downpaymentFormatted": "50000.0",
+      "principal": "200000000000",
+      "principalFormatted": "200000.0",
+      "rate": "40000000000000000",
+      "rateBps": 400,
+      "premiumA": "19545134079",
+      "premiumB": "1794600000",
+      "fullTermInterest": "47230193693",
+      "fullTermInterestFormatted": "47230.193693",
+      "aprEquivalent": "118075484232500000",
+      "aprEquivalentPercent": "11.80754842325",
+      "aprEquivalentNote": "A simple annualized figure for comparison (full-term interest over principal and runtime). It is not a regulatory effective annual rate.",
+      "coverageWindowInterest": "7326148180",
+      "coverageLimit": "49250000000",
+      "coverageOk": true
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-19T09:12:04.318Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Downpayment Out of Range
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_WOULD_REVERT",
+    "message": "The downpayment is outside the range this market allows.",
+    "details": {
+      "action": "terms preview",
+      "error": "DownpaymentOutOfRange",
+      "args": [],
+      "revertData": "0x74074304"
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-10-19T09:12:04.318Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A parameter is missing or outside its bounds, or `price` has more decimals than the payment token. `error.details` names it |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `TX_WOULD_REVERT` | `409` | The market refuses these terms. `details.error` names the contract error, for example `DownpaymentOutOfRange`, `DurationOutOfRange`, `InterestPeriodOutOfRange`, `GracePeriodOutOfRange`, `RateModeDisabled`, `RateOutOfRange` or `InvalidPrice` |
+| `ASSET_DECIMALS_UNRESOLVED` | `409` | The asset token does not report its decimals, so no listing can be sized on this market |
+| `CHAIN_UNAVAILABLE` | `503` | The market could not be read. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `QUOTE_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |

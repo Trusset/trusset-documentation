@@ -1,0 +1,383 @@
+---
+title: 'Seller Financing'
+description: 'Sell a tokenized asset against a downpayment and deferred payment, under retention of title'
+icon: 'handshake'
+---
+
+<Warning>
+  Seller Financing is in beta and runs on testnet instances only: `DEVELOPMENT` instances on Sepolia (chain ID `11155111`). Every endpoint called with the key of a `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE` with the message "Seller Financing is in beta and available on testnet instances only". An instance on a network other than Ethereum answers the same.
+</Warning>
+
+Seller Financing is a sale with deferred payment for an existing tokenized asset, such as an ERC-3643 or eWpG security token. The holder lists an amount of the asset at a fixed price. A buyer pays a downpayment, then interest each period and the principal. The asset reaches the buyer only after full payment. Until then the seller keeps title.
+
+If the buyer defaults, the seller withdraws from the sale. The asset is released back to the seller, and the payments held in escrow are split between the seller's compensation, the interest still owed, and a refund to the buyer.
+
+The market contract holds the downpayment and every principal payment in escrow, and credits the seller the price only on full payment. The seller's share of each interest payment is credited when the payment arrives.
+
+## Lifecycle
+
+Every read names a listing's state in `status`.
+
+| Status | Meaning | Next |
+|---|---|---|
+| `OPEN` | Listed and waiting for a buyer | `ACTIVE` on purchase, `CANCELLED` on cancellation |
+| `CANCELLED` | The seller or the operator cancelled the listing before a purchase | Final |
+| `ACTIVE` | A buyer paid the downpayment and the loan runs | `REPAID` on full payment, `LIQUIDATED` after a default |
+| `REPAID` | The buyer paid in full and the seller is credited the full price | `COMPLETED` when the buyer claims the asset |
+| `COMPLETED` | The asset was delivered to the buyer or to the recipient the buyer named | Final |
+| `LIQUIDATED` | The seller withdrew from the sale after a default. The asset is back with the seller and the escrow is settled | Final |
+
+## Collateral modes
+
+Each market runs in one mode, fixed at deployment. `FREEZE` is the default.
+
+| | `FREEZE` | `CUSTODY` |
+|---|---|---|
+| For | ERC-3643 and eWpG tokens with the T-REX agent functions, which the freeze adapter uses to freeze, unfreeze and force-transfer | ERC-1404 tokens, other restricted tokens and plain ERC-20 |
+| At listing | Nothing moves. The listing is refused when the freeze adapter is not an agent of the token, or when the seller's unfrozen balance is below the amount | The asset moves from the seller into the market's custody adapter. The seller approves the adapter first |
+| At purchase | The amount is frozen in the seller's wallet | Nothing moves |
+| On cancellation | Nothing to release | The adapter returns the asset to the seller |
+| On completion | The adapter unfreezes the amount and force-transfers it to the buyer's recipient | The adapter transfers the asset to the buyer's recipient |
+| On liquidation | The adapter unfreezes the amount in the seller's wallet | The adapter returns the asset to the seller |
+| Token-side setup | The token owner grants the freeze adapter the agent role | The token admits the custody adapter as a holder |
+
+Every lock names the market's collateral agent as pledgee. In custody mode, when the token refuses to return the asset to the seller, the adapter keeps it in escrow for the seller, who claims it from the adapter with `claimEscrowedCollateral`. This API does not build that call.
+
+### Token-side setup
+
+Each market has its own adapter, deployed with it. Until the asset token accepts that adapter, a freeze market refuses every listing, and a custody listing on a token that gates its holders reverts at the transfer into the adapter. The party that signs this setup is on the token issuer's side, not necessarily the deployer.
+
+- **Freeze mode.** The token's owner grants the freeze adapter the agent role with `addAgent(adapter)`. Only the owner can grant it. The adapter then freezes, unfreezes and force-transfers exactly the listed amount.
+- **Custody mode.** The token must admit the custody adapter as a holder. On a token with an ERC-3643 identity register, the token issuer's KYC operator issues an ONCHAINID for the adapter carrying the claims the register requires, and an agent of the register registers the adapter under it. On a Trusset ID Register, a KYC provider of the register verifies the adapter. On a token with its own contract allow-list, the token's compliance admin allow-lists the adapter. A token with neither an identity register nor an allow-list, and no transfer rule that refuses the adapter, needs no step.
+
+[Build Token Setup](/endpoints/seller-financing/token-setup) reads where the adapter stands and returns the transaction to sign, or the reason it cannot prepare one for the wallet it checked. [Record Deployment](/endpoints/seller-financing/confirm-deployment) returns the same answer right after deployment.
+
+## Roles
+
+| Party | Can | Cannot |
+|---|---|---|
+| Admin (`DEFAULT_ADMIN_ROLE`) | Grant and revoke roles, upgrade the market | Move escrowed payments or the asset |
+| Operator (`OPERATOR_ROLE`) | Change the configuration for new listings, change the market identity register for new business, pause and unpause, cancel a listing or liquidate a defaulted loan for a seller | Change a listing or a loan once stamped, reach the escrow or the asset |
+| Collateral agent | Stand as pledgee on every lock the adapter takes. Named at deployment and immutable | Act on the market. It holds no role there |
+| Seller | List, cancel its own open listings, liquidate its own defaulted loans, withdraw what it is owed | Receive the price before full payment |
+| Buyer | Purchase, claim the asset to itself or to any recipient the token admits, withdraw a refund | Hold the asset before full payment |
+| Anyone | Repay any active loan, pay the Trusset fees out to the Trusset wallet | Anything else |
+
+The deployment names the admin, the operator and the collateral agent. Without an operator, the admin holds the operator role as well. Trusset holds no role, key or asset on a market, and neither does the factory. No role can move escrowed payment tokens or the asset to anyone other than the recorded seller, the recorded buyer (or the recipient the buyer names on claim) and the fixed Trusset wallet. There is no emergency withdrawal.
+
+A market can name an identity register. When it does, the seller must be verified on it to list and the buyer to purchase. The operator changes it on-chain with `setIdentityRegistry`, which this API does not build. Separately, a buyer must be verified on the asset token's own identity register when the token has one, because the token would otherwise refuse the delivery. A seller holding the agent role on the asset token is refused at listing and at purchase, because an agent can unfreeze and move the tokens it sells.
+
+## Interest
+
+A listing takes one of the strategies its market enables. The rate, the premium coefficients and every term are stamped on the listing when it is created. A later configuration change reaches new listings only.
+
+- **`FIXED`** charges one annual rate on the outstanding principal. On a market where sellers set the rate (`sellerSetsFixedRate: true`), the seller names it in `fixedRateBps`, up to the market's `maxFixedRateBps`. Otherwise the operator's `fixedRateBps` applies.
+- **`DERIVED`** charges the operator's base rate (`baseRateBps`) on the outstanding principal, plus a walk-away premium. The premium pays the seller for the buyer's right to walk away from the sale. It is priced from the listing's price and downpayment and from the operator's volatility input (`volatilityBps`), and stamped on the listing as `premiumA` and `premiumB`. It accrues with the time since purchase, fastest at the start, and does not fall as principal is repaid.
+
+Interest is charged by the second. A repayment settles the interest due up to that moment first, and only the rest reduces the principal. Interest cannot be paid in advance: a payment before a due date settles the interest accrued until then, and the excess goes to principal. Repaid principal stays in escrow until the loan completes or is liquidated. The base rate is charged on the principal still outstanding, so it falls as principal is repaid.
+
+[Get Quote](/endpoints/seller-financing/quote-terms) previews a listing's terms before it exists: the downpayment, the principal, the rate, the interest over the full runtime and `aprEquivalent`. That figure is a simple annualized rate for comparison, not a regulatory effective annual rate.
+
+## Due dates, grace and default
+
+The runtime is cut into interest periods counted from the purchase. The interest charged up to the end of each period is due at that end. The last period is shorter when the runtime is not a multiple of the period. The principal is due at maturity. With an interest period equal to the runtime, interest and principal are both due at maturity.
+
+Each due date is followed by the listing's grace period. A payment made by the end of the grace period is on time. One second later, the loan becomes liquidatable if interest charged up to that due date is still unpaid. It also becomes liquidatable one second after maturity plus the grace period while principal is outstanding. [Get Loan Status](/endpoints/seller-financing/get-loan-status) answers `isLiquidatable`, `liquidatableAt` and the next amount due.
+
+Interest keeps accruing after a missed due date until the seller liquidates. A liquidation takes it out of the escrow, capped at what the escrow holds after the compensation, so the buyer never owes the market more than the escrow.
+
+### Coverage rule
+
+A listing is refused unless its downpayment, after the 1.5 percent compensation, covers the interest of one interest period plus the grace period plus one day. A liquidation within a day of the first missed grace period can then pay the compensation and every unit of interest owed out of the escrow. A short interest period and a short grace period keep the required downpayment low. [Get Quote](/endpoints/seller-financing/quote-terms) returns the check as `coverageWindowInterest`, `coverageLimit` and `coverageOk`.
+
+## Fees
+
+- **Trusset interest share.** 20 percent, rounded down, of every interest amount the seller receives, and of what the seller takes at liquidation. The rest is credited to the seller. The share is fixed in the market contract.
+- **Repay fee.** Every repayment carries a fee, borne by the payer. It is carved out of the payment: the market keeps the smaller of the market's repay fee and 0.5 percent of the amount applied, and only the rest goes to interest and principal. The factory stamps the repay fee on the market at deployment, in the payment token's smallest unit: its default of 1.5 whole units of the payment token, for example 1.5 USDC, or a figure set for that payment token, at most 10 whole units. The market has no setter, so the fee never changes. [Get Market](/endpoints/seller-financing/get-market) returns it as `repayFee` and `repayFeeFormatted`, and [Build Deployment](/endpoints/seller-financing/deploy-market) in `deployment.repayFee` before you sign.
+
+Both fees round down. A repayment under 201 smallest units carries no repay fee, and an interest amount of 4 smallest units or less carries no Trusset share. A market therefore takes only payment tokens with 6 to 18 decimals, where these amounts are dust.
+
+What the market owes Trusset accrues in `trussetFeesPayable`. Anyone can pay it out to the fixed Trusset wallet `0x65FF3a731366472d40CF458332457403168c2BEA` with `sweepInfrastructureFees()` on the market. This API does not build that call.
+
+## What each party receives
+
+**On completion.** The repayment that brings the principal to zero credits the seller the full price: the downpayment plus every principal payment held in escrow. The loan is then `REPAID`. The buyer takes delivery with [Claim Asset](/endpoints/seller-financing/claim-asset), to its own wallet or to any recipient the token admits. The seller withdraws with [Withdraw](/endpoints/seller-financing/withdraw). In the Sepolia smoke test (a price of 10,000 USDC, 20 percent down, 30 days), the seller withdrew 10,000.8633 USDC: the price plus its share of the 1.079124 USDC interest the buyer paid.
+
+**On liquidation.** The escrow holds the downpayment plus the principal paid so far. The seller takes the compensation (1.5 percent of the downpayment, rounded up) plus the interest still owed, capped at the escrow. Trusset takes 20 percent of that. The buyer is refunded the rest. The asset is released to the seller: unfrozen in its wallet in freeze mode, returned from the adapter in custody mode. Interest the buyer paid before the default stays with the seller.
+
+For example, take a listing at 10,000 USDC with 20 percent down, 30 days, 7-day interest periods, a 2-day grace period and `DERIVED` interest at a 4 percent base rate and 12 percent volatility. The buyer pays nothing after the downpayment, and the seller liquidates 10 days after the purchase. The escrow holds 2,000 USDC and 140.139154 USDC of interest is owed. The seller takes the 30 USDC compensation plus that interest, 170.139154 USDC, of which Trusset takes 34.02783 USDC. The seller is credited 136.111324 USDC and the buyer 1,829.860846 USDC. Each withdraws with [Withdraw](/endpoints/seller-financing/withdraw).
+
+## Base Path
+
+```
+https://api.trusset.org/seller-financing/api/markets
+```
+
+Every request authenticates with an instance API key in the `X-API-Key` header. See [Authentication](/endpoints/authentication). The API takes the instance from the key only. The instance needs the lending service: without it every request answers `403 SERVICE_NOT_ENABLED`. Requests draw on the instance's monthly API credits, booked to the lending service.
+
+You see only the markets your instance recorded on its network. A market of another instance answers `404 MARKET_NOT_FOUND`. The market ID is your instance's record ID for the market, as `id` on [List Markets](/endpoints/seller-financing/list-markets), not its contract address.
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| [List Markets](/endpoints/seller-financing/list-markets) | GET | Your instance's markets with live counters and token-side setup |
+| [Get Market](/endpoints/seller-financing/get-market) | GET | One market with its configuration, repay fee, counters and setup |
+| [Get Deployment Options](/endpoints/seller-financing/get-deployment-options) | GET | Factory, modes, default configuration, bounds and payment tokens |
+| [Build Deployment](/endpoints/seller-financing/deploy-market) | POST | Calldata that deploys a market from a verified wallet of your instance |
+| [Record Deployment](/endpoints/seller-financing/confirm-deployment) | POST | Verifies the deployment receipt and records the market |
+| [Build Token Setup](/endpoints/seller-financing/token-setup) | POST | The token-side transaction the adapter needs, and who signs it |
+| [Get Role Audit](/endpoints/seller-financing/get-role-audit) | GET | The role assignments of the deployment, verified live |
+| [List Listings](/endpoints/seller-financing/list-listings) | GET | A page of a market's listings with their loans |
+| [Get Listing](/endpoints/seller-financing/get-listing) | GET | One listing, with the loan's live status while it is active |
+| [Get Quote](/endpoints/seller-financing/quote-terms) | GET | Preview of the terms a listing would be stamped with |
+| [Create Listing](/endpoints/seller-financing/create-listing) | POST | Calldata that lists an amount of the asset |
+| [Cancel Listing](/endpoints/seller-financing/cancel-listing) | POST | Calldata that cancels an open listing |
+| [Purchase](/endpoints/seller-financing/purchase) | POST | Approve-and-purchase calldata for the downpayment |
+| [Get Loan Status](/endpoints/seller-financing/get-loan-status) | GET | Interest due, payoff, next due date and default state |
+| [Repay](/endpoints/seller-financing/repay) | POST | Calldata for a partial or full repayment |
+| [Claim Asset](/endpoints/seller-financing/claim-asset) | POST | Calldata that delivers the asset after full payment |
+| [Liquidate](/endpoints/seller-financing/liquidate) | POST | Calldata that withdraws from the sale of a defaulted loan |
+| [Get Claimable](/endpoints/seller-financing/get-claimable) | GET | What a wallet can withdraw from the market |
+| [Withdraw](/endpoints/seller-financing/withdraw) | POST | Calldata that pays out a wallet's claimable balance |
+| [Update Configuration](/endpoints/seller-financing/update-config) | POST | Calldata that changes the configuration for new listings |
+| [Pause Market](/endpoints/seller-financing/pause-market) | POST | Calldata that stops new listings, purchases and liquidations |
+| [Unpause Market](/endpoints/seller-financing/unpause-market) | POST | Calldata that resumes them |
+
+## Response envelope
+
+```json
+{
+  "success": true,
+  "data": { },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-19T09:12:04.318Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+
+On failure, `success` is `false`, `data` is `null`, and `error` carries `code`, `message` and, where the page says so, `details`. Always branch on `success` rather than on the HTTP status alone. When reporting a problem, quote both `metadata.requestId` and the `X-Request-Id` response header. On this API they are two different values.
+
+A request refused before it reaches a route answers without `data` and without `metadata.instanceId`. That covers an invalid key, a service not enabled on the instance, an exhausted credit allowance, a rate limit, key material in the body, and a malformed `txHash` on [Record Deployment](/endpoints/seller-financing/confirm-deployment).
+
+## Writes
+
+Every write returns unsigned transactions for the wallet holder to sign and broadcast. Nothing is signed or submitted on your behalf, and Trusset holds no key.
+
+```json
+{
+  "action": "SIGN_TRANSACTIONS",
+  "chainId": 11155111,
+  "steps": [
+    {
+      "to": "0x98aD0ca091552e23C564B41C74282e5343D03E8a",
+      "data": "0x095ea7b3...",
+      "value": "0",
+      "functionName": "approve",
+      "label": "Approve exactly the downpayment of 2000.0",
+      "description": "Approve exactly the downpayment of 2000.0",
+      "chainId": 11155111
+    },
+    {
+      "to": "0xc35e5f74eC4C1dfB8cE2b8798D6161B706F9B5E1",
+      "data": "0xefef39a1...",
+      "value": "0",
+      "functionName": "purchase",
+      "label": "Buy listing 4 with a downpayment of 2000.0",
+      "description": "Buy listing 4 with a downpayment of 2000.0",
+      "chainId": 11155111
+    }
+  ],
+  "confirmStepIndex": 1,
+  "preflight": {
+    "simulated": false,
+    "note": "The main call can only be simulated once the approval is mined; every market-side check passed before the token transfer."
+  }
+}
+```
+
+Each step is one transaction: `to`, `data`, `value` (always `"0"`), `chainId`, the `functionName` it calls, and a `label`, repeated as `description`. Broadcast the steps in order, each once the previous one is mined.
+
+- **`from` names the signer.** It is required on every write except [Build Token Setup](/endpoints/seller-financing/token-setup). The API reads that wallet's balance and allowance and simulates the main transaction from it with `estimateGas`. When the contract would revert, the answer is `409 TX_WOULD_REVERT` and nothing is built. Sign with the wallet you named, because no other wallet was checked.
+- **Approvals are exact.** An approval step approves exactly the amount the market or the adapter pulls, never an unlimited amount. The one exception is a full payoff, which approves the payoff plus a margin, as below. When the wallet holds a smaller non-zero allowance, a step that resets it to zero comes first. When the allowance already covers the amount, no approval step is returned.
+- **A closing repayment ends with `approve(0)`.** The payoff approval carries a margin for interest that accrues until the payment is mined. The last step resets what is left of it. It is returned only when the response also approved.
+- **`confirmStepIndex`** is the index of the main transaction: after any approval, before a trailing reset. That transaction carries the action. Watch its hash. Deployment is the only write with a confirm endpoint, so for every other write the result is read back once that transaction is mined.
+- **Gas headroom.** When the simulation succeeds, `preflight` reads `{ "simulated": true, "gasEstimate": "..." }` and the main step carries `gasLimit`, the estimate plus 30 percent. When an approval comes first, the main transaction usually fails simulation because that approval is not mined yet. A revert raised by the token itself therefore does not stop the build: the response carries `preflight.simulated: false` with a `note`, and the main step has no `gasLimit`. The market's own checks before the token transfer passed. Let the wallet estimate gas once the approval is mined.
+
+Write bodies are strict. A field the page does not list answers `400 VALIDATION_ERROR`, except `instanceId`, which is accepted and ignored. A body with a field named for key material, such as `privateKey` or `mnemonic`, answers `400 KEY_MATERIAL_REJECTED`.
+
+### Units
+
+Addresses are `0x` followed by 40 hex characters. A mixed-case address must pass its EIP-55 checksum, an all-lowercase one is accepted, and the zero address is refused. Amounts you send are decimal strings in whole units of the token, for example `"10000"` for 10,000 USDC, parsed at the token's decimals. A finer fraction answers `VALIDATION_ERROR`. Amounts returned are integer strings in the token's smallest unit. Most carry a `...Formatted` twin in whole units. These do not: `premiumA`, `premiumB`, `baseAccrued`, `coverageWindowInterest`, `coverageLimit`, `totalClaimable`, `trussetFeesPayable`, and the `interest`, `principal` and `fee` parts of `payoff`. Rates are basis points per year. Terms are sent in days. Listings return their runtime, interest period and grace period in seconds, and every time as unix seconds.
+
+### State is read from the chain
+
+The API records a market when its deployment is confirmed and keeps no record of listings, loans or balances. Every other state is read from the chain through [Get Listing](/endpoints/seller-financing/get-listing), [Get Loan Status](/endpoints/seller-financing/get-loan-status) and [Get Claimable](/endpoints/seller-financing/get-claimable). A new listing's ID is the `id` of the `ListingCreated` event in the receipt of the listing transaction. IDs count up from 1 on each market, and `total` on [List Listings](/endpoints/seller-financing/list-listings) is the highest one.
+
+## Deployment
+
+1. Read [Get Deployment Options](/endpoints/seller-financing/get-deployment-options) for the factory, the modes, the default configuration, the bounds and the payment tokens of your network.
+2. Build the deployment with [Build Deployment](/endpoints/seller-financing/deploy-market). `from` must be a verified wallet of your instance. Any other wallet answers `403 DEPLOYMENT_NOT_INSTANCE_BOUND` before any calldata exists. The API checks both tokens, the identity register, the asset's freeze surface in freeze mode and the payment token's decimals, then simulates the deployment from `from`.
+3. Sign and broadcast the single `deployMarket` step from that wallet.
+4. Record it with [Record Deployment](/endpoints/seller-financing/confirm-deployment) and the transaction hash. The API verifies the receipt against the factory and requires the signer to be a verified wallet of your instance. A deployment sent through a Safe, an EIP-7702 account or an ERC-4337 smart account is accepted: the API reads the wrapped call and takes the `MarketDeployed` event of the signing wallet. The answer carries the market record, the role assignment record and the token-side setup.
+5. Complete the token-side setup with [Build Token Setup](/endpoints/seller-financing/token-setup), signed on the token issuer's side.
+6. Keep the role assignment record. [Get Role Audit](/endpoints/seller-financing/get-role-audit) rebuilds it from the deployment receipt and checks each role live. The Issuer Portal also renders it as a PDF certificate under the same `docRef`. The certificate is available in the Issuer Portal only, not to an API key.
+
+Your instance runs at most one market per asset token, payment token and mode. A second deployment of the same combination answers `409 MARKET_EXISTS` and names the existing market. A payment token must use 6 to 18 decimals and debit exactly what it is asked to transfer, so fee-on-transfer tokens are refused on every inbound payment.
+
+## Walkthrough
+
+From deployment to completion:
+
+1. **Issuer.** [Get Deployment Options](/endpoints/seller-financing/get-deployment-options), then [Build Deployment](/endpoints/seller-financing/deploy-market). Sign the step, then [Record Deployment](/endpoints/seller-financing/confirm-deployment) with its hash.
+2. **Token owner or register agent.** [Build Token Setup](/endpoints/seller-financing/token-setup). Sign the step it returns.
+3. **Seller.** [Get Quote](/endpoints/seller-financing/quote-terms) to size the terms, then [Create Listing](/endpoints/seller-financing/create-listing). Sign the steps, then read the listing ID from the `ListingCreated` event.
+4. **Buyer.** [List Listings](/endpoints/seller-financing/list-listings) with `status=OPEN` and [Get Listing](/endpoints/seller-financing/get-listing), then [Purchase](/endpoints/seller-financing/purchase). Sign the approval and the purchase. The listing reads `ACTIVE`.
+5. **Buyer, each period.** [Get Loan Status](/endpoints/seller-financing/get-loan-status) for `nextDue`. Once the due date has passed and before its grace period ends, [Repay](/endpoints/seller-financing/repay) the interest due plus the repay fee.
+6. **Buyer, at the end.** [Repay](/endpoints/seller-financing/repay) with `amount: "full"`. Sign the approval, the repayment and the reset. The listing reads `REPAID`.
+7. **Buyer.** [Claim Asset](/endpoints/seller-financing/claim-asset). The listing reads `COMPLETED`.
+8. **Seller.** [Get Claimable](/endpoints/seller-financing/get-claimable), then [Withdraw](/endpoints/seller-financing/withdraw). The seller can withdraw its interest credits at any time during the loan as well.
+
+To liquidation, from step 5:
+
+1. **Buyer.** Misses a due date. After `liquidatableAt`, [Get Loan Status](/endpoints/seller-financing/get-loan-status) reads `isLiquidatable: true`.
+2. **Seller or operator.** [Liquidate](/endpoints/seller-financing/liquidate). The listing reads `LIQUIDATED` and the asset is back with the seller.
+3. **Seller and buyer.** Each reads [Get Claimable](/endpoints/seller-financing/get-claimable) and calls [Withdraw](/endpoints/seller-financing/withdraw): the seller for its compensation and interest, the buyer for its refund.
+
+The operator administers the market with [Update Configuration](/endpoints/seller-financing/update-config), [Pause Market](/endpoints/seller-financing/pause-market) and [Unpause Market](/endpoints/seller-financing/unpause-market).
+
+## Pausing
+
+The operator can pause a market for new business. A pause also stops liquidation.
+
+| Function | While paused |
+|---|---|
+| Create listing, purchase, liquidate | Refused (`EnforcedPause`) |
+| Cancel listing, repay, claim asset, withdraw, sweep the Trusset fees | Open |
+| Update configuration, change the identity register, unpause | Open to the operator |
+
+## Errors
+
+```json
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_WOULD_REVERT",
+    "message": "The listing has expired.",
+    "details": {
+      "action": "purchase",
+      "error": "ListingExpired",
+      "args": [],
+      "revertData": "0x398cfd02"
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-10-19T09:12:04.318Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+
+`409 TX_WOULD_REVERT` means the transaction would revert on-chain, so nothing was built. `details.error` names the decoded contract error and `details.args` its arguments, and `message` explains it, as listed under Contract refusals below. A revert with a text reason, typically from a token, has `error: "Error"` and the message "The transaction would revert: " followed by the reason. A revert the API cannot decode has `error: null`. `details.action` names the operation and `details.revertData` carries the raw revert data.
+
+Some refusals come from the API's own reads before any simulation, with the same code and contract error name and without `args` or `revertData`: `InsufficientDownpaymentCoverage` on [Create Listing](/endpoints/seller-financing/create-listing) with `details.terms`, `AgentRoleMissing` and `InsufficientFreeBalance` on [Purchase](/endpoints/seller-financing/purchase), `NotLiquidatable` on [Liquidate](/endpoints/seller-financing/liquidate) with `details.liquidatableAt`, and `NothingToWithdraw` on [Withdraw](/endpoints/seller-financing/withdraw).
+
+`503 CHAIN_UNAVAILABLE` means the chain could not be read. Nothing was changed or built. Retry shortly.
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A body, query or path value fails its schema. `error.details` lists `{ field, message }` for each problem |
+| `KEY_MATERIAL_REJECTED` | `400` | The body carries a field named for key material or for signing on someone else's behalf |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `INVALID_LISTING_ID` | `400` | `listingId` is not a positive integer of up to 19 digits |
+| `AUTH_REQUIRED`, `AUTH_FAILED` | `401` | No key, or a key that is malformed, unknown, expired or bound to an archived instance |
+| `CREDIT_LIMIT_EXCEEDED` | `402` | The instance's monthly API credits are used up |
+| `ACCOUNT_FROZEN` | `403` | The issuer account behind the key is suspended |
+| `SERVICE_NOT_ENABLED` | `403` | The instance does not have the lending service |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
+| `INVALID_STATUS` | `409` | The listing is not in the status the action needs. `details.status` names the current one |
+| `INSUFFICIENT_BALANCE` | `409` | `from` holds less of the token than the transaction pulls. `details` carries `token`, `owner`, `balance` and `needed` in smallest units |
+| `TX_WOULD_REVERT` | `409` | The transaction would revert. See above |
+| `RATE_LIMIT_EXCEEDED` | `429` | A rate limit was hit. See below |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was changed. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | Your instance's verified wallets could not be read. Retry shortly |
+| `AUTH_ERROR` | `500` | The key could not be checked. Retry shortly |
+| A route's own `..._FAILED` code | `500` | Unexpected failure, with the message "The request could not be completed. Nothing was changed." Each page names its code |
+
+<Accordion title="Contract refusals">
+
+| `details.error` | `message` |
+|---|---|
+| `InvalidAddress` | An address in the request is zero, a contract without code, or one the market refuses in that position. |
+| `InvalidAdapter` | The adapter is not bound to this market and its asset token. |
+| `InvalidConfig` | The configuration is outside the hard bounds of the contract or inconsistent (a minimum above its maximum, or no rate mode enabled). |
+| `InvalidAmount` | The amount is zero or above the contract limit. |
+| `InvalidPrice` | The price is zero, above the contract limit, or too small to leave a principal after the downpayment. |
+| `DownpaymentOutOfRange` | The downpayment is outside the range this market allows. |
+| `DurationOutOfRange` | The runtime is outside the range this market allows. |
+| `InterestPeriodOutOfRange` | The interest period is outside the range this market allows, or longer than the runtime. |
+| `GracePeriodOutOfRange` | The grace period is longer than this market allows. |
+| `RateModeDisabled` | This market does not offer the chosen interest strategy. |
+| `RateOutOfRange` | The fixed rate is above the ceiling this market allows sellers to set. |
+| `InvalidExpiry` | The expiry must be in the future and at most 365 days ahead. |
+| `InsufficientDownpaymentCoverage` | The downpayment does not cover the compensation plus the interest of one interest period, the grace period and one day. Raise the downpayment or shorten the interest period or grace period. |
+| `IdentityNotVerified` | The wallet is not verified on the market identity register. |
+| `BuyerNotVerified` | The buyer is not verified on the asset token's own identity register, so the token would refuse the delivery. |
+| `AdapterNotAgent` | The freeze adapter does not hold the agent role on the asset token yet. Complete the token-side setup first. |
+| `InsufficientFreeBalance` | The seller does not hold enough unfrozen tokens for this listing. |
+| `AssetTransferMismatch` | The asset token delivered a different amount than listed. Tokens that take a fee on transfer cannot be listed. |
+| `PaymentTokenNotSupported` | The payment token delivered a different amount than requested. Fee-on-transfer payment tokens are not supported. |
+| `UnknownListing` | No listing with this id exists on the market. |
+| `InvalidStatus` | The listing is not in a state that allows this action. |
+| `NotSeller` | Only the seller or the market operator can do this. |
+| `NotBuyer` | Only the buyer can claim the asset. |
+| `NotDesignatedBuyer` | This listing is reserved for another buyer. |
+| `ListingExpired` | The listing has expired. |
+| `InvalidBuyer` | The seller, the market and its adapter cannot buy, and cannot be designated as buyer. |
+| `InvalidRecipient` | The recipient cannot be zero, the market or its adapter. |
+| `NotLiquidatable` | The loan is not in default, so it cannot be liquidated yet. |
+| `NothingToWithdraw` | There is nothing to withdraw for this wallet. |
+| `NothingToSweep` | There are no infrastructure fees to sweep. |
+| `InvalidPage` | Pages hold between 1 and 50 listings. |
+| `OnlyFactory` | Only the factory can initialize a market. |
+| `SameToken` | The asset token and the payment token must differ. |
+| `NotAToken` | One of the tokens has no code or does not answer balanceOf. |
+| `DecimalsUnresolved` | The payment token does not report its decimals; supply a fallback between 1 and 36. |
+| `RefInUse` | The adapter already holds this reference. |
+| `RefNotActive` | The adapter reference is not active. |
+| `InsufficientLocked` | The adapter holds less of the asset than recorded. |
+| `NoCollateralReceived` | The asset token delivered nothing to the custody adapter. Check the seller approval of the adapter. |
+| `AgentRoleMissing` | The freeze adapter lost its agent role on the asset token. The token issuer has to restore it. |
+| `FreezeMismatch` | The asset token did not freeze or unfreeze the exact amount. |
+| `ForcedTransferFailed` | The asset token refused the forced transfer. |
+| `TransferShortfall` | The asset token delivered less than the full amount to the recipient. |
+| `OnlyMarket` | Only the market can move the asset through its adapter. |
+| `SellerIsTokenAgent` | The seller holds the agent role on the asset token. An agent can unfreeze and move the tokens it sells, so it cannot sell under retention of title. List from a wallet without the agent role. |
+| `EnforcedPause` | The market is paused for new business. |
+| `ExpectedPause` | The market is not paused. |
+| `AccessControlUnauthorizedAccount` | The signing wallet does not hold the role this action needs on the market. |
+| `ReentrancyGuardReentrantCall` | The call re-entered the market. |
+| `SafeERC20FailedOperation` | The token refused the transfer. |
+| `ERC20InsufficientAllowance` | The token allowance is too low. |
+| `ERC20InsufficientBalance` | The wallet holds too few tokens. |
+
+</Accordion>
+
+## Rate limits
+
+Every request made with an API key counts against a ceiling of 200 requests per minute for that key. Every write on this API also draws on a budget of 10 per minute, and every read on one of 100 per minute. Each budget is counted per API key across every endpoint that carries it, not per endpoint, and the same two budgets also cover the lending, trading and other product endpoints that carry them. A burst of lending writes therefore leaves fewer Seller Financing writes in that minute.
+
+Exceeding a limit returns `429` with code `RATE_LIMIT_EXCEEDED` and a `Retry-After` header in seconds. The 200 per minute ceiling reports its state in `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`. The two tighter budgets report theirs in `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. See [Rate Limits](/endpoints/rate-limits).
+
+## Trust boundaries
+
+- **The token issuer keeps its powers over the asset.** In freeze mode another agent of the token can unfreeze or force-transfer the frozen amount, and a recovery of the seller's wallet by the issuer strands the lock. The market refuses a seller that is an agent of the token, but cannot refuse an agent role granted after the purchase. In custody mode an agent can force-transfer tokens out of the adapter, and the delivery then reverts. The issuer can also refuse every recipient or revoke the freeze adapter's agent role.
+- **Refunds wait for the asset.** Cancellation and liquidation return the asset before any money settles. While the freeze adapter lacks its agent role, or the custody adapter holds less than it recorded, they revert and the escrow waits until the token issuer restores the role or the holdings.
+- **The payment-token issuer can block repayments.** A paused stablecoin, or one that starts charging a transfer fee, makes every repayment revert, while liquidation, which moves no payment tokens, stays open. The operator's only defence is pausing the market, which also stops liquidation.
+- **The admin can upgrade the market.** An upgraded implementation is not bound by these rules. Compare the market's ERC-1967 implementation slot with `marketImplementation()` on the factory.
+- **Configuration and screening apply to new business.** A configuration change mined just before a pending listing applies to it, so check the terms stamped on the listing and cancel one you do not accept. A purchase does not re-check the seller, and anyone can repay a loan. The operator cancels the open listings of a seller who loses verification.

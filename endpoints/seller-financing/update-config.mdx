@@ -1,0 +1,188 @@
+---
+title: 'Update Configuration'
+api: 'POST /seller-financing/api/markets/{marketId}/config'
+description: 'Calldata that changes the configuration new listings are checked against'
+---
+
+<Note>
+  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Builds `setConfig` on the market for a holder of the operator role to sign. The configuration sets the ranges new listings must fall within and the rates they are stamped with. It replaces the whole configuration, so send every field, including the ones you keep. Read the current values with [Get Market](/endpoints/seller-financing/get-market).
+
+A new configuration reaches new listings only. Every listing already created, open or with a running loan, keeps the terms it was stamped with. The operator can update the configuration while the market is paused.
+
+<Warning>
+  A configuration mined just before a seller's pending listing applies to that listing. Sellers see the terms they got in the `ListingCreated` event and can cancel an open listing they do not accept.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/seller-financing/list-markets).</ParamField>
+
+## Body Parameters
+
+<ParamField body="config" type="object" required>
+  The full configuration. Each minimum must not exceed its maximum, `minInterestPeriodDays` must not exceed `maxDurationDays`, and at least one strategy must be enabled, or the request answers `400 INVALID_CONFIG`.
+  <Expandable>
+    <ParamField body="minDownpaymentBps" type="integer" required>Smallest downpayment, 500 to 9000 basis points of the price.</ParamField>
+    <ParamField body="maxDownpaymentBps" type="integer" required>Largest downpayment, 500 to 9000.</ParamField>
+    <ParamField body="minDurationDays" type="integer" required>Shortest runtime, 1 to 3650 days.</ParamField>
+    <ParamField body="maxDurationDays" type="integer" required>Longest runtime, 1 to 3650 days.</ParamField>
+    <ParamField body="minInterestPeriodDays" type="integer" required>Shortest interest period, 1 to 366 days.</ParamField>
+    <ParamField body="maxInterestPeriodDays" type="integer" required>Longest interest period, 1 to 366 days.</ParamField>
+    <ParamField body="maxGracePeriodDays" type="integer" required>Longest grace period, 0 to 90 days.</ParamField>
+    <ParamField body="fixedEnabled" type="boolean" required>Offer `FIXED` interest.</ParamField>
+    <ParamField body="derivedEnabled" type="boolean" required>Offer `DERIVED` interest.</ParamField>
+    <ParamField body="sellerSetsFixedRate" type="boolean" required>Let the seller name the rate of a `FIXED` listing, up to `maxFixedRateBps`. With `false`, every `FIXED` listing carries `fixedRateBps`.</ParamField>
+    <ParamField body="fixedRateBps" type="integer" required>The operator's fixed annual rate, 0 to 5000 basis points.</ParamField>
+    <ParamField body="maxFixedRateBps" type="integer" required>The ceiling on a seller's fixed rate, 0 to 5000.</ParamField>
+    <ParamField body="baseRateBps" type="integer" required>The annual base rate of `DERIVED` interest, 0 to 5000.</ParamField>
+    <ParamField body="volatilityBps" type="integer" required>The annual volatility input that prices the walk-away premium, 100 to 20000. See [Choosing the volatility input](/endpoints/seller-financing/deploy-market#choosing-the-volatility-input).</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="from" type="string" required>The wallet that signs. It must hold the operator role, or the request answers `409 TX_WOULD_REVERT` with `AccessControlUnauthorizedAccount`.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain the step is built for.</ResponseField>
+    <ResponseField name="steps" type="array">One step, `setConfig` on the market, with `gasLimit`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">`0`.</ResponseField>
+    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`.</ResponseField>
+    <ResponseField name="config" type="object">The configuration the step sets, as you sent it.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/seller-financing/api/markets/cmsg4x7k20003sf9q1d8v6b2e/config" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "minDownpaymentBps": 1000,
+      "maxDownpaymentBps": 9000,
+      "minDurationDays": 30,
+      "maxDurationDays": 3650,
+      "minInterestPeriodDays": 7,
+      "maxInterestPeriodDays": 92,
+      "maxGracePeriodDays": 14,
+      "fixedEnabled": true,
+      "derivedEnabled": true,
+      "sellerSetsFixedRate": true,
+      "fixedRateBps": 800,
+      "maxFixedRateBps": 1500,
+      "baseRateBps": 400,
+      "volatilityBps": 1500
+    },
+    "from": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895"
+  }'
+```
+```typescript TypeScript
+const { data: market } = await (await fetch(
+  `https://api.trusset.org/seller-financing/api/markets/${marketId}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+)).json();
+const { raw, ...current } = market.config;
+
+const res = await fetch(
+  `https://api.trusset.org/seller-financing/api/markets/${marketId}/config`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config: { ...current, volatilityBps: 1500 }, from: await operator.getAddress() })
+  }
+);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "chainId": 11155111,
+    "steps": [
+      {
+        "to": "0xc35e5f74eC4C1dfB8cE2b8798D6161B706F9B5E1",
+        "data": "0x9cd3912e...",
+        "value": "0",
+        "functionName": "setConfig",
+        "label": "Update the market configuration for new listings",
+        "description": "Update the market configuration for new listings",
+        "gasLimit": "77873",
+        "chainId": 11155111
+      }
+    ],
+    "confirmStepIndex": 0,
+    "preflight": {
+      "simulated": true,
+      "gasEstimate": "59903"
+    },
+    "config": {
+      "minDownpaymentBps": 1000,
+      "maxDownpaymentBps": 9000,
+      "minDurationDays": 30,
+      "maxDurationDays": 3650,
+      "minInterestPeriodDays": 7,
+      "maxInterestPeriodDays": 92,
+      "maxGracePeriodDays": 14,
+      "fixedEnabled": true,
+      "derivedEnabled": true,
+      "sellerSetsFixedRate": true,
+      "fixedRateBps": 800,
+      "maxFixedRateBps": 1500,
+      "baseRateBps": 400,
+      "volatilityBps": 1500
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-19T09:12:04.318Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Not the Operator
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_WOULD_REVERT",
+    "message": "The signing wallet does not hold the role this action needs on the market.",
+    "details": {
+      "action": "configuration update",
+      "error": "AccessControlUnauthorizedAccount",
+      "args": [
+        "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b",
+        "0x97667070c54ef182b0f5858b034beac1b6f3089aa2d3188bb1e8929f4fa9b929"
+      ],
+      "revertData": "0xe2517d3f0000000000000000000000003e22fdfa28e880239541d9c5b66b3b161f9ed77b97667070c54ef182b0f5858b034beac1b6f3089aa2d3188bb1e8929f4fa9b929"
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-10-19T09:12:04.318Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A `config` field is missing or outside its bounds, `from` is missing or malformed, or the body carries another field. `error.details` names each field |
+| `INVALID_CONFIG` | `400` | The configuration is inconsistent: a minimum above its maximum, `minInterestPeriodDays` above `maxDurationDays`, or no strategy enabled. `message` is the first problem and `details.problems` lists all |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `TX_WOULD_REVERT` | `409` | The update would revert: `AccessControlUnauthorizedAccount` when `from` lacks the operator role, or `InvalidConfig` |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `CONFIG_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

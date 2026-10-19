@@ -1,0 +1,251 @@
+---
+title: 'Record Deployment'
+api: 'POST /seller-financing/api/markets/confirm'
+description: 'Verify a broadcast market deployment and record the market on your instance'
+---
+
+<Note>
+  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Records a market your instance deployed. Send the hash of the mined `deployMarket` transaction built by [Build Deployment](/endpoints/seller-financing/deploy-market). This is the only Seller Financing write with a confirm call. Everything after it is read from the chain.
+
+The API reads the receipt and checks, in order:
+
+1. The transaction is mined and succeeded.
+2. It calls `deployMarket` on your network's Seller Financing factory, directly or wrapped in a smart-account call.
+3. The wallet that signed it is a verified wallet of your instance.
+4. The factory emitted `MarketDeployed` with that wallet as deployer, and recognises the market as its own.
+
+A deployment sent through a Safe, an EIP-7702 account or an ERC-4337 smart account is accepted. The API reads the wrapped call, and the signer is the smart account that called the factory, so that account must be the verified wallet of your instance. The wallet that broadcast the outer transaction is kept as `outerSender` on the role assignment record.
+
+The answer carries the market record, the role assignment record built from the same receipt, and the token-side setup the adapter still needs.
+
+## Body Parameters
+
+<ParamField body="txHash" type="string" required>
+  Hash of the mined deployment transaction: `0x` followed by 64 hex characters. A malformed hash answers `400 VALIDATION_ERROR` naming `txHash`, before anything is read.
+</ParamField>
+
+## Response Fields
+
+The status is `201` when the market is recorded now and `200` when it was already recorded on your instance. Sending the same hash again is safe.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="market" type="object">The market record, as on [List Markets](/endpoints/seller-financing/list-markets) without the live blocks: `id`, `chainId`, `address`, `adapter`, `assetToken`, `paymentToken`, `mode`, `admin`, `operator`, `collateralAgent`, `deployTxHash`, `deployBlock`, `signer`, `factory` and `createdAt`. Use `id` as `marketId` from now on.</ResponseField>
+    <ResponseField name="created" type="boolean">`true` when this call recorded the market, `false` when it was already recorded.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet that signed the deployment, lowercased.</ResponseField>
+    <ResponseField name="auditDocument" type="object">The role assignment record of the deployment. See [Get Role Audit](/endpoints/seller-financing/get-role-audit) for its fields.</ResponseField>
+    <ResponseField name="tokenSetup" type="object">The token-side setup, as [Build Token Setup](/endpoints/seller-financing/token-setup) answers without `from`: `done: true` when the token already accepts the adapter, otherwise the step and who must sign it, or why no step can be prepared. `null` when it could not be read. Call [Build Token Setup](/endpoints/seller-financing/token-setup) then.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Tip>
+  `TX_NOT_FOUND` is the expected answer when you confirm before the transaction is mined. Wait for one confirmation and send the hash again.
+</Tip>
+
+<Note>
+  If the answer is an error after the market was already recorded, for example because the chain could not be read while the role record was built, send the same hash again. A recorded market answers `200` with `created: false`.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/seller-financing/api/markets/confirm" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"txHash": "0xab2709878f3c6a93fef46c073043a8a7206fa5a164e04bf1f2cd5055da619fde"}'
+```
+```typescript TypeScript
+const res = await fetch('https://api.trusset.org/seller-financing/api/markets/confirm', {
+  method: 'POST',
+  headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+  body: JSON.stringify({ txHash })
+});
+const { data } = await res.json();
+const marketId = data.market.id;
+if (data.tokenSetup && !data.tokenSetup.done) {
+  console.log('Token-side setup, signed by', data.tokenSetup.requiredSigner);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "market": {
+      "id": "cmsg4x7k20003sf9q1d8v6b2e",
+      "chainId": 11155111,
+      "address": "0xc35e5f74eC4C1dfB8cE2b8798D6161B706F9B5E1",
+      "adapter": "0x037B9e26D8B98aa1B1FCC321ba45A87Fc786C7Fc",
+      "assetToken": "0x305382e98F8e6ee24c32dF3567342E1F1DECb9b6",
+      "paymentToken": "0x98aD0ca091552e23C564B41C74282e5343D03E8a",
+      "mode": "FREEZE",
+      "admin": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+      "operator": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+      "collateralAgent": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+      "deployTxHash": "0xab2709878f3c6a93fef46c073043a8a7206fa5a164e04bf1f2cd5055da619fde",
+      "deployBlock": 11943817,
+      "signer": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+      "factory": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
+      "createdAt": "2026-10-18T21:44:05.112Z"
+    },
+    "created": true,
+    "signer": "0xcd421abba2b9b047ec069215df5c49c97c96f895",
+    "auditDocument": {
+      "docRef": "SF-739AD00ECE63",
+      "title": "Seller Financing market deployment: role assignments",
+      "chainId": 11155111,
+      "market": "0xc35e5f74eC4C1dfB8cE2b8798D6161B706F9B5E1",
+      "adapter": "0x037B9e26D8B98aa1B1FCC321ba45A87Fc786C7Fc",
+      "factory": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
+      "assetToken": "0x305382e98F8e6ee24c32dF3567342E1F1DECb9b6",
+      "paymentToken": "0x98aD0ca091552e23C564B41C74282e5343D03E8a",
+      "mode": "FREEZE",
+      "collateralAgent": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+      "identityRegistry": null,
+      "repayFee": "1500000",
+      "transaction": {
+        "hash": "0xab2709878f3c6a93fef46c073043a8a7206fa5a164e04bf1f2cd5055da619fde",
+        "blockNumber": 11943817,
+        "blockHash": "0x2371180b75e06fb38b90fc899a1f982e899f316e144bd84ac4c5f372988021bd",
+        "timestamp": 1792359828,
+        "signer": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+        "outerSender": null,
+        "outerTarget": null,
+        "status": 1
+      },
+      "assignments": [
+        {
+          "role": "DEFAULT_ADMIN_ROLE",
+          "roleHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "account": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+          "grantedBy": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
+          "logIndex": 76
+        },
+        {
+          "role": "OPERATOR_ROLE",
+          "roleHash": "0x97667070c54ef182b0f5858b034beac1b6f3089aa2d3188bb1e8929f4fa9b929",
+          "account": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+          "grantedBy": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
+          "logIndex": 77
+        }
+      ],
+      "atomic": true,
+      "liveVerification": {
+        "checkedAtBlock": 11943817,
+        "checkedAt": "2026-10-18T21:44:05.287Z",
+        "assignments": [
+          {
+            "role": "DEFAULT_ADMIN_ROLE",
+            "roleHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "account": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+            "grantedBy": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
+            "logIndex": 76,
+            "holdsNow": true
+          },
+          {
+            "role": "OPERATOR_ROLE",
+            "roleHash": "0x97667070c54ef182b0f5858b034beac1b6f3089aa2d3188bb1e8929f4fa9b929",
+            "account": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+            "grantedBy": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
+            "logIndex": 77,
+            "holdsNow": true
+          }
+        ],
+        "noRoleFor": [
+          { "account": "0x2805394e8fCC41bB11613c95967be0104AB88b1c", "label": "factory", "holdsAdmin": false, "holdsOperator": false },
+          { "account": "0x5Ad87a0621175206b72d10E4b8577b192e7F40aB", "label": "factory owner", "holdsAdmin": false, "holdsOperator": false }
+        ]
+      }
+    },
+    "tokenSetup": {
+      "done": false,
+      "tokenSetup": {
+        "ready": false,
+        "mode": "FREEZE",
+        "requirement": "adapter_must_hold_agent_role",
+        "authorizedVia": null,
+        "identityRegistry": null,
+        "reason": null
+      },
+      "canSign": null,
+      "requiredSigner": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+      "action": "SIGN_TRANSACTIONS",
+      "chainId": 11155111,
+      "steps": [
+        {
+          "to": "0x305382e98F8e6ee24c32dF3567342E1F1DECb9b6",
+          "data": "0x84e79842000000000000000000000000037b9e26d8b98aa1b1fcc321ba45a87fc786c7fc",
+          "value": "0",
+          "functionName": "addAgent",
+          "label": "Grant agent role to freeze adapter 0x037B9e...86C7Fc on the security token (requires token agent admin)",
+          "description": "Grant agent role to freeze adapter 0x037B9e...86C7Fc on the security token (requires token agent admin)",
+          "chainId": 11155111
+        }
+      ],
+      "confirmStepIndex": 0,
+      "preflight": {
+        "simulated": false,
+        "note": "Pass from (the signing wallet) to check that it holds the authority on the token."
+      }
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-18T21:44:05.391Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Not Mined Yet
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_NOT_FOUND",
+    "message": "Transaction not found or not yet mined"
+  },
+  "metadata": {
+    "timestamp": "2026-10-18T21:43:41.118Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Signer Not of This Instance
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "DEPLOYMENT_NOT_INSTANCE_BOUND",
+    "message": "The deployment was signed by a wallet that is not a verified wallet of this instance. Register the wallet on the instance first."
+  },
+  "metadata": {
+    "timestamp": "2026-10-18T21:44:05.391Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `txHash` is missing or not `0x` followed by 64 hex characters, or the body carries another field. `error.details` names the field |
+| `TX_REVERTED` | `400` | The transaction was mined but reverted. Nothing was deployed |
+| `TX_WRONG_TARGET` | `400` | The transaction is not sent to the Seller Financing factory of your network, and no recognised smart-account call inside it calls `deployMarket` on that factory |
+| `TX_WRONG_FUNCTION` | `400` | The transaction calls the factory directly, but not `deployMarket` |
+| `TX_NOT_VERIFIED` | `400` | The receipt carries no `MarketDeployed` from the factory for the signing wallet, or the factory does not recognise the market |
+| `DEPLOYMENT_NOT_INSTANCE_BOUND` | `403` | The signer is not a verified wallet of your instance. Register the wallet, then send the hash again |
+| `TX_NOT_FOUND` | `404` | No receipt yet: the transaction is unmined, dropped or on another network |
+| `MARKET_RECORDED_ELSEWHERE` | `409` | The market is recorded on another instance |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | Your instance's verified wallets could not be read. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `DEPLOY_CONFIRM_FAILED` | `500` | Unexpected failure. Send the hash again, or contact support with the request ID |

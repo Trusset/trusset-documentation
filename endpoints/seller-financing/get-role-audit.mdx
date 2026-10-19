@@ -1,0 +1,172 @@
+---
+title: 'Get Role Audit'
+api: 'GET /seller-financing/api/markets/{marketId}/role-audit'
+description: 'The role assignments of a market''s deployment, rebuilt from the receipt and verified live'
+---
+
+<Note>
+  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Returns the record of who received which role when the market was deployed. It is rebuilt from the deployment receipt on every call: each `RoleGranted` event the market emitted in that transaction, the signer, and the market's initial parameters. Every role is then checked live with `hasRole`, together with a check that neither the factory nor its owner holds the admin or operator role.
+
+[Record Deployment](/endpoints/seller-financing/confirm-deployment) returns the same record as `auditDocument`. The Issuer Portal also renders it as a PDF certificate under the same `docRef`. The certificate is available in the Issuer Portal only, not to an API key.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/seller-financing/list-markets).</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="docRef" type="string">`SF-` followed by 12 hex characters, derived from the chain, the market and the deployment transaction. The same market always has the same reference.</ResponseField>
+    <ResponseField name="title" type="string">`Seller Financing market deployment: role assignments`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain.</ResponseField>
+    <ResponseField name="market" type="string">The market contract.</ResponseField>
+    <ResponseField name="adapter" type="string">Its collateral adapter.</ResponseField>
+    <ResponseField name="factory" type="string">The factory that deployed it.</ResponseField>
+    <ResponseField name="assetToken" type="string">The asset token.</ResponseField>
+    <ResponseField name="paymentToken" type="string">The payment token.</ResponseField>
+    <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`.</ResponseField>
+    <ResponseField name="collateralAgent" type="string">The collateral agent.</ResponseField>
+    <ResponseField name="identityRegistry" type="string">The market identity register the deployment set, or `null`. [Get Market](/endpoints/seller-financing/get-market) reads the one in force now.</ResponseField>
+    <ResponseField name="repayFee" type="string">The repay fee the factory stamped, in the payment token's smallest unit.</ResponseField>
+    <ResponseField name="transaction" type="object">
+      <Expandable>
+        <ResponseField name="hash" type="string">The deployment transaction.</ResponseField>
+        <ResponseField name="blockNumber" type="integer">Its block.</ResponseField>
+        <ResponseField name="blockHash" type="string">The block hash.</ResponseField>
+        <ResponseField name="timestamp" type="integer">The block time, in unix seconds.</ResponseField>
+        <ResponseField name="signer" type="string">The wallet that signed the deployment. For a smart-account deployment, the smart account.</ResponseField>
+        <ResponseField name="outerSender" type="string">For a smart-account deployment, the wallet that broadcast the outer transaction. `null` for a direct one.</ResponseField>
+        <ResponseField name="outerTarget" type="string">For a smart-account deployment, the contract the outer transaction called, such as the Safe or the ERC-4337 entry point. `null` for a direct one.</ResponseField>
+        <ResponseField name="status" type="integer">`1` for a successful transaction.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="assignments" type="array">Each role the market granted in the deployment transaction: `{ role, roleHash, account, grantedBy, logIndex }`. `role` is `DEFAULT_ADMIN_ROLE` or `OPERATOR_ROLE`, or the raw hash of any other role.</ResponseField>
+    <ResponseField name="atomic" type="boolean">`true` when the deployment transaction granted roles and the factory made every one of those grants. `false` when it granted none, or another account made one.</ResponseField>
+    <ResponseField name="liveVerification" type="object">
+      The live check.
+      <Expandable>
+        <ResponseField name="checkedAtBlock" type="integer">The block the check ran against.</ResponseField>
+        <ResponseField name="checkedAt" type="string">ISO 8601 time of the check.</ResponseField>
+        <ResponseField name="assignments" type="array">The same grants with `holdsNow`: `true` when the account still holds the role, `false` when it was revoked or renounced, `null` when unread.</ResponseField>
+        <ResponseField name="noRoleFor" type="array">`{ account, label, holdsAdmin, holdsOperator }` for the factory (`label: "factory"`) and its owner (`label: "factory owner"`). Both read `false` on a market where Trusset holds no role. `null` means unread. When the factory's owner cannot be read, its row is left out.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  The record covers the grants of the deployment transaction. A role the admin granted later is not in `assignments`. A role revoked later shows as `holdsNow: false`.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/seller-financing/api/markets/cmsg4x7k20003sf9q1d8v6b2e/role-audit" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/seller-financing/api/markets/${marketId}/role-audit`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+const trussetFree = data.liveVerification.noRoleFor.every(
+  (r: { holdsAdmin: boolean | null; holdsOperator: boolean | null }) => r.holdsAdmin === false && r.holdsOperator === false
+);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "docRef": "SF-739AD00ECE63",
+    "title": "Seller Financing market deployment: role assignments",
+    "chainId": 11155111,
+    "market": "0xc35e5f74eC4C1dfB8cE2b8798D6161B706F9B5E1",
+    "adapter": "0x037B9e26D8B98aa1B1FCC321ba45A87Fc786C7Fc",
+    "factory": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
+    "assetToken": "0x305382e98F8e6ee24c32dF3567342E1F1DECb9b6",
+    "paymentToken": "0x98aD0ca091552e23C564B41C74282e5343D03E8a",
+    "mode": "FREEZE",
+    "collateralAgent": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+    "identityRegistry": null,
+    "repayFee": "1500000",
+    "transaction": {
+      "hash": "0xab2709878f3c6a93fef46c073043a8a7206fa5a164e04bf1f2cd5055da619fde",
+      "blockNumber": 11943817,
+      "blockHash": "0x2371180b75e06fb38b90fc899a1f982e899f316e144bd84ac4c5f372988021bd",
+      "timestamp": 1792359828,
+      "signer": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+      "outerSender": null,
+      "outerTarget": null,
+      "status": 1
+    },
+    "assignments": [
+      {
+        "role": "DEFAULT_ADMIN_ROLE",
+        "roleHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "account": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+        "grantedBy": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
+        "logIndex": 76
+      },
+      {
+        "role": "OPERATOR_ROLE",
+        "roleHash": "0x97667070c54ef182b0f5858b034beac1b6f3089aa2d3188bb1e8929f4fa9b929",
+        "account": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+        "grantedBy": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
+        "logIndex": 77
+      }
+    ],
+    "atomic": true,
+    "liveVerification": {
+      "checkedAtBlock": 11947182,
+      "checkedAt": "2026-10-19T09:07:00.512Z",
+      "assignments": [
+        {
+          "role": "DEFAULT_ADMIN_ROLE",
+          "roleHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "account": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+          "grantedBy": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
+          "logIndex": 76,
+          "holdsNow": true
+        },
+        {
+          "role": "OPERATOR_ROLE",
+          "roleHash": "0x97667070c54ef182b0f5858b034beac1b6f3089aa2d3188bb1e8929f4fa9b929",
+          "account": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+          "grantedBy": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
+          "logIndex": 77,
+          "holdsNow": true
+        }
+      ],
+      "noRoleFor": [
+        { "account": "0x2805394e8fCC41bB11613c95967be0104AB88b1c", "label": "factory", "holdsAdmin": false, "holdsOperator": false },
+        { "account": "0x5Ad87a0621175206b72d10E4b8577b192e7F40aB", "label": "factory owner", "holdsAdmin": false, "holdsOperator": false }
+      ]
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-19T09:07:00.618Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `TX_NOT_FOUND` | `404` | The deployment transaction could not be loaded from the chain |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `ROLE_AUDIT_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |

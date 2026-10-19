@@ -1,0 +1,288 @@
+---
+title: 'Build Token Setup'
+api: 'POST /seller-financing/api/markets/{marketId}/token-setup'
+description: 'The token-side transaction the market adapter needs on the asset token, and who signs it'
+---
+
+<Note>
+  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Reads where the market's adapter stands on the asset token and builds the one transaction that sets it up. A market takes no listing until the token accepts its adapter. See [Token-side setup](/endpoints/seller-financing/introduction#token-side-setup).
+
+- **Freeze mode.** The step is `addAgent(adapter)` on the asset token. Only the token's owner can grant the agent role, and `requiredSigner` names that owner.
+- **Custody mode.** The step admits the custody adapter as a holder of the token. On an ERC-3643 identity register it is `registerIdentity` under the adapter's ONCHAINID, signed by an agent of the register. On a Trusset ID Register it verifies the adapter, signed by a KYC provider of the register. On a token with a contract allow-list it allow-lists the adapter, signed by the token's compliance admin.
+
+The signer is on the token issuer's side and is often not your instance. Pass `from` to check whether a wallet can sign the step. In freeze mode and on an allow-list, a wallet that cannot sign still gets the transaction, to send to the party that can.
+
+A register registration is different. It is test-run from `from`, or from your instance's primary verified wallet when you omit `from`, before any transaction is built. When the register refuses that wallet, the answer is blocked with `IDENTITY_REGISTRY_WRITE_REJECTED` and carries no transaction. The calldata therefore comes back only when the wallet checked is an agent of the register (on a Trusset ID Register, a KYC provider). Otherwise the register's agent, usually the token issuer's KYC operator, builds it from its own wallet.
+
+Unlike every other write, `from` is optional here, so you can build the step before you know who will sign it.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/seller-financing/list-markets).</ParamField>
+
+## Body Parameters
+
+<ParamField body="from" type="string">
+  The wallet that would sign. With it, the step is simulated from that wallet and the answer says whether it can sign. Without it, a freeze or allow-list step comes back unchecked with `canSign: null`. A register registration is checked from your instance's primary verified wallet instead, as above.
+</ParamField>
+
+<ParamField body="identityAddress" type="string">
+  Custody mode on an ERC-3643 identity register only. The ONCHAINID the token issuer's KYC operator issued for the custody adapter. It must be a deployed contract carrying a valid claim for every topic the register requires, from a trusted issuer of the token. Without it, the answer is blocked with `ONCHAINID_REQUIRED`, naming the register and the claim topics to ask for.
+</ParamField>
+
+## Response Fields
+
+The answer takes one of five shapes. Branch on `done` and `canSign`.
+
+| `done` | `canSign` | Meaning |
+|---|---|---|
+| `true` | absent | The token already accepts the adapter. `steps` is empty and nothing is to be signed |
+| `false` | `true` | `from` can sign. `steps` holds the simulated transaction with `gasLimit` |
+| `false` | `null` | No `from` was sent. `steps` holds the transaction, unchecked in freeze mode and on an allow-list |
+| `false` | `false`, with `transaction` | Freeze mode or an allow-list: `from` cannot sign. `transaction` is the step to send to the party that can, and `steps` is empty |
+| `false` | `false`, with `blocked` | No transaction can be prepared for the wallet checked. `blocked.code` says why and `message` what to do. `steps` is empty |
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="done" type="boolean">`true` when the token already accepts the adapter.</ResponseField>
+    <ResponseField name="tokenSetup" type="object">The setup status. See [Setup status](#setup-status).</ResponseField>
+    <ResponseField name="canSign" type="boolean">Whether `from` can sign the step. `null` without `from`.</ResponseField>
+    <ResponseField name="requiredSigner" type="string">The asset token's owner, on a freeze-mode answer that leaves a step to sign and on any blocked answer, including a custody block whose remedy lies with the register's agent rather than the owner. `null` on a custody-mode answer that is not blocked, and when the token has no `owner()`. Absent when `from` can sign.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`, when `steps` holds a transaction.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain the step is built for.</ResponseField>
+    <ResponseField name="steps" type="array">The step to sign: `{ to, data, value, functionName, label, description, chainId }`, plus `gasLimit` when simulated. `functionName` is `addAgent` in freeze mode and `registerHolder` for any custody-mode admission. Empty when there is nothing to sign from `from`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">`0`, when `steps` holds a transaction.</ResponseField>
+    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }` when `from` can sign, `{ simulated: false, note }` without `from`.</ResponseField>
+    <ResponseField name="transaction" type="object">When `from` cannot sign: `{ to, data, description, chainId, value }`, the step to hand to its signer.</ResponseField>
+    <ResponseField name="blocked" type="object">When no transaction can be prepared: `{ code, message }`. See the codes below.</ResponseField>
+    <ResponseField name="message" type="string">On a blocked answer or one `from` cannot sign: what to do, in words. On an allow-list token the message names an agent of the token's identity registry as the signer, while the step is signed by the token's compliance admin.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Setup status
+
+`tokenSetup` is the same block [List Markets](/endpoints/seller-financing/list-markets) and [Get Market](/endpoints/seller-financing/get-market) return: `{ ready, mode, requirement, authorizedVia, identityRegistry, reason }`. `ready` is `true` once the token accepts the adapter, `false` while it does not, and `null` when that could not be read.
+
+| `requirement` | Mode | Meaning |
+|---|---|---|
+| `adapter_must_hold_agent_role` | `FREEZE` | The adapter needs the agent role on the token. `ready` says whether it holds it |
+| `token_not_freeze_compatible` | `FREEZE` | The token cannot take a freeze lock: it lacks the ERC-3643 freeze reads, or it is an ERC-7943 token without an identity register. `reason` says which. No setup can make the market work |
+| `adapter_must_be_verified_holder` | `CUSTODY` | The token's identity register, named in `identityRegistry`, must verify the adapter. `authorizedVia` reads `identity_registry` once it does |
+| `adapter_must_be_authorized_contract` | `CUSTODY` | The token's own contract allow-list must list the adapter. `authorizedVia` reads `token_authorized_contract` once it does |
+| `none_required` | `CUSTODY` | Nothing on the token stands in the adapter's way. `authorizedVia` reads `token_transfer_rules` when the token's transfer rules admit the adapter, or `unrestricted_token` when the token exposes no holder rule at all. `reason` explains |
+| `token_refuses_holder` | `CUSTODY` | The token's transfer rules refuse the adapter. Only the token issuer can admit it under the token's own rules, and no transaction can be prepared. `reason` says so |
+| `holder_status_unreadable` | Both | The token or its register could not be read. `ready` is `null` |
+| `unknown` | Both | The status could not be determined. `ready` reads `false`. Retry before acting on it |
+
+<Warning>
+  A `none_required` token with `authorizedVia: "unrestricted_token"` exposes no rule this platform can read. If it restricts transfers through a surface the platform cannot see, its issuer must still admit the adapter, or the first custody listing reverts at the transfer into the adapter.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/seller-financing/api/markets/cmsg4x7k20003sf9q1d8v6b2e/token-setup" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"from": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/seller-financing/api/markets/${marketId}/token-setup`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: await signer.getAddress() })
+  }
+);
+const { data } = await res.json();
+if (data.done) return;
+if (data.canSign) {
+  const step = data.steps[0];
+  await (await signer.sendTransaction({ to: step.to, data: step.data, value: 0, gasLimit: step.gasLimit })).wait();
+} else {
+  console.log(data.message);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Freeze - Owner Can Sign
+{
+  "success": true,
+  "data": {
+    "done": false,
+    "tokenSetup": {
+      "ready": false,
+      "mode": "FREEZE",
+      "requirement": "adapter_must_hold_agent_role",
+      "authorizedVia": null,
+      "identityRegistry": null,
+      "reason": null
+    },
+    "canSign": true,
+    "action": "SIGN_TRANSACTIONS",
+    "chainId": 11155111,
+    "steps": [
+      {
+        "to": "0x305382e98F8e6ee24c32dF3567342E1F1DECb9b6",
+        "data": "0x84e79842000000000000000000000000037b9e26d8b98aa1b1fcc321ba45a87fc786c7fc",
+        "value": "0",
+        "functionName": "addAgent",
+        "label": "Grant agent role to freeze adapter 0x037B9e...86C7Fc on the security token (requires token agent admin)",
+        "description": "Grant agent role to freeze adapter 0x037B9e...86C7Fc on the security token (requires token agent admin)",
+        "gasLimit": "196930",
+        "chainId": 11155111
+      }
+    ],
+    "confirmStepIndex": 0,
+    "preflight": {
+      "simulated": true,
+      "gasEstimate": "151485"
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-18T21:44:12.006Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Freeze - Another Wallet Must Sign
+{
+  "success": true,
+  "data": {
+    "done": false,
+    "tokenSetup": {
+      "ready": false,
+      "mode": "FREEZE",
+      "requirement": "adapter_must_hold_agent_role",
+      "authorizedVia": null,
+      "identityRegistry": null,
+      "reason": null
+    },
+    "canSign": false,
+    "requiredSigner": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+    "message": "The connected wallet 0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b cannot sign this step. It has to be signed by the asset token's owner 0xCD421aBbA2b9b047eC069215Df5C49c97C96f895 (only the owner can grant the agent role). Send them the transaction below or ask them to complete it.",
+    "transaction": {
+      "to": "0x305382e98F8e6ee24c32dF3567342E1F1DECb9b6",
+      "data": "0x84e79842000000000000000000000000037b9e26d8b98aa1b1fcc321ba45a87fc786c7fc",
+      "description": "Grant agent role to freeze adapter 0x037B9e...86C7Fc on the security token (requires token agent admin)",
+      "chainId": 11155111,
+      "value": "0"
+    },
+    "steps": []
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-18T21:44:12.006Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Custody - ONCHAINID Required
+{
+  "success": true,
+  "data": {
+    "done": false,
+    "tokenSetup": {
+      "ready": false,
+      "mode": "CUSTODY",
+      "requirement": "adapter_must_be_verified_holder",
+      "authorizedVia": null,
+      "identityRegistry": "0x18dC3306C6488413aBE3706352CE2f3362F4E342",
+      "reason": null
+    },
+    "steps": [],
+    "canSign": false,
+    "blocked": {
+      "code": "ONCHAINID_REQUIRED",
+      "message": "Only KYC-approved addresses may hold this collateral token. Its identity registry at 0x18dC3306C6488413aBE3706352CE2f3362F4E342 admits an address only once an ONCHAINID (an on-chain identity contract) has been issued for it, and the custody adapter 0xa6cd40...001d4c has none yet. That onboarding is done by the token issuer's KYC operator, not by Trusset: send them the custody adapter address and ask them to issue an ONCHAINID carrying the claims this registry requires (topics: 0xf10451f2068956fc6b77c861ed53a001af01cf7ac253ae3e3e8e4145a5f43c53). Once it exists, paste the ONCHAINID address here and the registration becomes signable by an agent of the registry."
+    },
+    "requiredSigner": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+    "message": "Only KYC-approved addresses may hold this collateral token. Its identity registry at 0x18dC3306C6488413aBE3706352CE2f3362F4E342 admits an address only once an ONCHAINID (an on-chain identity contract) has been issued for it, and the custody adapter 0xa6cd40...001d4c has none yet. That onboarding is done by the token issuer's KYC operator, not by Trusset: send them the custody adapter address and ask them to issue an ONCHAINID carrying the claims this registry requires (topics: 0xf10451f2068956fc6b77c861ed53a001af01cf7ac253ae3e3e8e4145a5f43c53). Once it exists, paste the ONCHAINID address here and the registration becomes signable by an agent of the registry."
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-18T21:46:58.442Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Custody - Register Agent Signs
+{
+  "success": true,
+  "data": {
+    "done": false,
+    "tokenSetup": {
+      "ready": false,
+      "mode": "CUSTODY",
+      "requirement": "adapter_must_be_verified_holder",
+      "authorizedVia": null,
+      "identityRegistry": "0x18dC3306C6488413aBE3706352CE2f3362F4E342",
+      "reason": null
+    },
+    "canSign": true,
+    "action": "SIGN_TRANSACTIONS",
+    "chainId": 11155111,
+    "steps": [
+      {
+        "to": "0x18dC3306C6488413aBE3706352CE2f3362F4E342",
+        "data": "0x454a03e0...",
+        "value": "0",
+        "functionName": "registerHolder",
+        "label": "Register custody adapter 0xa6cd40...001d4c on the ERC-3643 identity registry under ONCHAINID 0x5D4315...6B449D (requires an agent of that registry)",
+        "description": "Register custody adapter 0xa6cd40...001d4c on the ERC-3643 identity registry under ONCHAINID 0x5D4315...6B449D (requires an agent of that registry)",
+        "gasLimit": "338535",
+        "chainId": 11155111
+      }
+    ],
+    "confirmStepIndex": 0,
+    "preflight": {
+      "simulated": true,
+      "gasEstimate": "260412"
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-18T21:47:30.215Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Blocked codes
+
+A blocked answer is a `200` with `blocked.code`. Nothing can be signed until its cause is resolved, usually by the token issuer.
+
+| `blocked.code` | Cause and remedy |
+|---|---|
+| `FREEZE_MODE_UNSUPPORTED_TOKEN` | The asset token cannot take a freeze lock. A freeze market cannot work on it |
+| `ONCHAINID_REQUIRED` | The adapter has no ONCHAINID on the token's ERC-3643 register. Ask the token issuer's KYC operator to issue one with the claim topics the message lists, then send it as `identityAddress` |
+| `ONCHAINID_NOT_CONTRACT` | `identityAddress` is not a deployed contract on your network |
+| `ONCHAINID_CLAIMS_MISSING` | The ONCHAINID carries no valid claim for a required topic from a trusted issuer. The KYC operator adds the claim first |
+| `IDENTITY_ALREADY_REGISTERED` | The adapter already holds a qualifying ONCHAINID on the register. Read the status again |
+| `IDENTITY_CLAIMS_REQUIRED` | The adapter is registered, but its ONCHAINID lacks a required claim. The setup completes once the KYC operator adds it |
+| `CLAIM_TOPICS_UNREADABLE` | The register did not return the claim topics it requires. The token issuer's register operator resolves this |
+| `IDENTITY_REGISTRY_WRITE_REJECTED` | The register refused the registration from the checked wallet. An agent of the register, usually the token issuer's KYC operator, must sign it. A chain read that fails during this check answers the same code, so retry once before you hand the request on |
+| `IDENTITY_REGISTRY_UNRECOGNISED` | The token's register answers neither the Trusset nor the ERC-3643 interface. The token issuer admits the adapter directly |
+| `IDENTITY_REGISTRY_UNKNOWN` | The token exposes no identity register |
+| `TOKEN_REFUSES_HOLDER` | The token's transfer rules refuse the adapter. Only the token issuer can admit it |
+| `HOLDER_VERIFICATION_BLOCKED` | The adapter cannot be admitted as a holder from this API |
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `from` or `identityAddress` is malformed, or the body carries another field. `error.details` names the field |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `CHAIN_UNAVAILABLE` | `503` | The setup status could not be read. Nothing was built. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `TOKEN_SETUP_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

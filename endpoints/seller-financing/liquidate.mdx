@@ -1,0 +1,162 @@
+---
+title: 'Liquidate'
+api: 'POST /seller-financing/api/markets/{marketId}/listings/{listingId}/liquidate'
+description: 'Calldata that withdraws from the sale of a defaulted loan and settles the escrow'
+---
+
+<Note>
+  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Builds the seller's withdrawal from the sale of a loan in default. The seller or the market's operator signs it. Once mined, the listing reads `LIQUIDATED`, the asset is released back to the seller, and the escrow is split:
+
+- The seller is credited the compensation, 1.5 percent of the downpayment rounded up, plus the interest still owed, capped at the escrow, less Trusset's 20 percent of that sum.
+- Trusset is credited that 20 percent.
+- The buyer is credited the rest of the escrow as a refund.
+
+The escrow is the downpayment plus the principal paid so far. Interest the buyer paid before the default stays with the seller. Nothing is paid out by the liquidation itself: the seller and the buyer each withdraw with [Withdraw](/endpoints/seller-financing/withdraw).
+
+In freeze mode the adapter unfreezes the amount in the seller's wallet. In custody mode it returns the asset to the seller, or keeps it in escrow for the seller when the token refuses the return. See [What each party receives](/endpoints/seller-financing/introduction#what-each-party-receives) for a worked example.
+
+A loan is in default one second after the grace period of a due date whose interest is unpaid, or one second after maturity plus the grace period while principal is outstanding. Before that, the API answers `409 TX_WOULD_REVERT` with `NotLiquidatable` and the moment the loan becomes liquidatable. A liquidation is refused while the market is paused.
+
+<Warning>
+  The asset is released before any money settles. While the freeze adapter lacks its agent role on the token, or the custody adapter holds less than it recorded, the liquidation reverts and the escrow waits until the token issuer restores the role or the holdings.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/seller-financing/list-markets).</ParamField>
+
+<ParamField path="listingId" type="string" required>The listing's ID on the market.</ParamField>
+
+## Body Parameters
+
+<ParamField body="from" type="string" required>The wallet that signs: the seller or a holder of the operator role. Any other wallet answers `409 TX_WOULD_REVERT` with `NotSeller`.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain the step is built for.</ResponseField>
+    <ResponseField name="steps" type="array">One step, `liquidate` on the market, with `gasLimit`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">`0`.</ResponseField>
+    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`.</ResponseField>
+    <ResponseField name="loanStatus" type="object">The loan when the request was built: `interestDue`, `payoff`, `nextDue`, `isLiquidatable` and `liquidatableAt`, as on [Get Loan Status](/endpoints/seller-financing/get-loan-status#response-fields). `null` when unread.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/seller-financing/api/markets/cmsg4x7k20003sf9q1d8v6b2e/listings/4/liquidate" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"from": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/seller-financing/api/markets/${marketId}/listings/${listingId}/liquidate`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: await seller.getAddress() })
+  }
+);
+const body = await res.json();
+if (!body.success && body.error.details?.error === 'NotLiquidatable') {
+  console.log(`Liquidatable from ${new Date(body.error.details.liquidatableAt * 1000).toISOString()}`);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "chainId": 11155111,
+    "steps": [
+      {
+        "to": "0xc35e5f74eC4C1dfB8cE2b8798D6161B706F9B5E1",
+        "data": "0x415f1240...",
+        "value": "0",
+        "functionName": "liquidate",
+        "label": "Withdraw from the sale of listing 4 and settle the escrow",
+        "description": "Withdraw from the sale of listing 4 and settle the escrow",
+        "gasLimit": "406127",
+        "chainId": 11155111
+      }
+    ],
+    "confirmStepIndex": 0,
+    "preflight": {
+      "simulated": true,
+      "gasEstimate": "312406"
+    },
+    "loanStatus": {
+      "interestDue": "140139154",
+      "interestDueFormatted": "140.139154",
+      "payoff": {
+        "interest": "140139154",
+        "principal": "8000000000",
+        "fee": "1500000",
+        "total": "8141639154",
+        "totalFormatted": "8141.639154"
+      },
+      "nextDue": {
+        "dueAt": 1793005200,
+        "interestAmount": "115781947",
+        "interestAmountFormatted": "115.781947",
+        "principalAmount": "0",
+        "principalAmountFormatted": "0.0"
+      },
+      "isLiquidatable": true,
+      "liquidatableAt": 1793178001
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-29T09:00:00.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Not in Default
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_WOULD_REVERT",
+    "message": "The loan is not in default. It becomes liquidatable at 2026-10-28T09:00:01.000Z (unix 1793178001) unless the buyer pays.",
+    "details": {
+      "action": "liquidation",
+      "error": "NotLiquidatable",
+      "liquidatableAt": 1793178001
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-10-22T09:00:00.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+Liquidated at this moment, the loan's 2,000 USDC escrow splits into 136.111324 USDC for the seller, 34.02783 USDC for Trusset and 1,829.860846 USDC for the buyer.
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_LISTING_ID` | `400` | `listingId` is not a positive integer of up to 19 digits |
+| `VALIDATION_ERROR` | `400` | `from` is missing or malformed, or the body carries another field |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
+| `INVALID_STATUS` | `409` | The listing is not `ACTIVE`. `details.status` names its status |
+| `TX_WOULD_REVERT` | `409` | The liquidation would revert: `NotLiquidatable` with `details.liquidatableAt`, `NotSeller`, `EnforcedPause`, or an adapter error such as `AgentRoleMissing` or `InsufficientLocked` |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `LIQUIDATE_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

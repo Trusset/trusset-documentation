@@ -1,0 +1,130 @@
+---
+title: 'Withdraw'
+api: 'POST /seller-financing/api/markets/{marketId}/withdraw'
+description: 'Calldata that pays out a wallet''s claimable balance'
+---
+
+<Note>
+  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Builds the payout of the signing wallet's whole claimable balance, read with [Get Claimable](/endpoints/seller-financing/get-claimable), in the payment token. The wallet that signs is the wallet paid for: only it can withdraw its balance, to `to` or to itself.
+
+A withdrawal stays open while the market is paused. When the payment token refuses to pay a wallet, for example one its issuer blacklisted, the owner of the balance can name another `to`. One wallet's refusal never holds back another's balance.
+
+The step pays out the balance at the moment it is mined, so `amount` in the answer can be lower than what arrives when more was credited in between.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/seller-financing/list-markets).</ParamField>
+
+## Body Parameters
+
+<ParamField body="to" type="string">The wallet that receives the payout. It cannot be the market or its adapter. Omitted, `""` or `null`, the payout goes to `from`.</ParamField>
+
+<ParamField body="from" type="string" required>The wallet whose balance is paid out, which signs. A wallet with nothing to withdraw answers `409 TX_WOULD_REVERT` with `NothingToWithdraw`.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain the step is built for.</ResponseField>
+    <ResponseField name="steps" type="array">One step, `withdraw` on the market, with `gasLimit`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">`0`.</ResponseField>
+    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`.</ResponseField>
+    <ResponseField name="to" type="string">The wallet that receives the payout.</ResponseField>
+    <ResponseField name="amount" type="string">The balance of `from` when the request was built, in the payment token's smallest unit.</ResponseField>
+    <ResponseField name="amountFormatted" type="string">The same in whole units.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/seller-financing/api/markets/cmsg4x7k20003sf9q1d8v6b2e/withdraw" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"from": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/seller-financing/api/markets/${marketId}/withdraw`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: await seller.getAddress() })
+  }
+);
+const { data } = await res.json();
+const step = data.steps[0];
+await (await seller.sendTransaction({ to: step.to, data: step.data, value: 0, gasLimit: step.gasLimit })).wait();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "chainId": 11155111,
+    "steps": [
+      {
+        "to": "0xc35e5f74eC4C1dfB8cE2b8798D6161B706F9B5E1",
+        "data": "0x51cff8d9...",
+        "value": "0",
+        "functionName": "withdraw",
+        "label": "Withdraw 10000.8633 to 0x3E22...D77b",
+        "description": "Withdraw 10000.8633 to 0x3E22...D77b",
+        "gasLimit": "258503",
+        "chainId": 11155111
+      }
+    ],
+    "confirmStepIndex": 0,
+    "preflight": {
+      "simulated": true,
+      "gasEstimate": "198849"
+    },
+    "to": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b",
+    "amount": "10000863300",
+    "amountFormatted": "10000.8633"
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-18T21:45:31.020Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Nothing to Withdraw
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_WOULD_REVERT",
+    "message": "There is nothing to withdraw for this wallet.",
+    "details": {
+      "action": "withdrawal",
+      "error": "NothingToWithdraw"
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-10-18T21:45:31.020Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `from` is missing, an address is malformed, or the body carries another field |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `TX_WOULD_REVERT` | `409` | `NothingToWithdraw` when `from` has no balance, `InvalidAddress` when `to` is the market or its adapter, or a refusal of the payment token such as `SafeERC20FailedOperation` |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `WITHDRAW_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

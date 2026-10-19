@@ -1,0 +1,218 @@
+---
+title: 'Repay'
+api: 'POST /seller-financing/api/markets/{marketId}/listings/{listingId}/repay'
+description: 'Calldata for a partial repayment or the full payoff of an active loan'
+---
+
+<Note>
+  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Builds a repayment on an `ACTIVE` loan: an exact approval on the payment token, then `repay`. Any wallet can repay any active loan, and the payment is booked to the loan. `from` is the payer.
+
+The market applies a payment in this order:
+
+1. The repay fee is carved out of it: the smaller of the market's `repayFee` and 0.5 percent of the amount applied.
+2. The rest settles the interest due up to the moment of payment.
+3. What remains reduces the principal and is held in escrow until the loan completes or is liquidated.
+
+The seller is credited its share of the interest at once, and Trusset 20 percent of it. Interest cannot be paid in advance. To pay a period on time, see [Paying a period on time](/endpoints/seller-financing/get-loan-status#paying-a-period-on-time).
+
+The payment that brings the principal to zero closes the loan. The listing reads `REPAID`, the seller is credited the full price, and the buyer can claim the asset with [Claim Asset](/endpoints/seller-financing/claim-asset).
+
+## Paying off in full
+
+With `amount: "full"`, the API reads the payoff now and approves it plus a 0.5 percent margin and one smallest unit, for the interest that accrues until the payment is mined. The market takes the payoff at the moment of mining and never more than the approved amount. A last step resets the allowance to zero, so no unused margin stays approved.
+
+<Warning>
+  If the transaction is mined much later than it was built, the margin may not cover the interest accrued meanwhile. The payment then applies in full and the loan stays `ACTIVE` with a small remainder. Read [Get Loan Status](/endpoints/seller-financing/get-loan-status) after mining and pay the remainder.
+</Warning>
+
+An `amount` at or above the payoff is also built as a full repayment, with `fullRepayment: true` and the closing reset, but without the margin: the approval is exactly `amount`. An `amount` equal to the payoff when the request was built will almost always leave a remainder, because interest accrues until the payment is mined. Send `"full"` to close a loan.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/seller-financing/list-markets).</ParamField>
+
+<ParamField path="listingId" type="string" required>The listing's ID on the market.</ParamField>
+
+## Body Parameters
+
+<ParamField body="amount" type="string" required>
+  `"full"` to pay off the loan, or the most the payment may take, as a decimal string in whole units of the payment token, for example `"128"`. It must be greater than zero. The market never takes more than the payoff, so an amount above it takes only the payoff.
+</ParamField>
+
+<ParamField body="from" type="string" required>The paying wallet, which signs the steps. It must hold the payoff for a full repayment, otherwise `amount`.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain the steps are built for.</ResponseField>
+    <ResponseField name="steps" type="array">Any reset of an existing allowance to zero, the approval of exactly `maxAmount`, then `repay`, and on a full repayment the closing `approve(0)`. With an allowance that already covers `maxAmount`, `repay` alone, with `gasLimit`, and no closing reset.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">Index of the `repay` step, before the closing reset.</ResponseField>
+    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`, or `{ simulated: false, note }` when the repayment can be simulated only after the approval is mined.</ResponseField>
+    <ResponseField name="fullRepayment" type="boolean">`true` when the payment is built to close the loan.</ResponseField>
+    <ResponseField name="maxAmount" type="string">The most the payment may take, which the approval covers, in the payment token's smallest unit.</ResponseField>
+    <ResponseField name="maxAmountFormatted" type="string">The same in whole units.</ResponseField>
+    <ResponseField name="payoff" type="object">The payoff when the request was built: `{ interest, principal, fee, total, totalFormatted }`, in smallest units.</ResponseField>
+    <ResponseField name="note" type="string">How the payment applies, in words.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/seller-financing/api/markets/cmsg4x7k20003sf9q1d8v6b2e/listings/4/repay" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": "full", "from": "0x09BD3f5c18488e492a7bC3C7CCfc6cc837f511e8"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/seller-financing/api/markets/${marketId}/listings/${listingId}/repay`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount: 'full', from: await buyer.getAddress() })
+  }
+);
+const { data } = await res.json();
+for (const step of data.steps) {
+  const tx = await buyer.sendTransaction({ to: step.to, data: step.data, value: 0, gasLimit: step.gasLimit });
+  await tx.wait();
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Full Payoff
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "chainId": 11155111,
+    "steps": [
+      {
+        "to": "0x98aD0ca091552e23C564B41C74282e5343D03E8a",
+        "data": "0x095ea7b3...",
+        "value": "0",
+        "functionName": "approve",
+        "label": "Approve the payoff of 8075.59837 plus a 0.5 percent margin for interest that accrues until the payment is mined",
+        "description": "Approve the payoff of 8075.59837 plus a 0.5 percent margin for interest that accrues until the payment is mined",
+        "chainId": 11155111
+      },
+      {
+        "to": "0xc35e5f74eC4C1dfB8cE2b8798D6161B706F9B5E1",
+        "data": "0xd8aed145...",
+        "value": "0",
+        "functionName": "repay",
+        "label": "Pay off listing 4 in full",
+        "description": "Pay off listing 4 in full",
+        "chainId": 11155111
+      },
+      {
+        "to": "0x98aD0ca091552e23C564B41C74282e5343D03E8a",
+        "data": "0x095ea7b3...",
+        "value": "0",
+        "functionName": "approve",
+        "label": "Reset the unused allowance to zero",
+        "description": "Reset the unused allowance to zero",
+        "chainId": 11155111
+      }
+    ],
+    "confirmStepIndex": 1,
+    "preflight": {
+      "simulated": false,
+      "note": "The main call can only be simulated once the approval is mined; every market-side check passed before the token transfer."
+    },
+    "fullRepayment": true,
+    "maxAmount": "8115976362",
+    "maxAmountFormatted": "8115.976362",
+    "payoff": {
+      "interest": "74098370",
+      "principal": "8000000000",
+      "fee": "1500000",
+      "total": "8075598370",
+      "totalFormatted": "8075.59837"
+    },
+    "note": "The market takes the payoff at the moment the transaction is mined and never more than the approved amount. The margin covers interest that accrues meanwhile; if the transaction is mined much later the loan can remain active with a small remainder."
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-22T09:00:00.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Partial Payment
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "chainId": 11155111,
+    "steps": [
+      {
+        "to": "0x98aD0ca091552e23C564B41C74282e5343D03E8a",
+        "data": "0x095ea7b3...",
+        "value": "0",
+        "functionName": "approve",
+        "label": "Approve exactly 128.0",
+        "description": "Approve exactly 128.0",
+        "chainId": 11155111
+      },
+      {
+        "to": "0xc35e5f74eC4C1dfB8cE2b8798D6161B706F9B5E1",
+        "data": "0xd8aed145...",
+        "value": "0",
+        "functionName": "repay",
+        "label": "Repay 128.0 on listing 4",
+        "description": "Repay 128.0 on listing 4",
+        "chainId": 11155111
+      }
+    ],
+    "confirmStepIndex": 1,
+    "preflight": {
+      "simulated": false,
+      "note": "The main call can only be simulated once the approval is mined; every market-side check passed before the token transfer."
+    },
+    "fullRepayment": false,
+    "maxAmount": "128000000",
+    "maxAmountFormatted": "128.0",
+    "payoff": {
+      "interest": "124330706",
+      "principal": "8000000000",
+      "fee": "1500000",
+      "total": "8125830706",
+      "totalFormatted": "8125.830706"
+    },
+    "note": "Interest is paid first. Principal moves only once interest is settled to the moment of payment, and stays in escrow until completion."
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-27T09:00:00.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+In the partial example, built a day after the first due date, the 128 USDC payment carries a fee of 0.636815 USDC. Of the remaining 127.363185 USDC, 124.330706 USDC settles the interest due and 3.032479 USDC goes to principal, if mined at once.
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_LISTING_ID` | `400` | `listingId` is not a positive integer of up to 19 digits |
+| `VALIDATION_ERROR` | `400` | `amount` is neither `"full"` nor a decimal string, or is finer than the payment token's decimals, or `from` is missing or malformed. `error.details` names the field |
+| `INVALID_AMOUNT` | `400` | `amount` is zero |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
+| `INVALID_STATUS` | `409` | The listing is not `ACTIVE`. `details.status` names its status |
+| `INSUFFICIENT_BALANCE` | `409` | `from` holds less of the payment token than the payment needs: the payoff for a full repayment, otherwise `amount`. `details` carries `token`, `owner`, `balance` and `needed` |
+| `TX_WOULD_REVERT` | `409` | The repayment would revert. With an approval step in the answer, which is the usual case, a refusal by the payment token itself (`SafeERC20FailedOperation`, `ERC20InsufficientAllowance`, `ERC20InsufficientBalance`, an undecoded revert or a text reason about the allowance) is let through to signing with `preflight.simulated: false`, and only other refusals answer here, such as a text reason from a paused token. When the existing allowance already covers `maxAmount`, every revert answers here, including `SafeERC20FailedOperation` and `PaymentTokenNotSupported` from a token that charges a fee on transfer |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `REPAY_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

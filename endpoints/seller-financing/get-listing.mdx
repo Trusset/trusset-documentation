@@ -1,0 +1,183 @@
+---
+title: 'Get Listing'
+api: 'GET /seller-financing/api/markets/{marketId}/listings/{listingId}'
+description: 'One listing with its stamped terms, its loan and, while active, what the loan owes'
+---
+
+<Note>
+  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Returns one listing as the market contract holds it: the terms stamped when it was created, and the loan once a buyer has purchased it. While the loan is `ACTIVE`, `loan.status` adds what it owes now, as [Get Loan Status](/endpoints/seller-financing/get-loan-status) returns it.
+
+The terms never change after creation. A configuration change on the market reaches new listings only.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/seller-financing/list-markets).</ParamField>
+
+<ParamField path="listingId" type="string" required>The listing's ID on the market: a positive integer of up to 19 digits. It is the `id` of the `ListingCreated` event of the listing transaction.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="id" type="string">The listing ID.</ResponseField>
+    <ResponseField name="status" type="string">`OPEN`, `CANCELLED`, `ACTIVE`, `REPAID`, `COMPLETED` or `LIQUIDATED`. See [Lifecycle](/endpoints/seller-financing/introduction#lifecycle).</ResponseField>
+    <ResponseField name="seller" type="string">The wallet that listed.</ResponseField>
+    <ResponseField name="rateMode" type="string">`FIXED` or `DERIVED`. See [Interest](/endpoints/seller-financing/introduction#interest).</ResponseField>
+    <ResponseField name="assetAmount" type="string">Amount of the asset sold, in the asset token's smallest unit.</ResponseField>
+    <ResponseField name="assetAmountFormatted" type="string">The same in whole units. `null` when the asset's decimals could not be read.</ResponseField>
+    <ResponseField name="price" type="string">The price, in the payment token's smallest unit.</ResponseField>
+    <ResponseField name="priceFormatted" type="string">The price in whole units.</ResponseField>
+    <ResponseField name="downpayment" type="string">The downpayment, rounded up, in smallest units.</ResponseField>
+    <ResponseField name="downpaymentFormatted" type="string">The downpayment in whole units.</ResponseField>
+    <ResponseField name="principal" type="string">The price less the downpayment: what the buyer owes after purchase, in smallest units.</ResponseField>
+    <ResponseField name="principalFormatted" type="string">The principal in whole units.</ResponseField>
+    <ResponseField name="downpaymentBps" type="integer">The downpayment in basis points of the price.</ResponseField>
+    <ResponseField name="duration" type="integer">The runtime from purchase to maturity, in seconds.</ResponseField>
+    <ResponseField name="interestPeriod" type="integer">The interest period, in seconds.</ResponseField>
+    <ResponseField name="gracePeriod" type="integer">The grace period after each due date, in seconds.</ResponseField>
+    <ResponseField name="rate" type="string">The annual rate, as an 18-decimal fixed-point fraction. For `FIXED` the fixed rate, for `DERIVED` the base rate.</ResponseField>
+    <ResponseField name="rateBps" type="integer">The rate in basis points.</ResponseField>
+    <ResponseField name="premiumA" type="string">The walk-away premium's first coefficient. `"0"` on a `FIXED` listing.</ResponseField>
+    <ResponseField name="premiumB" type="string">Its second coefficient. `"0"` on a `FIXED` listing.</ResponseField>
+    <ResponseField name="designatedBuyer" type="string">The only wallet that may buy, or `null` when anyone the registers admit may.</ResponseField>
+    <ResponseField name="expiresAt" type="integer">Unix time after which the listing can no longer be bought, or `null` for none.</ResponseField>
+    <ResponseField name="createdAt" type="integer">Unix time of the listing.</ResponseField>
+    <ResponseField name="ref" type="string">The adapter's reference for the lock. Set at listing in custody mode and at purchase in freeze mode, all zeros before.</ResponseField>
+    <ResponseField name="loan" type="object">
+      The loan, or `null` before a purchase.
+      <Expandable>
+        <ResponseField name="buyer" type="string">The wallet that purchased.</ResponseField>
+        <ResponseField name="start" type="integer">Unix time of the purchase. Interest periods count from it.</ResponseField>
+        <ResponseField name="maturity" type="integer">Unix time the principal is due.</ResponseField>
+        <ResponseField name="checkpointAt" type="integer">Unix time of the last principal payment, or the purchase.</ResponseField>
+        <ResponseField name="principal" type="string">Principal still outstanding, in smallest units. `"0"` once repaid.</ResponseField>
+        <ResponseField name="principalFormatted" type="string">The same in whole units.</ResponseField>
+        <ResponseField name="escrowedPrincipal" type="string">Principal repaid so far and held in escrow, in smallest units. It moves to the seller on completion and becomes refundable on liquidation, so it reads `"0"` after either.</ResponseField>
+        <ResponseField name="escrowedPrincipalFormatted" type="string">The same in whole units.</ResponseField>
+        <ResponseField name="baseAccrued" type="string">Base interest accrued up to `checkpointAt`, in smallest units.</ResponseField>
+        <ResponseField name="interestPaid" type="string">Interest paid so far, in smallest units, including what a liquidation took.</ResponseField>
+        <ResponseField name="interestPaidFormatted" type="string">The same in whole units.</ResponseField>
+        <ResponseField name="status" type="object">Only while the listing is `ACTIVE`: `interestDue`, `payoff`, `nextDue`, `isLiquidatable` and `liquidatableAt`, as on [Get Loan Status](/endpoints/seller-financing/get-loan-status#response-fields). `null` when those reads failed.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/seller-financing/api/markets/cmsg4x7k20003sf9q1d8v6b2e/listings/4" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/seller-financing/api/markets/${marketId}/listings/${listingId}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+if (data.status === 'ACTIVE' && data.loan.status) {
+  console.log(`Payoff now ${data.loan.status.payoff.totalFormatted}`);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Active Loan
+{
+  "success": true,
+  "data": {
+    "id": "4",
+    "status": "ACTIVE",
+    "seller": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b",
+    "rateMode": "DERIVED",
+    "assetAmount": "100",
+    "assetAmountFormatted": "100",
+    "price": "10000000000",
+    "priceFormatted": "10000.0",
+    "downpayment": "2000000000",
+    "downpaymentFormatted": "2000.0",
+    "principal": "8000000000",
+    "principalFormatted": "8000.0",
+    "downpaymentBps": 2000,
+    "duration": 2592000,
+    "interestPeriod": 604800,
+    "gracePeriod": 172800,
+    "rate": "40000000000000000",
+    "rateBps": 400,
+    "premiumA": "781805364",
+    "premiumB": "71784000",
+    "designatedBuyer": null,
+    "expiresAt": null,
+    "createdAt": 1792400112,
+    "ref": "0xbf99db9385e9acbeaf1bb0fb2b03846217e51159e1f85e21d539a35125e73815",
+    "loan": {
+      "buyer": "0x09BD3f5c18488e492a7bC3C7CCfc6cc837f511e8",
+      "start": 1792400400,
+      "maturity": 1794992400,
+      "checkpointAt": 1792400400,
+      "principal": "8000000000",
+      "principalFormatted": "8000.0",
+      "escrowedPrincipal": "0",
+      "escrowedPrincipalFormatted": "0.0",
+      "baseAccrued": "0",
+      "interestPaid": "0",
+      "interestPaidFormatted": "0.0",
+      "status": {
+        "interestDue": "74098370",
+        "interestDueFormatted": "74.09837",
+        "payoff": {
+          "interest": "74098370",
+          "principal": "8000000000",
+          "fee": "1500000",
+          "total": "8075598370",
+          "totalFormatted": "8075.59837"
+        },
+        "nextDue": {
+          "dueAt": 1793005200,
+          "interestAmount": "115781947",
+          "interestAmountFormatted": "115.781947",
+          "principalAmount": "0",
+          "principalAmountFormatted": "0.0"
+        },
+        "isLiquidatable": false,
+        "liquidatableAt": 1793178001
+      }
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-22T09:00:00.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Not Found
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "LISTING_NOT_FOUND",
+    "message": "No listing with this id exists on the market."
+  },
+  "metadata": {
+    "timestamp": "2026-10-22T09:00:00.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_LISTING_ID` | `400` | `listingId` is not a positive integer of up to 19 digits |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
+| `CHAIN_UNAVAILABLE` | `503` | The market could not be read. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `LISTING_READ_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |

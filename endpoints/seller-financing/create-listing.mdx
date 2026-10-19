@@ -1,0 +1,271 @@
+---
+title: 'Create Listing'
+api: 'POST /seller-financing/api/markets/{marketId}/listings'
+description: 'Calldata that lists an amount of the asset at a fixed price with deferred payment'
+---
+
+<Note>
+  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Builds the listing for the seller to sign. The listing offers `assetAmount` of the asset at `price`, against a downpayment and deferred payment on the terms you send. Every term is checked against the market's configuration and stamped on the listing when the transaction is mined. It never changes afterwards.
+
+Before building, the API previews the terms on the market contract and refuses terms the market would refuse, including a downpayment that fails the [coverage rule](/endpoints/seller-financing/introduction#coverage-rule). It then simulates the listing from `from`.
+
+- **Freeze mode.** One step, `createListing`. Nothing moves: the asset stays in the seller's wallet until a buyer purchases, when the amount is frozen there. The seller needs that amount unfrozen in its wallet now, and the freeze adapter must hold the agent role on the token.
+- **Custody mode.** An exact approval of the custody adapter for `assetAmount` on the asset token, then `createListing`, which moves the asset into the adapter. The API checks that `from` holds the amount.
+
+The seller must be verified on the market identity register when the market names one, and must not hold the agent role on the asset token.
+
+<Warning>
+  A freeze-mode listing reserves nothing. A seller can list the same unfrozen balance twice. The second purchase then reverts before any money moves. A configuration change mined just before your listing applies to it: check the terms in the `ListingCreated` event, and cancel the listing if you do not accept them.
+</Warning>
+
+The listing's ID is the `id` of the `ListingCreated` event in the receipt of the `createListing` step. There is no confirm call. Read the listing with [Get Listing](/endpoints/seller-financing/get-listing).
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/seller-financing/list-markets).</ParamField>
+
+## Body Parameters
+
+<ParamField body="assetAmount" type="string" required>Amount of the asset to sell, as a decimal string in whole units of the asset token, for example `"100"`. Parsed at the asset's decimals. Must be greater than zero.</ParamField>
+
+<ParamField body="price" type="string" required>The price for the whole amount, as a decimal string in whole units of the payment token, for example `"10000"`.</ParamField>
+
+<ParamField body="downpaymentBps" type="integer" required>The downpayment, 500 to 9000 basis points of the price, inside the market's `minDownpaymentBps` and `maxDownpaymentBps`. The downpayment is rounded up to the payment token's smallest unit.</ParamField>
+
+<ParamField body="durationDays" type="integer" required>The runtime from purchase to maturity, 1 to 3650 days, inside the market's range.</ParamField>
+
+<ParamField body="interestPeriodDays" type="integer" required>The interest period, 1 to 366 days, inside the market's range and not longer than `durationDays`. Interest is due at the end of each period, counted from the purchase. Equal to `durationDays`, interest and principal are both due at maturity.</ParamField>
+
+<ParamField body="gracePeriodDays" type="integer" required>The grace period after each due date, 0 to 90 days, up to the market's `maxGracePeriodDays`.</ParamField>
+
+<ParamField body="rateMode" type="string" required>`FIXED` or `DERIVED`, among those the market enables. See [Interest](/endpoints/seller-financing/introduction#interest).</ParamField>
+
+<ParamField body="fixedRateBps" type="integer">`FIXED` on a market where sellers set the rate: the annual rate, 0 to 5000 basis points, up to the market's `maxFixedRateBps`. Omitted, the rate is `0`. Ignored with `DERIVED`, and on a market where the operator's `fixedRateBps` applies.</ParamField>
+
+<ParamField body="designatedBuyer" type="string">Reserve the listing for one wallet. It cannot be the seller, the market or its adapter. Omitted, `""` or `null`, anyone the registers admit may buy.</ParamField>
+
+<ParamField body="expiresAt" type="integer">Unix time after which the listing can no longer be bought. It must lie in the future and at most 365 days ahead. Omit it for a listing without expiry.</ParamField>
+
+<ParamField body="from" type="string" required>The seller's wallet, which signs the steps.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain the steps are built for.</ResponseField>
+    <ResponseField name="steps" type="array">In custody mode, any reset to zero and the approval of the adapter, then `createListing`. In freeze mode, `createListing` alone. Each step is `{ to, data, value, functionName, label, description, chainId }`, and the simulated `createListing` adds `gasLimit`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">Index of the `createListing` step. Its receipt carries `ListingCreated`.</ResponseField>
+    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`, or `{ simulated: false, note }` when the listing could be simulated only after the approval is mined. See [Writes](/endpoints/seller-financing/introduction#writes).</ResponseField>
+    <ResponseField name="terms" type="object">The terms the listing will be stamped with, as on [Get Quote](/endpoints/seller-financing/quote-terms#response-fields).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/seller-financing/api/markets/cmsg4x7k20003sf9q1d8v6b2e/listings" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "assetAmount": "100",
+    "price": "10000",
+    "downpaymentBps": 2000,
+    "durationDays": 30,
+    "interestPeriodDays": 7,
+    "gracePeriodDays": 2,
+    "rateMode": "DERIVED",
+    "from": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/seller-financing/api/markets/${marketId}/listings`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      assetAmount: '100', price: '10000', downpaymentBps: 2000,
+      durationDays: 30, interestPeriodDays: 7, gracePeriodDays: 2,
+      rateMode: 'DERIVED', from: await seller.getAddress()
+    })
+  }
+);
+const { data } = await res.json();
+
+let receipt;
+for (const [index, step] of data.steps.entries()) {
+  const tx = await seller.sendTransaction({ to: step.to, data: step.data, value: 0, gasLimit: step.gasLimit });
+  const mined = await tx.wait();
+  if (index === data.confirmStepIndex) receipt = mined;
+}
+const LISTING_CREATED = ethers.id(
+  'ListingCreated(uint256,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint8,uint256,uint256,uint256,address,uint256,bytes32)'
+);
+const log = receipt.logs.find((l) => l.topics[0] === LISTING_CREATED);
+const listingId = BigInt(log.topics[1]).toString();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Freeze Mode
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "chainId": 11155111,
+    "steps": [
+      {
+        "to": "0xc35e5f74eC4C1dfB8cE2b8798D6161B706F9B5E1",
+        "data": "0x643af579...",
+        "value": "0",
+        "functionName": "createListing",
+        "label": "List 100 of the asset for 10000.0",
+        "description": "List 100 of the asset for 10000.0",
+        "gasLimit": "1320022",
+        "chainId": 11155111
+      }
+    ],
+    "confirmStepIndex": 0,
+    "preflight": {
+      "simulated": true,
+      "gasEstimate": "1015402"
+    },
+    "terms": {
+      "downpayment": "2000000000",
+      "downpaymentFormatted": "2000.0",
+      "principal": "8000000000",
+      "principalFormatted": "8000.0",
+      "rate": "40000000000000000",
+      "rateBps": 400,
+      "premiumA": "781805364",
+      "premiumB": "71784000",
+      "fullTermInterest": "256338057",
+      "fullTermInterestFormatted": "256.338057",
+      "aprEquivalent": "389847461687500000",
+      "aprEquivalentPercent": "38.98474616875",
+      "aprEquivalentNote": "A simple annualized figure for comparison (full-term interest over principal and runtime). It is not a regulatory effective annual rate.",
+      "coverageWindowInterest": "140139154",
+      "coverageLimit": "1970000000",
+      "coverageOk": true
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-19T08:55:12.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Custody Mode
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "chainId": 11155111,
+    "steps": [
+      {
+        "to": "0x305382e98F8e6ee24c32dF3567342E1F1DECb9b6",
+        "data": "0x095ea7b3...",
+        "value": "0",
+        "functionName": "approve",
+        "label": "Approve the custody adapter for 100 of the asset",
+        "description": "Approve the custody adapter for 100 of the asset",
+        "chainId": 11155111
+      },
+      {
+        "to": "0x2ee5F705c8932D49DF9659205D9Ae69B3612Af58",
+        "data": "0x643af579...",
+        "value": "0",
+        "functionName": "createListing",
+        "label": "List 100 of the asset for 10000.0",
+        "description": "List 100 of the asset for 10000.0",
+        "chainId": 11155111
+      }
+    ],
+    "confirmStepIndex": 1,
+    "preflight": {
+      "simulated": false,
+      "note": "The main call can only be simulated once the approval is mined; every market-side check passed before the token transfer."
+    },
+    "terms": {
+      "downpayment": "2000000000",
+      "downpaymentFormatted": "2000.0",
+      "principal": "8000000000",
+      "principalFormatted": "8000.0",
+      "rate": "40000000000000000",
+      "rateBps": 400,
+      "premiumA": "781805364",
+      "premiumB": "71784000",
+      "fullTermInterest": "256338057",
+      "fullTermInterestFormatted": "256.338057",
+      "aprEquivalent": "389847461687500000",
+      "aprEquivalentPercent": "38.98474616875",
+      "aprEquivalentNote": "A simple annualized figure for comparison (full-term interest over principal and runtime). It is not a regulatory effective annual rate.",
+      "coverageWindowInterest": "140139154",
+      "coverageLimit": "1970000000",
+      "coverageOk": true
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-19T08:55:12.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Coverage
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_WOULD_REVERT",
+    "message": "The downpayment does not cover the compensation plus the interest of one interest period, the grace period and one day. Raise the downpayment or shorten the interest period or grace period.",
+    "details": {
+      "action": "listing creation",
+      "error": "InsufficientDownpaymentCoverage",
+      "terms": {
+        "downpayment": "25000000000",
+        "downpaymentFormatted": "25000.0",
+        "principal": "225000000000",
+        "principalFormatted": "225000.0",
+        "rate": "40000000000000000",
+        "rateBps": 400,
+        "premiumA": "19574539997",
+        "premiumB": "1797300000",
+        "fullTermInterest": "49277179941",
+        "fullTermInterestFormatted": "49277.179941",
+        "aprEquivalent": "109504844313333333",
+        "aprEquivalentPercent": "10.9504844313333333",
+        "aprEquivalentNote": "A simple annualized figure for comparison (full-term interest over principal and runtime). It is not a regulatory effective annual rate.",
+        "coverageWindowInterest": "32103180718",
+        "coverageLimit": "24625000000",
+        "coverageOk": false
+      }
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-10-19T08:55:12.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field is missing, outside its bounds or finer than the token's decimals, `interestPeriodDays` exceeds `durationDays`, `expiresAt` is not in the future or more than 365 days ahead, or the body carries a field this page does not list. `error.details` names each field |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `TX_WOULD_REVERT` | `409` | The market would refuse the listing. `details.error` names the reason: terms outside the configuration (`DownpaymentOutOfRange`, `DurationOutOfRange`, `InterestPeriodOutOfRange`, `GracePeriodOutOfRange`, `RateModeDisabled`, `RateOutOfRange`, `InvalidPrice`), `InsufficientDownpaymentCoverage` with `details.terms`, or a refusal of the simulated listing such as `IdentityNotVerified`, `SellerIsTokenAgent`, `AdapterNotAgent`, `InsufficientFreeBalance`, `InvalidBuyer`, `InvalidExpiry`, `InvalidAmount` or `EnforcedPause` |
+| `INSUFFICIENT_BALANCE` | `409` | Custody mode: `from` holds less of the asset than `assetAmount`. `details` carries `token`, `owner`, `balance` and `needed` |
+| `ASSET_DECIMALS_UNRESOLVED` | `409` | The asset token does not report its decimals, so `assetAmount` cannot be converted. Nothing was built |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `LISTING_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

@@ -1,0 +1,271 @@
+---
+title: 'Build Deployment'
+api: 'POST /seller-financing/api/markets'
+description: 'Calldata that deploys a Seller Financing market from a verified wallet of your instance'
+---
+
+<Note>
+  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Builds the one transaction that deploys a market through the factory. The factory creates the market, deploys its adapter bound to it, and grants the admin role and the operator role, all in that transaction. The factory and Trusset hold no role on the market afterwards.
+
+`from` must be a verified wallet of your instance, because only a deployment your instance's wallet signed can be recorded on your instance. Any other wallet answers `403 DEPLOYMENT_NOT_INSTANCE_BOUND` before any calldata exists. The API then checks both tokens, the identity register, the asset's freeze surface in freeze mode and the payment token's decimals, and simulates the deployment from `from`. A deployment that would revert answers `409 TX_WOULD_REVERT`.
+
+Sign the step from `from` and record the market with [Record Deployment](/endpoints/seller-financing/confirm-deployment), as `confirmWith` names. Until then the market exists on-chain but not on your instance.
+
+Your instance runs at most one market per asset token, payment token and mode. A second request for the same combination answers `409 MARKET_EXISTS` and names the existing market.
+
+## Body Parameters
+
+<ParamField body="assetToken" type="string" required>
+  The token sold on the market. It must have contract code on your network and answer `balanceOf`. In `FREEZE` mode it must also answer the ERC-3643 freeze reads `isAgent` and `getFrozenTokens`, and must not be an ERC-7943 token without an identity register, whose freeze works without an agent role. Otherwise the request answers `409 FREEZE_MODE_UNSUPPORTED_TOKEN` with the reason: use `CUSTODY` for such a token.
+</ParamField>
+
+<ParamField body="paymentToken" type="string" required>
+  The token the buyer pays in, for example USDC from `paymentTokens` on [Get Deployment Options](/endpoints/seller-financing/get-deployment-options). It must differ from `assetToken`, have contract code, answer `balanceOf`, and use 6 to 18 decimals. It must debit exactly what it is asked to transfer: the market refuses a fee-on-transfer token on every payment.
+</ParamField>
+
+<ParamField body="mode" type="string" default="FREEZE">
+  `FREEZE` or `CUSTODY`. See [Collateral modes](/endpoints/seller-financing/introduction#collateral-modes). Fixed for the life of the market.
+</ParamField>
+
+<ParamField body="admin" type="string" required>
+  The wallet that receives `DEFAULT_ADMIN_ROLE`: it grants and revokes roles and can upgrade the market.
+</ParamField>
+
+<ParamField body="operator" type="string">
+  The wallet that receives `OPERATOR_ROLE`: it changes the configuration, pauses and unpauses, and can cancel listings and liquidate defaulted loans for sellers. Omitted, `""` or `null`, the admin receives it.
+</ParamField>
+
+<ParamField body="collateralAgent" type="string" required>
+  The pledgee every lock of the adapter names. Immutable once deployed.
+</ParamField>
+
+<ParamField body="identityRegistry" type="string">
+  An identity register that examines sellers at listing and buyers at purchase. It must have contract code, and a wallet passes when the first word `isVerified(address)` returns is `1`, so ERC-3643 registers and the Trusset ID Register both work. Omit it for a market without a register of its own. The asset token's own register still examines buyers either way.
+</ParamField>
+
+<ParamField body="paymentFallbackDecimals" type="integer">
+  Decimals to use when the payment token does not report its own, from 6 to 18. Ignored when the token reports them. Without it, such a token answers `409 DECIMALS_UNRESOLVED`.
+</ParamField>
+
+<ParamField body="config" type="object">
+  The configuration new listings are checked against and stamped with. Every field is optional, and an omitted field takes its value from `defaults` on [Get Deployment Options](/endpoints/seller-financing/get-deployment-options). The operator changes it later with [Update Configuration](/endpoints/seller-financing/update-config).
+
+  Each minimum must not exceed its maximum, `minInterestPeriodDays` must not exceed `maxDurationDays`, and at least one strategy must be enabled. A configuration that breaks one of these answers `400 INVALID_CONFIG`, a field outside its bounds `400 VALIDATION_ERROR`.
+  <Expandable>
+    <ParamField body="minDownpaymentBps" type="integer">Smallest downpayment, 500 to 9000 basis points of the price. Default `500`.</ParamField>
+    <ParamField body="maxDownpaymentBps" type="integer">Largest downpayment, 500 to 9000. Default `9000`.</ParamField>
+    <ParamField body="minDurationDays" type="integer">Shortest runtime, 1 to 3650 days. Default `7`.</ParamField>
+    <ParamField body="maxDurationDays" type="integer">Longest runtime, 1 to 3650 days. Default `3650`.</ParamField>
+    <ParamField body="minInterestPeriodDays" type="integer">Shortest interest period, 1 to 366 days. Default `1`.</ParamField>
+    <ParamField body="maxInterestPeriodDays" type="integer">Longest interest period, 1 to 366 days. Default `366`.</ParamField>
+    <ParamField body="maxGracePeriodDays" type="integer">Longest grace period, 0 to 90 days. Default `30`.</ParamField>
+    <ParamField body="fixedEnabled" type="boolean">Offer `FIXED` interest. Default `true`.</ParamField>
+    <ParamField body="derivedEnabled" type="boolean">Offer `DERIVED` interest. Default `true`. At least one of the two must be on.</ParamField>
+    <ParamField body="sellerSetsFixedRate" type="boolean">Let the seller name the rate of a `FIXED` listing, up to `maxFixedRateBps`. With `false`, every `FIXED` listing carries `fixedRateBps`. Default `true`.</ParamField>
+    <ParamField body="fixedRateBps" type="integer">The operator's fixed annual rate, 0 to 5000 basis points. Default `800`.</ParamField>
+    <ParamField body="maxFixedRateBps" type="integer">The ceiling on a seller's fixed rate, 0 to 5000. Default `2000`.</ParamField>
+    <ParamField body="baseRateBps" type="integer">The annual base rate of `DERIVED` interest, 0 to 5000. Default `400`.</ParamField>
+    <ParamField body="volatilityBps" type="integer">The annual volatility input that prices the walk-away premium, 100 to 20000. Default `1200`. See [Choosing the volatility input](#choosing-the-volatility-input).</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="from" type="string" required>
+  The wallet that signs the deployment. It must be a verified wallet of your instance. The deployment is simulated from it.
+</ParamField>
+
+## Choosing the volatility input
+
+`volatilityBps` prices the walk-away premium of `DERIVED` listings. Use the annualized volatility of the asset's price, estimated conservatively. As a starting point: listed residential real estate funds 6 to 15 percent, diversified commercial property 10 to 20 percent, single-asset or development projects 20 to 40 percent, listed equities 20 to 40 percent.
+
+When in doubt choose the higher figure. An underestimate leaves the seller less compensated for a buyer who walks away than the premium is designed to give. An overestimate only makes the loan dearer. `FIXED` listings take no premium, so a seller who sets a fixed rate prices that risk into the rate.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain the step is built for.</ResponseField>
+    <ResponseField name="steps" type="array">One step, `deployMarket` on the factory: `{ to, data, value, functionName, label, description, gasLimit, chainId }`. `gasLimit` is the simulated estimate plus 30 percent.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">`0`. Record the market with this step's hash.</ResponseField>
+    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`. A deployment is always simulated from `from`.</ResponseField>
+    <ResponseField name="deployment" type="object">
+      What the step deploys, as the factory will stamp it.
+      <Expandable>
+        <ResponseField name="assetToken" type="string">The asset token.</ResponseField>
+        <ResponseField name="paymentToken" type="string">The payment token.</ResponseField>
+        <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`.</ResponseField>
+        <ResponseField name="admin" type="string">The admin.</ResponseField>
+        <ResponseField name="operator" type="string">The operator, the admin when none was named.</ResponseField>
+        <ResponseField name="collateralAgent" type="string">The collateral agent.</ResponseField>
+        <ResponseField name="identityRegistry" type="string">The market identity register, or `null`.</ResponseField>
+        <ResponseField name="config" type="object">The full configuration, your fields merged over the defaults.</ResponseField>
+        <ResponseField name="repayFee" type="string">The repay fee the factory will stamp on the market, in the payment token's smallest unit. It never changes afterwards.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field }`: [Record Deployment](/endpoints/seller-financing/confirm-deployment) at `/seller-financing/api/markets/confirm`, with the hash in `txHash`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/seller-financing/api/markets" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "assetToken": "0x305382e98F8e6ee24c32dF3567342E1F1DECb9b6",
+    "paymentToken": "0x98aD0ca091552e23C564B41C74282e5343D03E8a",
+    "mode": "FREEZE",
+    "admin": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+    "collateralAgent": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+    "config": { "minDurationDays": 1, "maxGracePeriodDays": 90 },
+    "from": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895"
+  }'
+```
+```typescript TypeScript
+const base = 'https://api.trusset.org/seller-financing/api/markets';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+const from = await signer.getAddress();
+
+const res = await fetch(base, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({
+    assetToken: '0x305382e98F8e6ee24c32dF3567342E1F1DECb9b6',
+    paymentToken: '0x98aD0ca091552e23C564B41C74282e5343D03E8a',
+    admin: from,
+    collateralAgent: from,
+    from
+  })
+});
+const { data } = await res.json();
+
+const step = data.steps[data.confirmStepIndex];
+const tx = await signer.sendTransaction({ to: step.to, data: step.data, value: 0, gasLimit: step.gasLimit });
+await tx.wait();
+
+await fetch(`${base}/confirm`, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.hash }) });
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "chainId": 11155111,
+    "steps": [
+      {
+        "to": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
+        "data": "0x9f455bdd...",
+        "value": "0",
+        "functionName": "deployMarket",
+        "label": "Deploy the freeze Seller Financing market for SFSS paid in USDC",
+        "description": "Deploy the freeze Seller Financing market for SFSS paid in USDC",
+        "gasLimit": "12759839",
+        "chainId": 11155111
+      }
+    ],
+    "confirmStepIndex": 0,
+    "preflight": {
+      "simulated": true,
+      "gasEstimate": "9815261"
+    },
+    "deployment": {
+      "assetToken": "0x305382e98F8e6ee24c32dF3567342E1F1DECb9b6",
+      "paymentToken": "0x98aD0ca091552e23C564B41C74282e5343D03E8a",
+      "mode": "FREEZE",
+      "admin": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+      "operator": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+      "collateralAgent": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
+      "identityRegistry": null,
+      "config": {
+        "minDownpaymentBps": 500,
+        "maxDownpaymentBps": 9000,
+        "minDurationDays": 1,
+        "maxDurationDays": 3650,
+        "minInterestPeriodDays": 1,
+        "maxInterestPeriodDays": 366,
+        "maxGracePeriodDays": 90,
+        "fixedEnabled": true,
+        "derivedEnabled": true,
+        "sellerSetsFixedRate": true,
+        "fixedRateBps": 800,
+        "maxFixedRateBps": 2000,
+        "baseRateBps": 400,
+        "volatilityBps": 1200
+      },
+      "repayFee": "1500000"
+    },
+    "confirmWith": {
+      "endpoint": "/seller-financing/api/markets/confirm",
+      "field": "txHash"
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-18T21:43:30.904Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Wallet Not of This Instance
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "DEPLOYMENT_NOT_INSTANCE_BOUND",
+    "message": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b is not a verified wallet of this instance, so the market it deploys could not be recorded here. Register the wallet on the instance first. Nothing was built."
+  },
+  "metadata": {
+    "timestamp": "2026-10-18T21:43:30.904Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Market Exists
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "MARKET_EXISTS",
+    "message": "This instance already runs a freeze market for this asset and payment token at 0xc35e5f74ec4c1dfb8ce2b8798d6161b706f9b5e1.",
+    "details": {
+      "marketId": "cmsg4x7k20003sf9q1d8v6b2e",
+      "address": "0xc35e5f74ec4c1dfb8ce2b8798d6161b706f9b5e1"
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-10-19T09:12:04.318Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A required field is missing, an address is malformed, a `config` field is outside its bounds, or the body carries a field this page does not list. `error.details` names each field |
+| `SAME_TOKEN` | `400` | `assetToken` and `paymentToken` are the same token |
+| `INVALID_CONFIG` | `400` | The configuration is inconsistent: a minimum above its maximum, `minInterestPeriodDays` above `maxDurationDays`, or no strategy enabled. `message` is the first problem and `details.problems` lists all |
+| `NOT_A_TOKEN` | `400` | A token has no contract code on your network or does not answer `balanceOf`. The message names which |
+| `INVALID_IDENTITY_REGISTRY` | `400` | `identityRegistry` has no contract code on your network |
+| `DEPLOYMENT_NOT_INSTANCE_BOUND` | `403` | `from` is not a verified wallet of your instance. Register it first. Nothing was built |
+| `MARKET_EXISTS` | `409` | Your instance already runs a market for this asset token, payment token and mode. `details` carries its `marketId` and `address` |
+| `FREEZE_MODE_UNSUPPORTED_TOKEN` | `409` | `FREEZE` was asked for a token that cannot take a freeze lock: it lacks the ERC-3643 freeze reads, or it is an ERC-7943 token without an identity register. The message says which. Deploy in `CUSTODY` |
+| `DECIMALS_UNRESOLVED` | `409` | The payment token does not report its decimals. Send `paymentFallbackDecimals` |
+| `PAYMENT_DECIMALS_UNSUPPORTED` | `409` | The payment token uses fewer than 6 or more than 18 decimals. `details.decimals` carries its figure |
+| `TX_WOULD_REVERT` | `409` | The simulated deployment reverts. `details.error` names the contract error. See [Errors](/endpoints/seller-financing/introduction#errors) |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
+| `PROVIDER_UNAVAILABLE` | `503` | The asset token could not be read to check its freeze surface. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | Your instance's verified wallets could not be read. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `DEPLOY_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |
