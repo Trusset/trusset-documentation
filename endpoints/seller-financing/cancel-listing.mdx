@@ -5,12 +5,12 @@ description: 'Calldata that cancels an open listing'
 ---
 
 <Note>
-  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
 Builds the cancellation of an `OPEN` listing. The seller or the market's operator signs it. Once mined, the listing reads `CANCELLED` and can no longer be bought.
 
-In freeze mode nothing moves, since nothing was frozen before a purchase. In custody mode the adapter returns the asset to the seller. When the token refuses that return, the adapter keeps the asset in escrow for the seller, who claims it from the adapter with `claimEscrowedCollateral`. This API does not build that call.
+In freeze mode nothing moves, since nothing was frozen before a purchase. In custody mode the adapter returns the asset to the seller. When the token refuses that return, the cancellation still goes through and the adapter keeps the asset in escrow for the seller. Before building, the API simulates the return from the adapter: when the token refuses it, the answer carries `assetReturn` with `willEscrow: true` and the same text in `warning`. Once the token admits the seller again, the seller takes the asset back with [Claim Escrowed Collateral](/endpoints/seller-financing/claim-escrowed-collateral).
 
 Cancellation stays open while the market is paused. An operator uses it to withdraw the open listings of a seller who lost verification.
 
@@ -22,7 +22,7 @@ Cancellation stays open while the market is paused. An operator uses it to withd
 
 ## Body Parameters
 
-<ParamField body="from" type="string" required>The wallet that signs: the seller or a holder of the operator role. Any other wallet answers `409 TX_WOULD_REVERT` with `NotSeller`.</ParamField>
+<ParamField body="from" type="string" required>The wallet that signs: the seller or a holder of `OPERATOR_ROLE`. Without it the answer is `400 FROM_REQUIRED`. Any other wallet answers `409 TX_WOULD_REVERT` with `NotSeller`, and the message names the seller and the current operators, also in `details.seller` and `details.roleHolders`.</ParamField>
 
 ## Response Fields
 
@@ -33,6 +33,9 @@ Cancellation stays open while the market is paused. An operator uses it to withd
     <ResponseField name="steps" type="array">One step, `cancelListing` on the market, with `gasLimit`.</ResponseField>
     <ResponseField name="confirmStepIndex" type="integer">`0`.</ResponseField>
     <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`.</ResponseField>
+    <ResponseField name="signer" type="object">`{ role: "SELLER_OR_OPERATOR_ROLE", seller }`: the seller of the listing, or a holder of `OPERATOR_ROLE`, signs.</ResponseField>
+    <ResponseField name="assetReturn" type="object">Custody mode only, present when the asset token refuses the return to the seller: `{ willEscrow: true, reason, message }`. `reason` is the token's refusal when it gave one, otherwise `null`. Absent when the return goes through or could not be checked.</ResponseField>
+    <ResponseField name="warning" type="string">`assetReturn.message`, present with it.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -81,6 +84,10 @@ await (await seller.sendTransaction({ to: step.to, data: step.data, value: 0, ga
     "preflight": {
       "simulated": true,
       "gasEstimate": "67747"
+    },
+    "signer": {
+      "role": "SELLER_OR_OPERATOR_ROLE",
+      "seller": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b"
     }
   },
   "error": null,
@@ -114,11 +121,12 @@ await (await seller.sendTransaction({ to: step.to, data: step.data, value: 0, ga
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_LISTING_ID` | `400` | `listingId` is not a positive integer of up to 19 digits |
-| `VALIDATION_ERROR` | `400` | `from` is missing or malformed, or the body carries another field |
-| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `VALIDATION_ERROR` | `400` | `from` is malformed, or the body carries another field. `error.details` names it |
+| `FROM_REQUIRED` | `400` | `from` is missing. The message names who signs: the seller of the listing or a wallet that holds `OPERATOR_ROLE` |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
 | `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
 | `INVALID_STATUS` | `409` | The listing is not `OPEN`. `details.status` names its status |
-| `TX_WOULD_REVERT` | `409` | The cancellation would revert, for example with `NotSeller` when `from` is neither the seller nor an operator, or because the custody adapter cannot return the asset |
+| `TX_WOULD_REVERT` | `409` | The cancellation would revert, for example with `NotSeller` when `from` is neither the seller nor an operator (`details.requiredRole`, `details.seller` and `details.roleHolders` name who can sign), or with `InsufficientLocked` because the custody adapter holds less than it recorded. A return the token refuses does not revert: it is escrowed, as `assetReturn` says |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
 | `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
 | `CANCEL_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

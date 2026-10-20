@@ -5,7 +5,7 @@ description: 'Calldata for a partial repayment or the full payoff of an active l
 ---
 
 <Note>
-  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
 Builds a repayment on an `ACTIVE` loan: an exact approval on the payment token, then `repay`. Any wallet can repay any active loan, and the payment is booked to the loan. `from` is the payer.
@@ -19,6 +19,10 @@ The market applies a payment in this order:
 The seller is credited its share of the interest at once, and Trusset 20 percent of it. Interest cannot be paid in advance. To pay a period on time, see [Paying a period on time](/endpoints/seller-financing/get-loan-status#paying-a-period-on-time).
 
 The payment that brings the principal to zero closes the loan. The listing reads `REPAID`, the seller is credited the full price, and the buyer can claim the asset with [Claim Asset](/endpoints/seller-financing/claim-asset).
+
+## When the asset cannot be delivered
+
+Before building, the API checks the listing's asset leg and returns it as `assetLeg`. See [Asset leg](/endpoints/seller-financing/introduction#asset-leg). While the asset can no longer be delivered to the buyer (`assetLeg.deliverable: false`), a repayment that would complete the loan, `amount: "full"` or an amount at or above the payoff, is refused with `409 ASSET_NOT_DELIVERABLE`: it would credit the seller the full price while the delivery to the buyer reverts. A partial repayment still builds, and carries the leg's text in `warning`. A leg that could not be read (`checked: false`) never refuses a repayment.
 
 ## Paying off in full
 
@@ -42,7 +46,7 @@ An `amount` at or above the payoff is also built as a full repayment, with `full
   `"full"` to pay off the loan, or the most the payment may take, as a decimal string in whole units of the payment token, for example `"128"`. It must be greater than zero. The market never takes more than the payoff, so an amount above it takes only the payoff.
 </ParamField>
 
-<ParamField body="from" type="string" required>The paying wallet, which signs the steps. It must hold the payoff for a full repayment, otherwise `amount`.</ParamField>
+<ParamField body="from" type="string" required>The paying wallet, which signs the steps, normally the buyer. It must hold the payoff for a full repayment, otherwise `amount`. Without it the answer is `400 FROM_REQUIRED`.</ParamField>
 
 ## Response Fields
 
@@ -52,11 +56,13 @@ An `amount` at or above the payoff is also built as a full repayment, with `full
     <ResponseField name="chainId" type="integer">The chain the steps are built for.</ResponseField>
     <ResponseField name="steps" type="array">Any reset of an existing allowance to zero, the approval of exactly `maxAmount`, then `repay`, and on a full repayment the closing `approve(0)`. With an allowance that already covers `maxAmount`, `repay` alone, with `gasLimit`, and no closing reset.</ResponseField>
     <ResponseField name="confirmStepIndex" type="integer">Index of the `repay` step, before the closing reset.</ResponseField>
-    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`, or `{ simulated: false, note }` when the repayment can be simulated only after the approval is mined.</ResponseField>
+    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }` when no approval is needed. With an approval step, `{ simulated: true, basis: "approvals-applied", gasEstimate, note }` when the approvals and the repayment were simulated together, and the `repay` step then carries `gasLimit`, the gas used plus 50 percent. `{ simulated: false, note }` when that bundle could not be simulated: estimate the gas once the approval is mined. See [Writes](/endpoints/seller-financing/introduction#writes).</ResponseField>
     <ResponseField name="fullRepayment" type="boolean">`true` when the payment is built to close the loan.</ResponseField>
     <ResponseField name="maxAmount" type="string">The most the payment may take, which the approval covers, in the payment token's smallest unit.</ResponseField>
     <ResponseField name="maxAmountFormatted" type="string">The same in whole units.</ResponseField>
     <ResponseField name="payoff" type="object">The payoff when the request was built: `{ interest, principal, fee, total, totalFormatted }`, in smallest units.</ResponseField>
+    <ResponseField name="assetLeg" type="object">Whether the asset can still be delivered to the buyer, as on [Get Listing](/endpoints/seller-financing/get-listing#response-fields).</ResponseField>
+    <ResponseField name="warning" type="string">`assetLeg.warning`, present whenever the leg carries one: on a partial repayment while the asset cannot be delivered, and on any repayment while part of the freeze was released or the seller's balance covers fewer than all of its sold listings.</ResponseField>
     <ResponseField name="note" type="string">How the payment applies, in words.</ResponseField>
   </Expandable>
 </ResponseField>
@@ -109,6 +115,7 @@ for (const step of data.steps) {
         "functionName": "repay",
         "label": "Pay off listing 4 in full",
         "description": "Pay off listing 4 in full",
+        "gasLimit": "318720",
         "chainId": 11155111
       },
       {
@@ -123,8 +130,10 @@ for (const step of data.steps) {
     ],
     "confirmStepIndex": 1,
     "preflight": {
-      "simulated": false,
-      "note": "The main call can only be simulated once the approval is mined; every market-side check passed before the token transfer."
+      "simulated": true,
+      "basis": "approvals-applied",
+      "gasEstimate": "212480",
+      "note": "Simulated with the approvals above applied first."
     },
     "fullRepayment": true,
     "maxAmount": "8115976362",
@@ -135,6 +144,23 @@ for (const step of data.steps) {
       "fee": "1500000",
       "total": "8075598370",
       "totalFormatted": "8075.59837"
+    },
+    "assetLeg": {
+      "checked": true,
+      "mode": "FREEZE",
+      "pooled": true,
+      "locked": true,
+      "deliverable": true,
+      "seller": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b",
+      "assetAmount": "100",
+      "lockedAmount": "100",
+      "sellerRequired": "100",
+      "sellerFrozen": "100",
+      "sellerBalance": "100",
+      "shortfall": "0",
+      "shortfallFormatted": "0",
+      "warning": null,
+      "note": null
     },
     "note": "The market takes the payoff at the moment the transaction is mined and never more than the approved amount. The margin covers interest that accrues meanwhile; if the transaction is mined much later the loan can remain active with a small remainder."
   },
@@ -169,13 +195,16 @@ for (const step of data.steps) {
         "functionName": "repay",
         "label": "Repay 128.0 on listing 4",
         "description": "Repay 128.0 on listing 4",
+        "gasLimit": "297945",
         "chainId": 11155111
       }
     ],
     "confirmStepIndex": 1,
     "preflight": {
-      "simulated": false,
-      "note": "The main call can only be simulated once the approval is mined; every market-side check passed before the token transfer."
+      "simulated": true,
+      "basis": "approvals-applied",
+      "gasEstimate": "198630",
+      "note": "Simulated with the approvals above applied first."
     },
     "fullRepayment": false,
     "maxAmount": "128000000",
@@ -187,11 +216,62 @@ for (const step of data.steps) {
       "total": "8125830706",
       "totalFormatted": "8125.830706"
     },
+    "assetLeg": {
+      "checked": true,
+      "mode": "FREEZE",
+      "pooled": true,
+      "locked": true,
+      "deliverable": true,
+      "seller": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b",
+      "assetAmount": "100",
+      "lockedAmount": "100",
+      "sellerRequired": "100",
+      "sellerFrozen": "100",
+      "sellerBalance": "100",
+      "shortfall": "0",
+      "shortfallFormatted": "0",
+      "warning": null,
+      "note": null
+    },
     "note": "Interest is paid first. Principal moves only once interest is settled to the moment of payment, and stays in escrow until completion."
   },
   "error": null,
   "metadata": {
     "timestamp": "2026-10-27T09:00:00.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Asset Not Deliverable
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ASSET_NOT_DELIVERABLE",
+    "message": "The seller's wallet 0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b holds 40 of the asset, less than the 100 this listing sold: the freeze was released by an agent of the token and the tokens left the wallet. A payoff would credit the seller in full while the delivery to the buyer reverts. Until the token's issuer or the seller restores the asset, the buyer can stop paying: once the loan is in default the seller's withdrawal refunds the downpayment and escrowed principal, less the compensation and the interest due. Nothing was built for the payoff of listing 4.",
+    "details": {
+      "assetLeg": {
+        "checked": true,
+        "mode": "FREEZE",
+        "pooled": true,
+        "locked": false,
+        "deliverable": false,
+        "seller": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b",
+        "assetAmount": "100",
+        "lockedAmount": "40",
+        "sellerRequired": "100",
+        "sellerFrozen": "40",
+        "sellerBalance": "40",
+        "shortfall": "60",
+        "shortfallFormatted": "60",
+        "warning": "The seller's wallet 0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b holds 40 of the asset, less than the 100 this listing sold: the freeze was released by an agent of the token and the tokens left the wallet. A payoff would credit the seller in full while the delivery to the buyer reverts. Until the token's issuer or the seller restores the asset, the buyer can stop paying: once the loan is in default the seller's withdrawal refunds the downpayment and escrowed principal, less the compensation and the interest due.",
+        "note": null
+      }
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-11-12T09:00:00.000Z",
     "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
     "instanceId": "inst_abc123"
   }
@@ -206,13 +286,15 @@ In the partial example, built a day after the first due date, the 128 USDC payme
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_LISTING_ID` | `400` | `listingId` is not a positive integer of up to 19 digits |
-| `VALIDATION_ERROR` | `400` | `amount` is neither `"full"` nor a decimal string, or is finer than the payment token's decimals, or `from` is missing or malformed. `error.details` names the field |
+| `VALIDATION_ERROR` | `400` | `amount` is neither `"full"` nor a decimal string, or is finer than the payment token's decimals, or `from` is malformed. `error.details` names the field |
+| `FROM_REQUIRED` | `400` | `from` is missing. The message names who signs: the wallet that pays, normally the buyer |
 | `INVALID_AMOUNT` | `400` | `amount` is zero |
-| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
 | `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
 | `INVALID_STATUS` | `409` | The listing is not `ACTIVE`. `details.status` names its status |
 | `INSUFFICIENT_BALANCE` | `409` | `from` holds less of the payment token than the payment needs: the payoff for a full repayment, otherwise `amount`. `details` carries `token`, `owner`, `balance` and `needed` |
-| `TX_WOULD_REVERT` | `409` | The repayment would revert. With an approval step in the answer, which is the usual case, a refusal by the payment token itself (`SafeERC20FailedOperation`, `ERC20InsufficientAllowance`, `ERC20InsufficientBalance`, an undecoded revert or a text reason about the allowance) is let through to signing with `preflight.simulated: false`, and only other refusals answer here, such as a text reason from a paused token. When the existing allowance already covers `maxAmount`, every revert answers here, including `SafeERC20FailedOperation` and `PaymentTokenNotSupported` from a token that charges a fee on transfer |
+| `ASSET_NOT_DELIVERABLE` | `409` | The repayment would complete the loan while the asset can no longer be delivered to the buyer. `details.assetLeg` carries the check. A partial repayment still builds |
+| `TX_WOULD_REVERT` | `409` | The repayment would revert. Without an approval step, every revert of the simulated repayment answers here, including `SafeERC20FailedOperation` and `PaymentTokenNotSupported` from a token that charges a fee on transfer. With an approval step, a refusal by the payment token itself makes the API simulate the approvals and the repayment together: a repayment that still reverts there answers here with the decoded refusal, and only when that bundle cannot be simulated is the build let through with `preflight.simulated: false`. Other refusals, such as a text reason from a paused token, answer here either way |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
 | `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
 | `REPAY_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

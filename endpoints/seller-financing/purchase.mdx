@@ -5,7 +5,7 @@ description: 'Approve-and-purchase calldata that pays the downpayment and starts
 ---
 
 <Note>
-  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
 Builds the purchase of an `OPEN` listing for the buyer to sign: an exact approval of the downpayment on the payment token, then `purchase`. The market pulls exactly the downpayment and holds it in escrow. The loan starts at the block time of the purchase, and its interest periods count from there.
@@ -21,7 +21,7 @@ The market admits a buyer that:
 
 The listing must not have expired, the market must not be paused, and the seller must not hold the agent role on the asset token.
 
-In freeze mode the API also checks, before building, that the freeze adapter still holds its agent role and that the seller still holds the listed amount unfrozen. Either failure answers `409 TX_WOULD_REVERT`, with `AgentRoleMissing` or `InsufficientFreeBalance`.
+Before building, the API refuses a listing past its `expiresAt` with `409 TX_WOULD_REVERT`, error `ListingExpired` and `details.expiresAt`. [List Listings](/endpoints/seller-financing/list-listings) with `status=OPEN` already leaves such listings out. In freeze mode it also checks that the freeze adapter still holds its agent role and that the seller still holds the listed amount unfrozen. Either failure answers `409 TX_WOULD_REVERT`, with `AgentRoleMissing` or `InsufficientFreeBalance`.
 
 ## Path Parameters
 
@@ -31,7 +31,7 @@ In freeze mode the API also checks, before building, that the freeze adapter sti
 
 ## Body Parameters
 
-<ParamField body="from" type="string" required>The buyer's wallet, which signs both steps. It must hold the downpayment in the payment token.</ParamField>
+<ParamField body="from" type="string" required>The buyer's wallet, which signs both steps. It must hold the downpayment in the payment token. Without it the answer is `400 FROM_REQUIRED`.</ParamField>
 
 ## Response Fields
 
@@ -41,7 +41,7 @@ In freeze mode the API also checks, before building, that the freeze adapter sti
     <ResponseField name="chainId" type="integer">The chain the steps are built for.</ResponseField>
     <ResponseField name="steps" type="array">Any reset of an existing allowance to zero, the approval of exactly the downpayment, then `purchase`. With an allowance that already covers the downpayment, `purchase` alone, with `gasLimit`.</ResponseField>
     <ResponseField name="confirmStepIndex" type="integer">Index of the `purchase` step.</ResponseField>
-    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`, or `{ simulated: false, note }` when the purchase can be simulated only after the approval is mined. The market's own checks of the buyer and the listing passed either way.</ResponseField>
+    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }` when no approval is needed. With an approval step, `{ simulated: true, basis: "approvals-applied", gasEstimate, note }` when the approval and the purchase were simulated together, and the `purchase` step then carries `gasLimit`. `{ simulated: false, note }` when that bundle could not be simulated: the market's own checks of the buyer and the listing passed, and the wallet estimates gas once the approval is mined. See [Writes](/endpoints/seller-financing/introduction#writes).</ResponseField>
     <ResponseField name="downpayment" type="string">The downpayment, in the payment token's smallest unit.</ResponseField>
     <ResponseField name="downpaymentFormatted" type="string">The same in whole units.</ResponseField>
     <ResponseField name="principal" type="string">What the buyer owes after the purchase, before interest, in smallest units.</ResponseField>
@@ -101,13 +101,16 @@ for (const step of data.steps) {
         "functionName": "purchase",
         "label": "Buy listing 4 with a downpayment of 2000.0",
         "description": "Buy listing 4 with a downpayment of 2000.0",
+        "gasLimit": "579315",
         "chainId": 11155111
       }
     ],
     "confirmStepIndex": 1,
     "preflight": {
-      "simulated": false,
-      "note": "The main call can only be simulated once the approval is mined; every market-side check passed before the token transfer."
+      "simulated": true,
+      "basis": "approvals-applied",
+      "gasEstimate": "386210",
+      "note": "Simulated with the approvals above applied first."
     },
     "downpayment": "2000000000",
     "downpaymentFormatted": "2000.0",
@@ -134,6 +137,26 @@ for (const step of data.steps) {
       "error": "NotDesignatedBuyer",
       "args": [],
       "revertData": "0x49042af3"
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-10-19T08:58:41.507Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Listing Expired
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_WOULD_REVERT",
+    "message": "Listing 6 expired at 2026-10-18T12:00:00.000Z, so it can no longer be bought. Only the seller or the operator can cancel it.",
+    "details": {
+      "action": "purchase",
+      "error": "ListingExpired",
+      "expiresAt": 1792324800
     }
   },
   "metadata": {
@@ -171,12 +194,13 @@ for (const step of data.steps) {
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_LISTING_ID` | `400` | `listingId` is not a positive integer of up to 19 digits |
-| `VALIDATION_ERROR` | `400` | `from` is missing or malformed, or the body carries another field |
-| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `VALIDATION_ERROR` | `400` | `from` is malformed, or the body carries another field. `error.details` names it |
+| `FROM_REQUIRED` | `400` | `from` is missing. The message names who signs: the buyer wallet that pays the downpayment |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
 | `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
 | `INVALID_STATUS` | `409` | The listing is not `OPEN`. `details.status` names its status |
 | `INSUFFICIENT_BALANCE` | `409` | `from` holds less of the payment token than the downpayment. `details` carries `token`, `owner`, `balance` and `needed` |
-| `TX_WOULD_REVERT` | `409` | The purchase would revert. `details.error` names the reason, for example `ListingExpired`, `NotDesignatedBuyer`, `InvalidBuyer`, `IdentityNotVerified`, `BuyerNotVerified`, `SellerIsTokenAgent`, `EnforcedPause`, or in freeze mode `AgentRoleMissing` and `InsufficientFreeBalance` |
+| `TX_WOULD_REVERT` | `409` | The purchase would revert. `details.error` names the reason, for example `ListingExpired` with `details.expiresAt`, `NotDesignatedBuyer`, `InvalidBuyer`, `IdentityNotVerified`, `BuyerNotVerified`, `SellerIsTokenAgent`, `EnforcedPause`, or in freeze mode `AgentRoleMissing` and `InsufficientFreeBalance` |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
 | `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
 | `PURCHASE_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

@@ -5,7 +5,7 @@ description: 'Calldata that stops new listings, purchases and liquidations'
 ---
 
 <Note>
-  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
 Builds `pause` on the market for a holder of the operator role to sign. A paused market refuses new listings, purchases and liquidations with `EnforcedPause`. Everything that settles existing business stays open: cancellations, repayments, asset claims and withdrawals. See [Pausing](/endpoints/seller-financing/introduction#pausing).
@@ -22,7 +22,7 @@ Resume with [Unpause Market](/endpoints/seller-financing/unpause-market).
 
 ## Body Parameters
 
-<ParamField body="from" type="string" required>The wallet that signs. It must hold the operator role, or the request answers `409 TX_WOULD_REVERT` with `AccessControlUnauthorizedAccount`.</ParamField>
+<ParamField body="from" type="string" required>The wallet that signs: a holder of `OPERATOR_ROLE` on the market, the operator named at deployment unless the admin moved the role. Without it the answer is `400 FROM_REQUIRED`. Any other wallet answers `409 TX_WOULD_REVERT` with `AccessControlUnauthorizedAccount`, and `details.requiredRole` and `details.roleHolders` name the role and the wallets that hold it now.</ParamField>
 
 ## Response Fields
 
@@ -33,6 +33,7 @@ Resume with [Unpause Market](/endpoints/seller-financing/unpause-market).
     <ResponseField name="steps" type="array">One step, `pause` on the market, with `gasLimit`.</ResponseField>
     <ResponseField name="confirmStepIndex" type="integer">`0`.</ResponseField>
     <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`.</ResponseField>
+    <ResponseField name="signer" type="object">`{ role, holders, holdersComplete }`. `role` is `OPERATOR_ROLE`. `holders` lists the wallets that hold it now, `null` when they could not be read. `holdersComplete` is `false` when the market's role history was read in part, so a holder may be missing.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -81,6 +82,11 @@ await (await operator.sendTransaction({ to: step.to, data: step.data, value: 0, 
     "preflight": {
       "simulated": true,
       "gasEstimate": "137091"
+    },
+    "signer": {
+      "role": "OPERATOR_ROLE",
+      "holders": ["0xCD421aBbA2b9b047eC069215Df5C49c97C96f895"],
+      "holdersComplete": true
     }
   },
   "error": null,
@@ -118,9 +124,10 @@ await (await operator.sendTransaction({ to: step.to, data: step.data, value: 0, 
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | `from` is missing or malformed, or the body carries another field |
-| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
-| `TX_WOULD_REVERT` | `409` | `EnforcedPause` when the market is already paused, or `AccessControlUnauthorizedAccount` when `from` lacks the operator role |
+| `VALIDATION_ERROR` | `400` | `from` is malformed, or the body carries another field. `error.details` names it |
+| `FROM_REQUIRED` | `400` | `from` is missing. The message names who signs: a wallet that holds `OPERATOR_ROLE` on the market |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
+| `TX_WOULD_REVERT` | `409` | `EnforcedPause` when the market is already paused, or `AccessControlUnauthorizedAccount` when `from` lacks the operator role, with `details.requiredRole` and `details.roleHolders` |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
 | `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
 | `PAUSE_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

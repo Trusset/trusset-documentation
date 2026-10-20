@@ -83,7 +83,12 @@ A full repayment (`all: true`) returns three. The third resets the allowance to 
 
 With a `permit`, the approval disappears. A partial repayment is one step, `repayWithPermit`. A full repayment is two: `repayWithPermit`, then the same allowance reset, because the permit installs the whole signed value as an allowance and the repayment does not spend all of it.
 
-The `repay` transaction carries a `gasLimit` of `600000` and `repayWithPermit` carries `650000`.
+The `repay` and `repayWithPermit` steps carry a `gasLimit` sized from a simulation of the sequence you sign, run from the borrower's wallet: the approval and then the repayment, or the permit call alone. The limit is the gas the simulated repayment used plus 50 percent, and never below `600000` for `repay` or `650000` for `repayWithPermit`. A repayment that uses less than two thirds of the floor therefore still carries the floor. `gasLimitBasis` says how it was set:
+
+- `simulated`: the sequence was simulated and the repayment succeeded in it.
+- `floor`: the sequence could not be simulated, or the repayment did not succeed in it, so the step carries the floor. Estimate the repayment's gas once the approval is mined, and use the larger of that estimate and `gasLimit`.
+
+The simulation runs from the borrower even when a third party pays, so a third-party payer should estimate from its own wallet as well.
 
 <Warning>
   The confirmable step is not always the last one, and it is not always at the same index. Read `confirmStepIndex` from the response rather than assuming a position. It is `1` on the approve-then-repay path and `0` on the permit path, and in both cases it names the step whose `functionName` starts with `repay`. Confirming with the allowance-reset hash returns `TX_WRONG_TARGET`.
@@ -98,6 +103,7 @@ The `repay` transaction carries a `gasLimit` of `600000` and `repayWithPermit` c
     <ResponseField name="steps" type="array">Ordered transactions to broadcast. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="fullRepayment" type="boolean">Whether the payload settles the loan in full: `all: true`, or an `amount` that covers the current debt plus the repayment fee.</ResponseField>
     <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm with. `1` on the approve-then-repay path, `0` on the permit path. Read it rather than assuming.</ResponseField>
+    <ResponseField name="gasLimitBasis" type="string">How the repay step's `gasLimit` was set: `simulated` (the gas the simulated sequence used plus 50 percent, never below the floor) or `floor` (`600000`, or `650000` for `repayWithPermit`, when the sequence could not be simulated). See [Transaction Shape](#transaction-shape).</ResponseField>
     <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }` on both paths: this route, `txHash` as the field, and a `body` carrying `loanId` with `txHash: null`.</ResponseField>
     <ResponseField name="permitSupported" type="boolean">Whether the settlement asset implements EIP-2612, so a `permit` could have been sent instead. Present on the approve-then-repay path.</ResponseField>
     <ResponseField name="permitUsed" type="boolean">`true` on the permit path. Absent otherwise.</ResponseField>
@@ -199,6 +205,7 @@ await fetch(url, {
       "field": "txHash",
       "body": { "loanId": "5", "txHash": null }
     },
+    "gasLimitBasis": "simulated",
     "permitSupported": true,
     "outstandingDebt": "50412.881000",
     "repayAmount": "50515.706763",
@@ -232,6 +239,7 @@ await fetch(url, {
         "description": "Repay in a single transaction: the embedded permit installs the allowance and the market pulls at most the true debt"
       }
     ],
+    "gasLimitBasis": "simulated",
     "fullRepayment": false,
     "confirmStepIndex": 0,
     "confirmWith": {

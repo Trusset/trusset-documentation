@@ -1,0 +1,186 @@
+---
+title: 'Set Identity Register'
+api: 'POST /seller-financing/api/markets/{marketId}/identity-registry'
+description: 'Calldata that changes or removes the market identity register'
+---
+
+<Note>
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Builds `setIdentityRegistry` on the market for a holder of `OPERATOR_ROLE` to sign. The market identity register screens the seller at listing and the buyer at purchase. Name a new register, or send `null` to remove it, so that listings and purchases are screened by the asset token only.
+
+Use it to repair a market whose register refuses everyone: one deployed with the asset token or a contract that does not answer `isVerified(address)` as its register, or one still reading the retired Trusset ID Register. [Get Market](/endpoints/seller-financing/get-market) reports such a market with `identityGate.usable: false`, and [Build Deployment](/endpoints/seller-financing/deploy-market) names this route in `details.repair` when you try to deploy the same market again.
+
+A new register is probed before any calldata exists, with the checks a deployment runs:
+
+- It must not be the market's asset token or payment token: `422 IDENTITY_REGISTRY_INCOMPATIBLE`.
+- It must have contract code: `400 INVALID_IDENTITY_REGISTRY`.
+- It must not be the previous Trusset ID Register, which takes no new identities: `422 IDENTITY_REGISTRY_RETIRED`, with the current register in `details.currentRegistry`.
+- It must answer `isVerified(address)`, probed for `from`: `422 IDENTITY_REGISTRY_INCOMPATIBLE` when it does not, `503 IDENTITY_REGISTRY_UNREADABLE` when it could not be reached.
+
+The API then simulates the change from `from`. The change stays open while the market is paused.
+
+<Warning>
+  The register applies to new business only. Listings and loans that exist already keep running under the new register, and a seller or buyer it refuses can no longer list or buy. Open listings of a seller the new register refuses stay open and can still be bought, because a purchase checks the buyer against the register, not the seller. The operator withdraws them with [Cancel Listing](/endpoints/seller-financing/cancel-listing).
+</Warning>
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/seller-financing/list-markets), not its contract address.</ParamField>
+
+## Body Parameters
+
+<ParamField body="identityRegistry" type="string" required>
+  The register the market should read from now on: an ERC-3643 identity registry or the Trusset ID Register, anything that answers `isVerified(address)`. Send `null` or `""` to remove the register. The key must be present: a body without it answers `400 VALIDATION_ERROR` with the message "Pass identityRegistry: the register address, or null to remove the market register." and `details[0].field` set to `identityRegistry`. The register the market already reads answers `409 IDENTITY_REGISTRY_UNCHANGED`.
+</ParamField>
+
+<ParamField body="from" type="string" required>
+  The wallet that signs: a holder of `OPERATOR_ROLE` on the market, the operator named at deployment unless the admin moved the role. Without it the answer is `400 FROM_REQUIRED`. Any other wallet answers `409 TX_WOULD_REVERT` with `AccessControlUnauthorizedAccount`, `details.requiredRole` and `details.roleHolders`.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain the step is built for.</ResponseField>
+    <ResponseField name="steps" type="array">One step, `setIdentityRegistry` on the market, with `gasLimit`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">`0`.</ResponseField>
+    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`.</ResponseField>
+    <ResponseField name="identityRegistry" type="object">`{ current, next }`: the register the market reads now and the one it will read once the step is mined. `null` stands for no register.</ResponseField>
+    <ResponseField name="note" type="string">What the change reaches, in words: the register screens the seller at listing and the buyer at purchase, and existing listings and loans keep running.</ResponseField>
+    <ResponseField name="signer" type="object">`{ role, holders, holdersComplete }`. `role` is `OPERATOR_ROLE`. `holders` lists the wallets that hold it now, `null` when they could not be read. `holdersComplete` is `false` when the market's role history was read in part, so a holder may be missing.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/seller-financing/api/markets/cmsg4x7k20003sf9q1d8v6b2e/identity-registry" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identityRegistry": "0x18dC3306C6488413aBE3706352CE2f3362F4E342",
+    "from": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/seller-financing/api/markets/${marketId}/identity-registry`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identityRegistry: null, from: await operator.getAddress() })
+  }
+);
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+const step = data.steps[0];
+await (await operator.sendTransaction({ to: step.to, data: step.data, value: 0, gasLimit: step.gasLimit })).wait();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "chainId": 11155111,
+    "steps": [
+      {
+        "to": "0xc35e5f74eC4C1dfB8cE2b8798D6161B706F9B5E1",
+        "data": "0xcbf3f861...",
+        "value": "0",
+        "functionName": "setIdentityRegistry",
+        "label": "Set the market identity register to 0x18dC3306C6488413aBE3706352CE2f3362F4E342: new listings and purchases need a wallet verified there",
+        "description": "Set the market identity register to 0x18dC3306C6488413aBE3706352CE2f3362F4E342: new listings and purchases need a wallet verified there",
+        "gasLimit": "49935",
+        "chainId": 11155111
+      }
+    ],
+    "confirmStepIndex": 0,
+    "preflight": {
+      "simulated": true,
+      "gasEstimate": "38412"
+    },
+    "identityRegistry": {
+      "current": null,
+      "next": "0x18dC3306C6488413aBE3706352CE2f3362F4E342"
+    },
+    "note": "The register screens the seller at listing and the buyer at purchase. Listings and loans that exist already keep running; a seller or buyer the new register refuses can no longer list or buy.",
+    "signer": {
+      "role": "OPERATOR_ROLE",
+      "holders": ["0xCD421aBbA2b9b047eC069215Df5C49c97C96f895"],
+      "holdersComplete": true
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-19T09:12:04.318Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Retired Register
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "IDENTITY_REGISTRY_RETIRED",
+    "message": "0xe9114c40934f6fb6bb317935156b731f7a86d006 is the previous Trusset ID Register, which takes no new identities, so a gate on it refuses every customer verified since the register moved. Name the current Trusset ID Register (0xef244c4bd4d71bd9a30edf6edef7ccc72642291a) instead, or another register.",
+    "details": {
+      "field": "identityRegistry",
+      "registry": "0xe9114c40934f6fb6bb317935156b731f7a86d006",
+      "currentRegistry": "0xef244c4bd4d71bd9a30edf6edef7ccc72642291a"
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-10-19T09:12:04.318Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Not the Operator
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_WOULD_REVERT",
+    "message": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b does not hold OPERATOR_ROLE on this market, so the identity register change would revert. OPERATOR_ROLE is held by 0xCD421aBbA2b9b047eC069215Df5C49c97C96f895; sign from one of them.",
+    "details": {
+      "action": "identity register change",
+      "error": "AccessControlUnauthorizedAccount",
+      "args": ["0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b", "0x97667070c54ef182b0f5858b034beac1b6f3089aa2d3188bb1e8929f4fa9b929"],
+      "revertData": "0xe2517d3f...",
+      "requiredRole": "OPERATOR_ROLE",
+      "roleHolders": ["0xCD421aBbA2b9b047eC069215Df5C49c97C96f895"]
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-10-19T09:12:04.318Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | The body has no `identityRegistry` key ("Pass identityRegistry: the register address, or null to remove the market register."), an address is malformed, or the body carries a field this page does not list. `error.details` names each field |
+| `FROM_REQUIRED` | `400` | `from` is missing. The message names who signs: a wallet that holds `OPERATOR_ROLE` on the market |
+| `INVALID_IDENTITY_REGISTRY` | `400` | `identityRegistry` has no contract code on your network. `details` carries `field` and `registry` |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
+| `IDENTITY_REGISTRY_UNCHANGED` | `409` | The market already reads this register, or already runs without one. `details.identityRegistry` names it. Nothing was built |
+| `TX_WOULD_REVERT` | `409` | The change would revert: `AccessControlUnauthorizedAccount` when `from` lacks `OPERATOR_ROLE`, with `details.requiredRole` and `details.roleHolders` |
+| `IDENTITY_REGISTRY_INCOMPATIBLE` | `422` | `identityRegistry` is the market's asset or payment token, or a contract that does not answer `isVerified(address)`. `details` carries `field` and `registry` |
+| `IDENTITY_REGISTRY_RETIRED` | `422` | `identityRegistry` is the previous Trusset ID Register. `details` carries `field`, `registry` and `currentRegistry` |
+| `CHAIN_UNAVAILABLE` | `503` | The market's current register, or the chain, could not be read. Nothing was built. Retry shortly |
+| `IDENTITY_REGISTRY_UNREADABLE` | `503` | `identityRegistry` could not be reached to probe it. Nothing was built. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `IDENTITY_REGISTRY_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

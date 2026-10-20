@@ -1,14 +1,14 @@
 ---
 title: 'Get Listing'
 api: 'GET /seller-financing/api/markets/{marketId}/listings/{listingId}'
-description: 'One listing with its stamped terms, its loan and, while active, what the loan owes'
+description: 'One listing with its stamped terms, its loan, what an active loan owes and whether the asset can still be delivered'
 ---
 
 <Note>
-  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
-Returns one listing as the market contract holds it: the terms stamped when it was created, and the loan once a buyer has purchased it. While the loan is `ACTIVE`, `loan.status` adds what it owes now, as [Get Loan Status](/endpoints/seller-financing/get-loan-status) returns it.
+Returns one listing as the market contract holds it: the terms stamped when it was created, and the loan once a buyer has purchased it. While the loan is `ACTIVE`, `loan.status` adds what it owes now, as [Get Loan Status](/endpoints/seller-financing/get-loan-status) returns it. While it is `ACTIVE` or `REPAID`, `assetLeg` says whether the asset can still be delivered to the buyer. A cancelled or liquidated listing on a custody market carries `collateralEscrow`, what the custody adapter holds in escrow for the seller.
 
 The terms never change after creation. A configuration change on the market reaches new listings only.
 
@@ -24,6 +24,7 @@ The terms never change after creation. A configuration change on the market reac
   <Expandable>
     <ResponseField name="id" type="string">The listing ID.</ResponseField>
     <ResponseField name="status" type="string">`OPEN`, `CANCELLED`, `ACTIVE`, `REPAID`, `COMPLETED` or `LIQUIDATED`. See [Lifecycle](/endpoints/seller-financing/introduction#lifecycle).</ResponseField>
+    <ResponseField name="expired" type="boolean">`true` for an `OPEN` listing past its `expiresAt`. It can no longer be bought, and a purchase is refused with `ListingExpired`, but it stays `OPEN` on chain until the seller or the operator cancels it. `false` otherwise.</ResponseField>
     <ResponseField name="seller" type="string">The wallet that listed.</ResponseField>
     <ResponseField name="rateMode" type="string">`FIXED` or `DERIVED`. See [Interest](/endpoints/seller-financing/introduction#interest).</ResponseField>
     <ResponseField name="assetAmount" type="string">Amount of the asset sold, in the asset token's smallest unit.</ResponseField>
@@ -63,6 +64,27 @@ The terms never change after creation. A configuration change on the market reac
         <ResponseField name="status" type="object">Only while the listing is `ACTIVE`: `interestDue`, `payoff`, `nextDue`, `isLiquidatable` and `liquidatableAt`, as on [Get Loan Status](/endpoints/seller-financing/get-loan-status#response-fields). `null` when those reads failed.</ResponseField>
       </Expandable>
     </ResponseField>
+    <ResponseField name="assetLeg" type="object">
+      Only while the listing is `ACTIVE` or `REPAID`: whether the asset can still reach the buyer. See [Asset leg](/endpoints/seller-financing/introduction#asset-leg).
+      <Expandable>
+        <ResponseField name="checked" type="boolean">`false` when the lock or the seller's balance could not be read. `deliverable`, `locked` and `warning` are then `null` and `note` says what was not read. An unchecked leg never refuses a payoff or a claim.</ResponseField>
+        <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`.</ResponseField>
+        <ResponseField name="deliverable" type="boolean">`true` when the asset can be delivered in full: in freeze mode the seller's wallet holds at least `assetAmount`, in custody mode the adapter holds at least `assetAmount` under this listing. With `false`, a payoff and the asset claim are refused with `409 ASSET_NOT_DELIVERABLE`.</ResponseField>
+        <ResponseField name="locked" type="boolean">In custody mode the same as `deliverable`. In freeze mode `true` while the freeze still covers every `ACTIVE` and `REPAID` listing of the seller on this market and this listing's lock is whole.</ResponseField>
+        <ResponseField name="pooled" type="boolean">Freeze mode only. `true` when every listing of the market was read, so `sellerRequired` counts all of the seller's sold listings.</ResponseField>
+        <ResponseField name="seller" type="string">Freeze mode only. The seller's wallet, checksummed.</ResponseField>
+        <ResponseField name="assetAmount" type="string">The amount this listing sold, in the asset token's smallest unit.</ResponseField>
+        <ResponseField name="lockedAmount" type="string">What the adapter reports as locked under this listing, in smallest units: the recorded amount, clamped in custody mode to what the adapter holds and in freeze mode to the seller's frozen balance and balance.</ResponseField>
+        <ResponseField name="sellerRequired" type="string">Freeze mode only. The asset all of the seller's `ACTIVE` and `REPAID` listings on this market sold, in smallest units.</ResponseField>
+        <ResponseField name="sellerFrozen" type="string">Freeze mode only. The seller's frozen balance on the token, in smallest units.</ResponseField>
+        <ResponseField name="sellerBalance" type="string">Freeze mode only. The seller's balance on the token, frozen tokens included, in smallest units.</ResponseField>
+        <ResponseField name="shortfall" type="string">What is missing to deliver this listing in full, in smallest units. `"0"` when deliverable.</ResponseField>
+        <ResponseField name="shortfallFormatted" type="string">The same in whole units.</ResponseField>
+        <ResponseField name="warning" type="string">What is wrong, in words: the asset left the seller's wallet or the adapter, part of the freeze was released, or the seller's balance covers fewer than all of its sold listings, so the buyers who claim first are delivered first. `null` when nothing is wrong.</ResponseField>
+        <ResponseField name="note" type="string">On an unchecked leg, what could not be read. On a freeze leg, set when the market holds more listings than one scan reads, so not every lock of the seller was counted. `null` otherwise.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="collateralEscrow" type="object">Only on a `CANCELLED` or `LIQUIDATED` listing of a custody market: `{ holder, amount, amountFormatted, note }`. `holder` is the seller. `amount` is what the custody adapter holds in escrow for the seller across every listing on the market, in the asset token's smallest unit, `"0"` when the return went through. `note` says how to reclaim it, with [Claim Escrowed Collateral](/endpoints/seller-financing/claim-escrowed-collateral), once the token admits the seller again. When the escrow could not be read, `amount` is `null` and `note` says so.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -80,6 +102,9 @@ const { data } = await res.json();
 if (data.status === 'ACTIVE' && data.loan.status) {
   console.log(`Payoff now ${data.loan.status.payoff.totalFormatted}`);
 }
+if (data.assetLeg?.checked && data.assetLeg.warning) {
+  console.log(data.assetLeg.warning);
+}
 ```
 </RequestExample>
 
@@ -90,6 +115,7 @@ if (data.status === 'ACTIVE' && data.loan.status) {
   "data": {
     "id": "4",
     "status": "ACTIVE",
+    "expired": false,
     "seller": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b",
     "rateMode": "DERIVED",
     "assetAmount": "100",
@@ -144,6 +170,23 @@ if (data.status === 'ACTIVE' && data.loan.status) {
         "isLiquidatable": false,
         "liquidatableAt": 1793178001
       }
+    },
+    "assetLeg": {
+      "checked": true,
+      "mode": "FREEZE",
+      "pooled": true,
+      "locked": true,
+      "deliverable": true,
+      "seller": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b",
+      "assetAmount": "100",
+      "lockedAmount": "100",
+      "sellerRequired": "100",
+      "sellerFrozen": "100",
+      "sellerBalance": "100",
+      "shortfall": "0",
+      "shortfallFormatted": "0",
+      "warning": null,
+      "note": null
     }
   },
   "error": null,
@@ -176,7 +219,7 @@ if (data.status === 'ACTIVE' && data.loan.status) {
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_LISTING_ID` | `400` | `listingId` is not a positive integer of up to 19 digits |
-| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
 | `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
 | `CHAIN_UNAVAILABLE` | `503` | The market could not be read. Retry shortly |
 | `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |

@@ -5,16 +5,16 @@ description: 'Calldata that deploys a Seller Financing market from a verified wa
 ---
 
 <Note>
-  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
 Builds the one transaction that deploys a market through the factory. The factory creates the market, deploys its adapter bound to it, and grants the admin role and the operator role, all in that transaction. The factory and Trusset hold no role on the market afterwards.
 
-`from` must be a verified wallet of your instance, because only a deployment your instance's wallet signed can be recorded on your instance. Any other wallet answers `403 DEPLOYMENT_NOT_INSTANCE_BOUND` before any calldata exists. The API then checks both tokens, the identity register, the asset's freeze surface in freeze mode and the payment token's decimals, and simulates the deployment from `from`. A deployment that would revert answers `409 TX_WOULD_REVERT`.
+`from` must be a verified wallet of your instance, because only a deployment your instance's wallet signed can be recorded on your instance. Without `from` the answer is `400 FROM_REQUIRED`. Any other wallet answers `403 DEPLOYMENT_NOT_INSTANCE_BOUND` before any calldata exists. The API then checks both tokens, the market identity register when you name one, the asset's freeze surface in freeze mode and the payment token's decimals, and simulates the deployment from `from`. A deployment that would revert answers `409 TX_WOULD_REVERT`.
 
 Sign the step from `from` and record the market with [Record Deployment](/endpoints/seller-financing/confirm-deployment), as `confirmWith` names. Until then the market exists on-chain but not on your instance.
 
-Your instance runs at most one market per asset token, payment token and mode. A second request for the same combination answers `409 MARKET_EXISTS` and names the existing market.
+This endpoint builds at most one market per asset token, payment token and mode for your instance. A second request for the same combination answers `409 MARKET_EXISTS`, before `from` is checked. It names the existing market, and `details.repair` names the route that repairs a market deployed with a wrong identity register in place: [Set Identity Register](/endpoints/seller-financing/set-identity-registry) builds `setIdentityRegistry` with a working register, or with none. The rule applies when a deployment is built. [Record Deployment](/endpoints/seller-financing/confirm-deployment) records any verified deployment of your instance, including a second one of the same combination signed from saved calldata.
 
 ## Body Parameters
 
@@ -43,7 +43,16 @@ Your instance runs at most one market per asset token, payment token and mode. A
 </ParamField>
 
 <ParamField body="identityRegistry" type="string">
-  An identity register that examines sellers at listing and buyers at purchase. It must have contract code, and a wallet passes when the first word `isVerified(address)` returns is `1`, so ERC-3643 registers and the Trusset ID Register both work. Omit it for a market without a register of its own. The asset token's own register still examines buyers either way.
+  An identity register that examines sellers at listing and buyers at purchase. A wallet passes when the first word `isVerified(address)` returns is `1`, so ERC-3643 registers and the Trusset ID Register both work. Omit it, or send `""` or `null`, for a market without a register of its own. The asset token's own register still examines buyers either way. In the Issuer Portal, the deploy dialog's optional Market identity register field sets the same value.
+
+  The register is probed before any calldata exists, because a market whose register refuses everyone can take no listing:
+
+  - It must have contract code, or the answer is `400 INVALID_IDENTITY_REGISTRY`.
+  - It must not be `assetToken` or `paymentToken`. Naming a token here answers `422 IDENTITY_REGISTRY_INCOMPATIBLE`.
+  - It must not be the previous Trusset ID Register, which takes no new identities: `422 IDENTITY_REGISTRY_RETIRED`, with the current register in `details.currentRegistry`.
+  - It must answer `isVerified(address)`, probed for `from`. A contract that does not answers `422 IDENTITY_REGISTRY_INCOMPATIBLE`. A probe that cannot reach it answers `503 IDENTITY_REGISTRY_UNREADABLE`.
+
+  A market already deployed with a wrong register is repaired in place with [Set Identity Register](/endpoints/seller-financing/set-identity-registry).
 </ParamField>
 
 <ParamField body="paymentFallbackDecimals" type="integer">
@@ -53,7 +62,7 @@ Your instance runs at most one market per asset token, payment token and mode. A
 <ParamField body="config" type="object">
   The configuration new listings are checked against and stamped with. Every field is optional, and an omitted field takes its value from `defaults` on [Get Deployment Options](/endpoints/seller-financing/get-deployment-options). The operator changes it later with [Update Configuration](/endpoints/seller-financing/update-config).
 
-  Each minimum must not exceed its maximum, `minInterestPeriodDays` must not exceed `maxDurationDays`, and at least one strategy must be enabled. A configuration that breaks one of these answers `400 INVALID_CONFIG`, a field outside its bounds `400 VALIDATION_ERROR`.
+  Each minimum must not exceed its maximum, `minInterestPeriodDays` must not exceed `maxDurationDays`, and at least one strategy must be enabled. While interest periods can be shorter than the runtime (`minInterestPeriodDays` below `maxDurationDays`), `maxGracePeriodDays` must be at least `1`, because a listing with periodic due dates needs a grace period of at least one day. Only a market whose `minInterestPeriodDays` equals `maxDurationDays`, so every listing has a single period, may keep `0`. A configuration that breaks one of these answers `400 INVALID_CONFIG`, a field outside its bounds `400 VALIDATION_ERROR`.
   <Expandable>
     <ParamField body="minDownpaymentBps" type="integer">Smallest downpayment, 500 to 9000 basis points of the price. Default `500`.</ParamField>
     <ParamField body="maxDownpaymentBps" type="integer">Largest downpayment, 500 to 9000. Default `9000`.</ParamField>
@@ -61,7 +70,7 @@ Your instance runs at most one market per asset token, payment token and mode. A
     <ParamField body="maxDurationDays" type="integer">Longest runtime, 1 to 3650 days. Default `3650`.</ParamField>
     <ParamField body="minInterestPeriodDays" type="integer">Shortest interest period, 1 to 366 days. Default `1`.</ParamField>
     <ParamField body="maxInterestPeriodDays" type="integer">Longest interest period, 1 to 366 days. Default `366`.</ParamField>
-    <ParamField body="maxGracePeriodDays" type="integer">Longest grace period, 0 to 90 days. Default `30`.</ParamField>
+    <ParamField body="maxGracePeriodDays" type="integer">Longest grace period, 0 to 90 days. Default `30`. At least `1` unless `minInterestPeriodDays` equals `maxDurationDays`.</ParamField>
     <ParamField body="fixedEnabled" type="boolean">Offer `FIXED` interest. Default `true`.</ParamField>
     <ParamField body="derivedEnabled" type="boolean">Offer `DERIVED` interest. Default `true`. At least one of the two must be on.</ParamField>
     <ParamField body="sellerSetsFixedRate" type="boolean">Let the seller name the rate of a `FIXED` listing, up to `maxFixedRateBps`. With `false`, every `FIXED` listing carries `fixedRateBps`. Default `true`.</ParamField>
@@ -73,7 +82,7 @@ Your instance runs at most one market per asset token, payment token and mode. A
 </ParamField>
 
 <ParamField body="from" type="string" required>
-  The wallet that signs the deployment. It must be a verified wallet of your instance. The deployment is simulated from it.
+  The wallet that signs the deployment. It must be a verified wallet of your instance. The deployment is simulated from it. Without it the answer is `400 FROM_REQUIRED`.
 </ParamField>
 
 ## Choosing the volatility input
@@ -234,10 +243,11 @@ await fetch(`${base}/confirm`, { method: 'POST', headers, body: JSON.stringify({
   "data": null,
   "error": {
     "code": "MARKET_EXISTS",
-    "message": "This instance already runs a freeze market for this asset and payment token at 0xc35e5f74ec4c1dfb8ce2b8798d6161b706f9b5e1.",
+    "message": "This instance already runs a freeze market for this asset and payment token at 0xc35e5f74ec4c1dfb8ce2b8798d6161b706f9b5e1. If that market was deployed with a wrong identity register, its operator repairs it in place: POST /seller-financing/api/markets/cmsg4x7k20003sf9q1d8v6b2e/identity-registry builds setIdentityRegistry with a working register, or with none.",
     "details": {
       "marketId": "cmsg4x7k20003sf9q1d8v6b2e",
-      "address": "0xc35e5f74ec4c1dfb8ce2b8798d6161b706f9b5e1"
+      "address": "0xc35e5f74ec4c1dfb8ce2b8798d6161b706f9b5e1",
+      "repair": "/seller-financing/api/markets/cmsg4x7k20003sf9q1d8v6b2e/identity-registry"
     }
   },
   "metadata": {
@@ -253,19 +263,23 @@ await fetch(`${base}/confirm`, { method: 'POST', headers, body: JSON.stringify({
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | A required field is missing, an address is malformed, a `config` field is outside its bounds, or the body carries a field this page does not list. `error.details` names each field |
+| `VALIDATION_ERROR` | `400` | A required field is missing, an address is malformed, a `config` field is outside its bounds, or the body carries a field this page does not list. `error.details` names each field, an unknown one by its own name |
+| `FROM_REQUIRED` | `400` | `from` is missing. Pass the verified wallet of your instance that signs the deployment |
 | `SAME_TOKEN` | `400` | `assetToken` and `paymentToken` are the same token |
-| `INVALID_CONFIG` | `400` | The configuration is inconsistent: a minimum above its maximum, `minInterestPeriodDays` above `maxDurationDays`, or no strategy enabled. `message` is the first problem and `details.problems` lists all |
+| `INVALID_CONFIG` | `400` | The configuration is inconsistent: a minimum above its maximum, `minInterestPeriodDays` above `maxDurationDays`, no strategy enabled, or `maxGracePeriodDays` below `1` while `minInterestPeriodDays` is below `maxDurationDays`. `message` is the first problem and `details.problems` lists all |
 | `NOT_A_TOKEN` | `400` | A token has no contract code on your network or does not answer `balanceOf`. The message names which |
-| `INVALID_IDENTITY_REGISTRY` | `400` | `identityRegistry` has no contract code on your network |
+| `INVALID_IDENTITY_REGISTRY` | `400` | `identityRegistry` has no contract code on your network. `details` carries `field` and `registry` |
 | `DEPLOYMENT_NOT_INSTANCE_BOUND` | `403` | `from` is not a verified wallet of your instance. Register it first. Nothing was built |
-| `MARKET_EXISTS` | `409` | Your instance already runs a market for this asset token, payment token and mode. `details` carries its `marketId` and `address` |
+| `MARKET_EXISTS` | `409` | Your instance already runs a market for this asset token, payment token and mode. `details` carries its `marketId`, `address` and `repair`, the [Set Identity Register](/endpoints/seller-financing/set-identity-registry) route of that market |
 | `FREEZE_MODE_UNSUPPORTED_TOKEN` | `409` | `FREEZE` was asked for a token that cannot take a freeze lock: it lacks the ERC-3643 freeze reads, or it is an ERC-7943 token without an identity register. The message says which. Deploy in `CUSTODY` |
 | `DECIMALS_UNRESOLVED` | `409` | The payment token does not report its decimals. Send `paymentFallbackDecimals` |
 | `PAYMENT_DECIMALS_UNSUPPORTED` | `409` | The payment token uses fewer than 6 or more than 18 decimals. `details.decimals` carries its figure |
 | `TX_WOULD_REVERT` | `409` | The simulated deployment reverts. `details.error` names the contract error. See [Errors](/endpoints/seller-financing/introduction#errors) |
+| `IDENTITY_REGISTRY_INCOMPATIBLE` | `422` | `identityRegistry` is the asset or payment token, or a contract that does not answer `isVerified(address)`, so the market would refuse every seller and buyer. `details` carries `field` and `registry` |
+| `IDENTITY_REGISTRY_RETIRED` | `422` | `identityRegistry` is the previous Trusset ID Register, which takes no new identities. `details` carries `field`, `registry` and `currentRegistry` |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
 | `PROVIDER_UNAVAILABLE` | `503` | The asset token could not be read to check its freeze surface. Retry shortly |
+| `IDENTITY_REGISTRY_UNREADABLE` | `503` | `identityRegistry` could not be reached to probe it. Nothing was built. Retry shortly |
 | `SERVICE_UNAVAILABLE` | `503` | Your instance's verified wallets could not be read. Retry shortly |
 | `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
 | `DEPLOY_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

@@ -1,14 +1,16 @@
 ---
 title: 'Get Market'
 api: 'GET /seller-financing/api/markets/{marketId}'
-description: 'One market with its configuration, repay fee, counters and token-side setup'
+description: 'One market with its configuration, repay fee, counters, register state and token-side setup'
 ---
 
 <Note>
-  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
 Returns one market: the record stored at deployment, and its configuration, repay fee, identity register, counters and token-side setup read live from the market contract.
+
+The market answers on the instance that deployed it and on any instance one of whose verified wallets holds `OPERATOR_ROLE` or `DEFAULT_ADMIN_ROLE` on it, read on chain with each request. `access` says which. Any other instance gets `404 MARKET_NOT_FOUND`. See [Which markets your instance reaches](/endpoints/seller-financing/introduction#which-markets-your-instance-reaches).
 
 The configuration is what new listings are checked against and stamped with. A listing already created keeps the terms it was stamped with, whatever the configuration says now.
 
@@ -35,6 +37,7 @@ The configuration is what new listings are checked against and stamped with. A l
     <ResponseField name="signer" type="string">The wallet that signed the deployment.</ResponseField>
     <ResponseField name="factory" type="string">The factory the market contract names, read live. `null` when unread.</ResponseField>
     <ResponseField name="createdAt" type="string">ISO 8601 time the market was recorded.</ResponseField>
+    <ResponseField name="access" type="object">`{ kind: "DEPLOYER" }` when your instance recorded the market. `{ kind: "ROLE_HOLDER", wallets }` when another instance did: `wallets` lists each of your verified wallets that holds a role, as `{ wallet, roles }`, with `roles` the roles `hasRole` confirmed just now.</ResponseField>
     <ResponseField name="asset" type="object">`{ address, symbol, name, decimals }` of the asset token, `address` lowercased. `null` when the read failed.</ResponseField>
     <ResponseField name="payment" type="object">The same for the payment token.</ResponseField>
     <ResponseField name="config" type="object">
@@ -71,8 +74,13 @@ The configuration is what new listings are checked against and stamped with. A l
         <ResponseField name="totalEscrowedFormatted" type="string">`totalEscrowed` in whole units.</ResponseField>
         <ResponseField name="totalClaimable" type="string">What all wallets together can withdraw now, in smallest units. `null` when unread.</ResponseField>
         <ResponseField name="trussetFeesPayable" type="string">Fees the market owes Trusset and has not paid out yet, in smallest units. `null` when unread.</ResponseField>
+        <ResponseField name="checked" type="boolean">`true` when the scan behind the next three counters read every listing. It reads up to 500 listings. A market without listings reads `true` with counters at `0`, and a scan that failed reads `false` with `null` counters. A scan is kept for up to 60 seconds while the market's counters stay the same.</ResponseField>
+        <ResponseField name="expiredListings" type="integer">`OPEN` listings past their `expiresAt`, which can no longer be bought. `openListings` still counts them, as the contract does. `null` when the scan failed.</ResponseField>
+        <ResponseField name="brokenAssetLegs" type="integer">`ACTIVE` and `REPAID` listings whose asset can no longer be delivered to the buyer. Their payoff and asset claim are refused with `ASSET_NOT_DELIVERABLE`. `null` when the scan failed. See [Asset leg](/endpoints/seller-financing/introduction#asset-leg).</ResponseField>
+        <ResponseField name="atRiskAssetLegs" type="integer">Freeze-mode listings that can still be delivered but carry a warning: part of the freeze was released, or the seller's balance covers fewer than all of its sold listings. `null` when the scan failed.</ResponseField>
       </Expandable>
     </ResponseField>
+    <ResponseField name="identityGate" type="object">Whether the register in `identityRegistry` can admit anyone: `{ registry, usable, code, reason }`. `usable` is `true` with no register or a working one, `false` when the register is the retired Trusset ID Register (`code: "IDENTITY_REGISTRY_RETIRED"`) or does not answer `isVerified(address)` (`code: "IDENTITY_REGISTRY_INCOMPATIBLE"`), and `null` when it could not be read just now. With `usable: false` the market refuses every listing and purchase, and `reason` names the remedy, [Set Identity Register](/endpoints/seller-financing/set-identity-registry). The whole block is `null` when the market's register could not be read.</ResponseField>
     <ResponseField name="tokenSetup" type="object">Where the adapter stands on the asset token: `{ ready, mode, requirement, authorizedVia, identityRegistry, reason }`. See [Setup status](/endpoints/seller-financing/token-setup#setup-status).</ResponseField>
   </Expandable>
 </ResponseField>
@@ -116,6 +124,7 @@ console.log(`${data.mode} market, repay fee ${data.repayFeeFormatted} ${data.pay
     "signer": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
     "factory": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
     "createdAt": "2026-10-18T21:44:05.112Z",
+    "access": { "kind": "DEPLOYER" },
     "asset": {
       "address": "0x305382e98f8e6ee24c32df3567342e1f1decb9b6",
       "symbol": "SFSS",
@@ -167,8 +176,13 @@ console.log(`${data.mode} market, repay fee ${data.repayFeeFormatted} ${data.pay
       "totalEscrowed": "0",
       "totalEscrowedFormatted": "0.0",
       "totalClaimable": "0",
-      "trussetFeesPayable": "1548106"
+      "trussetFeesPayable": "1548106",
+      "checked": true,
+      "expiredListings": 0,
+      "brokenAssetLegs": 0,
+      "atRiskAssetLegs": 0
     },
+    "identityGate": { "registry": null, "usable": true, "reason": null },
     "tokenSetup": {
       "ready": true,
       "mode": "FREEZE",
@@ -192,7 +206,7 @@ console.log(`${data.mode} market, repay fee ${data.repayFeeFormatted} ${data.pay
   "data": null,
   "error": {
     "code": "MARKET_NOT_FOUND",
-    "message": "Market not found"
+    "message": "Market not found on this instance. A market is reached on the instance that deployed it, or on an instance one of whose verified wallets holds the operator or admin role on it."
   },
   "metadata": {
     "timestamp": "2026-10-19T09:12:04.318Z",
@@ -208,7 +222,8 @@ console.log(`${data.mode} market, repay fee ${data.repayFeeFormatted} ${data.pay
 | Code | HTTP | Cause |
 |---|---|---|
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
-| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network. A contract address sent as the ID answers the same |
-| `CHAIN_UNAVAILABLE` | `503` | The market's counters could not be read. Nothing was changed. Retry shortly |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network: it neither deployed it nor holds a role on it through a verified wallet. A contract address sent as the ID answers the same |
+| `CHAIN_UNAVAILABLE` | `503` | The market's counters could not be read, or, for a market another instance deployed, whether your wallets hold a role on it. Nothing was changed. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | Your instance's verified wallets could not be read for the role check. Retry shortly |
 | `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
 | `MARKET_READ_FAILED` | `500` | Unexpected failure. Nothing was changed. Retry, or contact support with the request ID |

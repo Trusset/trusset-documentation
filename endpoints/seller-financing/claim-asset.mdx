@@ -5,14 +5,21 @@ description: 'Calldata that delivers the asset to the buyer after full payment'
 ---
 
 <Note>
-  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
 Builds the delivery of the asset on a `REPAID` listing. Only the buyer can sign it. The asset goes to `recipient`, the buyer's own wallet unless you name another, and the listing reads `COMPLETED`.
 
 In freeze mode the adapter unfreezes the amount in the seller's wallet and force-transfers it to the recipient. In custody mode the adapter transfers it from its own holdings. Either way the asset token checks the recipient, so the recipient must be a wallet the token admits, for example one verified on its identity register.
 
-A recipient the token refuses makes the claim revert, and the API answers `409 TX_WOULD_REVERT` with the token's reason. Nothing is lost: the listing stays `REPAID`. Claim again later, or name another admitted wallet. A claim stays open while the market is paused.
+Before building, the API checks, in order:
+
+1. `from` is the buyer. Any other wallet answers `409 TX_WOULD_REVERT` with `NotBuyer`, naming the buyer in the message and in `details.buyer`.
+2. The asset can still be delivered. While it cannot (`assetLeg.deliverable: false`), the claim answers `409 ASSET_NOT_DELIVERABLE` with `details.assetLeg`. See [Asset leg](/endpoints/seller-financing/introduction#asset-leg).
+3. The recipient is verified on the asset token's own identity register, when the token names one. A recipient the register answers as not verified is refused with `409 RECIPIENT_NOT_VERIFIED`, naming `recipient` and `registry`.
+4. In custody mode, the token admits the delivery: the transfer from the custody adapter to the recipient is simulated, and a refusal answers `409 RECIPIENT_REFUSED` with the token's `reason`.
+
+A check that cannot be read does not refuse the claim. The claim is then simulated from `from`, and a revert there, such as a freeze-mode forced transfer the token refuses, answers `409 TX_WOULD_REVERT` with the token's reason. Nothing is lost on any refusal: the listing stays `REPAID`. Claim again later, or name another admitted wallet. A claim stays open while the market is paused.
 
 ## Path Parameters
 
@@ -24,7 +31,7 @@ A recipient the token refuses makes the claim revert, and the API answers `409 T
 
 <ParamField body="recipient" type="string">The wallet that receives the asset. It cannot be the market or its adapter. Omitted, `""` or `null`, the asset goes to `from`.</ParamField>
 
-<ParamField body="from" type="string" required>The buyer's wallet, which signs. Any other wallet answers `409 TX_WOULD_REVERT` with `NotBuyer`.</ParamField>
+<ParamField body="from" type="string" required>The buyer's wallet, which signs. Without it the answer is `400 FROM_REQUIRED`. Any other wallet answers `409 TX_WOULD_REVERT` with `NotBuyer`, `details.requiredRole: "BUYER"` and `details.buyer`.</ParamField>
 
 ## Response Fields
 
@@ -36,6 +43,8 @@ A recipient the token refuses makes the claim revert, and the API answers `409 T
     <ResponseField name="confirmStepIndex" type="integer">`0`.</ResponseField>
     <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`.</ResponseField>
     <ResponseField name="recipient" type="string">The wallet that receives the asset.</ResponseField>
+    <ResponseField name="assetLeg" type="object">Present only when the asset leg carries a warning while the asset can still be delivered, for example a freeze partly released or a seller balance that covers fewer than all of its sold listings. As on [Get Listing](/endpoints/seller-financing/get-listing#response-fields).</ResponseField>
+    <ResponseField name="warning" type="string">`assetLeg.warning`, present with it.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -95,18 +104,37 @@ await (await buyer.sendTransaction({ to: step.to, data: step.data, value: 0, gas
   }
 }
 ```
-```json Error - Recipient Refused by the Token
+```json Error - Recipient Not Verified
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "RECIPIENT_NOT_VERIFIED",
+    "message": "The recipient 0x7AE1c4D5B28f0E93a6c1F84b2D07E5c9a3b6f120 is not verified on the asset token's identity register 0x18dC3306C6488413aBE3706352CE2f3362F4E342, so the token refuses the delivery. Name a wallet that is verified there, or have the token's register provider verify 0x7AE1c4D5B28f0E93a6c1F84b2D07E5c9a3b6f120 first.",
+    "details": {
+      "recipient": "0x7AE1c4D5B28f0E93a6c1F84b2D07E5c9a3b6f120",
+      "registry": "0x18dC3306C6488413aBE3706352CE2f3362F4E342"
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-11-12T14:30:00.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Not the Buyer
 {
   "success": false,
   "data": null,
   "error": {
     "code": "TX_WOULD_REVERT",
-    "message": "The transaction would revert: Transfer not possible",
+    "message": "Only the buyer 0x09BD3f5c18488e492a7bC3C7CCfc6cc837f511e8 can claim the asset of listing 4; 0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b is not the buyer.",
     "details": {
       "action": "asset claim",
-      "error": "Error",
-      "args": ["Transfer not possible"],
-      "revertData": "0x08c379a0..."
+      "error": "NotBuyer",
+      "requiredRole": "BUYER",
+      "buyer": "0x09BD3f5c18488e492a7bC3C7CCfc6cc837f511e8"
     }
   },
   "metadata": {
@@ -123,11 +151,15 @@ await (await buyer.sendTransaction({ to: step.to, data: step.data, value: 0, gas
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_LISTING_ID` | `400` | `listingId` is not a positive integer of up to 19 digits |
-| `VALIDATION_ERROR` | `400` | `from` is missing, an address is malformed, or the body carries another field |
-| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `VALIDATION_ERROR` | `400` | An address is malformed, or the body carries another field. `error.details` names it |
+| `FROM_REQUIRED` | `400` | `from` is missing. The message names who signs: the buyer of the listing |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
 | `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
 | `INVALID_STATUS` | `409` | The listing is not `REPAID`. `details.status` names its status |
-| `TX_WOULD_REVERT` | `409` | The claim would revert: `NotBuyer`, `InvalidRecipient`, a token refusal of the recipient with the token's reason, or an adapter error such as `AgentRoleMissing`, `ForcedTransferFailed` or `TransferShortfall` |
+| `ASSET_NOT_DELIVERABLE` | `409` | The asset can no longer be delivered: the seller's wallet or the custody adapter holds less than the listing sold. `details.assetLeg` carries the check |
+| `RECIPIENT_NOT_VERIFIED` | `409` | The recipient is not verified on the asset token's identity register. `details` carries `recipient` and `registry` |
+| `RECIPIENT_REFUSED` | `409` | Custody mode: the asset token refuses the delivery from the adapter to the recipient. `details` carries `recipient` and the token's `reason`, `null` when it gave none |
+| `TX_WOULD_REVERT` | `409` | The claim would revert: `NotBuyer` with `details.requiredRole` and `details.buyer`, `InvalidRecipient`, a token refusal of the recipient with the token's reason, or an adapter error such as `ForcedTransferFailed` or `TransferShortfall` |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
 | `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
 | `CLAIM_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

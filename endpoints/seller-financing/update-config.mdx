@@ -5,7 +5,7 @@ description: 'Calldata that changes the configuration new listings are checked a
 ---
 
 <Note>
-  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
 Builds `setConfig` on the market for a holder of the operator role to sign. The configuration sets the ranges new listings must fall within and the rates they are stamped with. It replaces the whole configuration, so send every field, including the ones you keep. Read the current values with [Get Market](/endpoints/seller-financing/get-market).
@@ -23,7 +23,7 @@ A new configuration reaches new listings only. Every listing already created, op
 ## Body Parameters
 
 <ParamField body="config" type="object" required>
-  The full configuration. Each minimum must not exceed its maximum, `minInterestPeriodDays` must not exceed `maxDurationDays`, and at least one strategy must be enabled, or the request answers `400 INVALID_CONFIG`.
+  The full configuration. Each minimum must not exceed its maximum, `minInterestPeriodDays` must not exceed `maxDurationDays`, and at least one strategy must be enabled, or the request answers `400 INVALID_CONFIG`. While `minInterestPeriodDays` is below `maxDurationDays`, `maxGracePeriodDays` must be at least `1`, because a listing with periodic due dates needs a grace period of at least one day; only a market where every listing has a single period may keep `0`. A smaller value answers `400 INVALID_CONFIG` with the message "maxGracePeriodDays must be at least 1 while interest periods can be shorter than the runtime: a listing with periodic due dates needs a grace period of at least 1 day".
   <Expandable>
     <ParamField body="minDownpaymentBps" type="integer" required>Smallest downpayment, 500 to 9000 basis points of the price.</ParamField>
     <ParamField body="maxDownpaymentBps" type="integer" required>Largest downpayment, 500 to 9000.</ParamField>
@@ -31,7 +31,7 @@ A new configuration reaches new listings only. Every listing already created, op
     <ParamField body="maxDurationDays" type="integer" required>Longest runtime, 1 to 3650 days.</ParamField>
     <ParamField body="minInterestPeriodDays" type="integer" required>Shortest interest period, 1 to 366 days.</ParamField>
     <ParamField body="maxInterestPeriodDays" type="integer" required>Longest interest period, 1 to 366 days.</ParamField>
-    <ParamField body="maxGracePeriodDays" type="integer" required>Longest grace period, 0 to 90 days.</ParamField>
+    <ParamField body="maxGracePeriodDays" type="integer" required>Longest grace period, 0 to 90 days. At least `1` unless `minInterestPeriodDays` equals `maxDurationDays`.</ParamField>
     <ParamField body="fixedEnabled" type="boolean" required>Offer `FIXED` interest.</ParamField>
     <ParamField body="derivedEnabled" type="boolean" required>Offer `DERIVED` interest.</ParamField>
     <ParamField body="sellerSetsFixedRate" type="boolean" required>Let the seller name the rate of a `FIXED` listing, up to `maxFixedRateBps`. With `false`, every `FIXED` listing carries `fixedRateBps`.</ParamField>
@@ -42,7 +42,7 @@ A new configuration reaches new listings only. Every listing already created, op
   </Expandable>
 </ParamField>
 
-<ParamField body="from" type="string" required>The wallet that signs. It must hold the operator role, or the request answers `409 TX_WOULD_REVERT` with `AccessControlUnauthorizedAccount`.</ParamField>
+<ParamField body="from" type="string" required>The wallet that signs: a holder of `OPERATOR_ROLE` on the market, the operator named at deployment unless the admin moved the role. Without it the answer is `400 FROM_REQUIRED`. Any other wallet answers `409 TX_WOULD_REVERT` with `AccessControlUnauthorizedAccount`, and `details.requiredRole` and `details.roleHolders` name the role and the wallets that hold it now.</ParamField>
 
 ## Response Fields
 
@@ -54,6 +54,7 @@ A new configuration reaches new listings only. Every listing already created, op
     <ResponseField name="confirmStepIndex" type="integer">`0`.</ResponseField>
     <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`.</ResponseField>
     <ResponseField name="config" type="object">The configuration the step sets, as you sent it.</ResponseField>
+    <ResponseField name="signer" type="object">`{ role, holders, holdersComplete }`. `role` is `OPERATOR_ROLE`. `holders` lists the wallets that hold it now, `null` when they could not be read. `holdersComplete` is `false` when the market's role history was read in part, so a holder may be missing.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -139,6 +140,11 @@ const res = await fetch(
       "maxFixedRateBps": 1500,
       "baseRateBps": 400,
       "volatilityBps": 1500
+    },
+    "signer": {
+      "role": "OPERATOR_ROLE",
+      "holders": ["0xCD421aBbA2b9b047eC069215Df5C49c97C96f895"],
+      "holdersComplete": true
     }
   },
   "error": null,
@@ -179,10 +185,11 @@ const res = await fetch(
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | A `config` field is missing or outside its bounds, `from` is missing or malformed, or the body carries another field. `error.details` names each field |
-| `INVALID_CONFIG` | `400` | The configuration is inconsistent: a minimum above its maximum, `minInterestPeriodDays` above `maxDurationDays`, or no strategy enabled. `message` is the first problem and `details.problems` lists all |
-| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
-| `TX_WOULD_REVERT` | `409` | The update would revert: `AccessControlUnauthorizedAccount` when `from` lacks the operator role, or `InvalidConfig` |
+| `VALIDATION_ERROR` | `400` | A `config` field is missing or outside its bounds, `from` is malformed, or the body carries another field. `error.details` names each field, an unknown one by its own name |
+| `FROM_REQUIRED` | `400` | `from` is missing. The message names who signs: a wallet that holds `OPERATOR_ROLE` on the market |
+| `INVALID_CONFIG` | `400` | The configuration is inconsistent: a minimum above its maximum, `minInterestPeriodDays` above `maxDurationDays`, no strategy enabled, or `maxGracePeriodDays` below `1` while `minInterestPeriodDays` is below `maxDurationDays`. `message` is the first problem and `details.problems` lists all |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
+| `TX_WOULD_REVERT` | `409` | The update would revert: `AccessControlUnauthorizedAccount` when `from` lacks the operator role, with `details.requiredRole` and `details.roleHolders`, or `InvalidConfig` |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
 | `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
 | `CONFIG_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

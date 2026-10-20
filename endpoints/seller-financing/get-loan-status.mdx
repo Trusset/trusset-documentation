@@ -5,16 +5,18 @@ description: 'What an active loan owes now, when the next payment is due, and wh
 ---
 
 <Note>
-  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
-Reads the loan of an `ACTIVE` listing from the market contract at the current block: the interest due now, the payoff, the next due date with its amount, and whether the loan can be liquidated. A listing in any other status answers with its status and `active: false`.
+Reads the loan of an `ACTIVE` listing from the market contract at the current block: the interest due now, the payoff, the next due date with its amount, whether the loan can be liquidated, and whether the asset can still be delivered to the buyer. A listing in any other status answers with its status and `active: false`, and a `REPAID` one adds `assetLeg`.
 
 Interest accrues by the second, so every figure here grows until the next payment. See [Due dates, grace and default](/endpoints/seller-financing/introduction#due-dates-grace-and-default).
 
 ## Paying a period on time
 
 Interest cannot be paid in advance. A payment before `nextDue.dueAt` settles only the interest accrued until then, and the excess goes to principal, so the period still closes with interest owed. Pay once `nextDue.dueAt` has passed, and before `liquidatableAt`.
+
+That window is the listing's grace period: `liquidatableAt` is `nextDue.dueAt` plus the grace period plus one second. A listing with several interest periods therefore carries a grace period of at least one day, and [Create Listing](/endpoints/seller-financing/create-listing) refuses less with `GRACE_PERIOD_REQUIRED`. On a single-period listing with a grace period of 0, pay off in full before maturity instead.
 
 Send at least `interestDue` plus the repay fee to [Repay](/endpoints/seller-financing/repay). The fee is carved out of the payment, and it is the smaller of the market's `repayFee` and 0.5 percent of the amount applied. Leave a small margin for the interest that accrues until the payment is mined: anything above the interest due goes to principal.
 
@@ -46,11 +48,12 @@ Send at least `interestDue` plus the repay fee to [Repay](/endpoints/seller-fina
     </ResponseField>
     <ResponseField name="isLiquidatable" type="boolean">`true` when the loan is in default and the seller or the operator can liquidate it now. `null` when unread.</ResponseField>
     <ResponseField name="liquidatableAt" type="integer">Unix time the loan becomes liquidatable if nothing more is paid: one second after the grace period of `nextDue.dueAt`. In the past once the loan is in default.</ResponseField>
+    <ResponseField name="assetLeg" type="object">On an `ACTIVE` or `REPAID` listing: whether the asset can still be delivered to the buyer, as on [Get Listing](/endpoints/seller-financing/get-listing#response-fields). With `deliverable: false`, a repayment that completes the loan and the asset claim are refused with `409 ASSET_NOT_DELIVERABLE`. See [Asset leg](/endpoints/seller-financing/introduction#asset-leg).</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Warning>
-  When the loan's figures cannot be read, an active listing answers with `id`, `status` and `active: true` only. Missing figures are unread, not zero. Retry before acting on them.
+  When the loan's figures cannot be read, an active listing answers with `id`, `status`, `active: true` and `assetLeg` only. Missing figures are unread, not zero. Retry before acting on them.
 </Warning>
 
 <RequestExample>
@@ -96,7 +99,24 @@ if (data.active && data.nextDue) {
       "principalAmountFormatted": "0.0"
     },
     "isLiquidatable": false,
-    "liquidatableAt": 1793178001
+    "liquidatableAt": 1793178001,
+    "assetLeg": {
+      "checked": true,
+      "mode": "FREEZE",
+      "pooled": true,
+      "locked": true,
+      "deliverable": true,
+      "seller": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b",
+      "assetAmount": "100",
+      "lockedAmount": "100",
+      "sellerRequired": "100",
+      "sellerFrozen": "100",
+      "sellerBalance": "100",
+      "shortfall": "0",
+      "shortfallFormatted": "0",
+      "warning": null,
+      "note": null
+    }
   },
   "error": null,
   "metadata": {
@@ -130,7 +150,24 @@ if (data.active && data.nextDue) {
       "principalAmountFormatted": "0.0"
     },
     "isLiquidatable": true,
-    "liquidatableAt": 1793178001
+    "liquidatableAt": 1793178001,
+    "assetLeg": {
+      "checked": true,
+      "mode": "FREEZE",
+      "pooled": true,
+      "locked": true,
+      "deliverable": true,
+      "seller": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b",
+      "assetAmount": "100",
+      "lockedAmount": "100",
+      "sellerRequired": "100",
+      "sellerFrozen": "100",
+      "sellerBalance": "100",
+      "shortfall": "0",
+      "shortfallFormatted": "0",
+      "warning": null,
+      "note": null
+    }
   },
   "error": null,
   "metadata": {
@@ -163,7 +200,7 @@ if (data.active && data.nextDue) {
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_LISTING_ID` | `400` | `listingId` is not a positive integer of up to 19 digits |
-| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
 | `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
 | `CHAIN_UNAVAILABLE` | `503` | The market could not be read. Retry shortly |
 | `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |

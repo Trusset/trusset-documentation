@@ -1,19 +1,25 @@
 ---
 title: 'List Markets'
 api: 'GET /seller-financing/api/markets'
-description: 'List your instance''s Seller Financing markets with live counters and token-side setup'
+description: 'List the Seller Financing markets your instance deployed or holds a role on, with live counters, register state and token-side setup'
 ---
 
 <Note>
-  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
-Returns the Seller Financing markets your instance recorded on its network, newest first, at most 100. Each record carries the deployment facts stored when [Record Deployment](/endpoints/seller-financing/confirm-deployment) verified the deployment, plus three blocks read live from the chain: the token metadata, the token-side setup and the market counters.
+Returns the Seller Financing markets your instance reaches on its network, at most 100: first the markets it deployed and recorded, newest first, then the markets another instance recorded on which one of your verified wallets holds a role, newest first. `access` says which. See [Which markets your instance reaches](/endpoints/seller-financing/introduction#which-markets-your-instance-reaches).
 
-Use `id` as the `marketId` of every other endpoint. A market deployed through the factory but never recorded on your instance does not appear.
+Each record carries the deployment facts stored when [Record Deployment](/endpoints/seller-financing/confirm-deployment) verified the deployment, plus blocks read live from the chain: the token metadata, the token-side setup, the state of the market identity register and the market counters.
+
+Use `id` as the `marketId` of every other endpoint. A market nobody recorded does not appear.
+
+<Note>
+  A market of another instance is listed only when one of your verified wallets is the admin or the operator named at its deployment and the chain confirms, on this request, that it still holds that role. A role that is revoked, or that could not be read, leaves the market out, and so does a failed read of your instance's wallets: the answer then holds your own markets only, rather than failing. A wallet the admin granted a role later reaches the market by its ID, on [Get Market](/endpoints/seller-financing/get-market) and every other market route, but the market is not listed here.
+</Note>
 
 <Warning>
-  The counters of every market are read in one batch. A market whose counters could not be read carries `state.readable: false` and `null` figures. When the whole batch fails, `state` holds only `readable: false` and `totalEscrowedFormatted: null`. A `null` figure is unread, not zero. Retry before acting on it.
+  The counters of every market are read in one batch. A market whose counters could not be read carries `state.readable: false` and `null` figures. When the whole batch fails, `state` holds only `readable: false`, `totalEscrowedFormatted: null`, `checked: false` and the three scan counters at `null`. A `null` figure is unread, not zero. Retry before acting on it.
 </Warning>
 
 ## Response Fields
@@ -23,7 +29,14 @@ Use `id` as the `marketId` of every other endpoint. A market deployed through th
     <ResponseField name="markets" type="array">
       Your instance's markets, newest first.
       <Expandable>
-        <ResponseField name="id" type="string">The market's record ID. Pass it as `marketId`.</ResponseField>
+        <ResponseField name="id" type="string">The market's record ID, created by the deploying instance. Pass it as `marketId`.</ResponseField>
+        <ResponseField name="access" type="object">
+          Why your instance reaches the market.
+          <Expandable>
+            <ResponseField name="kind" type="string">`DEPLOYER` when your instance recorded the market. `ROLE_HOLDER` when another instance did and one of your verified wallets holds a role on it.</ResponseField>
+            <ResponseField name="wallets" type="array">`ROLE_HOLDER` only. Each `{ wallet, roles, verified }`: your wallet, checksummed, the roles named at deployment that it still holds (`DEFAULT_ADMIN_ROLE`, `OPERATOR_ROLE` or both), and `verified`, always `true` here because only roles `hasRole` confirmed on chain are listed.</ResponseField>
+          </Expandable>
+        </ResponseField>
         <ResponseField name="chainId" type="integer">`11155111` on Sepolia.</ResponseField>
         <ResponseField name="address" type="string">The market contract.</ResponseField>
         <ResponseField name="adapter" type="string">The market's collateral adapter: the freeze adapter or the custody adapter.</ResponseField>
@@ -41,6 +54,15 @@ Use `id` as the `marketId` of every other endpoint. A market deployed through th
         <ResponseField name="asset" type="object">`{ address, symbol, name, decimals }` of the asset token, read from the token, with `address` lowercased. A field the token does not answer is `null`, and the whole block is `null` when the read failed.</ResponseField>
         <ResponseField name="payment" type="object">The same for the payment token.</ResponseField>
         <ResponseField name="tokenSetup" type="object">Where the adapter stands on the asset token: `{ ready, mode, requirement, authorizedVia, identityRegistry, reason }`. `ready` is `true` once the token accepts the adapter, and `null` when that could not be read. See [Setup status](/endpoints/seller-financing/token-setup#setup-status).</ResponseField>
+        <ResponseField name="identityGate" type="object">
+          Whether the market identity register in force can admit anyone. `null` when the register could not be read from the market.
+          <Expandable>
+            <ResponseField name="registry" type="string">The register the market reads now, or `null` when it names none.</ResponseField>
+            <ResponseField name="usable" type="boolean">`true` when the market names no register or its register answers `isVerified(address)`. `false` when the register is the retired Trusset ID Register or does not answer `isVerified(address)`: the market then refuses every listing and purchase. `null` when the register could not be read just now.</ResponseField>
+            <ResponseField name="code" type="string">With `usable: false` only: `IDENTITY_REGISTRY_RETIRED` or `IDENTITY_REGISTRY_INCOMPATIBLE`.</ResponseField>
+            <ResponseField name="reason" type="string">What is wrong and the remedy, [Set Identity Register](/endpoints/seller-financing/set-identity-registry). `null` when usable.</ResponseField>
+          </Expandable>
+        </ResponseField>
         <ResponseField name="state" type="object">
           Live counters of the market contract.
           <Expandable>
@@ -52,7 +74,12 @@ Use `id` as the `marketId` of every other endpoint. A market deployed through th
             <ResponseField name="paused" type="boolean">Whether the market is paused for new business. `null` when unread.</ResponseField>
             <ResponseField name="paymentDecimals" type="integer">The payment token's decimals as the market recorded them at deployment.</ResponseField>
             <ResponseField name="trussetFeesPayable" type="string">Fees the market owes Trusset and has not paid out yet, in smallest units.</ResponseField>
+            <ResponseField name="identityRegistry" type="string">The market identity register, read live. `null` when the market names none. Absent when unread.</ResponseField>
             <ResponseField name="totalEscrowedFormatted" type="string">`totalEscrowed` in whole units.</ResponseField>
+            <ResponseField name="checked" type="boolean">`true` when the scan behind the next three counters read every listing. The scan reads up to 500 listings, so a market with more reads `false`, and so does one whose listings could not be read, with `null` counters. A market without listings reads `true` with counters at `0`. A scan is kept for up to 60 seconds while the market's counters stay the same.</ResponseField>
+            <ResponseField name="expiredListings" type="integer">`OPEN` listings past their `expiresAt`. They can no longer be bought, but the seller or the operator still has to cancel them. `openListings` keeps counting them, as the contract does. `null` when the scan failed.</ResponseField>
+            <ResponseField name="brokenAssetLegs" type="integer">`ACTIVE` and `REPAID` listings whose asset can no longer be delivered to the buyer: in freeze mode the seller holds less than the listing sold, in custody mode the adapter holds less. Their payoff and asset claim are refused with `ASSET_NOT_DELIVERABLE`. `null` when the scan failed. See [Asset leg](/endpoints/seller-financing/introduction#asset-leg).</ResponseField>
+            <ResponseField name="atRiskAssetLegs" type="integer">Freeze-mode listings that can still be delivered but carry a warning: part of the freeze was released, or the seller's balance covers fewer than all of its sold listings. `null` when the scan failed.</ResponseField>
           </Expandable>
         </ResponseField>
       </Expandable>
@@ -76,6 +103,8 @@ const res = await fetch('https://api.trusset.org/seller-financing/api/markets', 
 const { data } = await res.json();
 for (const market of data.markets) {
   if (market.tokenSetup.ready !== true) console.log(`${market.id}: token-side setup outstanding`);
+  if (market.identityGate?.usable === false) console.log(`${market.id}: ${market.identityGate.reason}`);
+  if (market.state.brokenAssetLegs) console.log(`${market.id}: ${market.state.brokenAssetLegs} loans cannot deliver their asset`);
 }
 ```
 </RequestExample>
@@ -102,6 +131,7 @@ for (const market of data.markets) {
         "signer": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
         "factory": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
         "createdAt": "2026-10-18T21:46:51.630Z",
+        "access": { "kind": "DEPLOYER" },
         "asset": {
           "address": "0x305382e98f8e6ee24c32df3567342e1f1decb9b6",
           "symbol": "SFSS",
@@ -122,6 +152,7 @@ for (const market of data.markets) {
           "identityRegistry": "0x18dC3306C6488413aBE3706352CE2f3362F4E342",
           "reason": null
         },
+        "identityGate": { "registry": null, "usable": true, "reason": null },
         "state": {
           "readable": true,
           "listings": "2",
@@ -131,7 +162,12 @@ for (const market of data.markets) {
           "paused": false,
           "paymentDecimals": 6,
           "trussetFeesPayable": "1552225",
-          "totalEscrowedFormatted": "0.0"
+          "identityRegistry": null,
+          "totalEscrowedFormatted": "0.0",
+          "checked": true,
+          "expiredListings": 0,
+          "brokenAssetLegs": 0,
+          "atRiskAssetLegs": 0
         }
       },
       {
@@ -150,6 +186,7 @@ for (const market of data.markets) {
         "signer": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
         "factory": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
         "createdAt": "2026-10-18T21:44:05.112Z",
+        "access": { "kind": "DEPLOYER" },
         "asset": {
           "address": "0x305382e98f8e6ee24c32df3567342e1f1decb9b6",
           "symbol": "SFSS",
@@ -170,6 +207,7 @@ for (const market of data.markets) {
           "identityRegistry": null,
           "reason": null
         },
+        "identityGate": { "registry": null, "usable": true, "reason": null },
         "state": {
           "readable": true,
           "listings": "3",
@@ -179,7 +217,12 @@ for (const market of data.markets) {
           "paused": false,
           "paymentDecimals": 6,
           "trussetFeesPayable": "1548106",
-          "totalEscrowedFormatted": "0.0"
+          "identityRegistry": null,
+          "totalEscrowedFormatted": "0.0",
+          "checked": true,
+          "expiredListings": 0,
+          "brokenAssetLegs": 0,
+          "atRiskAssetLegs": 0
         }
       }
     ]
@@ -198,7 +241,7 @@ for (const market of data.markets) {
   "data": null,
   "error": {
     "code": "SELLER_FINANCING_UNAVAILABLE",
-    "message": "Seller Financing is in beta and available on testnet instances only"
+    "message": "Seller Financing is in beta and runs on Ethereum Sepolia instances only for now"
   },
   "metadata": {
     "timestamp": "2026-10-19T09:12:04.318Z",
@@ -213,7 +256,7 @@ for (const market of data.markets) {
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum. Seller Financing runs on testnet instances only |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum. Seller Financing runs on Ethereum Sepolia instances only for now |
 | `MARKETS_READ_FAILED` | `500` | Unexpected failure. Nothing was changed. Retry, or contact support with the request ID |
 
 Authentication, credit and rate-limit codes are listed under [Errors](/endpoints/seller-financing/introduction#errors).

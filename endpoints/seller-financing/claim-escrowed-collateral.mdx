@@ -1,0 +1,154 @@
+---
+title: 'Claim Escrowed Collateral'
+api: 'POST /seller-financing/api/markets/{marketId}/claim-escrowed-collateral'
+description: 'Calldata that returns an asset the custody adapter holds in escrow to its holder'
+---
+
+<Note>
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Builds `claimEscrowedCollateral()` on the market's custody adapter for the wallet the adapter holds an asset for. When a custody market cancels a listing or liquidates a loan, the adapter returns the asset to the seller. If the asset token refuses that transfer, for example because the seller's verification lapsed, the cancellation or the liquidation still goes through and the adapter keeps the asset in escrow for the seller. [Cancel Listing](/endpoints/seller-financing/cancel-listing) and [Liquidate](/endpoints/seller-financing/liquidate) announce it in `assetReturn` before you sign.
+
+Once the token admits the seller again, the seller signs this claim and the adapter transfers the whole escrow to it. Read what is held with [Get Claimable](/endpoints/seller-financing/get-claimable) (`collateralEscrow`) or on the listing with [Get Listing](/endpoints/seller-financing/get-listing) (`collateralEscrow`).
+
+Before building, the API reads the escrow of `from` on the adapter and simulates the transfer from the adapter to `from`. While the token still refuses it, the answer is `409 COLLATERAL_TRANSFER_RESTRICTED` with the token's reason, and the asset stays in escrow: have the token's issuer admit the wallet first. The claim is not stopped by a pause of the market.
+
+The escrow is one balance per wallet on the adapter, across every listing of the market, and the claim pays it out in full to the signing wallet only. No other wallet can claim it, and it cannot be sent elsewhere.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/seller-financing/list-markets). It must be a custody market.</ParamField>
+
+## Body Parameters
+
+<ParamField body="from" type="string" required>The wallet the adapter holds the asset for, normally the seller, which signs and receives it. Without it the answer is `400 FROM_REQUIRED`.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain the step is built for.</ResponseField>
+    <ResponseField name="steps" type="array">One step, `claimEscrowedCollateral` on the custody adapter (the market's `adapter`, not the market), with `gasLimit`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">`0`.</ResponseField>
+    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`.</ResponseField>
+    <ResponseField name="holder" type="string">The wallet the escrow is held for, `from`.</ResponseField>
+    <ResponseField name="amount" type="string">The escrow when the request was built, in the asset token's smallest unit. The claim pays out the escrow at the moment it is mined.</ResponseField>
+    <ResponseField name="amountFormatted" type="string">The same in whole units of the asset.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/seller-financing/api/markets/cmsg4z1p80005sf9qk3m2w7ra/claim-escrowed-collateral" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"from": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/seller-financing/api/markets/${marketId}/claim-escrowed-collateral`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: await seller.getAddress() })
+  }
+);
+const { success, data, error } = await res.json();
+if (!success) {
+  if (error.code === 'COLLATERAL_TRANSFER_RESTRICTED') console.log('The token still refuses the seller:', error.details.reason);
+  return;
+}
+const step = data.steps[0];
+await (await seller.sendTransaction({ to: step.to, data: step.data, value: 0, gasLimit: step.gasLimit })).wait();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "chainId": 11155111,
+    "steps": [
+      {
+        "to": "0xA6cd408e91c3997E2460860F5d1AE8755E001D4C",
+        "data": "0x2bd4442e",
+        "value": "0",
+        "functionName": "claimEscrowedCollateral",
+        "label": "Reclaim 100 of the asset held in escrow by the custody adapter",
+        "description": "Reclaim 100 of the asset held in escrow by the custody adapter",
+        "gasLimit": "75812",
+        "chainId": 11155111
+      }
+    ],
+    "confirmStepIndex": 0,
+    "preflight": {
+      "simulated": true,
+      "gasEstimate": "58317"
+    },
+    "holder": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b",
+    "amount": "100",
+    "amountFormatted": "100"
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-11-02T10:15:00.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Nothing Escrowed
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "NOTHING_ESCROWED",
+    "message": "The custody adapter holds nothing in escrow for 0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b.",
+    "details": { "holder": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b" }
+  },
+  "metadata": {
+    "timestamp": "2026-11-02T10:15:00.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Token Still Refuses
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "COLLATERAL_TRANSFER_RESTRICTED",
+    "message": "The asset token still refuses to deliver 100 from the custody adapter to 0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b: Transfer not possible, so the claim would revert and stays in escrow. The token's issuer has to admit 0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b again first.",
+    "details": {
+      "holder": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b",
+      "reason": "Transfer not possible"
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-11-02T10:15:00.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `from` is malformed, or the body carries another field. `error.details` names it |
+| `FROM_REQUIRED` | `400` | `from` is missing. The message names who signs: the wallet whose asset the custody adapter holds in escrow |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
+| `NOT_A_CUSTODY_MARKET` | `409` | The market runs in freeze mode. A freeze market releases the freeze in the seller's wallet and holds nothing in escrow |
+| `NOTHING_ESCROWED` | `409` | The adapter holds nothing in escrow for `from`. `details.holder` names it |
+| `COLLATERAL_TRANSFER_RESTRICTED` | `409` | The asset token still refuses the transfer from the adapter to `from`. `details` carries `holder` and the token's `reason`, `null` when it gave none. The asset stays in escrow |
+| `TX_WOULD_REVERT` | `409` | The simulated claim reverts, for example with `InsufficientLocked` when the adapter holds less of the asset than the escrow |
+| `CHAIN_UNAVAILABLE` | `503` | The adapter's escrow, or the chain, could not be read. Nothing was built. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `ESCROW_CLAIM_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

@@ -5,7 +5,7 @@ description: 'Calldata that withdraws from the sale of a defaulted loan and sett
 ---
 
 <Note>
-  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
 Builds the seller's withdrawal from the sale of a loan in default. The seller or the market's operator signs it. Once mined, the listing reads `LIQUIDATED`, the asset is released back to the seller, and the escrow is split:
@@ -16,7 +16,7 @@ Builds the seller's withdrawal from the sale of a loan in default. The seller or
 
 The escrow is the downpayment plus the principal paid so far. Interest the buyer paid before the default stays with the seller. Nothing is paid out by the liquidation itself: the seller and the buyer each withdraw with [Withdraw](/endpoints/seller-financing/withdraw).
 
-In freeze mode the adapter unfreezes the amount in the seller's wallet. In custody mode it returns the asset to the seller, or keeps it in escrow for the seller when the token refuses the return. See [What each party receives](/endpoints/seller-financing/introduction#what-each-party-receives) for a worked example.
+In freeze mode the adapter unfreezes the amount in the seller's wallet. In custody mode it returns the asset to the seller, or keeps it in escrow for the seller when the token refuses the return. Before building, the API simulates that return from the adapter: when the token refuses it, the answer carries `assetReturn` with `willEscrow: true` and the same text in `warning`, and the seller later takes the asset back with [Claim Escrowed Collateral](/endpoints/seller-financing/claim-escrowed-collateral). See [What each party receives](/endpoints/seller-financing/introduction#what-each-party-receives) for a worked example.
 
 A loan is in default one second after the grace period of a due date whose interest is unpaid, or one second after maturity plus the grace period while principal is outstanding. Before that, the API answers `409 TX_WOULD_REVERT` with `NotLiquidatable` and the moment the loan becomes liquidatable. A liquidation is refused while the market is paused.
 
@@ -32,7 +32,7 @@ A loan is in default one second after the grace period of a due date whose inter
 
 ## Body Parameters
 
-<ParamField body="from" type="string" required>The wallet that signs: the seller or a holder of the operator role. Any other wallet answers `409 TX_WOULD_REVERT` with `NotSeller`.</ParamField>
+<ParamField body="from" type="string" required>The wallet that signs: the seller or a holder of `OPERATOR_ROLE`. Without it the answer is `400 FROM_REQUIRED`. Any other wallet answers `409 TX_WOULD_REVERT` with `NotSeller`, and the message names the seller and the current operators, also in `details.seller` and `details.roleHolders`.</ParamField>
 
 ## Response Fields
 
@@ -44,6 +44,9 @@ A loan is in default one second after the grace period of a due date whose inter
     <ResponseField name="confirmStepIndex" type="integer">`0`.</ResponseField>
     <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`.</ResponseField>
     <ResponseField name="loanStatus" type="object">The loan when the request was built: `interestDue`, `payoff`, `nextDue`, `isLiquidatable` and `liquidatableAt`, as on [Get Loan Status](/endpoints/seller-financing/get-loan-status#response-fields). `null` when unread.</ResponseField>
+    <ResponseField name="signer" type="object">`{ role: "SELLER_OR_OPERATOR_ROLE", seller }`: the seller of the listing, or a holder of `OPERATOR_ROLE`, signs.</ResponseField>
+    <ResponseField name="assetReturn" type="object">Custody mode only, present when the asset token refuses the return to the seller: `{ willEscrow: true, reason, message }`. `reason` is the token's refusal when it gave one, otherwise `null`. The liquidation still settles the escrow. Absent when the return goes through or could not be checked.</ResponseField>
+    <ResponseField name="warning" type="string">`assetReturn.message`, present with it.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -113,6 +116,10 @@ if (!body.success && body.error.details?.error === 'NotLiquidatable') {
       },
       "isLiquidatable": true,
       "liquidatableAt": 1793178001
+    },
+    "signer": {
+      "role": "SELLER_OR_OPERATOR_ROLE",
+      "seller": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b"
     }
   },
   "error": null,
@@ -152,11 +159,12 @@ Liquidated at this moment, the loan's 2,000 USDC escrow splits into 136.111324 U
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_LISTING_ID` | `400` | `listingId` is not a positive integer of up to 19 digits |
-| `VALIDATION_ERROR` | `400` | `from` is missing or malformed, or the body carries another field |
-| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance and network |
+| `VALIDATION_ERROR` | `400` | `from` is malformed, or the body carries another field. `error.details` names it |
+| `FROM_REQUIRED` | `400` | `from` is missing. The message names who signs: the seller of the listing or a wallet that holds `OPERATOR_ROLE` |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
 | `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
 | `INVALID_STATUS` | `409` | The listing is not `ACTIVE`. `details.status` names its status |
-| `TX_WOULD_REVERT` | `409` | The liquidation would revert: `NotLiquidatable` with `details.liquidatableAt`, `NotSeller`, `EnforcedPause`, or an adapter error such as `AgentRoleMissing` or `InsufficientLocked` |
+| `TX_WOULD_REVERT` | `409` | The liquidation would revert: `NotLiquidatable` with `details.liquidatableAt`, `NotSeller` with `details.requiredRole`, `details.seller` and `details.roleHolders`, `EnforcedPause`, `InsufficientLocked` when the custody adapter holds less than it recorded, or the token's own refusal of the unfreeze, for example when the freeze adapter lost its agent role |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
 | `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
 | `LIQUIDATE_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

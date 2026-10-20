@@ -5,7 +5,7 @@ description: 'Verify a broadcast market deployment and record the market on your
 ---
 
 <Note>
-  Seller Financing is in beta and runs on testnet instances only (Sepolia, `DEVELOPMENT`). A `PRODUCTION` instance answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
 Records a market your instance deployed. Send the hash of the mined `deployMarket` transaction built by [Build Deployment](/endpoints/seller-financing/deploy-market). This is the only Seller Financing write with a confirm call. Everything after it is read from the chain.
@@ -14,17 +14,21 @@ The API reads the receipt and checks, in order:
 
 1. The transaction is mined and succeeded.
 2. It calls `deployMarket` on your network's Seller Financing factory, directly or wrapped in a smart-account call.
-3. The wallet that signed it is a verified wallet of your instance.
-4. The factory emitted `MarketDeployed` with that wallet as deployer, and recognises the market as its own.
+3. The factory emitted `MarketDeployed` with the signing wallet as deployer.
+4. No other instance has recorded the market. A market recorded elsewhere answers `409 MARKET_RECORDED_ELSEWHERE`, whatever wallet signed it. `details.marketId` names its record ID only when a verified wallet of your instance holds `OPERATOR_ROLE` or `DEFAULT_ADMIN_ROLE` on it, read on chain.
+5. The wallet that signed it is a verified wallet of your instance.
+6. The factory recognises the market as its own.
 
 A deployment sent through a Safe, an EIP-7702 account or an ERC-4337 smart account is accepted. The API reads the wrapped call, and the signer is the smart account that called the factory, so that account must be the verified wallet of your instance. The wallet that broadcast the outer transaction is kept as `outerSender` on the role assignment record.
 
 The answer carries the market record, the role assignment record built from the same receipt, and the token-side setup the adapter still needs.
 
+A market is recorded once, on the instance whose wallet signed its deployment. An instance one of whose verified wallets holds `OPERATOR_ROLE` or `DEFAULT_ADMIN_ROLE` on a market another instance recorded does not record it again: every market route answers for it by its ID, and [List Markets](/endpoints/seller-financing/list-markets) lists it when that wallet is the admin or operator named at deployment. See [Which markets your instance reaches](/endpoints/seller-financing/introduction#which-markets-your-instance-reaches).
+
 ## Body Parameters
 
 <ParamField body="txHash" type="string" required>
-  Hash of the mined deployment transaction: `0x` followed by 64 hex characters. A malformed hash answers `400 VALIDATION_ERROR` naming `txHash`, before anything is read.
+  Hash of the mined deployment transaction: `0x` followed by 64 hex characters. A malformed hash answers the standard `400 VALIDATION_ERROR` with the message "txHash must be a 32-byte hex hash" and `details: [{ field: "txHash", message }]`, before anything is read.
 </ParamField>
 
 ## Response Fields
@@ -106,6 +110,7 @@ if (data.tokenSetup && !data.tokenSetup.done) {
       "mode": "FREEZE",
       "collateralAgent": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895",
       "identityRegistry": null,
+      "currentIdentityRegistry": null,
       "repayFee": "1500000",
       "transaction": {
         "hash": "0xab2709878f3c6a93fef46c073043a8a7206fa5a164e04bf1f2cd5055da619fde",
@@ -158,7 +163,16 @@ if (data.tokenSetup && !data.tokenSetup.done) {
         "noRoleFor": [
           { "account": "0x2805394e8fCC41bB11613c95967be0104AB88b1c", "label": "factory", "holdsAdmin": false, "holdsOperator": false },
           { "account": "0x5Ad87a0621175206b72d10E4b8577b192e7F40aB", "label": "factory owner", "holdsAdmin": false, "holdsOperator": false }
-        ]
+        ],
+        "currentHolders": [
+          { "role": "DEFAULT_ADMIN_ROLE", "roleHash": "0x0000000000000000000000000000000000000000000000000000000000000000", "account": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895", "holdsNow": true },
+          { "role": "OPERATOR_ROLE", "roleHash": "0x97667070c54ef182b0f5858b034beac1b6f3089aa2d3188bb1e8929f4fa9b929", "account": "0xCD421aBbA2b9b047eC069215Df5C49c97C96f895", "holdsNow": true }
+        ],
+        "roleChanges": [],
+        "registerChanges": [],
+        "upgrades": [],
+        "implementation": "0xde0Dd200b23De7a21877980A75ea4143543Bab47",
+        "history": { "complete": true, "fromBlock": 11943817, "scannedToBlock": 11943817 }
       }
     },
     "tokenSetup": {
@@ -222,12 +236,28 @@ if (data.tokenSetup && !data.tokenSetup.done) {
   "data": null,
   "error": {
     "code": "DEPLOYMENT_NOT_INSTANCE_BOUND",
-    "message": "The deployment was signed by a wallet that is not a verified wallet of this instance. Register the wallet on the instance first."
+    "message": "The deployment was signed by 0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b, which is not a verified wallet of this instance, so the market is recorded only on the instance whose wallet signed it. A verified wallet of this instance that holds the operator or admin role on the market sees it here once that instance has recorded it."
   },
   "metadata": {
     "timestamp": "2026-10-18T21:44:05.391Z",
     "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
     "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Recorded Elsewhere
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "MARKET_RECORDED_ELSEWHERE",
+    "message": "This market is recorded on the instance that deployed it, so it is not recorded a second time here. While a verified wallet of this instance holds the operator or admin role on the market, every market route answers for it here by its id, and GET /seller-financing/api/markets lists it when that wallet is the operator or admin named at deployment.",
+    "details": { "marketId": "cmsg4x7k20003sf9q1d8v6b2e" }
+  },
+  "metadata": {
+    "timestamp": "2026-10-19T10:02:17.640Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_def456"
   }
 }
 ```
@@ -237,14 +267,14 @@ if (data.tokenSetup && !data.tokenSetup.done) {
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | `txHash` is missing or not `0x` followed by 64 hex characters, or the body carries another field. `error.details` names the field |
+| `VALIDATION_ERROR` | `400` | `txHash` is missing or not `0x` followed by 64 hex characters ("txHash must be a 32-byte hex hash"), or the body carries another field. `error.details` names the field |
 | `TX_REVERTED` | `400` | The transaction was mined but reverted. Nothing was deployed |
 | `TX_WRONG_TARGET` | `400` | The transaction is not sent to the Seller Financing factory of your network, and no recognised smart-account call inside it calls `deployMarket` on that factory |
 | `TX_WRONG_FUNCTION` | `400` | The transaction calls the factory directly, but not `deployMarket` |
 | `TX_NOT_VERIFIED` | `400` | The receipt carries no `MarketDeployed` from the factory for the signing wallet, or the factory does not recognise the market |
-| `DEPLOYMENT_NOT_INSTANCE_BOUND` | `403` | The signer is not a verified wallet of your instance. Register the wallet, then send the hash again |
+| `DEPLOYMENT_NOT_INSTANCE_BOUND` | `403` | The signer is not a verified wallet of your instance. The message names the signer. Register the wallet, then send the hash again. Checked after `MARKET_RECORDED_ELSEWHERE` |
 | `TX_NOT_FOUND` | `404` | No receipt yet: the transaction is unmined, dropped or on another network |
-| `MARKET_RECORDED_ELSEWHERE` | `409` | The market is recorded on another instance |
+| `MARKET_RECORDED_ELSEWHERE` | `409` | The market is recorded on the instance that deployed it. When a verified wallet of yours holds the operator or admin role on it, `details.marketId` is its record ID: use it on the market routes instead of recording the market. Otherwise there are no `details` |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Retry shortly |
 | `SERVICE_UNAVAILABLE` | `503` | Your instance's verified wallets could not be read. Retry shortly |
 | `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
