@@ -110,7 +110,8 @@ The optional clearing step's description names the forecast's `leftoverMax` figu
 
 Before anything is returned, the API simulates the plan with `eth_simulateV1` from the payer, or from the borrower when no `payer` is named: the steps up to the repayment, or every required step of a bundle.
 
-- A named payer whose approval would revert is refused with `APPROVAL_REFUSED`. A repayment that would revert is refused with `REPAY_SIMULATION_FAILED`. Nothing is built.
+- A named payer is checked against its balance first. A wallet that holds less than the loan owes now, or less than a partial `amount`, is refused with `INSUFFICIENT_BALANCE`. Its `details` name `balance`, `required` (what the market pulls now), `upTo` (on a full repayment, the forecast amount), `shortfall` (what to add) and `fullRepayment`. The message says to add the shortfall or to repay at most the balance.
+- A named payer whose approval would revert is refused with `APPROVAL_REFUSED`. A repayment that would revert is refused with `REPAY_SIMULATION_FAILED`. Both carry `details` with `payer`, `failedStep` and the decoded reason in `revert`, and the message adds what to do. Nothing is built.
 - With no `payer` named, a revert does not refuse the call. The plan is returned with a `PAYER_NOT_CHECKED` entry in `warnings`, naming the failing step in `failedStep` and the decoded reason in `revert`. If the borrower pays, resolve that reason before signing. If another wallet pays, build again with it as `payer`.
 
 The repay step carries a `gasLimit` of the gas the simulated repayment used plus 50 percent, never below `600000` for `repay` or `650000` for `repayWithPermit`. `gasLimitBasis` says how it was set:
@@ -177,7 +178,7 @@ The chart traces the three repay entries on the market contract. None of them ch
     <ResponseField name="remainingAllowanceAfter" type="string">Present when `allowanceCovers` is `true`: what stays of the standing allowance after the repayment, at least. `remainingAllowanceBasis` reads `AT_LEAST`.</ResponseField>
     <ResponseField name="gasLimitBasis" type="string">How the repay step's `gasLimit` was set: `simulated` or `floor`. See [Simulation and gas](#simulation-and-gas).</ResponseField>
     <ResponseField name="forecast" type="object">
-      Present on `all: true`. How the full repayment was sized.
+      Present on `all: true`. How the full repayment was sized. On the permit path it describes the signed permit instead. `amount` is the permit's value, and `leftoverMax` is that value less the live debt, the figure the clearing step names. `windowSeconds` runs to the permit's deadline, and `basis` reads `PERMIT_VALUE`.
       <Expandable>
         <ResponseField name="amount" type="string">The approved and offered amount. `amountRaw` in base units.</ResponseField>
         <ResponseField name="debt" type="string">The live debt the figure starts from.</ResponseField>
@@ -434,12 +435,26 @@ if (confirmed.data.remainder?.offerRepayRemainder) {
   }
 }
 ```
-```json Error - Simulation Failed
+```json Error - Insufficient Balance
 {
   "success": false,
   "error": {
-    "code": "REPAY_SIMULATION_FAILED",
-    "message": "The repayment would revert when sent from 0xabc7f1093d5e26b804a1c3f78de025916b47c0d3 (ERC20InsufficientBalance), so nothing was built."
+    "code": "INSUFFICIENT_BALANCE",
+    "message": "Wallet 0xabc7f1093d5e26b804a1c3f78de025916b47c0d3 holds 199.999981 USDC, less than the 200.131946 USDC the loan owes now, so the repayment would revert and nothing was built. Repaying the whole debt needs up to 200.131961 USDC with the interest that accrues until it mines. Add 0.13198 USDC to this wallet, or repay a partial amount of at most 199.999981 USDC.",
+    "details": {
+      "payer": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+      "failedStep": "repay",
+      "revert": "ERC20InsufficientBalance",
+      "balance": "199.999981",
+      "balanceRaw": "199999981",
+      "required": "200.131946",
+      "requiredRaw": "200131946",
+      "upTo": "200.131961",
+      "upToRaw": "200131961",
+      "shortfall": "0.13198",
+      "shortfallRaw": "131980",
+      "fullRepayment": true
+    }
   }
 }
 ```
@@ -473,11 +488,12 @@ if (confirmed.data.remainder?.offerRepayRemainder) {
 | `PRICE_WINDOW_DEVIATION_TOO_LARGE` | `400` | The `signedPrice` falls outside the band the oracle accepts within its current one-hour window |
 | `TX_WRONG_TARGET` | `400` | The confirmed transaction neither targets the market nor emits `LoanRepaid` from it. Confirm the step at `confirmStepIndex`, or the one transaction a wallet bundled the steps into, never an approval |
 | `TX_NOT_VERIFIED` | `400` | The confirmed transaction repays a different loan |
+| `INSUFFICIENT_BALANCE` | `400` | The named payer holds less than the loan owes now, or less than the partial `amount`. `details` names `balance`, `required`, `upTo`, `shortfall` and `fullRepayment`. Add the shortfall to the wallet, repay at most its balance, or pay from a funded wallet |
 | `REPAY_FAILED` | `400` | The repayment could not be prepared and no more specific code applied |
 | `LOAN_NOT_FOUND` | `404` | No such loan on this market |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
-| `APPROVAL_REFUSED` | `409` | The settlement token refuses the approval this repayment needs from the named payer, both to the amount and to zero, or the simulated approval reverts. A paused token or a blocked wallet does this. Resolve it with the token issuer |
-| `REPAY_SIMULATION_FAILED` | `409` | The repayment reverts when simulated from the named payer, for example on an insufficient balance. Nothing was built |
+| `APPROVAL_REFUSED` | `409` | The settlement token refuses the approval this repayment needs from the named payer, both to the amount and to zero, or the simulated approval reverts. A paused token or a blocked wallet does this. `details` names the payer, the failed step and the decoded revert when the simulation refused it. Resolve it with the token issuer |
+| `REPAY_SIMULATION_FAILED` | `409` | The repayment reverts when simulated from the named payer. `details` names the payer, `failedStep` and the decoded reason in `revert` (a market error, a common token error, an `Error(string)` reason or the custom error selector). Nothing was built |
 | `PERMIT_REQUIRES_EOA` | `409` | The payer is a contract account, which the token's permit check does not accept in this form. Repay with `mode: batch` or `sequential` |
 | `PERMIT_UNSUPPORTED` | `409` | A `permit` was sent for a settlement asset that does not implement EIP-2612. `503` when its support could not be verified. Use the approval steps |
 | `EXTERNAL_FEED_ACTIVE` | `409` | A `signedPrice` was sent to a market that prices from an external feed. Retry without it |
