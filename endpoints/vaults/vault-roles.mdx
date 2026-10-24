@@ -1,106 +1,30 @@
 ---
 title: 'Vault Roles'
-description: 'Admin, allocators, pausers, fee recipient and handover on the vault implementation with roles'
+description: 'Who controls a vault, and where roles are managed'
 ---
 
-A vault on the implementation with roles separates control from daily operation. The admin owns the vault and appoints the other roles. Each role acts only through its own wallet, and none of them can take anything out of the vault. Trusset holds no role on any vault.
+A vault on the current implementation separates control from daily operation. The admin owns the vault and can appoint other wallets to help run it. Each role acts only through its own wallet, and no role can take anything out of the vault. Trusset holds no role on any vault.
 
-Role management runs in the Issuer Portal, under Vault Details, Roles. Its routes accept the signed-in Issuer Portal session only, not an API key. On the `X-API-Key` face, read the roles of your own vault from `roles` on [Get Vault](/endpoints/vaults/get-vault). There is no role builder on that face: `GET /api/vaults/{vaultId}/roles` answers `404`.
+<Note>
+Role management is handled in the Issuer Portal, under Vault Details, Roles. It is not available through the API at the moment. API endpoints for it are planned. Until then, the API reads the roles of your own vault, as described below.
+</Note>
 
 ## Roles
 
 | Role | What it can do |
 |---|---|
-| Admin | Owns the vault. Keeps every decision investors are given notice of: the fee and its collection, upgrades, write-offs, distributor approvals and resuming deposits. Appoints and removes allocators and pausers, names the fee recipient, hands the vault over and resets every role. It can also allocate and pause itself. |
-| Allocator | Places and caps the vault's liquidity in markets whose lender of record is the admin, and recalls it from any market the vault holds. It cannot change fees, notices, upgrades or roles. A first funding that would fix the register a vault without its own adopts is left to the admin (`ADMIN_ONLY_ADOPTION`). |
+| Admin | Owns the vault. Decides the fee and its collection, upgrades, write-offs, distributor approvals and resuming deposits. Appoints and removes the other roles, and can hand the vault over. |
+| Allocator | Places and caps the vault's liquidity in markets whose lender of record is the admin, and recalls it from any market the vault holds. |
 | Pauser | Stops new deposits, just-in-time draws and rebalancing. Only the admin resumes them. Redemptions never stop. |
-| Fee recipient | Receives the performance-fee shares and the operator's distributor share, and holds no other power. It is the admin until the admin names another wallet, and it can never be the vault itself. |
-| Pending admin | A wallet the admin nominated. Nothing changes until it accepts, and the admin can cancel the handover until then. |
-
-A vault funds only markets whose lender of record is its current admin. A vault that still holds a position or a draw consent in another market lists it in `roles.staleAllocations` and `roles.staleConsents`. The admin or an allocator recalls the position with a deallocation and clears the consent with a draw cap of zero.
-
-### Fee recipient and the depositor gate
-
-A fee recipient is examined like a depositor, once, when it is named: every register the vault examines its depositors against must verify it. A vault that names no register of its own and funds no market with a provider register has nothing to examine it against, so it refuses to name one (`DEPOSITOR_GATE_REQUIRED`). Fund a market with a provider gate first. Later fee mints do not check the recipient again, and the admin as default recipient is never checked.
-
-Unattributed distributor fees go to whoever is fee recipient when they are paid. Before the recipient changes or the vault is handed over, the builders put a [Pay Operator Fees](/endpoints/vaults/pay-operator-fees) step first, so the owed fees reach the current recipient, and warn with `OPERATOR_FEES_OWED`. Send `settleOperatorFees: false` to leave them for the next recipient.
+| Fee recipient | Receives the performance-fee shares and the operator's distributor share. It is the admin unless the admin names another wallet. |
 
 ## Handing the vault over
 
-<Steps>
-  <Step title="Nominate">
-    The admin signs `transferOwnership(newAdmin)`. Nothing changes yet. A nomination replaces any pending one, and nominating the zero address through `newAdmin: null` cancels it.
-  </Step>
-  <Step title="Accept">
-    The nominee signs `acceptOwnership()`. A nominee that is a verified wallet of the vault's own instance accepts under Roles in the Issuer Portal. The accept builder serves only the vault's own instance, and a vault that is not published is not visible to any other. A nominee on another Trusset instance therefore accepts by calling `acceptOwnership()` on the vault from its own wallet.
-  </Step>
-  <Step title="New epoch">
-    At acceptance every allocator and pauser is removed at once, the fee recipient returns to the new admin, and the role epoch goes up by one. Distributor approvals, holders' distributor bindings and running notices carry over. The handover takes effect at once: unlike an upgrade, a fee collection or a write-off, it has no notice period.
-  </Step>
-</Steps>
+The admin nominates a new admin, and nothing changes until the nominee accepts. At acceptance every allocator and pauser is removed and the fee recipient returns to the new admin. The handover takes effect at once, with no notice period.
 
-From then on the vault draws into and allocates to markets the new admin runs only. The vault stays listed under the instance that created it. Every action that instance prepares is checked against the live admin and refused to a wallet that no longer holds the role.
+A nominee that is a wallet of the same Trusset instance accepts in the Issuer Portal. Any other wallet accepts by calling `acceptOwnership()` on the vault contract from its own wallet. The vault stays listed under the instance that created it.
 
-**Reset all roles** removes every allocator and pauser and returns the fee recipient to the admin without changing hands. The admin nominates itself and accepts: two transactions, which a wallet with atomic batching signs as one. A reset over a pending handover to another wallet replaces it, and needs `confirmReplace: true`.
+## Reading roles through the API
 
-## Routes
-
-Every route is under `https://api.trusset.org/lending-external-securities-v2/vaults` and needs the Issuer Portal session and the instance. Every builder takes `signerAddress`, the wallet that will sign, and answers `400 FROM_REQUIRED` without it. Each transaction is preflighted from that wallet before it is offered, so a refusal names its cause instead of failing on chain.
-
-| Route | Body | Builds |
-|---|---|---|
-| `GET /{vaultId}/roles` | `viewer` query, optional | The roles block of [Get Vault](/endpoints/vaults/get-vault), plus `viewer` (`address`, `isAdmin`, `isPendingAdmin`, `isAllocator`, `isPauser`) for the named wallet |
-| `POST /{vaultId}/roles/allocator` | `account`, `enabled` | `setAllocator(account, enabled)`, signed by the admin |
-| `POST /{vaultId}/roles/pauser` | `account`, `enabled` | `setPauser(account, enabled)`, signed by the admin |
-| `POST /{vaultId}/roles/fee-recipient` | `recipient` (`null` resets it to the admin), `settleOperatorFees` | `setFeeRecipient`, signed by the admin, after an operator fee payout when one is owed |
-| `POST /{vaultId}/admin/transfer` | `newAdmin` (`null` cancels), `settleOperatorFees` | `transferOwnership`, signed by the admin |
-| `POST /{vaultId}/admin/accept` | none | `acceptOwnership()`, signed by the nominee |
-| `POST /{vaultId}/roles/reset` | `confirmReplace`, `settleOperatorFees` | `transferOwnership(admin)` then `acceptOwnership()`, signed by the admin |
-
-The same six builders exist under `/groups/{groupId}/...` for a vault group, one step per pocket with `confirmEach: true`. Pockets an action does not apply to are named in `skipped`. `vaultIds` limits a role change to some pockets. A group handover covers every pocket and is refused while a pocket runs the implementation without roles. A group whose pockets have different admins is diverged, and Add currency stays blocked until they agree again.
-
-Record each mined step with `POST /{vaultId}/confirm-tx` and `txType` `SET_ALLOCATOR`, `SET_PAUSER`, `SET_FEE_RECIPIENT`, `TRANSFER_ADMIN`, `ACCEPT_ADMIN` or `RESET_ROLES`, as each step's `confirmWith` names. The confirmation reads the change from the receipt, a Safe, multisend, ERC-4337 or EIP-7702 wallet included. The vault's ledger on [List Transactions](/endpoints/vaults/list-vault-transactions) then carries the change in `roleChange`.
-
-## Warnings
-
-A handover, an acceptance and a reset answer with `warnings`, each `{ code, message }`. Show them before the wallet opens. On a vault group, a warning that reads the same on every pocket appears once, and one that differs is prefixed with the pocket's name. Each carries `vaultId` and `vaultIds`.
-
-| Code | Meaning |
-|---|---|
-| `ROLES_VOIDED_ON_ACCEPT` | Every allocator and pauser is removed at acceptance and the fee recipient returns to the new admin. The message counts the holders on record. |
-| `DRAWS_STOP_IN_OTHER_MARKETS` | After acceptance the vault draws into and allocates to the new admin's markets only. `markets` lists the markets it funds or consented to that the new admin does not run. |
-| `NOTICES_INHERITED` | The new admin inherits an announced upgrade or a running fee-collection notice. |
-| `VAULT_LISTING_STAYS` | The vault stays listed under this instance after the handover. |
-| `NOMINEE_ACCEPTS` | How the nominee accepts. `nomineeOnInstance` is `true` when it is a verified wallet of this instance and accepts under Roles, `false` when it accepts by calling `acceptOwnership()` on the vault from its own wallet, `null` when that could not be checked. |
-| `PENDING_TRANSFER_REPLACED` | This replaces a pending handover, which can then no longer be accepted. |
-| `OPERATOR_FEES_OWED` | Unattributed distributor fees are owed. `amount` and `recipient` say how much and to whom. |
-| `ROLE_HOLDER_OUTSIDE_INSTANCE`, `ROLE_HOLDER_UNCHECKED` | On an appointment: the wallet is not a verified wallet of this instance, or that could not be checked. It holds the role on chain all the same. |
-| `GROUP_HANDOVER_COMPLETE_ONLY`, `GROUP_DIVERGED` | On a vault group: the handover covers every pocket, or not every pocket has a handover to this wallet pending. |
-
-## Refusals
-
-The role builders above answer these, and so do the allocation, draw cap and pause actions of the Issuer Portal, which are authorized against the live roles in the same way.
-
-| Code | HTTP | Cause |
-|---|---|---|
-| `FROM_REQUIRED` | `400` | No `signerAddress` was sent |
-| `VALIDATION_ERROR` | `400` | An address is malformed, the zero address or the vault itself, or a body field is unknown |
-| `NOT_VAULT_OWNER` | `403` | The signer is not the admin, for an admin-only action. `details.admin` names the admin |
-| `NOT_PENDING_ADMIN` | `403` | The signer is not the nominated wallet. `details.pendingAdmin` names it |
-| `VAULT_ROLE_REQUIRED` | `403` | The action needs the admin or an allocator (allocate, recall, draw cap) or a pauser (pause), and the signer is neither. `details.holders` lists the holders on record, `null` when they could not be read |
-| `MARKET_NOT_OPERATORS` | `409` | The market's lender of record is not the vault's admin, so the vault cannot fund it or consent to draws there. `details.reason` reads `STALE_ADMIN_MARKET` only when the vault still holds a position or a draw consent in that market, with `clearAction` naming the deallocation and the zero draw cap that clear it |
-| `ADMIN_ONLY_ADOPTION` | `409` | The allocation or consent would be the vault's first funding and fix its depositor register for good, which only the admin may sign |
-| `DEPOSITOR_GATE_REQUIRED` | `409` | The vault has no depositor gate to examine a fee recipient against. Fund a market with a provider gate first |
-| `FEE_RECIPIENT_NOT_VERIFIED` | `409` | A register the vault examines its depositors against does not verify the wallet. `details.register` names it |
-| `FEE_RECIPIENT_UNCHANGED` | `409` | The wallet already is the fee recipient |
-| `ROLE_UNCHANGED` | `409` | The wallet already holds the role, or does not hold the role it would lose |
-| `ROLE_HELD_BY_ADMIN` | `409` | The admin already holds every power of an allocator and a pauser |
-| `USE_ROLES_RESET` | `409` | The nominee is the current admin. Reset the roles instead |
-| `TRANSFER_ALREADY_PENDING` | `409` | A handover to that wallet is already pending |
-| `NO_PENDING_TRANSFER` | `409` | No handover is pending to cancel or accept |
-| `PENDING_TRANSFER_REPLACED` | `409` | A reset would replace a pending handover. Send `confirmReplace: true` |
-| `VAULT_ROLES_UNSUPPORTED` | `409` | The vault runs an implementation without roles. `details.upgradeAvailable` says whether the platform serves one; adopt it through the upgrade, after its seven-day notice |
-| `VAULT_STORAGE_CONFLICT` | `409` | On the upgrade: the vault holds data in the storage slots the roles use. Contact Trusset |
-| `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address |
-| `VAULT_ROLES_UNREADABLE` | `503` | The vault's admin, roles or appointment history could not be read just now. Retry shortly |
-| `CHAIN_UNAVAILABLE` | `503` | The preflight could not reach the chain. Retry shortly |
+- [Get Vault](/endpoints/vaults/get-vault) returns `roles` on your own vault: the admin, a pending admin, the fee recipient, the allocators and pausers, and the role epoch. `staleAllocations` and `staleConsents` list positions and draw consents the vault still holds in markets its current admin does not run.
+- [List Vault Transactions](/endpoints/vaults/list-vault-transactions) records each role change with `roleChange`, naming who was appointed, removed, nominated or named.
