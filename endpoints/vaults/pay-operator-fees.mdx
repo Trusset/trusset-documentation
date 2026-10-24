@@ -1,12 +1,12 @@
 ---
 title: 'Pay Operator Fees'
 api: 'POST /lending-external-securities-v2/api/vaults/{vaultId}/operator-fees/pay'
-description: 'Calldata that pays the vault''s unattributed distributor slice to the vault owner'
+description: 'Calldata that pays the vault''s unattributed distributor slice to its fee recipient'
 ---
 
-Builds `payOperatorFees()` on the vault. It pays the vault owner the part of the collected distributor slices that no distributor earned. That is what shares without a distributor earned, plus anything that accrued while no shares were in issue. `operator.claimable` on [Get Earnings](/endpoints/vaults/get-earnings) shows the amount.
+Builds `payOperatorFees()` on the vault. It pays the vault's fee recipient the part of the collected distributor slices that no distributor earned. That is what shares without a distributor earned, plus anything that accrued while no shares were in issue. `operator.claimable` on [Get Earnings](/endpoints/vaults/get-earnings) shows the amount.
 
-Any wallet may sign, and the vault pays its owner, never the signer. The API builds the call only for the instance that operates the vault. Only fees already collected into the vault are payable: run [Collect Distributor Fees](/endpoints/vaults/collect-distributor-fees) for each market first.
+Any wallet may sign, and the vault pays whoever is its fee recipient when the transaction runs, never the signer. The fee recipient is the vault's admin unless the admin named another wallet, and `recipientIsAdmin` says which applies. On a vault implementation without roles the vault pays its owner. See [Vault Roles](/endpoints/vaults/vault-roles). The API builds the call only for the instance that operates the vault. Only fees already collected into the vault are payable: run [Collect Distributor Fees](/endpoints/vaults/collect-distributor-fees) for each market first.
 
 Holders bound to your instance's own distributor wallet earn through [Pay Distributor](/endpoints/vaults/pay-distributor), like any other distributor's holders. This call pays only the unattributed part.
 
@@ -32,11 +32,13 @@ The calldata response:
     <ResponseField name="transaction" type="object">`to` (the vault), `data`, `value` (`"0"`) and `chainId`.</ResponseField>
     <ResponseField name="functionName" type="string">`payOperatorFees`.</ResponseField>
     <ResponseField name="permissionless" type="boolean">Always `true`: any wallet may sign.</ResponseField>
-    <ResponseField name="recipient" type="string">The vault owner, which the vault pays.</ResponseField>
-    <ResponseField name="amount" type="string">What the vault holds for its owner when the calldata was built, formatted at the vault's asset decimals.</ResponseField>
+    <ResponseField name="recipient" type="string">The wallet the vault pays: its fee recipient when the calldata was built. A fee recipient named before the transaction runs receives the payout instead.</ResponseField>
+    <ResponseField name="recipientIsAdmin" type="boolean">`true` when the fee recipient is the vault's admin, which it is until the admin names another wallet.</ResponseField>
+    <ResponseField name="rolesSupported" type="boolean">`true` on the vault implementation with roles. `false` on an earlier one, where the vault pays its owner.</ResponseField>
+    <ResponseField name="amount" type="string">What the vault holds for its fee recipient when the calldata was built, formatted at the vault's asset decimals.</ResponseField>
     <ResponseField name="amountRaw" type="string">The same amount in base units.</ResponseField>
     <ResponseField name="description" type="string">The transaction in words.</ResponseField>
-    <ResponseField name="note" type="string">States that the vault pays its owner, never the signer.</ResponseField>
+    <ResponseField name="note" type="string">States who the vault pays, never the signer.</ResponseField>
     <ResponseField name="confirmWith" type="object">`endpoint`, this route with the vault ID filled in, and `field`, always `txHash`.</ResponseField>
     <ResponseField name="steps" type="array">Present instead of `transaction`, with `action: "SIGN_TRANSACTIONS"`, when the vault must first record a market's write-off: one `recordMarketLoss` step per such market, then the payout. Each step is `{ action, transaction, functionName, description }`. `confirmStepIndex` points at the last step, `recordsWriteOffs` lists `{ marketAddress, amountRaw }` per market, and `writeOffNote` explains them. Any wallet may sign every step. Confirm with the hash of the last one.</ResponseField>
   </Expandable>
@@ -95,10 +97,12 @@ await fetch(url, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.ha
     "functionName": "payOperatorFees",
     "permissionless": true,
     "recipient": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "recipientIsAdmin": true,
+    "rolesSupported": true,
     "amount": "5.625",
     "amountRaw": "5625000",
-    "description": "Pay the 5.625 USDC unattributed distributor slice to the vault owner 0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
-    "note": "Any wallet may sign this transaction. The vault pays its owner, never the signer.",
+    "description": "Pay the 5.625 USDC unattributed distributor slice to the vault admin 0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "note": "Any wallet may sign this transaction. The vault pays whoever is fee recipient when it runs, here 0x5ad87a0621175206b72d10e4b8577b192e7f40ab, never the signer.",
     "confirmWith": {
       "endpoint": "POST /lending-external-securities-v2/api/vaults/cmssh8t2u0003cghxkx1w1fwd/operator-fees/pay",
       "field": "txHash"
@@ -141,7 +145,7 @@ await fetch(url, { method: 'POST', headers, body: JSON.stringify({ txHash: tx.ha
 | `VAULT_NOT_DEPLOYED` | `409` | The vault has no on-chain address on record |
 | `VAULT_UPGRADE_REQUIRED` | `409` | The vault runs an implementation from before distributor attribution |
 | `NOTHING_ACCRUED` | `409` | No unattributed distributor fee is waiting for the operator. Collect the vault's slice from its markets first |
-| `VAULT_STATE_UNAVAILABLE` | `503` | The vault implementation, its operator balance or owner, whether a market wrote off accrual the vault has not recorded, or your standing in an unpublished vault could not be read. Retry shortly |
+| `VAULT_STATE_UNAVAILABLE` | `503` | The vault implementation, its operator balance or fee recipient, whether a market wrote off accrual the vault has not recorded, or your standing in an unpublished vault could not be read. Retry shortly |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read, so nothing was decided. Retry shortly |
 | `SERVICE_UNAVAILABLE` | `503` | The vault records or your instance's verified wallets could not be read. Retry shortly |
 | `VAULT_DISTRIBUTOR_ACTION_FAILED` | `500` | Unexpected failure. Retry, or contact support with the request ID |

@@ -4,9 +4,9 @@ api: 'POST /lending-external-securities-v2/api/positions/{marketId}/repay'
 description: 'Repay loan debt, interest first then principal'
 ---
 
-Repays part or all of a loan's outstanding debt. Accrued interest is settled before principal. A repayment that clears the whole debt closes the loan in the same transaction and releases the collateral, so no [Close Loan](/endpoints/lending/close-loan) call follows it.
+Repays part or all of a loan's outstanding debt. Accrued interest is settled before principal. A repayment that clears the whole debt closes the loan in the same transaction and releases the collateral to the borrower, so no [Close Loan](/endpoints/lending/close-loan) call follows it.
 
-Anyone can repay any loan through the approve-then-repay steps, so a third party can rescue a position approaching liquidation. The single-transaction permit path is the borrower's own. A repayment sent without a `signedPrice` reads no price, so neither a stale price nor a paused market blocks it.
+Any wallet can repay any loan, so a third party can rescue a position approaching liquidation or an omnibus wallet can pay for its customer. The collateral always returns to the borrower, never to the payer. Name the paying wallet in `payer`: the allowance, the token's approval rule and the repayment are then checked from that wallet before you sign. A repayment sent without a `signedPrice` reads no price, so neither a stale price nor a paused market blocks it.
 
 <Warning>
   To close a loan, repay with `all: true`. A payment of exactly the debt quoted earlier leaves the interest accrued since then outstanding. On a market with a repayment fee it also leaves a fee-sized remainder open. The loan then stays active and keeps accruing.
@@ -23,11 +23,19 @@ Anyone can repay any loan through the approve-then-repay steps, so a third party
 </ParamField>
 
 <ParamField body="amount" type="string">
-  Amount to pay, as a positive decimal string in borrow asset units. The contract caps the payment at the debt plus the repayment fee, so overpaying does not transfer more than that. An amount that covers the current debt plus the repayment fee closes the loan, so it is built as a full repayment: `fullRepayment` is `true`, a `CUSTODY` loan carries `collateralRelease` when the collateral would be escrowed, and a last step clears the leftover allowance. Required unless `all` is `true` or you are confirming with `txHash`.
+  Amount to pay, as a positive decimal string in borrow asset units. The contract caps the payment at the debt plus the repayment fee, so overpaying does not transfer more than that. An amount that covers the current debt plus the repayment fee closes the loan, so it is built as a full repayment: `fullRepayment` is `true`, a `CUSTODY` loan carries `collateralRelease` when the collateral would be escrowed, and an approval is followed by a step that clears the leftover allowance. Required unless `all` is `true` or you are confirming with `txHash`.
 </ParamField>
 
 <ParamField body="all" type="boolean">
-  Repay the loan in full. The API reads the current debt and adds a 20 basis point accrual buffer plus the repayment fee to the offer. Interest accruing between the quote and the mine therefore cannot leave dust behind. Use this instead of computing a payoff yourself.
+  Repay the loan in full. The API reads the live debt and sizes the payment to it plus the interest it can accrue before the transaction mines, plus the repayment fee. See [Sizing a full repayment](#sizing-a-full-repayment). Use this instead of computing a payoff yourself.
+</ParamField>
+
+<ParamField body="payer" type="string">
+  The wallet that signs and pays, `0x` and 40 hex characters. The API reads its allowance, checks whether its token accepts the approval, and simulates the plan from it. Omit it and the plan is checked from the loan's borrower instead, with a 24 hour sizing window and a `PAYER_NOT_CHECKED` warning when the plan would fail from the borrower. Required with a `permit`.
+</ParamField>
+
+<ParamField body="mode" type="string">
+  How the payer's wallet signs the plan: `batch`, `permit` or `sequential`. Defaults to `permit` when a `permit` is sent and to `sequential` otherwise. See [Modes](#modes).
 </ParamField>
 
 <ParamField body="signedPrice" type="object">
@@ -41,9 +49,9 @@ Anyone can repay any loan through the approve-then-repay steps, so a third party
 </ParamField>
 
 <ParamField body="permit" type="object">
-  An EIP-2612 permit over the settlement asset, signed by the borrower with the market as spender. It replaces the approval, so the repayment is one transaction. Get the payload to sign from [Get Permit Quote](/endpoints/lending/get-permit-quote). See [Pay with a permit](#pay-with-a-permit) for the binding rules.
+  An EIP-2612 permit over the settlement asset, signed by `payer` with the market as spender. It replaces the approval, so the repayment is one transaction. Get the payload to sign from [Get Permit Quote](/endpoints/lending/get-permit-quote). See [Pay with a permit](#pay-with-a-permit) for the binding rules.
   <Expandable>
-    <ParamField body="deadline" type="integer" required>Unix timestamp in seconds that the permit was signed with. It must still be in the future.</ParamField>
+    <ParamField body="deadline" type="integer" required>Unix timestamp in seconds that the permit was signed with. It must lie between 2 and 31 minutes after the current block time.</ParamField>
     <ParamField body="v" type="integer" required>Signature recovery id, `27` or `28`.</ParamField>
     <ParamField body="r" type="string" required>32 bytes, hex.</ParamField>
     <ParamField body="s" type="string" required>32 bytes, hex.</ParamField>
@@ -52,69 +60,144 @@ Anyone can repay any loan through the approve-then-repay steps, so a third party
 </ParamField>
 
 <ParamField body="txHash" type="string">
-  Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+  Hash of the repay transaction you broadcast, the step at `confirmStepIndex`, or of the one transaction a wallet bundled the steps into. Send it to confirm the transaction and record the result. Omit it to receive the plan.
 </ParamField>
+
+## Modes
+
+The response always tells you what the wallet will be asked for in `walletPrompts.label` and why in `walletPrompts.why`. Show both before the first signature.
+
+| Mode | Wallet prompts | When to use it |
+|---|---|---|
+| `batch` | `1 confirmation` | The payer's wallet supports EIP-5792 atomic batching (`wallet_sendCalls` with `atomicRequired: true`). Send every non-optional step as one bundle. The bundle ends with an `approve(0)` that clears the allowance, so nothing stays approved. |
+| `permit` | `1 signature + 1 transaction` | The settlement asset implements EIP-2612 (`permitSupported: true`) and the payer is a wallet without contract code. The permit signature stands in for the approval. |
+| `sequential` | `1 transaction`, `2 transactions` or `3 transactions` | Every other wallet, a multisig or smart account without batching included. One transaction when the payer's standing allowance already covers the amount, two for the approval and the repayment, three when the token refuses to move a non-zero allowance straight to a new value. |
+
+A `batch` plan must run as one atomic bundle. If the wallet settles it as separate transactions, check what was applied before you build again.
+
+## Sizing a full repayment
+
+Interest accrues every second, so a full repayment approves more than the debt you read now. The market pulls only what closes the loan, and the rest stays as allowance until a clearing step resets it. The approved amount is:
+
+`debt now + interest over the window + repayment fee + 1 base unit`
+
+The window depends on how long the payer's wallet can take to sign and mine:
+
+| Case | Window |
+|---|---|
+| `mode: batch` | 30 days |
+| `mode: permit` | 1 hour |
+| A named `payer` without contract code | 1 hour |
+| A named `payer` that is a contract (a multisig or smart account) | 24 hours |
+| No `payer` named | 24 hours |
+
+The interest over the window uses the loan's stamped fixed rate where it has one. On a variable-rate loan it uses the curve rate at full utilization, the highest rate the curve can charge, so the figure is an upper bound. A variable-rate loan also counts the interest the market has accrued but not booked yet. `forecast` carries every part of the figure, and `forecast.leftoverMax` is the most that can be left over as allowance. A partial `amount` is approved exactly.
+
+## Transaction Shape
+
+The steps come in this order. Read `confirmStepIndex` and `optionalStepIndexes` rather than counting positions.
+
+| Step | `stepKind` | Present when |
+|---|---|---|
+| `approve(market, 0)` | `approveZeroFirst` | The payer holds a non-zero allowance below the amount and its token refuses a direct change. With no `payer` named, the borrower's standing allowance decides it. |
+| `approve(market, amount)` | `approve` | The payer's standing allowance does not cover the amount, or no `payer` was named. |
+| `repay` or `repayWithPermit` | none | Always. This is the step at `confirmStepIndex`. |
+| `approve(market, 0)` | `clearAllowance` | An approval or a permit preceded a full repayment. Optional and listed in `optionalStepIndexes` in `sequential` and `permit` mode. Required in `batch` mode, where it also follows a partial repayment. |
+
+The optional clearing step's description names the forecast's `leftoverMax` figure. The repayment is complete once the repay step confirms, without it. Clearing sets the wallet's whole allowance for the market to zero, including any allowance it keeps there for liquidity or other loans. When the standing allowance already covers the amount, no approval and no clearing step are built, and `remainingAllowanceAfter` says how much of it stays in place.
+
+### Simulation and gas
+
+Before anything is returned, the API simulates the plan with `eth_simulateV1` from the payer, or from the borrower when no `payer` is named: the steps up to the repayment, or every required step of a bundle.
+
+- A named payer whose approval would revert is refused with `APPROVAL_REFUSED`. A repayment that would revert is refused with `REPAY_SIMULATION_FAILED`. Nothing is built.
+- With no `payer` named, a revert does not refuse the call. The plan is returned with a `PAYER_NOT_CHECKED` entry in `warnings`, naming the failing step in `failedStep` and the decoded reason in `revert`. If the borrower pays, resolve that reason before signing. If another wallet pays, build again with it as `payer`.
+
+The repay step carries a `gasLimit` of the gas the simulated repayment used plus 50 percent, never below `600000` for `repay` or `650000` for `repayWithPermit`. `gasLimitBasis` says how it was set:
+
+- `simulated`: the plan was simulated and the repayment succeeded in it.
+- `floor`: the plan could not be simulated, or the repayment did not succeed in it, so the step carries the floor. Estimate the repayment's gas once the approval is mined, and use the larger of that estimate and `gasLimit`. A `batch` plan always reads `floor` and its repay step carries no `gasLimit`: the wallet sizes the bundle.
+
+<Warning>
+  The confirmable step is not always at the same index. It is `0` on the permit path and when the standing allowance covers the amount, `1` after one approval and `2` after `approveZeroFirst`. Confirming with an approval hash returns `TX_WRONG_TARGET`.
+</Warning>
 
 ## Repayment fee
 
 A market may carry a flat repayment fee, stamped when it was deployed and never changeable afterwards. Read it from `transactionFees` on [Get Fee Split](/endpoints/lending/get-fee-split). The payer bears it. The fee comes out of the payment first, and only the rest reduces the debt.
 
-Each charge is capped at 0.5 percent of the debt it discharges. The contract caps a payment at the debt plus `min(repayFee, debt / 200)`, which is exactly what closes the loan. A partial payment reduces the debt by the payment less a fee of at most one 201st of it. When the fee is not zero, the calldata response carries `transactionFee` and states the effect in `warning`.
+Each charge is capped at 0.5 percent of the debt it discharges. The contract caps a payment at the debt plus `min(repayFee, debt / 200)`, which is exactly what closes the loan. A partial payment reduces the debt by the payment less a fee of at most one 201st of it. When the fee is not zero, the response carries `transactionFee` and states the effect in `warning`.
 
 ## Pay with a permit
 
-The permit path exists only where the settlement asset provably implements EIP-2612. `permitSupported` on the standard response says whether this market's asset qualifies. It is probed once per settlement asset and stored on the market, not asked per request. A token with a different permit shape, such as DAI's, reads as unsupported, and a permit sent to it is refused with `PERMIT_UNSUPPORTED`.
+The permit path exists only where the settlement asset provably implements EIP-2612. `permitSupported` on the response says whether this market's asset qualifies. It is probed once per settlement asset and stored on the market, not asked per request. A token with a different permit shape, such as DAI's, reads as unsupported, and a permit sent to it is refused with `PERMIT_UNSUPPORTED`.
 
-The permit must be signed by the loan's borrower, name the market as spender, and carry the token's current nonce and a future deadline. The borrower's wallet also sends the transaction, because the market redeems the permit for the sender. A third party repays through the approve-then-repay steps instead.
+The permit is the payer's own. `payer` is required, it must be a wallet without contract code, and it also sends the transaction, because the market redeems the permit for the sender. The permit must name the market as spender and carry the token's current nonce for the payer. Its deadline must lie between 2 and 31 minutes after the current block time, and its value can never be unlimited or above what this repayment can need.
 
 `repayWithPermit` binds the permit to the amount it repays, so the signed value decides what the calldata carries:
 
 - With `amount`, the permit covers exactly `amount`. A `permit.value` that differs is refused with `INVALID_PERMIT`.
 - With `all: true`, `permit.value` is required, or the call returns `PERMIT_VALUE_REQUIRED`. It becomes the amount the calldata offers, and it must cover the live debt plus the repayment fee, or the call returns `INVALID_PERMIT`.
-- A full-repayment value inside the 20 basis point buffer builds with a `warning`. If interest outgrows it before the transaction mines, the market takes the permit's value as a partial repayment and the loan stays open.
+- A full-repayment value that covers the debt now but not the debt plus the interest it can accrue until the permit's deadline builds with a `warning`. If interest outgrows the value before the transaction mines, the market takes the permit's value as a partial repayment and the loan stays open. A value quoted by [Get Permit Quote](/endpoints/lending/get-permit-quote) and signed unchanged does not trigger it.
 
-Before any calldata is offered, the API recovers the signature against the token's domain and the borrower's nonce. A signature that does not recover to the borrower is refused with `INVALID_PERMIT`. When the token's domain or the nonce cannot be read, the call returns `PERMIT_UNVERIFIABLE`.
+Before any calldata is offered, the API recovers the signature against the token's domain and the payer's nonce, and checks that the token accepts the permit. A signature that does not recover to the payer, or that the token refuses, is refused with `INVALID_PERMIT`. An expired permit is refused the same way: quote it again and sign the new one. When the token's domain or the nonce cannot be read, the call returns `PERMIT_UNVERIFIABLE`.
 
-## Transaction Shape
+## Confirming
 
-A partial repayment returns two steps: `approve` on the borrow asset, then `repay`.
+Send the hash of the repay step, or of the bundle's one transaction, as `txHash`. The API verifies the receipt, records the repayment and, when the loan closed, the collateral release. It then reads the loan at the receipt's block.
 
-A full repayment (`all: true`) returns three. The third resets the allowance to zero. `repay` caps the pull at what closes the loan, so without it the unused approval would stay live against the payer's funds after the loan closed.
-
-With a `permit`, the approval disappears. A partial repayment is one step, `repayWithPermit`. A full repayment is two: `repayWithPermit`, then the same allowance reset, because the permit installs the whole signed value as an allowance and the repayment does not spend all of it.
-
-The `repay` and `repayWithPermit` steps carry a `gasLimit` sized from a simulation of the sequence you sign, run from the borrower's wallet: the approval and then the repayment, or the permit call alone. The limit is the gas the simulated repayment used plus 50 percent, and never below `600000` for `repay` or `650000` for `repayWithPermit`. A repayment that uses less than two thirds of the floor therefore still carries the floor. `gasLimitBasis` says how it was set:
-
-- `simulated`: the sequence was simulated and the repayment succeeded in it.
-- `floor`: the sequence could not be simulated, or the repayment did not succeed in it, so the step carries the floor. Estimate the repayment's gas once the approval is mined, and use the larger of that estimate and `gasLimit`.
-
-The simulation runs from the borrower even when a third party pays, so a third-party payer should estimate from its own wallet as well.
-
-<Warning>
-  The confirmable step is not always the last one, and it is not always at the same index. Read `confirmStepIndex` from the response rather than assuming a position. It is `1` on the approve-then-repay path and `0` on the permit path, and in both cases it names the step whose `functionName` starts with `repay`. Confirming with the allowance-reset hash returns `TX_WRONG_TARGET`.
-</Warning>
+- `loanClosed` is `true` when the loan is closed, `false` when it is still open, and `null` when the loan could not be read.
+- `remainder` is present while the loan is still open. `remainder.offerRepayRemainder` is `true` only when what is left is dust, smaller than one percent of the payment: interest accrued past the amount the repayment carried. Repay it as a new full repayment, which is sized afresh. On a deliberate partial repayment it is `false`, and `remainder.note` states what is still outstanding.
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="success" type="boolean">`true`, nested inside `data` on the calldata response.</ResponseField>
+    <ResponseField name="success" type="boolean">`true`, nested inside `data` on the plan response.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="steps" type="array">Ordered transactions to broadcast. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="fullRepayment" type="boolean">Whether the payload settles the loan in full: `all: true`, or an `amount` that covers the current debt plus the repayment fee.</ResponseField>
-    <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm with. `1` on the approve-then-repay path, `0` on the permit path. Read it rather than assuming.</ResponseField>
-    <ResponseField name="gasLimitBasis" type="string">How the repay step's `gasLimit` was set: `simulated` (the gas the simulated sequence used plus 50 percent, never below the floor) or `floor` (`600000`, or `650000` for `repayWithPermit`, when the sequence could not be simulated). See [Transaction Shape](#transaction-shape).</ResponseField>
-    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }` on both paths: this route, `txHash` as the field, and a `body` carrying `loanId` with `txHash: null`.</ResponseField>
-    <ResponseField name="permitSupported" type="boolean">Whether the settlement asset implements EIP-2612, so a `permit` could have been sent instead. Present on the approve-then-repay path.</ResponseField>
-    <ResponseField name="permitUsed" type="boolean">`true` on the permit path. Absent otherwise.</ResponseField>
-    <ResponseField name="outstandingDebt" type="string">Principal plus accrued interest at the time the payload was built, without the repayment fee.</ResponseField>
-    <ResponseField name="repayAmount" type="string">Amount the repay step offers. On a full repayment it includes the accrual buffer and the fee. On the permit path it is the permit's value.</ResponseField>
+    <ResponseField name="steps" type="array">Ordered transactions to broadcast, each `{ action, transaction, functionName, description }`. Approval steps also carry `stepKind` (`approveZeroFirst`, `approve` or `clearAllowance`) and `approval` (`token`, `spender`, `amount`, `amountRaw`). An optional step carries `optional: true`.</ResponseField>
+    <ResponseField name="mode" type="string">The mode the plan was built for: `batch`, `permit` or `sequential`.</ResponseField>
+    <ResponseField name="payer" type="string">The named payer, lowercased. `null` when none was named.</ResponseField>
+    <ResponseField name="payerIsContract" type="boolean">Whether the payer, or the borrower when no payer was named, is a contract account. It decides the sizing window and whether a permit is possible.</ResponseField>
+    <ResponseField name="walletPrompts" type="object">`{ required, optional, signatures, transactions, label, why }`: what the wallet will be asked for. `label` is `1 confirmation`, `1 signature + 1 transaction`, or `1 transaction` to `3 transactions`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm with. Read it rather than assuming.</ResponseField>
+    <ResponseField name="optionalStepIndexes" type="integer[]">Indexes of steps the payer may skip, here the clearing step after a full repayment in `sequential` or `permit` mode.</ResponseField>
+    <ResponseField name="approvals" type="array">The required approvals with a non-zero amount, each `{ token, spender, amount, amountRaw }`.</ResponseField>
+    <ResponseField name="allowanceCovers" type="boolean">`true` when the payer's standing allowance already covers the amount, so no approval is built.</ResponseField>
+    <ResponseField name="standingAllowance" type="string">The payer's allowance for the market when the plan was built. `null` when no `payer` was named.</ResponseField>
+    <ResponseField name="remainingAllowanceAfter" type="string">Present when `allowanceCovers` is `true`: what stays of the standing allowance after the repayment, at least. `remainingAllowanceBasis` reads `AT_LEAST`.</ResponseField>
+    <ResponseField name="gasLimitBasis" type="string">How the repay step's `gasLimit` was set: `simulated` or `floor`. See [Simulation and gas](#simulation-and-gas).</ResponseField>
+    <ResponseField name="forecast" type="object">
+      Present on `all: true`. How the full repayment was sized.
+      <Expandable>
+        <ResponseField name="amount" type="string">The approved and offered amount. `amountRaw` in base units.</ResponseField>
+        <ResponseField name="debt" type="string">The live debt the figure starts from.</ResponseField>
+        <ResponseField name="forecastInterest" type="string">The interest the window allows for.</ResponseField>
+        <ResponseField name="repayFee" type="string">The repayment fee included.</ResponseField>
+        <ResponseField name="windowSeconds" type="integer">The sizing window, in seconds.</ResponseField>
+        <ResponseField name="heldSeconds" type="integer">Seconds of accrued but unbooked interest added on a variable-rate loan. `0` otherwise.</ResponseField>
+        <ResponseField name="rateBps" type="integer">The annual rate used, in basis points.</ResponseField>
+        <ResponseField name="rateBasis" type="string">`FIXED` for a stamped fixed rate, `CURVE_AT_FULL_UTILIZATION` for a variable rate.</ResponseField>
+        <ResponseField name="leftoverMax" type="string">The most of the approved amount that can be left over as allowance. `leftoverMaxRaw` in base units.</ResponseField>
+        <ResponseField name="note" type="string">The sizing in words.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="warnings" type="array">Present when the plan carries a warning entry, each `{ code, message }`. `PAYER_NOT_CHECKED` also carries `failedStep` (`approveZeroFirst`, `approve` or `repay`) and, when it could be decoded, `revert`.</ResponseField>
+    <ResponseField name="fullRepayment" type="boolean">Whether the plan settles the loan in full: `all: true`, or an `amount` that covers the current debt plus the repayment fee.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: this route, `txHash` as the field, and a `body` carrying `loanId` with `txHash: null`.</ResponseField>
+    <ResponseField name="permitSupported" type="boolean">Whether the settlement asset implements EIP-2612, so `mode: permit` is possible.</ResponseField>
+    <ResponseField name="permitUsed" type="boolean">`true` on the permit path, with `permitDeadline`. Absent otherwise.</ResponseField>
+    <ResponseField name="outstandingDebt" type="string">Principal plus accrued interest at the time the plan was built, without the repayment fee. `outstandingDebtRaw` in base units.</ResponseField>
+    <ResponseField name="repayAmount" type="string">Amount the repay step offers. On a full repayment it is `forecast.amount`. On the permit path it is the permit's value. `repayAmountRaw` in base units.</ResponseField>
     <ResponseField name="transactionFee" type="object">The repayment fee, present only when it is not zero. Carries `kind: "REPAY"`, `fee`, `feeRaw` and `message`, plus `debtReduction` on a partial repayment. On a full repayment `fee` is computed on the debt at build time.</ResponseField>
-    <ResponseField name="collateralRelease" type="object">Present on a full repayment (`fullRepayment: true`) of a `CUSTODY` loan when the collateral token would refuse to return the collateral, or when its verdict cannot be read. The repayment still succeeds, and the adapter escrows the collateral instead of delivering it.</ResponseField>
+    <ResponseField name="collateralRelease" type="object">Present on a full repayment of a `CUSTODY` loan when the collateral token would refuse to return the collateral to the borrower, or when its verdict cannot be read. The repayment still succeeds, and the adapter escrows the collateral instead of delivering it.</ResponseField>
     <ResponseField name="warning" type="string">One string joining whichever apply: the permit headroom warning, the fee message and the collateral release message.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming.</ResponseField>
     <ResponseField name="loanId" type="string">Loan ID, echoed back as a string. Returned when confirming.</ResponseField>
     <ResponseField name="repaidAmount" type="string">Principal plus interest the payment settled, read from the `LoanRepaid` event rather than from the calldata. It excludes the repayment fee. On a full repayment it is lower than `repayAmount`, because the contract pulls only what closes the loan. Returned when confirming.</ResponseField>
+    <ResponseField name="payer" type="string">On the confirmation, the wallet that sent the transaction.</ResponseField>
+    <ResponseField name="loanClosed" type="boolean">On the confirmation, whether the loan is closed at the receipt's block. `null` when it could not be read.</ResponseField>
+    <ResponseField name="remainder" type="object">On the confirmation, present while the loan is still open: `{ open, remainingDebt, remainingDebtRaw, offerRepayRemainder, note }`. See [Confirming](#confirming).</ResponseField>
     <ResponseField name="collateralReturned" type="string">Collateral released when the repayment closed the loan. Present only then. Returned when confirming.</ResponseField>
     <ResponseField name="collateralReturnEscrowed" type="boolean">`true` when that return was blocked on compliance and escrowed on the adapter instead of delivered. Claim it with [Claim Escrowed Collateral](/endpoints/lending/claim-escrowed-collateral).</ResponseField>
   </Expandable>
@@ -125,7 +208,7 @@ The simulation runs from the borrower even when a third party pays, so a third-p
 curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/positions/{marketId}/repay" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"loanId": 5, "all": true}'
+  -d '{"loanId": 5, "all": true, "payer": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3", "mode": "sequential"}'
 ```
 ```typescript TypeScript
 const url = `https://api.trusset.org/lending-external-securities-v2/api/positions/${marketId}/repay`;
@@ -133,35 +216,61 @@ const headers = {
   'X-API-Key': 'trusset_your_key_here',
   'Content-Type': 'application/json'
 };
+const payer = await wallet.getAddress();
 
 const res = await fetch(url, {
   method: 'POST',
   headers,
-  body: JSON.stringify({ loanId: 5, all: true })
+  body: JSON.stringify({ loanId: 5, all: true, payer, mode: 'sequential' })
 });
 const { data } = await res.json();
+console.log(data.walletPrompts.label, data.walletPrompts.why);
 
-const hashes: string[] = [];
-for (const step of data.steps) {
+const optional = new Set(data.optionalStepIndexes);
+let repayHash = '';
+for (const [index, step] of data.steps.entries()) {
+  if (optional.has(index) && !clearLeftoverAllowance) continue;
   const tx = await wallet.sendTransaction(step.transaction);
   await tx.wait();
-  hashes.push(tx.hash);
+  if (index === data.confirmStepIndex) repayHash = tx.hash;
 }
 
-await fetch(url, {
+const confirmed = await fetch(url, {
   method: 'POST',
   headers,
-  body: JSON.stringify({ loanId: 5, txHash: hashes[data.confirmStepIndex] })
-});
+  body: JSON.stringify({ loanId: 5, txHash: repayHash })
+}).then((r) => r.json());
+if (confirmed.data.remainder?.offerRepayRemainder) {
+  console.log('Dust left: repay it as a new full repayment');
+}
 ```
 </RequestExample>
 
 <ResponseExample>
-```json Calldata Response - Full Repayment
+```json Plan Response - Full Repayment
 {
   "success": true,
   "data": {
     "success": true,
+    "permitSupported": true,
+    "fullRepayment": true,
+    "outstandingDebt": "50412.881",
+    "outstandingDebtRaw": "50412881000",
+    "payerIsContract": false,
+    "forecast": {
+      "amount": "50416.59333",
+      "amountRaw": "50416593330",
+      "debt": "50412.881",
+      "forecastInterest": "1.712329",
+      "repayFee": "2.0",
+      "windowSeconds": 3600,
+      "heldSeconds": 0,
+      "rateBps": 3000,
+      "rateBasis": "CURVE_AT_FULL_UTILIZATION",
+      "leftoverMax": "3.71233",
+      "leftoverMaxRaw": "3712330",
+      "note": "Sized to the debt now plus the interest it can accrue over 1 hour and the repayment fee. The market pulls only what closes the loan; at most 3.71233 USDC of the approved amount can be left over as allowance, and a clearing step in the plan, where there is one, resets it."
+    },
     "action": "SIGN_TRANSACTIONS",
     "steps": [
       {
@@ -173,18 +282,26 @@ await fetch(url, {
           "chainId": 11155111
         },
         "functionName": "approve",
-        "description": "Approve the market to pull USDC"
+        "stepKind": "approve",
+        "approval": {
+          "token": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+          "spender": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+          "amount": "50416.59333",
+          "amountRaw": "50416593330"
+        },
+        "description": "Approve 0x70a0e25c7b768b87e658348b3b577678a173e038 to pull at most 50416.59333 USDC"
       },
       {
         "action": "SIGN_TRANSACTION",
         "transaction": {
           "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
           "data": "0x...",
-          "gasLimit": "600000",
+          "gasLimit": "628029",
           "value": "0",
           "chainId": 11155111
         },
-        "functionName": "repay"
+        "functionName": "repay",
+        "description": "Repay the loan"
       },
       {
         "action": "SIGN_TRANSACTION",
@@ -195,20 +312,47 @@ await fetch(url, {
           "chainId": 11155111
         },
         "functionName": "approve",
-        "description": "Clear the leftover USDC allowance granted for this repayment"
+        "stepKind": "clearAllowance",
+        "approval": {
+          "token": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+          "spender": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+          "amount": "0.0",
+          "amountRaw": "0"
+        },
+        "optional": true,
+        "description": "Clear the leftover allowance (at most 3.71233 USDC for 0x70a0e25c7b768b87e658348b3b577678a173e038). The repayment is complete once the repay transaction confirms"
       }
     ],
-    "fullRepayment": true,
+    "mode": "sequential",
+    "payer": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
     "confirmStepIndex": 1,
+    "optionalStepIndexes": [2],
     "confirmWith": {
       "endpoint": "POST /lending-external-securities-v2/api/positions/cmssh7p1k0001cghxq2m4v8rz/repay",
       "field": "txHash",
       "body": { "loanId": "5", "txHash": null }
     },
+    "walletPrompts": {
+      "required": 2,
+      "optional": 1,
+      "signatures": 0,
+      "transactions": 2,
+      "label": "2 transactions",
+      "why": "Without atomic batching or a permit, the approval and the repayment are two transactions."
+    },
+    "approvals": [
+      {
+        "token": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+        "spender": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "amount": "50416.59333",
+        "amountRaw": "50416593330"
+      }
+    ],
+    "allowanceCovers": false,
+    "standingAllowance": "0.0",
     "gasLimitBasis": "simulated",
-    "permitSupported": true,
-    "outstandingDebt": "50412.881000",
-    "repayAmount": "50515.706763",
+    "repayAmount": "50416.59333",
+    "repayAmountRaw": "50416593330",
     "transactionFee": {
       "kind": "REPAY",
       "fee": "2.0",
@@ -219,45 +363,32 @@ await fetch(url, {
   }
 }
 ```
-```json Calldata Response - With Permit
+```json Plan Response - No Payer Named
 {
   "success": true,
   "data": {
     "success": true,
     "action": "SIGN_TRANSACTIONS",
-    "steps": [
+    "mode": "sequential",
+    "payer": null,
+    "confirmStepIndex": 1,
+    "gasLimitBasis": "floor",
+    "walletPrompts": {
+      "required": 2,
+      "optional": 1,
+      "signatures": 0,
+      "transactions": 2,
+      "label": "2 transactions",
+      "why": "Without atomic batching or a permit, the approval and the repayment are two transactions."
+    },
+    "warnings": [
       {
-        "action": "SIGN_TRANSACTION",
-        "transaction": {
-          "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
-          "data": "0x...",
-          "gasLimit": "650000",
-          "value": "0",
-          "chainId": 11155111
-        },
-        "functionName": "repayWithPermit",
-        "description": "Repay in a single transaction: the embedded permit installs the allowance and the market pulls at most the true debt"
+        "code": "PAYER_NOT_CHECKED",
+        "failedStep": "repay",
+        "revert": "ERC20InsufficientBalance",
+        "message": "No payer was given, so the plan was checked from the borrower 0xabc7f1093d5e26b804a1c3f78de025916b47c0d3, and from that wallet the repayment would revert (ERC20InsufficientBalance). If the borrower pays, resolve that before signing, or the steps fail on chain. If another wallet pays, pass it as payer to have the allowance, the token's approval rule and the repayment checked from that wallet before signing."
       }
-    ],
-    "gasLimitBasis": "simulated",
-    "fullRepayment": false,
-    "confirmStepIndex": 0,
-    "confirmWith": {
-      "endpoint": "POST /lending-external-securities-v2/api/positions/cmssh7p1k0001cghxq2m4v8rz/repay",
-      "field": "txHash",
-      "body": { "loanId": "5", "txHash": null }
-    },
-    "permitUsed": true,
-    "outstandingDebt": "50412.881000",
-    "repayAmount": "10000.0",
-    "transactionFee": {
-      "kind": "REPAY",
-      "fee": "2.0",
-      "feeRaw": "2000000",
-      "debtReduction": "9998.0",
-      "message": "This market charges a repayment fee of 2.0 USDC, taken from this payment first: 9998.0 USDC of it reduces the loan."
-    },
-    "warning": "This market charges a repayment fee of 2.0 USDC, taken from this payment first: 9998.0 USDC of it reduces the loan."
+    ]
   }
 }
 ```
@@ -268,26 +399,47 @@ await fetch(url, {
     "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
     "loanId": "5",
     "repaidAmount": "50412.913422",
+    "payer": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "loanClosed": true,
     "collateralReturned": "1000.0",
     "collateralReturnEscrowed": false
   }
 }
 ```
-```json Error - Permit Value Required
+```json Confirmed Response - Partial Repayment
 {
-  "success": false,
-  "error": {
-    "code": "PERMIT_VALUE_REQUIRED",
-    "message": "A full repayment with a permit needs permit.value: the permit is verified and encoded over that figure, and it must cover the outstanding debt at the moment the transaction mines. Quote it through the permit-quote endpoint (50515.706763 USDC now, the live debt plus a 20 bps accrual buffer and the repayment fee) and sign the permit over the value it names."
+  "success": true,
+  "data": {
+    "txHash": "0x2f853f69c4b0a1e7d3f2c58e916b0a74d2c3e5f8a9b1c6d4e7f0a2b3c5d6150b",
+    "loanId": "5",
+    "repaidAmount": "10000.0",
+    "payer": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+    "loanClosed": false,
+    "remainder": {
+      "open": true,
+      "remainingDebt": "40414.881",
+      "remainingDebtRaw": "40414881000",
+      "offerRepayRemainder": false,
+      "note": "The loan is still open with 40414.881 USDC outstanding."
+    }
   }
 }
 ```
-```json Error - Wrong Step Confirmed
+```json Error - Simulation Failed
 {
   "success": false,
   "error": {
-    "code": "TX_WRONG_TARGET",
-    "message": "This transaction neither targets the market nor emits a LoanRepaid from it. A full repayment is signed as several steps and only the repay step can be confirmed. Use the hash of the step whose functionName is \"repay\" (index 1 of the steps returned for this repayment), not the last one."
+    "code": "REPAY_SIMULATION_FAILED",
+    "message": "The repayment would revert when sent from 0xabc7f1093d5e26b804a1c3f78de025916b47c0d3 (ERC20InsufficientBalance), so nothing was built."
+  }
+}
+```
+```json Error - Permit Expired
+{
+  "success": false,
+  "error": {
+    "code": "INVALID_PERMIT",
+    "message": "The permit has expired: its deadline has passed, so the token would refuse it. Nothing was built. Quote the permit again and sign the new one."
   }
 }
 ```
@@ -299,26 +451,34 @@ await fetch(url, {
 |---|---|---|
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
-| `VALIDATION_ERROR` | `400` | `loanId` is not a positive integer, neither `amount` nor `all` was supplied, an amount is malformed or carries more decimal places than the borrow asset supports, or a `permit` field has the wrong shape |
+| `VALIDATION_ERROR` | `400` | `loanId` is not a positive integer, neither `amount` nor `all` was supplied, an amount is malformed or carries more decimal places than the borrow asset supports, `mode` is not `batch`, `permit` or `sequential`, `payer` is not an address, or a `permit` field has the wrong shape |
+| `INVALID_PAYER` | `400` | `payer` is the zero address, or a mixed-case address whose EIP-55 checksum does not match |
 | `NO_OUTSTANDING_DEBT` | `400` | `all` was set on a loan that owes nothing |
 | `LOAN_NOT_ACTIVE` | `400` | The loan is closed and can no longer be modified |
-| `INVALID_PERMIT` | `400` | `permit.deadline` is not in the future, `permit.value` breaks the binding rules, or the signature does not recover to the borrower for this spender, value, nonce and deadline |
+| `PAYER_REQUIRED` | `400` | The permit path was chosen without `payer` |
+| `PERMIT_REQUIRED` | `400` | `mode: permit` was sent without a `permit` |
+| `INVALID_PERMIT` | `400` | The permit has expired, its deadline is less than 2 or more than 31 minutes ahead, its value is unlimited, above what the repayment can need or breaks the binding rules, the signature does not recover to the payer for this spender, value, nonce and deadline, or the token refuses the permit |
 | `PERMIT_VALUE_REQUIRED` | `400` | A `permit` was sent with `all: true` but without `permit.value` |
 | `INVALID_SIGNED_PRICE` | `400` | The `signedPrice` is malformed, expired, dated in the future or older than the oracle's price age window, or it was signed by a wallet that is not an authorized signer on the market's oracle, which `details.signer` then names. Sign a fresh quote, or repay without it |
 | `PRICE_DEVIATION_TOO_LARGE` | `400` | The `signedPrice` moves further from the oracle's current price than its `maxDeviationBps` allows |
 | `PRICE_WINDOW_DEVIATION_TOO_LARGE` | `400` | The `signedPrice` falls outside the band the oracle accepts within its current one-hour window |
-| `TX_WRONG_TARGET` | `400` | The confirmed transaction neither targets the market nor emits `LoanRepaid` from it. On a full repayment, confirm the `repay` step |
+| `TX_WRONG_TARGET` | `400` | The confirmed transaction neither targets the market nor emits `LoanRepaid` from it. Confirm the step at `confirmStepIndex`, or the one transaction a wallet bundled the steps into, never an approval |
 | `TX_NOT_VERIFIED` | `400` | The confirmed transaction repays a different loan |
 | `REPAY_FAILED` | `400` | The repayment could not be prepared and no more specific code applied |
 | `LOAN_NOT_FOUND` | `404` | No such loan on this market |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
-| `PERMIT_UNSUPPORTED` | `409` | A `permit` was sent for a settlement asset that does not implement EIP-2612, or whose support could not be verified. Use the approve-then-repay steps |
+| `APPROVAL_REFUSED` | `409` | The settlement token refuses the approval this repayment needs from the named payer, both to the amount and to zero, or the simulated approval reverts. A paused token or a blocked wallet does this. Resolve it with the token issuer |
+| `REPAY_SIMULATION_FAILED` | `409` | The repayment reverts when simulated from the named payer, for example on an insufficient balance. Nothing was built |
+| `PERMIT_REQUIRES_EOA` | `409` | The payer is a contract account, which the token's permit check does not accept in this form. Repay with `mode: batch` or `sequential` |
+| `PERMIT_UNSUPPORTED` | `409` | A `permit` was sent for a settlement asset that does not implement EIP-2612. `503` when its support could not be verified. Use the approval steps |
 | `EXTERNAL_FEED_ACTIVE` | `409` | A `signedPrice` was sent to a market that prices from an external feed. Retry without it |
 | `FIXED_PRICE_ACTIVE` | `409` | A `signedPrice` was sent to a market with a fixed price. Retry without it |
 | `SIGNED_PRICE_OUTDATED` | `409` | The `signedPrice` is not dated after the price the oracle already holds, so the oracle would refuse it. Sign a fresh quote, or repay without it |
-| `LOAN_STATE_UNAVAILABLE` | `503` | The loan could not be read from the network right now. Retry shortly |
+| `ALLOWANCE_UNREADABLE` | `503` | The named payer's allowance for the market could not be read, so nothing was built. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | Whether the payer is a contract, or whether the token accepts the new approval, could not be read. Retry shortly |
+| `LOAN_STATE_UNAVAILABLE` | `503` | The loan, its rate or the market's accrual could not be read from the network right now, so the repayment cannot be sized. Retry shortly |
 | `MARKET_STATE_UNAVAILABLE` | `503` | The market's transaction fees could not be read, or, with a `signedPrice`, its price oracle. Retry shortly |
 | `PRICE_STATE_UNAVAILABLE` | `503` | The oracle could not be read to check the `signedPrice`, so nothing was built. Retry shortly, or repay without it |
-| `PERMIT_UNVERIFIABLE` | `503` | The settlement asset's permit domain or the borrower's nonce could not be read, so the signature could not be checked. Retry, or use the approve-then-repay steps |
+| `PERMIT_UNVERIFIABLE` | `503` | The settlement asset's permit domain, the payer's nonce or the token's answer to the permit could not be read, so the signature could not be checked. Retry, or use the approval steps |
 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

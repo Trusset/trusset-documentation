@@ -4,7 +4,7 @@ api: 'GET /lending-external-securities-v2/api/vaults/{vaultId}'
 description: 'Full vault record plus live chain state and an optional holder position'
 ---
 
-Returns the vault record with its live state. `onChain` is the vault read from the chain in one aggregate. `holder` is the position of the wallet named in `address`, or `null` without one. On a vault your instance operates, `implementation` and `jitLiquidity` add the operator's view; on every other vault both are `null`.
+Returns the vault record with its live state. `onChain` is the vault read from the chain in one aggregate. `holder` is the position of the wallet named in `address`, or `null` without one. On a vault your instance operates, `implementation`, `jitLiquidity` and `roles` add the operator's view; on every other vault all three are `null`.
 
 The record fields are those of a [List Vaults](/endpoints/vaults/list-vaults) row, `depositorGate`, `depositorProfile`, `depositorAccessList` and `distributorView` included. A vault whose own register is the previous Trusset ID Register also carries `depositorRegisterRetired: true`, `currentRegistry` and `depositorRegisterNote`, as described there. A vault is visible here under the same rules as on that list.
 
@@ -37,7 +37,7 @@ The record fields are those of a [List Vaults](/endpoints/vaults/list-vaults) ro
         <ResponseField name="readFailed" type="boolean">True when the chain could not be read. Every other field in this block is then absent, apart from `isOnChain` and, when they could still be established, `supportsNotice` and `feeNotice`. Keep your last verified values instead of rendering zeros.</ResponseField>
         <ResponseField name="isOnChain" type="boolean">`true` on a clean read, `null` when the read failed.</ResponseField>
         <ResponseField name="vaultAddress" type="string">The vault contract, lowercased.</ResponseField>
-        <ResponseField name="owner" type="string">The wallet that owns the vault on-chain. Only it can sign the vault's owner-only actions, distributor approvals included.</ResponseField>
+        <ResponseField name="owner" type="string">The vault's admin, the wallet that owns it on-chain. Only it can sign the vault's admin-only actions, distributor approvals included. On the implementation with roles, the allocators and pausers it appoints sign their own actions. See [Vault Roles](/endpoints/vaults/vault-roles).</ResponseField>
         <ResponseField name="asset" type="string">The vault's asset, read from the contract rather than from the record.</ResponseField>
         <ResponseField name="identityRegistry" type="string">The vault's own identity register, read from the contract. `null` when the vault names none.</ResponseField>
         <ResponseField name="totalAssets" type="string">Everything the vault is worth: idle funds plus its position in every allocated market. Formatted at the vault's asset decimals.</ResponseField>
@@ -55,7 +55,7 @@ The record fields are those of a [List Vaults](/endpoints/vaults/list-vaults) ro
         <ResponseField name="assetsFullyReadable" type="boolean">`false` when the vault's position in at least one allocated market could not be read, so `totalAssets` understates the vault. Deposits are then refused with `VAULT_BOOK_INCOMPLETE`, and redemptions are quoted low.</ResponseField>
         <ResponseField name="supportsNotice" type="boolean">Whether this vault runs the implementation that announces its changes in advance and can write a dead market off. `null` when that could not be established.</ResponseField>
         <ResponseField name="feeNotice" type="object">
-          The performance-fee notice. Collecting the fee mints shares to the operator and dilutes holders. The current implementation takes it only after an announced notice period.
+          The performance-fee notice. Collecting the fee mints shares to the vault's fee recipient, the admin unless it named another wallet, and dilutes holders. The current implementation takes it only after an announced notice period.
           <Expandable>
             <ResponseField name="supported" type="boolean">`true` when the vault requires the notice, `false` on the earlier implementation that collects without one, `null` when unknown.</ResponseField>
             <ResponseField name="activatesAt" type="integer">Unix time from which an announced collection may be taken. `null` when none is announced. A holder who disagrees with the collection can redeem before it.</ResponseField>
@@ -144,6 +144,26 @@ The record fields are those of a [List Vaults](/endpoints/vaults/list-vaults) ro
     </ResponseField>
     <ResponseField name="jitLiquidity" type="object">
       Present only on your own vault, `null` on every other. Carries `readFailed` and a `markets` array: the operator's lending markets that settle in the vault's asset and could draw on it. Each entry names the market (`marketId`, `marketAddress`, `marketName`, `marketSymbol`, `borrowAssetSymbol`), states both sides of the connection, and ends in a `readiness` verdict.
+    </ResponseField>
+    <ResponseField name="roles" type="object">
+      Present only on your own vault, `null` on every other and on a vault with no on-chain address. Who controls the vault, read live from the chain. See [Vault Roles](/endpoints/vaults/vault-roles).
+      <Expandable>
+        <ResponseField name="supported" type="boolean">`true` on the vault implementation with roles, `false` on an earlier one. `null` when the roles could not be read.</ResponseField>
+        <ResponseField name="readFailed" type="boolean">Present and `true` when the roles could not be read. `code` then reads `VAULT_ROLES_UNREADABLE`, `message` says why, and `allocators` and `pausers` are `null`, not empty. Retry rather than show nobody.</ResponseField>
+        <ResponseField name="epoch" type="integer">The role epoch. Every accepted handover and every reset starts a new one and voids every allocator and pauser of the previous one. `null` on an implementation without roles.</ResponseField>
+        <ResponseField name="admin" type="object">`{ address, name }`: the wallet that owns the vault. `name` is what your instance calls the wallet (a registered wallet, a customer or a team member), `null` otherwise.</ResponseField>
+        <ResponseField name="pendingAdmin" type="object">`{ address, name }` of a wallet the admin nominated and that has not accepted yet. `null` when no handover is pending.</ResponseField>
+        <ResponseField name="feeRecipient" type="object">`{ address, name, isAdmin }`: the wallet that receives the performance-fee shares and the operator's distributor share. `isAdmin` is `true` while it is the admin.</ResponseField>
+        <ResponseField name="allocators" type="array">The allocators of the current epoch, each `{ address, name }`, every one confirmed on chain. Empty on an implementation without roles.</ResponseField>
+        <ResponseField name="pausers" type="array">The pausers of the current epoch, in the same shape.</ResponseField>
+        <ResponseField name="staleAllocations" type="array">Markets the vault still holds a position in whose lender of record is not the current admin, each `{ marketAddress, lenderOfRecord, lpValue, lpValueRaw }`. The vault no longer allocates or draws there. Recall the position with a deallocation. `null` when the markets could not all be read.</ResponseField>
+        <ResponseField name="staleConsents" type="array">Markets with a draw cap above zero whose lender of record is not the current admin, each `{ marketAddress, lenderOfRecord, cap, capRaw }`. Clear the consent with a draw cap of zero. `null` when the markets could not all be read.</ResponseField>
+        <ResponseField name="staleReadFailed" type="boolean">`true` when a market's lender of record could not be read, so the two lists may be incomplete.</ResponseField>
+        <ResponseField name="viewer" type="object">Always `null` on this API.</ResponseField>
+        <ResponseField name="complete" type="boolean">`false` when the vault's appointment history could not be read back to its creation, or when more than 200 accounts were ever appointed. `incompleteReason` then says which. Every account listed is still confirmed on chain.</ResponseField>
+        <ResponseField name="asOfBlock" type="integer">The block the roles were read through.</ResponseField>
+        <ResponseField name="handoverWarning" type="string">Present on an implementation without roles: what a handover there would leave behind, and that the vault should be upgraded first.</ResponseField>
+      </Expandable>
     </ResponseField>
   </Expandable>
 </ResponseField>
@@ -276,7 +296,8 @@ if (!data.onChain || data.onChain.readFailed) {
       "readFailed": false
     },
     "implementation": null,
-    "jitLiquidity": null
+    "jitLiquidity": null,
+    "roles": null
   }
 }
 ```
@@ -289,7 +310,8 @@ if (!data.onChain || data.onChain.readFailed) {
     "onChain": { "readFailed": true, "isOnChain": null },
     "holder": null,
     "implementation": null,
-    "jitLiquidity": null
+    "jitLiquidity": null,
+    "roles": null
   }
 }
 ```
