@@ -8,7 +8,7 @@ description: 'What an active loan owes now, when the next payment is due, and wh
   Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
-Reads the loan of an `ACTIVE` listing from the market contract at the current block: the interest due now, the payoff, the next due date with its amount, whether the loan can be liquidated, and whether the asset can still be delivered to the buyer. A listing in any other status answers with its status and `active: false`, and a `REPAID` one adds `assetLeg`.
+Reads the loan of an `ACTIVE` listing from the market contract at the current block: the interest due now, the payoff, the next due date with its amount, whether the loan can be liquidated, and whether the asset can still be delivered to the buyer. A listing in any other status answers with its status and `active: false`. A `REPAID` one adds `assetLeg`, and a `LIQUIDATED` one adds `liquidation`, the account of the liquidation read from the market's `LoanLiquidated` event.
 
 Interest accrues by the second, so every figure here grows until the next payment. See [Due dates, grace and default](/endpoints/seller-financing/introduction#due-dates-grace-and-default).
 
@@ -17,6 +17,8 @@ Interest accrues by the second, so every figure here grows until the next paymen
 Interest cannot be paid in advance. A payment before `nextDue.dueAt` settles only the interest accrued until then, and the excess goes to principal, so the period still closes with interest owed. Pay once `nextDue.dueAt` has passed, and before `liquidatableAt`.
 
 That window is the listing's grace period: `liquidatableAt` is `nextDue.dueAt` plus the grace period plus one second. A listing with several interest periods therefore carries a grace period of at least one day, and [Create Listing](/endpoints/seller-financing/create-listing) refuses less with `GRACE_PERIOD_REQUIRED`. On a single-period listing with a grace period of 0, pay off in full before maturity instead.
+
+A loan whose interest periods are shorter than its runtime and whose grace period is under one day carries `graceWarning`. On such a loan a payment mined before `nextDue.dueAt` settles only the interest accrued until it is mined, so the interest that accrues between the payment and the due date stays owed and the loan can be liquidated from `liquidatableAt`. See [Due dates, grace and default](/endpoints/seller-financing/introduction#due-dates-grace-and-default).
 
 Send at least `interestDue` plus the repay fee to [Repay](/endpoints/seller-financing/repay). The fee is carved out of the payment, and it is the smaller of the market's `repayFee` and 0.5 percent of the amount applied. Leave a small margin for the interest that accrues until the payment is mined: anything above the interest due goes to principal.
 
@@ -32,7 +34,9 @@ Send at least `interestDue` plus the repay fee to [Repay](/endpoints/seller-fina
   <Expandable>
     <ResponseField name="id" type="string">The listing ID.</ResponseField>
     <ResponseField name="status" type="string">The listing's status.</ResponseField>
-    <ResponseField name="active" type="boolean">`true` while the status is `ACTIVE`. The fields below are returned only then.</ResponseField>
+    <ResponseField name="active" type="boolean">`true` while the status is `ACTIVE`. The fields below are returned only then, except `settlementModel`, `assetLeg`, `heldPayment` and `liquidation`.</ResponseField>
+    <ResponseField name="settlementModel" type="string">`CREDIT_AT_PAYOFF` or `DELIVERY_AGAINST_PAYMENT`, `null` when unread. See [Market generations](/endpoints/seller-financing/introduction#market-generations).</ResponseField>
+    <ResponseField name="heldPayment" type="object">On a `REPAID` listing of a delivery-against-payment market: the held price, `deliverBy` and `unwindableAt`, as on [Get Listing](/endpoints/seller-financing/get-listing#response-fields).</ResponseField>
     <ResponseField name="interestDue" type="string">Interest owed now, base and premium together, in the payment token's smallest unit.</ResponseField>
     <ResponseField name="interestDueFormatted" type="string">The same in whole units.</ResponseField>
     <ResponseField name="payoff" type="object">What a full repayment would pay now: `{ interest, principal, fee, total, totalFormatted }`, in smallest units, with `total` the sum of the other three. [Repay](/endpoints/seller-financing/repay) with `amount: "full"` approves `total` plus a margin.</ResponseField>
@@ -48,7 +52,32 @@ Send at least `interestDue` plus the repay fee to [Repay](/endpoints/seller-fina
     </ResponseField>
     <ResponseField name="isLiquidatable" type="boolean">`true` when the loan is in default and the seller or the operator can liquidate it now. `null` when unread.</ResponseField>
     <ResponseField name="liquidatableAt" type="integer">Unix time the loan becomes liquidatable if nothing more is paid: one second after the grace period of `nextDue.dueAt`. In the past once the loan is in default.</ResponseField>
-    <ResponseField name="assetLeg" type="object">On an `ACTIVE` or `REPAID` listing: whether the asset can still be delivered to the buyer, as on [Get Listing](/endpoints/seller-financing/get-listing#response-fields). With `deliverable: false`, a repayment that completes the loan and the asset claim are refused with `409 ASSET_NOT_DELIVERABLE`. See [Asset leg](/endpoints/seller-financing/introduction#asset-leg).</ResponseField>
+    <ResponseField name="assetLeg" type="object">On an `ACTIVE` or `REPAID` listing: whether the asset can still be delivered to the buyer, as on [Get Listing](/endpoints/seller-financing/get-listing#response-fields). With `deliverable: false`, the asset claim and the delivery are refused with `409 ASSET_NOT_DELIVERABLE`, and on a first-generation market a repayment that completes the loan too. See [Asset leg](/endpoints/seller-financing/introduction#asset-leg).</ResponseField>
+    <ResponseField name="graceWarning" type="object">Only on a loan whose interest periods are shorter than its runtime and whose grace period is under one day: `code` (`GRACE_PERIOD_BELOW_FLOOR`), `gracePeriod`, `interestPeriod` and `minimum` in seconds, `dueAt`, `liquidatableAt`, `interestAccruingBeforeDueAt` (the interest that accrues from now until `dueAt`, which a payment mined now leaves owed at the due date) with its formatted twin, and `message`. Inside the grace window `message` names what is owed now and by when; once the loan can be liquidated it says so, and past maturity it says that only a full payoff stops a liquidation.</ResponseField>
+    <ResponseField name="liquidation" type="object">
+      On a `LIQUIDATED` listing: the account of the liquidation, read from the market's `LoanLiquidated` event. Amounts are in the payment token's smallest unit, each with a `...Formatted` twin.
+      <Expandable>
+        <ResponseField name="readable" type="boolean">`false` when the event could not be read from the market's event log just now, with `note`. Read again shortly.</ResponseField>
+        <ResponseField name="liquidatedAt" type="integer">Unix time of the block that mined the liquidation. `null` when the block could not be read.</ResponseField>
+        <ResponseField name="liquidatedBy" type="string">The wallet that signed it.</ResponseField>
+        <ResponseField name="liquidatedByRole" type="string">`SELLER` or `OPERATOR`.</ResponseField>
+        <ResponseField name="transactionHash" type="string">The liquidation transaction.</ResponseField>
+        <ResponseField name="blockNumber" type="integer">Its block.</ResponseField>
+        <ResponseField name="refundable" type="string">The escrow settled: the downpayment plus the principal the buyer had paid.</ResponseField>
+        <ResponseField name="compensation" type="string">1.5 percent of the downpayment, rounded up, kept by the seller.</ResponseField>
+        <ResponseField name="interestTaken" type="string">Interest owed at the liquidation and taken from the escrow.</ResponseField>
+        <ResponseField name="trussetShare" type="string">20 percent of the compensation and the interest taken, booked as Trusset's infrastructure fees.</ResponseField>
+        <ResponseField name="sellerCredit" type="string">What the liquidation credited to the seller.</ResponseField>
+        <ResponseField name="buyerRefund" type="string">What the liquidation credited to the buyer.</ResponseField>
+        <ResponseField name="interestPaidTotal" type="string">All interest on the loan, the interest taken included.</ResponseField>
+        <ResponseField name="interestPaidBefore" type="string">Interest the buyer paid before the liquidation. It is not refunded.</ResponseField>
+        <ResponseField name="seller" type="object">`{ address, amount, amountFormatted, claimableNow, claimableNowFormatted }`: the seller's credit from this liquidation and everything the seller can withdraw from the market now, credits from other sales included. `claimableNow` is `null` when unread.</ResponseField>
+        <ResponseField name="buyer" type="object">The same for the buyer, with the refund as `amount`.</ResponseField>
+        <ResponseField name="asset" type="string">Where the asset went: in freeze mode the lock is released in the seller's wallet (on a delivery-against-payment market, except what the seller's other live sales still need frozen); in custody mode the adapter returns it to the seller or keeps it in escrow for the seller ([Get Listing](/endpoints/seller-financing/get-listing) shows `collateralEscrow`).</ResponseField>
+        <ResponseField name="nextStep" type="string">Each party withdraws with [Withdraw](/endpoints/seller-financing/withdraw); the path is given with the market ID.</ResponseField>
+        <ResponseField name="note" type="string">The account in words.</ResponseField>
+      </Expandable>
+    </ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -172,6 +201,64 @@ if (data.active && data.nextDue) {
   "error": null,
   "metadata": {
     "timestamp": "2026-10-29T09:00:00.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Liquidated
+{
+  "success": true,
+  "data": {
+    "id": "3",
+    "status": "LIQUIDATED",
+    "active": false,
+    "settlementModel": "CREDIT_AT_PAYOFF",
+    "liquidation": {
+      "readable": true,
+      "liquidatedAt": 1792523952,
+      "liquidatedBy": "0xCeBE3CdF854629823D03892675f7FD4eA3A036a9",
+      "liquidatedByRole": "OPERATOR",
+      "transactionHash": "0xefbb21f05b05db67ee6de8b51f7a76107b1dd92fbd5966be3b378c94ca54a256",
+      "blockNumber": 11957332,
+      "refundable": "10785243",
+      "refundableFormatted": "10.785243",
+      "compensation": "150000",
+      "compensationFormatted": "0.15",
+      "interestTaken": "239",
+      "interestTakenFormatted": "0.000239",
+      "sellerCredit": "120192",
+      "sellerCreditFormatted": "0.120192",
+      "trussetShare": "30047",
+      "trussetShareFormatted": "0.030047",
+      "buyerRefund": "10635004",
+      "buyerRefundFormatted": "10.635004",
+      "interestPaidTotal": "210021",
+      "interestPaidTotalFormatted": "0.210021",
+      "interestPaidBefore": "209782",
+      "interestPaidBeforeFormatted": "0.209782",
+      "seller": {
+        "address": "0x8cC237798b4E5eE7A07F20e8ad2db554404abF88",
+        "amount": "120192",
+        "amountFormatted": "0.120192",
+        "claimableNow": "288018",
+        "claimableNowFormatted": "0.288018"
+      },
+      "buyer": {
+        "address": "0x23966303b7b8e6cE0223f6A1D34b5a0B1aD2417F",
+        "amount": "10635004",
+        "amountFormatted": "10.635004",
+        "claimableNow": "10635004",
+        "claimableNowFormatted": "10.635004"
+      },
+      "asset": "The freeze adapter releases the lock on the sold asset in the seller's wallet.",
+      "nextStep": "Each party withdraws its balance with POST /seller-financing/api/markets/cmvf0aagg02h410r33i6ksz6m/withdraw (from: the seller 0x8cC237798b4E5eE7A07F20e8ad2db554404abF88 or the buyer 0x23966303b7b8e6cE0223f6A1D34b5a0B1aD2417F). claimableNow is everything the wallet can withdraw from this market, including credits from other sales.",
+      "note": "The operator 0xCeBE3CdF854629823D03892675f7FD4eA3A036a9 liquidated the sale on 2026-10-20T19:19:12.000Z, after a payment due was not made within the grace period. Of the 10.785243 the buyer paid into the market (the downpayment and the escrowed principal), the seller keeps the compensation of 0.15 (1.5 percent of the downpayment) and 0.000239 of interest due; Trusset's infrastructure share of 20 percent of that, 0.030047, is booked as fees, so the seller is credited 0.120192 and the buyer is refunded 10.635004. Interest the buyer paid before the liquidation (0.209782) is not refunded. The freeze adapter releases the lock on the sold asset in the seller's wallet."
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-20T19:20:02.000Z",
     "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
     "instanceId": "inst_abc123"
   }

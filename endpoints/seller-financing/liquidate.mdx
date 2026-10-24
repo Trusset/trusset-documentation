@@ -16,6 +16,10 @@ Builds the seller's withdrawal from the sale of a loan in default. The seller or
 
 The escrow is the downpayment plus the principal paid so far. Interest the buyer paid before the default stays with the seller. Nothing is paid out by the liquidation itself: the seller and the buyer each withdraw with [Withdraw](/endpoints/seller-financing/withdraw).
 
+The answer previews that split as `settlementPreview`, computed from the loan as read when the request was built, together with the due date that passed unpaid and what was unpaid at it. Interest keeps accruing until the transaction is mined, so the interest taken can come out slightly higher, never above the escrow less the compensation. After the liquidation, [Get Loan Status](/endpoints/seller-financing/get-loan-status) returns the split as mined in `liquidation`.
+
+The answer also carries the sale's `assetLeg`, as on [Get Loan Status](/endpoints/seller-financing/get-loan-status). When the asset cannot be delivered to the buyer (`assetLeg.deliverable` is `false`), `warning` says so: the liquidation still credits the seller the compensation and the interest due.
+
 In freeze mode the adapter unfreezes the amount in the seller's wallet. In custody mode it returns the asset to the seller, or keeps it in escrow for the seller when the token refuses the return. Before building, the API simulates that return from the adapter: when the token refuses it, the answer carries `assetReturn` with `willEscrow: true` and the same text in `warning`, and the seller later takes the asset back with [Claim Escrowed Collateral](/endpoints/seller-financing/claim-escrowed-collateral). See [What each party receives](/endpoints/seller-financing/introduction#what-each-party-receives) for a worked example.
 
 A loan is in default one second after the grace period of a due date whose interest is unpaid, or one second after maturity plus the grace period while principal is outstanding. Before that, the API answers `409 TX_WOULD_REVERT` with `NotLiquidatable` and the moment the loan becomes liquidatable. A liquidation is refused while the market is paused.
@@ -46,7 +50,9 @@ A loan is in default one second after the grace period of a due date whose inter
     <ResponseField name="loanStatus" type="object">The loan when the request was built: `interestDue`, `payoff`, `nextDue`, `isLiquidatable` and `liquidatableAt`, as on [Get Loan Status](/endpoints/seller-financing/get-loan-status#response-fields). `null` when unread.</ResponseField>
     <ResponseField name="signer" type="object">`{ role: "SELLER_OR_OPERATOR_ROLE", seller }`: the seller of the listing, or a holder of `OPERATOR_ROLE`, signs.</ResponseField>
     <ResponseField name="assetReturn" type="object">Custody mode only, present when the asset token refuses the return to the seller: `{ willEscrow: true, reason, message }`. `reason` is the token's refusal when it gave one, otherwise `null`. The liquidation still settles the escrow. Absent when the return goes through or could not be checked.</ResponseField>
-    <ResponseField name="warning" type="string">`assetReturn.message`, present with it.</ResponseField>
+    <ResponseField name="settlementPreview" type="object">The split if the liquidation were mined now, in the payment token's smallest unit, each with a `...Formatted` twin in whole units: `refundable` (the escrow: downpayment plus principal paid), `compensation`, `interestTaken`, `trussetShare`, `sellerCredit` and `buyerRefund`. `default` is the due date that passed unpaid: `{ dueAt, interestOwed, principalOwed }` with formatted twins, set only while the loan reads liquidatable, `null` otherwise. `note` says it in words. `{ readable: false, note }` when the loan could not be read; the liquidation then settles on chain as usual.</ResponseField>
+    <ResponseField name="assetLeg" type="object">Whether the asset of the sale can still be delivered, as on [Get Loan Status](/endpoints/seller-financing/get-loan-status#response-fields). Absent when the lock could not be read.</ResponseField>
+    <ResponseField name="warning" type="string">Present when the custody return would be escrowed (the text of `assetReturn.message`) or when the asset cannot be delivered to the buyer. Both texts are joined when both apply.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -117,6 +123,29 @@ if (!body.success && body.error.details?.error === 'NotLiquidatable') {
       "isLiquidatable": true,
       "liquidatableAt": 1793178001
     },
+    "settlementPreview": {
+      "readable": true,
+      "refundable": "2000000000",
+      "refundableFormatted": "2000.0",
+      "compensation": "30000000",
+      "compensationFormatted": "30.0",
+      "interestTaken": "140139154",
+      "interestTakenFormatted": "140.139154",
+      "sellerCredit": "136111324",
+      "sellerCreditFormatted": "136.111324",
+      "trussetShare": "34027830",
+      "trussetShareFormatted": "34.02783",
+      "buyerRefund": "1829860846",
+      "buyerRefundFormatted": "1829.860846",
+      "default": {
+        "dueAt": 1793005200,
+        "interestOwed": "115781947",
+        "interestOwedFormatted": "115.781947",
+        "principalOwed": "0",
+        "principalOwedFormatted": "0.0"
+      },
+      "note": "The due date 2026-10-26T09:00:00.000Z passed with 115.781947 of interest unpaid within the grace period. Of the 2000.0 the buyer paid into the market (the downpayment and the escrowed principal), the seller keeps the compensation of 30.0 (1.5 percent of the downpayment) and 140.139154 of interest due; Trusset's infrastructure share of 20 percent of that, 34.02783, is booked as fees, so the seller is credited 136.111324 and the buyer is refunded 1829.860846. These figures are read now; interest keeps accruing until the transaction is mined, so the interest taken can be slightly higher, never above the escrow less the compensation. The freeze adapter releases the lock on the sold asset in the seller's wallet."
+    },
     "signer": {
       "role": "SELLER_OR_OPERATOR_ROLE",
       "seller": "0x3E22FdfA28e880239541d9c5B66B3b161F9ED77b"
@@ -152,7 +181,7 @@ if (!body.success && body.error.details?.error === 'NotLiquidatable') {
 ```
 </ResponseExample>
 
-Liquidated at this moment, the loan's 2,000 USDC escrow splits into 136.111324 USDC for the seller, 34.02783 USDC for Trusset and 1,829.860846 USDC for the buyer.
+Liquidated at this moment, the loan's 2,000 USDC escrow splits into 136.111324 USDC for the seller, 34.02783 USDC for Trusset and 1,829.860846 USDC for the buyer, as `settlementPreview` shows.
 
 ## Error Codes
 
@@ -164,6 +193,7 @@ Liquidated at this moment, the loan's 2,000 USDC escrow splits into 136.111324 U
 | `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
 | `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
 | `INVALID_STATUS` | `409` | The listing is not `ACTIVE`. `details.status` names its status |
+| `MIGRATION_PENDING` | `409` | The market runs delivery against payment but has not recounted its live sales, so the return to the seller could revert. [Upgrade Market](/endpoints/seller-financing/upgrade-market) builds the recount, which any wallet can sign |
 | `TX_WOULD_REVERT` | `409` | The liquidation would revert: `NotLiquidatable` with `details.liquidatableAt`, `NotSeller` with `details.requiredRole`, `details.seller` and `details.roleHolders`, `EnforcedPause`, `InsufficientLocked` when the custody adapter holds less than it recorded, or the token's own refusal of the unfreeze, for example when the freeze adapter lost its agent role |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
 | `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |

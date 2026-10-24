@@ -23,6 +23,8 @@ The listing must not have expired, the market must not be paused, and the seller
 
 Before building, the API refuses a listing past its `expiresAt` with `409 TX_WOULD_REVERT`, error `ListingExpired` and `details.expiresAt`. [List Listings](/endpoints/seller-financing/list-listings) with `status=OPEN` already leaves such listings out. In freeze mode it also checks that the freeze adapter still holds its agent role and that the seller still holds the listed amount unfrozen. Either failure answers `409 TX_WOULD_REVERT`, with `AgentRoleMissing` or `InsufficientFreeBalance`.
 
+It refuses a listing whose interest periods are shorter than its runtime and whose grace period is under one day with `409 GRACE_PERIOD_REQUIRED`, whoever created it, a listing made on the contract directly included. With no grace the buyer could pay a period's interest on time only in the very second of its due date, and a payment mined before the due date leaves the interest that accrues until then owed, which makes the loan liquidatable. `details` carries `gracePeriod`, `interestPeriod` and `duration` in seconds and `minimum` (86400). [List Listings](/endpoints/seller-financing/list-listings) and [Get Listing](/endpoints/seller-financing/get-listing) flag such a listing with `graceBelowFloor`. The seller can cancel it and list the asset again with a grace period of at least one day.
+
 ## Path Parameters
 
 <ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/seller-financing/list-markets).</ParamField>
@@ -166,6 +168,28 @@ for (const step of data.steps) {
   }
 }
 ```
+```json Error - Grace Period Required
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "GRACE_PERIOD_REQUIRED",
+    "message": "Listing 3 has interest periods shorter than its runtime and no grace period after each due date, below the 1 day the API requires. The interest of a period can only be paid once its due date has passed, so the buyer could pay on time only in the very second of each due date, and a payment made before a due date leaves the interest that accrues until then owed, which makes the loan liquidatable. Nothing was built. The seller can cancel the listing and list the asset again with a grace period of at least 1 day.",
+    "details": {
+      "action": "purchase",
+      "gracePeriod": 0,
+      "interestPeriod": 86400,
+      "duration": 172800,
+      "minimum": 86400
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-10-21T13:58:41.507Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
 ```json Error - Insufficient Balance
 {
   "success": false,
@@ -199,6 +223,7 @@ for (const step of data.steps) {
 | `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
 | `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
 | `INVALID_STATUS` | `409` | The listing is not `OPEN`. `details.status` names its status |
+| `GRACE_PERIOD_REQUIRED` | `409` | The listing has interest periods shorter than its runtime and less than one day of grace. `details` carries `gracePeriod`, `interestPeriod`, `duration` and `minimum` |
 | `INSUFFICIENT_BALANCE` | `409` | `from` holds less of the payment token than the downpayment. `details` carries `token`, `owner`, `balance` and `needed` |
 | `TX_WOULD_REVERT` | `409` | The purchase would revert. `details.error` names the reason, for example `ListingExpired` with `details.expiresAt`, `NotDesignatedBuyer`, `InvalidBuyer`, `IdentityNotVerified`, `BuyerNotVerified`, `SellerIsTokenAgent`, `EnforcedPause`, or in freeze mode `AgentRoleMissing` and `InsufficientFreeBalance` |
 | `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |

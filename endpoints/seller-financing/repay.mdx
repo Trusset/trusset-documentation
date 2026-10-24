@@ -18,11 +18,21 @@ The market applies a payment in this order:
 
 The seller is credited its share of the interest at once, and Trusset 20 percent of it. Interest cannot be paid in advance. To pay a period on time, see [Paying a period on time](/endpoints/seller-financing/get-loan-status#paying-a-period-on-time).
 
-The payment that brings the principal to zero closes the loan. The listing reads `REPAID`, the seller is credited the full price, and the buyer can claim the asset with [Claim Asset](/endpoints/seller-financing/claim-asset).
+The payment that brings the principal to zero closes the loan. The listing reads `REPAID`, and the buyer can claim the asset with [Claim Asset](/endpoints/seller-financing/claim-asset). On a first-generation market the seller is credited the full price at that moment. On a delivery-against-payment market the market holds it until the asset is delivered, and the response says so in `settlement`. See [Market generations](/endpoints/seller-financing/introduction#market-generations).
 
 ## When the asset cannot be delivered
 
-Before building, the API checks the listing's asset leg and returns it as `assetLeg`. See [Asset leg](/endpoints/seller-financing/introduction#asset-leg). While the asset can no longer be delivered to the buyer (`assetLeg.deliverable: false`), a repayment that would complete the loan, `amount: "full"` or an amount at or above the payoff, is refused with `409 ASSET_NOT_DELIVERABLE`: it would credit the seller the full price while the delivery to the buyer reverts. A partial repayment still builds, and carries the leg's text in `warning`. A leg that could not be read (`checked: false`) never refuses a repayment.
+Before building, the API checks the listing's asset leg and returns it as `assetLeg`. See [Asset leg](/endpoints/seller-financing/introduction#asset-leg). While the asset can no longer be delivered to the buyer (`assetLeg.deliverable: false`), a repayment that would complete the loan, `amount: "full"` or an amount at or above the payoff, is treated by market generation:
+
+- **First-generation market.** Refused with `409 ASSET_NOT_DELIVERABLE`: it would credit the seller the full price while the delivery to the buyer reverts.
+- **Delivery-against-payment market.** Built, with the leg's text in `warning`: the price stays held until delivery, and 30 days after the payoff the buyer can unwind the sale with [Unwind Sale](/endpoints/seller-financing/unwind-sale).
+- **Generation unreadable.** `503 CHAIN_UNAVAILABLE`, nothing built.
+
+A partial repayment always builds, and carries the leg's text in `warning`. A leg that could not be read (`checked: false`) never refuses a repayment.
+
+## Loans with less than a day of grace
+
+On a loan whose interest periods are shorter than its runtime and whose grace period is under one day, a partial repayment carries `graceWarning`, and its `message` is appended to `warning`. A payment mined before the next due date settles only the interest accrued until it is mined, so the interest that accrues until the due date stays owed, and with no grace the loan can be liquidated one second after the due date. `graceWarning` names the due date, `liquidatableAt` and that interest. Paying off in full closes the loan and carries no such warning. [Purchase](/endpoints/seller-financing/purchase) no longer builds such a listing; the warning covers loans that were bought before or outside the API.
 
 ## Paying off in full
 
@@ -56,13 +66,16 @@ An `amount` at or above the payoff is also built as a full repayment, with `full
     <ResponseField name="chainId" type="integer">The chain the steps are built for.</ResponseField>
     <ResponseField name="steps" type="array">Any reset of an existing allowance to zero, the approval of exactly `maxAmount`, then `repay`, and on a full repayment the closing `approve(0)`. With an allowance that already covers `maxAmount`, `repay` alone, with `gasLimit`, and no closing reset.</ResponseField>
     <ResponseField name="confirmStepIndex" type="integer">Index of the `repay` step, before the closing reset.</ResponseField>
-    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }` when no approval is needed. With an approval step, `{ simulated: true, basis: "approvals-applied", gasEstimate, note }` when the approvals and the repayment were simulated together, and the `repay` step then carries `gasLimit`, the gas used plus 50 percent. `{ simulated: false, note }` when that bundle could not be simulated: estimate the gas once the approval is mined. See [Writes](/endpoints/seller-financing/introduction#writes).</ResponseField>
+    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }` when no approval is needed. With an approval step, `{ simulated: true, basis: "approvals-applied", gasEstimate, note }` when the approvals and the repayment were simulated together, and the `repay` step then carries `gasLimit`, the gas used plus 50 percent. `{ simulated: false, note }` when that bundle could not be simulated: estimate the gas once the approval is mined. The `repay` step never carries less than 400,000 gas: a smaller figure is raised, and `preflight` then adds `gasLimitBasis: "floor"` and `gasLimitFloor: "400000"`, because a simulation in the second the loan was bought or last paid sees no interest due and skips a branch the mined payment runs. See [Writes](/endpoints/seller-financing/introduction#writes).</ResponseField>
     <ResponseField name="fullRepayment" type="boolean">`true` when the payment is built to close the loan.</ResponseField>
     <ResponseField name="maxAmount" type="string">The most the payment may take, which the approval covers, in the payment token's smallest unit.</ResponseField>
     <ResponseField name="maxAmountFormatted" type="string">The same in whole units.</ResponseField>
     <ResponseField name="payoff" type="object">The payoff when the request was built: `{ interest, principal, fee, total, totalFormatted }`, in smallest units.</ResponseField>
     <ResponseField name="assetLeg" type="object">Whether the asset can still be delivered to the buyer, as on [Get Listing](/endpoints/seller-financing/get-listing#response-fields).</ResponseField>
-    <ResponseField name="warning" type="string">`assetLeg.warning`, present whenever the leg carries one: on a partial repayment while the asset cannot be delivered, and on any repayment while part of the freeze was released or the seller's balance covers fewer than all of its sold listings.</ResponseField>
+    <ResponseField name="warning" type="string">`assetLeg.warning`, present whenever the leg carries one: on a partial repayment while the asset cannot be delivered, on a full repayment on a delivery-against-payment market while the asset cannot be delivered, and on any repayment while part of the freeze was released or the seller's balance covers fewer than all of its sold listings. On a partial repayment of a loan with less than a day of grace, `graceWarning.message` follows it, or stands alone.</ResponseField>
+    <ResponseField name="graceWarning" type="object">Only on a partial repayment of a loan whose interest periods are shorter than its runtime and whose grace period is under one day: `code` (`GRACE_PERIOD_BELOW_FLOOR`), `gracePeriod`, `interestPeriod`, `minimum`, `dueAt`, `liquidatableAt`, `interestAccruingBeforeDueAt` with its formatted twin, and `message`, as on [Get Loan Status](/endpoints/seller-financing/get-loan-status#response-fields).</ResponseField>
+    <ResponseField name="settlementModel" type="string">`CREDIT_AT_PAYOFF` or `DELIVERY_AGAINST_PAYMENT`, `null` when unread.</ResponseField>
+    <ResponseField name="settlement" type="object">On a full repayment on a delivery-against-payment market: `{ model: "DELIVERY_AGAINST_PAYMENT", note }`, saying that the payoff is held until delivery and can be unwound 30 days later.</ResponseField>
     <ResponseField name="note" type="string">How the payment applies, in words.</ResponseField>
   </Expandable>
 </ResponseField>
@@ -115,7 +128,7 @@ for (const step of data.steps) {
         "functionName": "repay",
         "label": "Pay off listing 4 in full",
         "description": "Pay off listing 4 in full",
-        "gasLimit": "318720",
+        "gasLimit": "400000",
         "chainId": 11155111
       },
       {
@@ -133,7 +146,9 @@ for (const step of data.steps) {
       "simulated": true,
       "basis": "approvals-applied",
       "gasEstimate": "212480",
-      "note": "Simulated with the approvals above applied first."
+      "note": "Simulated with the approvals above applied first.",
+      "gasLimitBasis": "floor",
+      "gasLimitFloor": "400000"
     },
     "fullRepayment": true,
     "maxAmount": "8115976362",
@@ -195,7 +210,7 @@ for (const step of data.steps) {
         "functionName": "repay",
         "label": "Repay 128.0 on listing 4",
         "description": "Repay 128.0 on listing 4",
-        "gasLimit": "297945",
+        "gasLimit": "400000",
         "chainId": 11155111
       }
     ],
@@ -204,7 +219,9 @@ for (const step of data.steps) {
       "simulated": true,
       "basis": "approvals-applied",
       "gasEstimate": "198630",
-      "note": "Simulated with the approvals above applied first."
+      "note": "Simulated with the approvals above applied first.",
+      "gasLimitBasis": "floor",
+      "gasLimitFloor": "400000"
     },
     "fullRepayment": false,
     "maxAmount": "128000000",
@@ -293,8 +310,8 @@ In the partial example, built a day after the first due date, the 128 USDC payme
 | `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
 | `INVALID_STATUS` | `409` | The listing is not `ACTIVE`. `details.status` names its status |
 | `INSUFFICIENT_BALANCE` | `409` | `from` holds less of the payment token than the payment needs: the payoff for a full repayment, otherwise `amount`. `details` carries `token`, `owner`, `balance` and `needed` |
-| `ASSET_NOT_DELIVERABLE` | `409` | The repayment would complete the loan while the asset can no longer be delivered to the buyer. `details.assetLeg` carries the check. A partial repayment still builds |
+| `ASSET_NOT_DELIVERABLE` | `409` | First-generation market: the repayment would complete the loan while the asset can no longer be delivered to the buyer. `details.assetLeg` carries the check. A partial repayment still builds, and a delivery-against-payment market builds the payoff with a `warning` |
 | `TX_WOULD_REVERT` | `409` | The repayment would revert. Without an approval step, every revert of the simulated repayment answers here, including `SafeERC20FailedOperation` and `PaymentTokenNotSupported` from a token that charges a fee on transfer. With an approval step, a refusal by the payment token itself makes the API simulate the approvals and the repayment together: a repayment that still reverts there answers here with the decoded refusal, and only when that bundle cannot be simulated is the build let through with `preflight.simulated: false`. Other refusals, such as a text reason from a paused token, answer here either way |
-| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read. Nothing was built. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read, including the market implementation when the asset cannot be delivered and the payment would complete the loan. Nothing was built. Retry shortly |
 | `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
 | `REPAY_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |

@@ -1,0 +1,172 @@
+---
+title: 'Upgrade Market'
+api: 'POST /seller-financing/api/markets/{marketId}/upgrade'
+description: 'Calldata that moves a market to delivery against payment, for the market admin to sign'
+---
+
+<Note>
+  Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
+</Note>
+
+Builds the move of a market to the implementation the factory binds today, as unsigned calldata for the market's own admin. The market is a UUPS proxy: only a wallet that holds `DEFAULT_ADMIN_ROLE` on it can upgrade it. Trusset holds no role on a market and never signs this transaction. See [Market generations](/endpoints/seller-financing/introduction#market-generations).
+
+The answer depends on where the market stands, as [Get Market](/endpoints/seller-financing/get-market) reports it in `implementation`:
+
+- **First implementation, the factory binds a delivery-against-payment one** (`implementation.action: "UPGRADE"`). The build is `upgradeToAndCall(newImplementation, migrateEncumbrance())` on the market: the upgrade and the recount of the live sales in one transaction. `upgradeAction` reads `UPGRADE`. Simulated from `from`, a wallet without `DEFAULT_ADMIN_ROLE` answers `409 TX_WOULD_REVERT` with `AccessControlUnauthorizedAccount`, naming the role and its holders.
+- **Delivery against payment without the recount** (`implementation.action: "MIGRATE"`), for example a market whose admin upgraded without the call. The build is `migrateEncumbrance()` alone. Any wallet can sign it; it only recounts and runs once. `upgradeAction` reads `MIGRATE`. Until it runs, deliveries, unwinds, claims, liquidations and custody cancellations answer `409 MIGRATION_PENDING`, because the market's pooled numbers do not know the sales locked before the upgrade.
+- **The factory still binds the first implementation**: `409 UPGRADE_NOT_AVAILABLE`.
+- **The market already runs what the factory binds**: `409 MARKET_UP_TO_DATE`.
+- **The market runs a delivery-against-payment implementation other than the one the factory binds**: `409 UPGRADE_NOT_SUPPORTED`. This build only moves first-generation markets.
+
+The implementation the market runs is read from its ERC-1967 slot and the recount from its OpenZeppelin `Initializable` version, both fresh on every build. Which implementation the factory binds is read from `marketImplementation()` on the factory.
+
+What changes with the upgrade, as the response lists in `changes`:
+
+- A payoff no longer credits the seller. The downpayment and the principal stay in the market until the asset is delivered, by the buyer with [Claim Asset](/endpoints/seller-financing/claim-asset) or by the seller or an operator with [Deliver Asset](/endpoints/seller-financing/deliver-asset).
+- 30 days after a payoff without delivery, the buyer can unwind a sale whose asset cannot be delivered, and an operator can unwind any, with [Unwind Sale](/endpoints/seller-financing/unwind-sale). The interest stays with the seller.
+- The market counts the asset sold on live sales per seller (freeze) or for the adapter (custody), and a return to the seller unfreezes only what the seller's other sales do not need.
+- A listing whose interest periods are shorter than its runtime needs a grace period of at least one day on chain.
+
+Sales paid off before the upgrade keep the first implementation's terms: the seller was credited at the payoff, the buyer still claims the asset, and the sale cannot be unwound. There is no rollback once a payoff is held, because the first implementation does not know the held payment.
+
+The same build is offered in the Issuer Portal, on the Seller Financing page, as Upgrade or Recount next to the market, signed by the connected wallet.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/seller-financing/list-markets).</ParamField>
+
+## Body Parameters
+
+<ParamField body="from" type="string" required>The wallet that signs: a wallet that holds `DEFAULT_ADMIN_ROLE` on the market for the upgrade, any wallet for the recount alone. Without it the answer is `400 FROM_REQUIRED`.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain the step is built for.</ResponseField>
+    <ResponseField name="steps" type="array">One step on the market: `upgradeToAndCall` or `migrateEncumbrance`, with `gasLimit`.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">`0`.</ResponseField>
+    <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`.</ResponseField>
+    <ResponseField name="upgradeAction" type="string">`UPGRADE` or `MIGRATE`.</ResponseField>
+    <ResponseField name="upgrade" type="object">`{ market, currentImplementation, currentGeneration, initializedVersion, factory, factoryImplementation, factoryGeneration, listings }`, plus `migrationCall` (`0xc1fa8cec`) on an upgrade. The recount reads every listing twice, so `listings` sizes the gas.</ResponseField>
+    <ResponseField name="signer" type="object">On an upgrade `{ role: "DEFAULT_ADMIN_ROLE", holders, holdersComplete }`. On a recount `{ role: "ANY", note }`.</ResponseField>
+    <ResponseField name="changes" type="array">On an upgrade, what changes for the market's sales.</ResponseField>
+    <ResponseField name="note" type="string">Who signs, the terms of sales paid off before the upgrade, and that there is no rollback.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/seller-financing/api/markets/cmsg4x7k20003sf9q1d8v6b2e/upgrade" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"from": "0x8cC237798b4E5eE7A07F20e8ad2db554404abF88"}'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/seller-financing/api/markets/${marketId}/upgrade`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: await admin.getAddress() })
+  }
+);
+const { data } = await res.json();
+const step = data.steps[0];
+await (await admin.sendTransaction({ to: step.to, data: step.data, value: 0, gasLimit: step.gasLimit })).wait();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "chainId": 11155111,
+    "steps": [
+      {
+        "to": "0xC0e7c00eFeE062188d596a5581638BE758F9D5d4",
+        "data": "0x4f1ef286...",
+        "value": "0",
+        "functionName": "upgradeToAndCall",
+        "label": "Upgrade the market to delivery against payment (0x7723...C22A) and recount its live sales in the same transaction",
+        "description": "Upgrade the market to delivery against payment (0x7723...C22A) and recount its live sales in the same transaction",
+        "gasLimit": "164092"
+      }
+    ],
+    "confirmStepIndex": 0,
+    "preflight": { "simulated": true, "gasEstimate": "126225" },
+    "upgradeAction": "UPGRADE",
+    "upgrade": {
+      "market": "0xC0e7c00eFeE062188d596a5581638BE758F9D5d4",
+      "currentImplementation": "0xde0Dd200b23De7a21877980A75ea4143543Bab47",
+      "currentGeneration": 1,
+      "initializedVersion": 1,
+      "factory": "0x2805394e8fCC41bB11613c95967be0104AB88b1c",
+      "factoryImplementation": "0x77235C631276bE54a3f9728C61ed2F80D657C22A",
+      "factoryGeneration": 2,
+      "listings": 6,
+      "migrationCall": "0xc1fa8cec"
+    },
+    "signer": {
+      "role": "DEFAULT_ADMIN_ROLE",
+      "holders": ["0x8cC237798b4E5eE7A07F20e8ad2db554404abF88"],
+      "holdersComplete": true
+    },
+    "changes": [
+      "A payoff no longer credits the seller: the downpayment and the principal are held until the asset is delivered (claim-asset by the buyer, or deliver by the seller or an operator).",
+      "Thirty days after a payoff without delivery, the buyer can unwind a sale whose asset cannot be delivered, and an operator can unwind any; the interest stays with the seller.",
+      "The market counts the asset sold on live sales per seller (freeze) or for the adapter (custody), and a return to the seller unfreezes only what the seller's other sales do not need.",
+      "Listings whose interest periods are shorter than the runtime need a grace period of at least one day on chain."
+    ],
+    "note": "Trusset never signs this transaction. Only a wallet holding DEFAULT_ADMIN_ROLE on the market can sign it. Sales paid off before the upgrade keep the first implementation's terms: the seller was credited at the payoff and they cannot be unwound. There is no rollback once a payoff is held: the first implementation does not know the held payment."
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-10-21T10:55:02.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Not the Admin
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_WOULD_REVERT",
+    "message": "0xCeBE3CdF854629823D03892675f7FD4eA3A036a9 does not hold DEFAULT_ADMIN_ROLE on this market, so the market upgrade would revert. DEFAULT_ADMIN_ROLE is held by 0x8cC237798b4E5eE7A07F20e8ad2db554404abF88; sign from one of them.",
+    "details": {
+      "action": "market upgrade",
+      "error": "AccessControlUnauthorizedAccount",
+      "args": ["0xCeBE3CdF854629823D03892675f7FD4eA3A036a9", "0x0000000000000000000000000000000000000000000000000000000000000000"],
+      "revertData": "0xe2517d3f...",
+      "requiredRole": "DEFAULT_ADMIN_ROLE",
+      "roleHolders": ["0x8cC237798b4E5eE7A07F20e8ad2db554404abF88"]
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-10-21T10:55:02.000Z",
+    "requestId": "3f7c2a91-6d84-4b0e-9a15-c2e8f4d7b603",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `from` is malformed, or the body carries another field. `error.details` names it |
+| `FROM_REQUIRED` | `400` | `from` is missing. The message names who signs |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
+| `UPGRADE_NOT_AVAILABLE` | `409` | The factory still binds the first implementation. `details.upgrade` carries the plan |
+| `MARKET_UP_TO_DATE` | `409` | The market already runs the implementation the factory binds |
+| `UPGRADE_NOT_SUPPORTED` | `409` | The market runs another delivery-against-payment implementation than the one the factory binds |
+| `TX_WOULD_REVERT` | `409` | The upgrade would revert: `AccessControlUnauthorizedAccount` with `details.requiredRole: "DEFAULT_ADMIN_ROLE"` and `details.roleHolders`, or a refusal of the new implementation such as `UUPSUnsupportedProxiableUUID` |
+| `CHAIN_UNAVAILABLE` | `503` | The market implementation, the recount state or the factory could not be read. Nothing was built. Retry shortly |
+| `SELLER_FINANCING_UNAVAILABLE` | `503` | The instance is a `PRODUCTION` instance or not on Ethereum |
+| `UPGRADE_BUILD_FAILED` | `500` | Unexpected failure. Nothing was built. Retry, or contact support with the request ID |
