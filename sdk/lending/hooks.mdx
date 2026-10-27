@@ -1,0 +1,207 @@
+---
+title: "Hooks"
+description: "Risk monitors, pre-liquidation checks and signed post-liquidation notices on a market"
+icon: "bell"
+---
+
+This page is for the risk or operations engineer who wires a market into their own systems. After reading it you will know how to create each kind of hook, verify the webhook deliveries it sends, test it, and rotate its signing secret.
+
+A hook is a rule Trusset stores and evaluates off chain. It never signs or broadcasts a transaction, so nothing on this page takes a signer. No hook result blocks a liquidation: a failing check is recorded and the liquidation goes ahead.
+
+| `hookType` | Runs | What a run does |
+|---|---|---|
+| `monitorRisk` | On its `checkFrequency`, and on `execute` | Fetches `riskUri` and evaluates `riskFields` against the JSON it returns |
+| `beforeLiquidation` | When a loan of the market is liquidated, and on `execute` | Evaluates `parameterChecks` against the liquidation's data |
+| `afterLiquidation` | When a loan is liquidated, when a monitor it lists in `triggerHookIds` evaluates to `false`, and on `execute` | Runs its `actionType`: `inform` queues a signed delivery to `webhookUrl`, `buy` returns unsigned bid steps |
+
+A liquidation runs the active `beforeLiquidation` and `afterLiquidation` hooks of every instance that holds the market, once per liquidation. [Create Hook](/endpoints/lending/create-hook#when-each-hook-type-runs) describes the timing in full.
+
+## Receive liquidation notices
+
+An `afterLiquidation` hook with `actionType: 'inform'` announces every liquidation of the market to a URL you run.
+
+```typescript
+const hook = await trusset.lending.hooks.create(marketId, {
+  hookType: 'afterLiquidation',
+  name: 'Liquidation notice',
+  actionType: 'inform',
+  webhookUrl: 'https://hooks.example.com/trusset',
+})
+
+console.log(hook.id, hook.webhookSecret)
+```
+
+Store `webhookSecret` when the hook is created. This response is the only place it appears: later reads carry `signed: true` and never the secret. If it is lost, issue a new one with `rotateSecret`.
+
+`webhookUrl` and `riskUri` must be `http` or `https` URLs on a public host. The SDK checks the scheme before sending. The API refuses a private, reserved or local host, and checks the address again on every outbound call.
+
+A delivery is queued, then sent and retried by a worker, up to eight attempts in all. A liquidation is announced to a hook at most once, and every attempt of one delivery carries the same id, so a retry is never a second event.
+
+### Verify a delivery
+
+Each delivery is a `POST`. Its `x-webhook-signature` header is an HMAC-SHA256 in hex, keyed with `webhookSecret` exactly as returned, over the `x-webhook-timestamp` value, a dot, and the raw request body.
+
+```typescript
+import { createHmac, timingSafeEqual } from 'node:crypto'
+
+function isFromTrusset(rawBody: string, timestamp: string, signature: string, secret: string): boolean {
+  const expected = Buffer.from(createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest('hex'), 'hex')
+  const received = Buffer.from(signature, 'hex')
+  return expected.length === received.length && timingSafeEqual(expected, received)
+}
+```
+
+Compute the signature over the body bytes as they arrived, before any JSON parsing. Each retry carries a fresh timestamp and a fresh signature. De-duplicate on `x-trusset-delivery-id`, which stays the same across retries.
+
+The body carries `id`, `event`, `hookId`, `marketId`, `emittedAt` and `timestamp`. A liquidation adds the loan, the amounts, the borrower, the transaction hash and the outcome. A monitor breach adds the monitor and its failing fields. [Signed deliveries](/endpoints/lending/create-hook#signed-deliveries) lists every field and the retry schedule.
+
+A `2xx` answer delivers it. A `5xx`, `408`, `425` or `429` answer, a timeout or a connection failure is retried. Any other answer, a redirect included, fails the delivery for good.
+
+## Monitor an external risk source
+
+A `monitorRisk` hook fetches `riskUri` on a schedule and checks fields of the JSON it returns. A field with a dot-notation `path` fails when the path resolves to nothing, or when its comparison with `threshold` fails.
+
+```typescript
+const monitor = await trusset.lending.hooks.create(marketId, {
+  hookType: 'monitorRisk',
+  name: 'Issuer rating feed',
+  riskUri: 'https://risk.example.com/issuers/eu-bond-1.json',
+  riskFields: [
+    { path: 'rating.score', operator: '>=', threshold: 60 },
+    { path: 'status.trading', operator: '==', threshold: 1 },
+  ],
+  checkFrequency: '1h',
+})
+```
+
+The SDK requires `riskUri` and at least one `riskFields` entry for this type. A hook without `checkFrequency` is never scheduled and runs only through `execute`. The scheduler picks a new monitor up at its next wake-up, not at the moment of this call.
+
+When a monitor evaluates to `false`, every active `afterLiquidation` hook that lists it in `triggerHookIds` acts on the breach. An `inform` hook then sends a `riskBreach` delivery. A `buy` hook only logs that a breach carries no auction to act on.
+
+```typescript
+await trusset.lending.hooks.create(marketId, {
+  hookType: 'afterLiquidation',
+  name: 'Rating breach alert',
+  actionType: 'inform',
+  webhookUrl: 'https://hooks.example.com/trusset/breach',
+  triggerHookIds: [hookId],
+})
+```
+
+`hookId` here is the monitor's id. A hook that lists triggers acts only when every listed hook is active and its last counted run returned `false`.
+
+## Check a loan before liquidation
+
+A `beforeLiquidation` hook evaluates `parameterChecks` and records the result. It does not block the liquidation.
+
+```typescript
+await trusset.lending.hooks.create(marketId, {
+  hookType: 'beforeLiquidation',
+  name: 'Large debt check',
+  parameterChecks: [{ parameter: 'debtValue', operator: '>', threshold: '250000' }],
+})
+```
+
+The checks run against the liquidation's data, not against chain state. A liquidation's data carries `debtValue` and none of the other four parameters, so a check on `healthFactor`, `collateralValue`, `collateralRatio` or `interestAccrued` fails on every liquidation. Those parameters only take effect in a test run where you supply them.
+
+## Test a hook
+
+`execute` runs one hook now and returns its outcome, whether or not the hook is active. What it needs depends on the type: nothing for `monitorRisk`, `loanData` for `beforeLiquidation`, and `liquidationData` for `afterLiquidation`.
+
+```typescript
+const monitorRun = await trusset.lending.hooks.execute(marketId, hookId)
+console.log(monitorRun.success, monitorRun.result)
+
+const checkRun = await trusset.lending.hooks.execute(marketId, hookId, {
+  loanData: { loanId: '42', debtValue: '310000', healthFactor: '0.97' },
+})
+console.log(checkRun.result)
+```
+
+The call answers HTTP 200 whenever the hook ran, including when the hook itself failed. Read the outcome from `success` and `result`. A monitor run lists each evaluated field in `fields`, and a check run lists `checkResults`.
+
+Executing an `inform` hook sends a real delivery to its `webhookUrl`. The run returns at once with `queued: true` and the `deliveryId`, before anything is sent. Pass an `eventKey` to make the call idempotent: a second call with the same key queues nothing and returns `duplicate: true`.
+
+```typescript
+const queued = await trusset.lending.hooks.execute(marketId, hookId, {
+  liquidationData: { loanId: '42', debtOwed: '1250.50', eventKey: 'notice-test-1' },
+})
+```
+
+The SDK never repeats an `execute` call after an ambiguous failure, because a repeat without `eventKey` queues a second delivery.
+
+### Buy hooks return steps, not bids
+
+<Warning>
+  A `buy` hook never bids. It returns an approval and a `bidOnAuction` step, priced when they were built, and nothing confirms them. The auction charges its price when the bid lands. The bid reverts if, for example, the auction ended, the price is stale or the signer is the borrower. The balance check before the steps reads only the instance's registered wallet, whichever wallet signs.
+</Warning>
+
+Treat a `buy` run as a price signal. To place the bid, use `auctions.bid` with the auction id from the run. It builds the same two steps, signs them with the bidder's wallet and confirms the mined bid. See [Auctions](/sdk/lending/auctions).
+
+## Change, pause or delete a hook
+
+`update` changes only the fields you send. Arrays and `webhookPayload` are replaced whole, not merged. Validation runs against the merged record, so switching `actionType` to `inform` on a hook without a `webhookUrl` is refused.
+
+```typescript
+const updated = await trusset.lending.hooks.update(marketId, hookId, { checkFrequency: '15m' })
+
+const paused = await trusset.lending.hooks.toggle(marketId, hookId, false)
+```
+
+A URL, `checkFrequency`, `actionType` or `riskThreshold` cannot be unset once stored. An inactive hook drops out of everything that runs on its own, and `execute` still runs it when called for it directly. Deliveries it queued before it was paused are still sent.
+
+<Warning>
+  `remove` deletes the hook, its execution log and its deliveries, including any not yet sent, which are then never sent. It cannot be undone. Other hooks that list the deleted hook in `triggerHookIds` never act again until you remove the id from them with `update`.
+</Warning>
+
+```typescript
+await trusset.lending.hooks.remove(marketId, hookId)
+```
+
+To stop a hook and keep its history, use `toggle` instead.
+
+## Rotate the signing secret
+
+<Warning>
+  The previous secret stops at once, with no overlap. Every attempt sent after this call is signed with the new secret, including retries of deliveries queued earlier. A receiver that rejects the new signature with a `4xx` other than `408`, `425` or `429` fails that delivery for good.
+</Warning>
+
+```typescript
+const { webhookSecret, rotatedAt } = await trusset.lending.hooks.rotateSecret(marketId, hookId)
+```
+
+Switch the receiver to the new secret right away, or have it answer `503` while it switches so the delivery is retried. A hook whose `signed` reads `false` holds no secret, and rotating issues it one.
+
+## Read hooks, runs and deliveries
+
+```typescript
+const { hooks } = await trusset.lending.hooks.list(marketId)
+
+const hook = await trusset.lending.hooks.get(marketId, hookId)
+
+const { executions, hasMore } = await trusset.lending.hooks.executions(marketId, hookId, { limit: 50 })
+
+const { deliveries } = await trusset.lending.hooks.deliveries(marketId, hookId, { limit: 50, offset: 0 })
+for (const d of deliveries) console.log(d.id, d.status, d.attempts, d.error)
+```
+
+`list` returns every hook on the market, newest first. `get` refuses a hook of another market with `HOOK_NOT_FOUND`. `executions` and `deliveries` return newest first and page with `limit`, from 1 to 200, and `offset`.
+
+The execution log and a hook's `executionCount` are different counts. An unmet trigger, a skipped bid or a short wallet balance adds a log entry without counting as a run. An `inform` run is logged when its delivery is delivered or fails for good, not when it is queued.
+
+A delivery's `status` is `PENDING`, `RETRYING`, `DELIVERED` or `FAILED`. Delivered and failed deliveries are kept for at least 30 days.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `hooks.list` | [List Hooks](/endpoints/lending/list-hooks) |
+| `hooks.get` | [Get Hook](/endpoints/lending/get-hook) |
+| `hooks.create` | [Create Hook](/endpoints/lending/create-hook) |
+| `hooks.update` | [Update Hook](/endpoints/lending/update-hook) |
+| `hooks.toggle` | [Toggle Hook](/endpoints/lending/toggle-hook) |
+| `hooks.remove` | [Delete Hook](/endpoints/lending/delete-hook) |
+| `hooks.execute` | [Execute Hook](/endpoints/lending/execute-hook) |
+| `hooks.executions` | [Get Hook Executions](/endpoints/lending/get-hook-executions) |
+| `hooks.deliveries` | [List Hook Deliveries](/endpoints/lending/list-hook-deliveries) |
+| `hooks.rotateSecret` | [Rotate Hook Secret](/endpoints/lending/rotate-hook-secret) |

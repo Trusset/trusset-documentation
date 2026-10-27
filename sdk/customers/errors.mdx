@@ -4,7 +4,7 @@ description: "Error types, codes, and retry behavior in the Trusset SDK"
 icon: "triangle-exclamation"
 ---
 
-This page is for the engineer writing the catch blocks. After reading it you will know which errors are worth retrying, which are not, and why an ambiguous write failure needs a status check rather than a retry.
+This page is for the engineer writing the catch blocks. After reading it you will know which errors are worth retrying, which are not, and what to do when a transaction is on chain but Trusset has not recorded it.
 
 All SDK errors extend `TrussetError` and carry a machine-readable `code`, HTTP `statusCode`, and the server's `requestId` when available. Catch specific subclasses to handle different failure modes.
 
@@ -16,6 +16,7 @@ import {
   AuthError,
   ValidationError,
   NetworkError,
+  ConfirmationError,
 } from '@trusset/sdk'
 ```
 
@@ -26,15 +27,18 @@ import {
 | `ValidationError` | 400 | Input rejected before hitting the API | Fix the input. Retrying is pointless. |
 | `AuthError` | 401 | API key is invalid, expired, or the instance is archived | Check the key and the instance state. |
 | `NetworkError` | 0 | Timeout, DNS failure, connection refused | Retry a read. For a write, check status first. |
+| `ConfirmationError` | from the API, or 0 | A lending flow broadcast at least one transaction but could not finish | Read `transactions` and `txHash`, then confirm with `{ txHash }`. Do not repeat the write. |
 | `TrussetError` | 4xx / 5xx | Server returned a non-success response | Branch on `code`. |
 
 Order the branches from most specific to least. `TrussetError` is the base class, so a leading `instanceof TrussetError` swallows every other case.
+
+`ConfirmationError` comes from the lending module's signing flows. Its `code` is `TRANSACTION_FAILED` when a step of a plan failed after earlier steps were already broadcast, and `CONFIRMATION_FAILED` when every step mined but Trusset could not record the result. `transactions` lists each step with its `functionName`, `txHash`, `optional` flag and `error`, and `txHash` is the hash to confirm. The customer identity writes do not throw it: a confirm that fails there surfaces the API's own error.
 
 ## Catch errors
 
 ```typescript
 try {
-  await trusset.customers.manage.get('0xinvalid')
+  await trusset.customers.manage.searchByWallet('0xinvalid')
 } catch (err) {
   if (err instanceof ValidationError) {
     console.error(err.message)
@@ -69,6 +73,9 @@ Every `TrussetError` instance exposes:
 | `code` | `string` | Machine-readable error code (e.g. `NOT_FOUND`, `TX_REVERTED`) |
 | `statusCode` | `number` | HTTP status code. `0` for network errors. |
 | `requestId` | `string \| null` | Server-assigned request ID for support inquiries |
+| `details` | `unknown` | The API's `error.details`, such as the per-field list of a `VALIDATION_ERROR`, or `null` |
+| `data` | `object \| null` | Every other field the API put on the error, such as `candidates` or `marketId` |
+| `retryAfter` | `number \| null` | Seconds the server asked to wait, on a `429` |
 
 ## Common error codes
 
@@ -80,10 +87,16 @@ Every `TrussetError` instance exposes:
 | `CUSTOMER_EXISTS` | 409 | Duplicate wallet or externalId |
 | `WALLET_IN_USE` | 409 | Wallet already assigned to another customer |
 | `SERVICE_NOT_ENABLED` | 403 | Required service not enabled on this instance |
-| `RELAYER_NOT_CONFIGURED` | 400 | No verified wallet is registered on this instance |
-| `TX_NOT_FOUND` | 404 | The transaction being confirmed has no receipt yet |
-| `TX_REVERTED` | 400 | The transaction being confirmed reverted on-chain |
-| `VALIDATION_ERROR` | 400 | Client-side input validation failure |
+| `CREDIT_LIMIT_EXCEEDED` | 402 | The instance used its monthly API credit allowance. Credits reset at the start of the next billing period |
+| `RATE_LIMIT_EXCEEDED` | 429 | Too many requests on this API key. `retryAfter` says how long to wait |
+| `KEY_MATERIAL_REJECTED` | 400 | A request body carried a field named for key material or signing on someone's behalf. Trusset never accepts one |
+| `TX_NOT_FOUND` | 404 | The transaction being confirmed has no receipt yet. Wait for it to mine and confirm again |
+| `TX_REVERTED` | 400 | The transaction being confirmed reverted on chain |
+| `TX_WRONG_TARGET` | 400 | The transaction called a different contract than the identity registry |
+| `TX_WRONG_FUNCTION` | 400 | The transaction called a different function than the write being confirmed |
+| `TX_TARGET_MISMATCH` | 400 | The transaction acted on a different wallet than the one named in the confirm |
+| `TX_ENTRIES_MISMATCH` | 400 | A batch confirm named entries that do not match the mined transaction. Confirm with the prepared `entries` |
+| `VALIDATION_ERROR` | 400 | Input rejected, by the SDK before sending or by the API with `details` per field |
 
 ## Hosted verification page codes
 
@@ -118,22 +131,24 @@ KYC proof flow codes (`NOT_VERIFIED`, `HASH_MISMATCH`, `WALLET_MISMATCH`, `STUB_
 
 ## Retry behavior
 
-Read requests (GET) are retried on transient failures. Write requests are not - identity writes carry on-chain side effects, and blindly repeating an ambiguous failure (5xx, timeout) could submit the same transaction twice. Writes retry only on `429`, where the server rejected the request before doing any work.
+Read requests (GET) are retried on transient failures. Writes are not: repeating an ambiguous failure, such as a 5xx or a timeout, could record or send the same thing twice. A write retries only on `429`, where the server refused the request before doing any work.
 
-| Status | GET | POST / PUT / DELETE |
+| Status | GET | POST / PUT / PATCH / DELETE |
 |---|---|---|
 | 408 Request Timeout | Retried | No |
 | 429 Too Many Requests | Retried | Retried |
 | 500 / 502 / 503 / 504 | Retried | No |
 | Network errors (DNS, connection) | Retried | No |
 | Timeouts (AbortError) | Retried | No |
-| 400, 401, 403, 404, 409 | No | No |
+| 400, 401, 402, 403, 404, 409 | No | No |
+
+On a `429` the SDK waits as long as the server's `Retry-After` header says, at most 60 seconds, then sends the request again. Every write route shares a limit of 10 requests per minute per API key, so a burst of writes waits rather than fails. Other retries back off exponentially: 1s, 2s, 4s, capped at 10s. `maxRetries` in the client constructor caps the attempts, and `0` disables retries.
+
+The lending module's confirm calls are the one write that also retries `408`, `502`, `503`, `504` and network errors, because the backend records one mined transaction once. The customer identity confirms keep the write rules above.
 
 <Tip>
-  If an on-chain write fails ambiguously (timeout, 5xx), check `identity.getStatus` or `identity.getClaims` before repeating it - the transaction may have landed anyway. Verification and claim writes are safe to repeat: re-verifying updates the identity, re-adding a claim overwrites it.
+  If an on-chain identity write fails ambiguously, check `identity.getStatus` or `identity.getClaims` before repeating it, because the transaction may have landed anyway. Verification and claim writes are safe to repeat: re-verifying updates the identity, and re-adding a claim overwrites it.
 </Tip>
-
-Retries use exponential backoff: 1s, 2s, 4s, capped at 10s. Configure via `maxRetries` in the client constructor. Set to `0` to disable.
 
 ```typescript
 const trusset = new TrussetClient({
@@ -143,7 +158,7 @@ const trusset = new TrussetClient({
 })
 ```
 
-On-chain write methods enforce higher per-request timeout floors regardless of `timeoutMs` (180s; `addClaimsFromProof` 420s), because the backend waits for block confirmations inside the request.
+On-chain write methods raise the request timeout to at least 60 seconds, and `addClaimsFromProof` to 180 seconds, whatever `timeoutMs` says, because the backend verifies a proof bundle on both legs.
 
 ## Enable logging
 

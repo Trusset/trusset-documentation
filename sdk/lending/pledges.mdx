@@ -1,0 +1,104 @@
+---
+title: "Pledges"
+description: "Read the pledges a market's collateral adapter has recorded against a security token"
+icon: "book"
+---
+
+This page is for the register provider. After reading it you will know how to pull every pledge standing against a token you keep the register for, and which fields a register entry needs.
+
+A market's collateral adapter locks the borrower's collateral and names the collateral agent as pledgee. On chain that lock restricts the balance. It is not the register entry, and on its own it does not create the security interest.
+
+The register entry is the legally operative act, and it stays with the register provider. Trusset holds no register authority, and no SDK method writes to a register. `pledges.list` gives you the fact pattern the entry needs: who pledged, to whom, how much, in which transaction, and whether the pledge still stands.
+
+## Read the standing pledges
+
+<Warning>
+  `amount`, `currentAmount`, `deliverableAmount` and every amount in `changes` are integer strings in the collateral token's base units. Divide by ten to the power of the token's decimals before a figure goes into a register entry.
+</Warning>
+
+`pledges.list` takes the market's contract address, not its market ID. The SDK accepts the address in lowercase or correctly checksummed, and refuses a mixed-case address whose checksum fails before sending anything.
+
+```typescript
+import { utils } from 'ethers'
+
+const market = await trusset.lending.markets.get(marketId)
+const decimals = market.collateralDecimals
+if (decimals === null) throw new Error('Read decimals() on the collateral token instead')
+
+const { pledges, index } = await trusset.lending.pledges.list(marketAddress, { includeEnded: false })
+
+for (const p of pledges.filter(x => x.active)) {
+  console.log(p.holder, p.pledgee, utils.formatUnits(p.currentAmount, decimals), p.lockedAt.txHash, p.lockedAt.at)
+}
+console.log(index.scannedToBlock, index.complete)
+```
+
+`collateralDecimals` comes from `markets.get`, which answers only for an instance that holds the market's record. Without one, read `decimals()` on the collateral token.
+
+Each pledge carries `holder`, `pledgee`, `currentAmount`, and the block, timestamp and transaction of the lock that created it in `lockedAt`. `currentAmount` is the figure a standing register entry describes. `amount` is the high-water mark of everything ever locked under the reference.
+
+Filter on `active`, not on `endedAt` alone. `includeEnded: false` still returns a pledge whose whole amount was withdrawn or split away, because the adapter emits no ending for that. Such a pledge reads `currentAmount: "0"`, `active: false` and `endedAt: null`.
+
+The list comes oldest first, 50 at a time by default. Page with `offset` and a `limit` from 1 to 200.
+
+## Check what the list covers
+
+The records are rebuilt from the adapter's own events, so the response describes the chain, not a Trusset ledger. Reading the list advances the scan, which is why a first call on a market with a long history can return a partial list.
+
+<Warning>
+  `index.historyTruncatedBeforeBlock` is reported once, on the response to the request that ran the market's first scan. Every later response reads `null`. Locks created before that block are missing for good, so record the value the first time you see it.
+</Warning>
+
+Read the parts of `index` rather than `complete` alone. `scannedToBlock` well behind the chain head means the scan has not caught up, so call again. A `reason` of `THROTTLED` is a normal answer: the scan runs at most once a minute per market, and the stored records are returned meanwhile. `unparsedLogsThisScan` above zero is informational and does not mean a pledge is missing. [Reading the index](/endpoints/asset-register/list-pledges#reading-the-index) explains every case.
+
+`deliverableAmount` is the one figure read live from the adapter on each call. When it falls short of `currentAmount`, the pledge carries `deliverableShortfall` and `deliverableUncertain: true`. A live read that failed sets `deliverableReadFailed`. `shortfalls` counts these over the page returned, not over the whole market.
+
+## Watch for the end of a pledge
+
+`endedAt` is `null` while the pledge stands.
+
+| `endedAt.kind` | Meaning | For the register |
+|---|---|---|
+| `RELEASED` | The adapter returned what was left to the holder: the loan closed, or a liquidation sent the remainder home | The restriction is gone and the entry can come off |
+| `ENFORCED` | A seizure took the last of the collateral, to the address in `endedAt.to` | The pledge was realized |
+
+A partial seizure without a release is not an ending. It lands in `changes` as `ENFORCED` and the pledge keeps standing for the remainder. In a `CUSTODY` market, a return the token refuses is escrowed in the adapter for the holder to claim, and the pledge still reads `RELEASED`.
+
+`changes` lists everything after the lock was created, oldest first, and keeps the last 100. Each entry has a `kind`, an `amount`, a `block` and a `txHash`.
+
+| `kind` | Meaning |
+|---|---|
+| `INCREASED` | Collateral added to the pledge |
+| `DECREASED` | Collateral partly or wholly returned to the holder |
+| `ENFORCED` | Collateral seized in a liquidation, to the address in `to` |
+| `SPLIT_OUT`, `SPLIT_IN` | Bookkeeping inside the adapter that moves part of a pledge to a new reference, with the same holder and pledgee |
+| `FREEZE_SHORTFALL` | Another agent on the token had already unfrozen part of the market-frozen balance before the market released or seized it |
+| `SHORTFALL_BORNE` | A custody release returned less than the pledge recorded, because tokens left the adapter without a loan asking for them |
+
+A `FREEZE_SHORTFALL` does not reduce `currentAmount`. The holder held that part unencumbered before the market let go of it, which matters when the register entry is reconciled.
+
+## Tie a pledge to a loan
+
+No method maps a pledge's `ref` back to a loan. Join on `lockedAt.txHash` against the market's transaction history, which records the same hash for the loan that created the lock. `holder` is the borrower.
+
+```typescript
+const { transactions } = await trusset.lending.markets.transactions(marketId, { limit: 100 })
+const { pledges } = await trusset.lending.pledges.list(marketAddress)
+
+const byHash = new Map(transactions.map(t => [t.txHash, t]))
+for (const p of pledges) console.log(p.ref, p.holder, byHash.get(p.lockedAt.txHash)?.onChainLoanId)
+```
+
+`markets.transactions` takes the market ID, so this join is open only to an instance that holds the market's record.
+
+## Who can read a market
+
+Access is decided per market, not per key. A market opens to an instance that holds an active record of it. That is the issuer instance that deployed it, and the lender of record's instance once its adoption is confirmed. It also opens to an instance whose verified wallet is nominated on it.
+
+A refusal with `NOT_NOMINATED` or `WALLET_NOT_CONFIGURED` is a statement about this instance's access to this market. A `503` such as `PLEDGE_INDEX_UNAVAILABLE` says only that a read failed: it says nothing about the market, and the SDK retries it. An address that is not a market on this instance's lending factory is refused with `MARKET_NOT_V2`.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `pledges.list` | [List Pledges](/endpoints/asset-register/list-pledges) |

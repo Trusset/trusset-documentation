@@ -1,0 +1,142 @@
+---
+title: "Auctions"
+description: "Give a market a Dutch auction venue, bid on auctions, and settle the ones that expire"
+icon: "hammer"
+---
+
+This page is for the engineer integrating Dutch auctions for a lender of record. After reading it you will know how a market gets its auction venue, how a bid buys seized collateral, and how an expired auction reaches the router.
+
+Dutch auctions do not run on the market contract. They run on a per-market auction venue that any wallet can deploy and that the market admin binds after a lender of record has taken the market. With `useDutchAuction` on, a [liquidation](/sdk/lending/liquidations) sends seized collateral to the venue and opens an auction there instead of delivering it to the router.
+
+A market priced from a live market price (`MARKET`) cannot run Dutch auctions at all, and wiring a venue for it is refused with `AUCTION_UNSUPPORTED_PRICE_SOURCE`. Nothing on this page turns auctions on. Once the venue is wired, the issuer enables `useDutchAuction` through [market configuration](/sdk/lending/markets), which is refused while no venue is wired or while the collateral token refuses it.
+
+## Check the venue
+
+`module` reads the venue state live from the chain on every call.
+
+```typescript
+const venue = await trusset.lending.auctions.module(marketId)
+if (venue.wired) {
+  console.log(venue.auctionModule, venue.routerAuthorized, venue.tokenAdmitted, venue.realizationReady)
+} else {
+  console.log(venue.readFailed ? 'The venue could not be read' : 'No venue is wired')
+}
+```
+
+`routerAuthorized` says whether the venue can hand an expired remainder to the liquidation router. `tokenAdmitted` says whether the collateral token accepts the venue as a holder. `readFailed: true` means the read failed, which is not a verdict either way.
+
+## Wire an auction venue
+
+<Warning>
+  Sign every leg before enabling auctions. Without the router leg, an expired auction cannot be settled and its unsold collateral stays in the venue. A venue the collateral token does not admit makes every liquidation revert once `useDutchAuction` is on. Confirm both on `module` afterwards.
+</Warning>
+
+Wiring takes two calls to `wireModule`. The first, without `moduleAddress`, deploys a new venue as a contract creation. Any wallet can deploy it, because the venue gains standing only when the market admin binds it. With a signer, the SDK reads the new address from the deployment receipt through the signer's provider.
+
+```typescript
+const created = await trusset.lending.auctions.wireModule(marketId, {}, { signer: admin })
+console.log(created.moduleAddress)
+```
+
+`moduleAddress` is `null` when the signer has no provider to read the receipt from. Read the contract address from the deployment receipt yourself in that case. A market that already names a venue is refused with `MODULE_ALREADY_SET`. The venue is not upgradeable.
+
+The second call, with `moduleAddress`, returns the legs still missing, so a repeated call returns fewer or none. Each leg has its own authority.
+
+| `key` | Signer | What it does |
+|---|---|---|
+| `setAuctionModule` | Market admin, `DEFAULT_ADMIN_ROLE` on the market | Binds the venue to the market |
+| `authorizeModuleOnRouter` | Router admin, `DEFAULT_ADMIN_ROLE` on the router | Lets the venue hand expired remainders to the router |
+| `authorizeVenueOnToken` | The collateral token's compliance admin | Allow-lists the venue on a token that gates holders through its own list |
+| `verifyVenueAsHolder` | A wallet allowed to write to the token's identity registry | Registers the venue as a verified holder |
+
+```typescript
+const created = await trusset.lending.auctions.wireModule(marketId, {}, { signer: admin })
+
+if (created.moduleAddress) {
+  const wired = await trusset.lending.auctions.wireModule(marketId, { moduleAddress: created.moduleAddress }, { signer: admin })
+  console.log(wired.transactions.map(t => t.functionName))
+}
+```
+
+Before it signs, the SDK reads whether the signer holds `MARKET_ADMIN` for the binding leg and `ROUTER_ADMIN` for the router leg. A missing role throws a `ValidationError` before anything is sent, and a role that could not be read throws `ROLE_UNREADABLE` with a status of 503.
+
+The two token-side legs belong to the register provider's side, never to the market admin. When the plan carries one, the SDK refuses to sign it. Prepare without a signer and hand each leg to the wallet that holds its authority.
+
+```typescript
+const venue = await trusset.lending.auctions.module(marketId)
+const plan = await trusset.lending.auctions.wireModule(marketId, venue.auctionModule ? { moduleAddress: venue.auctionModule } : {})
+if (plan.action === 'SIGN_TRANSACTIONS') {
+  for (const step of plan.steps) console.log(step.key, step.to, step.description)
+  console.log(plan.tokenAdmission.admitted, plan.tokenAdmission.requirement)
+}
+```
+
+Wiring has no confirm leg: `{ txHash }` is refused, and the venue is read back from the chain on the next `module` call. The other auction routes cache each market's venue for up to five minutes, so they can answer with the previous venue for that long.
+
+Passing a different `moduleAddress` replaces the market's venue. The market accepts a replacement only while the current venue has no open auction, including an expired one not yet settled. The API does not check this, so `setAuctionModule` reverts on chain in that case.
+
+## Read auctions
+
+```typescript
+const { auctions } = await trusset.lending.auctions.list(marketId)
+for (const auction of auctions) console.log(auction.auctionId, auction.phase, auction.currentPrice, auction.collateralRemaining)
+
+const one = await trusset.lending.auctions.get(marketId, auctionId)
+const forLoan = await trusset.lending.auctions.forLoan(marketId, loanId)
+console.log(one.venueAddress, forLoan.auction?.phase)
+```
+
+`list` returns every auction the venue still holds open: `RUNNING` ones that take bids, and `EXPIRED` ones that wait for settlement. `get` also returns closed auctions, with `phase` `CLOSED`. `forLoan` is a live lookup, not a history: the venue unlinks a loan from its auction when the last unit sells or the expired auction settles.
+
+An empty list, an `auction` of `null` and `AUCTION_NOT_FOUND` also answer a market with no venue and a venue that could not be read. Check `module` before treating any of them as proof that no auction exists.
+
+The price falls linearly from the seizure price times `auctionStartPremium` to that price times `auctionMinPremium`, across `auctionDuration`. The schedule is fixed when the auction opens, so later oracle updates do not move it. `currentPrice` reflects the moment of the request, and `phase` uses the API server's clock while the venue judges by the block timestamp.
+
+## Bid on an auction
+
+<Warning>
+  The buyer receives a security token, so the token must admit the bidding wallet. If the token refuses it, the whole bid reverts and no money moves. The SDK fills `bidder` from the signer, which makes the API ask the token first and refuse with `BIDDER_CANNOT_RECEIVE` instead of building the bid.
+</Warning>
+
+Bids can be partial: buy any quantity up to `collateralRemaining`, and the auction stays open for the rest until its end time. `collateralAmount` is a decimal string in the collateral token's units. The plan approves the venue for the estimated cost in the settlement token (stablecoin), then calls `bidOnAuction`. The approval is left out when the bidder's allowance already covers the cost.
+
+```typescript
+const auction = await trusset.lending.auctions.get(marketId, auctionId)
+if (auction.biddable) {
+  const bought = await trusset.lending.auctions.bid(marketId, { auctionId, collateralAmount: '25' }, { signer: bidder })
+  console.log(bought.collateralPurchased, bought.amountPaid, bought.auctionSettled)
+}
+```
+
+With `bidder` set, the API refuses the auction's own borrower with `SELF_PURCHASE_NOT_ALLOWED` and a short balance with `INSUFFICIENT_BALANCE`. It refuses an auction past its end time with `AUCTION_EXPIRED`. The venue still reverts a bid when the market is paused, when the oracle price is stale, or when the end time passes between preparing and mining.
+
+A bid larger than the collateral left is clamped to what remains. The price only falls, so the amount paid is at or below the prepared `estimatedCost`, never above. The bid that buys the last unit closes the auction and settles the market's record in the same transaction. Only its result carries `auctionSettled: true`, with `debtCovered`, `shortfall`, `reserve` and any `surplus` for the borrower.
+
+## Settle an expired auction
+
+<Warning>
+  The venue must be authorized on the market's liquidation router, otherwise the settlement reverts and the collateral stays in the venue. The API does not check this before building the transaction. Read `routerAuthorized` on `module`, and sign the `authorizeModuleOnRouter` leg first if it is not `true`.
+</Warning>
+
+Until an expired auction is settled, its collateral is in limbo: no longer purchasable, not yet available for an off-platform sale, and the loan stays locked. `settleExpired` moves the unsold remainder to the liquidation router, which opens a record for it.
+
+```typescript
+const settled = await trusset.lending.auctions.settleExpired(marketId, { auctionId }, { signer })
+console.log(settled.liquidationId, settled.marketLiquidationId)
+```
+
+Any wallet may settle while the market is unpaused. Under a pause the venue accepts the call only from a wallet holding `LIQUIDATOR_ROLE` on the market. The SDK does not fill `signerAddress` from the signer here, because sending it turns on a `LIQUIDATOR_ROLE` check that applies whether or not the market is paused. Pass `signerAddress` yourself when settling a paused market, and the SDK checks it names the signer.
+
+The remainder always arrives two-step, whatever the router's atomic mode. Continue with the returned `liquidationId` on [Liquidations](/sdk/lending/liquidations): withdraw for sale, report proceeds, settle, or sell it whole where the atomic sale is offered. The 7-day write-off clock does not restart here. It runs from the original seizure into the auction.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `auctions.module` | [Get Auction Module](/endpoints/lending/get-auction-module) |
+| `auctions.wireModule` | [Wire Auction Module](/endpoints/lending/wire-auction-module) |
+| `auctions.list` | [List Active Auctions](/endpoints/lending/list-auctions) |
+| `auctions.get` | [Get Auction](/endpoints/lending/get-auction) |
+| `auctions.forLoan` | [Get Loan Auction](/endpoints/lending/get-loan-auction) |
+| `auctions.bid` | [Bid on Auction](/endpoints/lending/bid-on-auction) |
+| `auctions.settleExpired` | [Settle Expired Auction](/endpoints/lending/settle-expired-auction) |

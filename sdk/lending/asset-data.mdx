@@ -1,0 +1,100 @@
+---
+title: "Asset Data"
+description: "Preview, read, attest and acknowledge a market's asset data with the SDK"
+icon: "file-shield"
+---
+
+This page is for the engineer at a deploying issuer or at a lender of record who handles a market's asset data from a backend. After reading it, both know how to preview the data a deployment attests, read and verify it, re-attest it after the token's records change, and acknowledge a version.
+
+A lender of record adopting a market underwrites an asset it did not issue, described by data no contract can read. The asset data makes that description attributable and tamper-evident: the issuer side attests the hash of a canonical bundle, and the lender of record acknowledges the hash it reviewed. The lending factory stores only the two hashes, and the bundle stays off chain. The factory does not verify the description. It only records who stated which version.
+
+`trusset.lending.assetData` takes the market's contract address, `marketAddress`, not its `marketId`. The writes take the three call shapes of the [signing model](/sdk/lending/signing).
+
+## Preview the asset data
+
+`preview` returns the bundle a deployment would attest for a collateral token, and its hash, before anything is built. It stores nothing. Pass the same `mode`, `priceSource` and `borrowAssetAddress` the deployment will use, because each is part of the bundle. On a `FIXED` deployment pass the same `initialPrice` too, because the bundle commits to the fixed price itself.
+
+```typescript
+const preview = await trusset.lending.assetData.preview({ collateralTokenAddress: tokenAddress, mode: 'FREEZE', priceSource: 'NAV' })
+
+console.log(preview.contentHash, preview.schemaVersion, preview.bundle.profile, preview.factorySupport)
+```
+
+The token must be imported into your instance with a published profile, or the preview is refused with `TOKEN_PROFILE_REQUIRED`, exactly as a deployment would be. The first attestation needs no call of its own: it travels inside the [deployment](/sdk/lending/markets#deploy-a-market) signature, and the prepared deployment carries the same `assetData.contentHash` to compare with the preview.
+
+## Read the asset data
+
+`get` returns the record: the attested and the acknowledged hash, who may write each next, and whether one of your wallets can.
+
+```typescript
+const record = await trusset.lending.assetData.get(marketAddress)
+
+console.log(record.status, record.attested?.contentHash, record.acknowledged?.contentHash, record.authority, record.viewer)
+```
+
+| `status` | Meaning |
+|---|---|
+| `NONE` | Nothing attested |
+| `ATTESTED` | The issuer side attested a bundle, and no lender of record acknowledged a version |
+| `ACKNOWLEDGED` | The lender of record acknowledged the version that stands now |
+| `DIVERGED` | The issuer re-attested after the lender of record's acknowledgement, so the two hashes differ |
+
+`status` is `null` when the factory record could not be read, which is not the same as `NONE`. `DIVERGED` is the signal a lender of record watches. Neither the market contracts nor the API act on a divergence: whether the new version still supports the credit already extended is the lender of record's decision.
+
+`bundle` returns the stored bytes behind a hash, the standing attestation by default. The API re-hashes them before they leave, and a lender of record can recompute the hash itself without trusting the response. The hash is keccak256 over the UTF-8 bytes of `canonicalJson`.
+
+```typescript
+import { utils } from 'ethers'
+
+const read = await trusset.lending.assetData.bundle(marketAddress)
+const rehash = utils.keccak256(utils.toUtf8Bytes(read.canonicalJson))
+
+console.log(read.contentHash === rehash, read.verification.matches, read.bundle?.instrument)
+```
+
+Only bundles prepared through Trusset are stored. A hash attested with bytes built elsewhere answers `SNAPSHOT_NOT_FOUND`, and `get` says ahead of time whether bytes exist in `bundleAvailable`. Pass `{ hash }` to read an earlier version.
+
+## Re-attest after the records change
+
+<Warning>
+  Re-attesting never removes an acknowledgement. When the lender of record approved an earlier version, the market reads `DIVERGED` from the moment the new attestation mines until the lender of record acknowledges again. `divergesAfter` on the prepared response says so before anything is signed.
+</Warning>
+
+`attest` replaces the standing attestation with the bundle the token's profile and instrument record produce now. Use it after either changed, or to move a version attested under schema `1.0.0` onto the current schema. `profile.changedSinceAttestation` on `get` reports both cases.
+
+The attestor signs. While the market seeks a lender of record that is the wallet that deployed it. After adoption it is the issuer wallet the lender of record named. The SDK compares the signer with the attestor the build names and refuses a mismatch before anything is signed.
+
+```typescript
+const prepared = await trusset.lending.assetData.attest(marketAddress)
+console.log(prepared.signer, prepared.signerRole, prepared.previousHash, prepared.contentHash, prepared.divergesAfter)
+
+const attested = await trusset.lending.assetData.attest(marketAddress, { signer: issuer })
+console.log(attested.attestation.version, attested.assetData.status, attested.transactions)
+```
+
+The attestor is read when the transaction is built. If the market is adopted before it mines, authority passes to the named issuer, and a transaction the deployer signed reverts. Any other instance is refused with `NOT_ATTESTOR`.
+
+## Acknowledge a version
+
+`acknowledge` records the lender of record's approval of the version it reviewed. The lender of record or the admin it named signs. Name the hash that was actually read. The build refuses a hash that is not the standing attestation with `ASSET_DATA_STALE`. The factory also reverts the acknowledgement if the issuer re-attests before it mines. The SDK refuses the zero hash before any request.
+
+```typescript
+const read = await trusset.lending.assetData.bundle(marketAddress)
+const acknowledged = await trusset.lending.assetData.acknowledge(marketAddress, read.contentHash, { signer: lender })
+
+console.log(acknowledged.acknowledgement.version, acknowledged.assetData.status, acknowledged.transactions)
+```
+
+An acknowledgement records a review, and the chain stores only the hash. No loan, liquidity or liquidation operation depends on it. Before a market is adopted there is nobody to acknowledge, and the call is refused with `NOT_ADOPTED`. The adoption itself can carry the first acknowledgement through `assetDataHash` in the [adoption terms](/sdk/lending/operators#take-the-lender-of-record-role).
+
+To confirm an acknowledgement broadcast from your own infrastructure, pass `null` as the hash with `{ txHash }`. The API records the hash, version and wallet from the event the mined transaction emitted, never from the request.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `preview` | [Preview Asset Data](/endpoints/lending/preview-asset-data) |
+| `get` | [Get Asset Data](/endpoints/lending/get-asset-data) |
+| `bundle` | [Get Asset Data Bundle](/endpoints/lending/get-asset-data-bundle) |
+| `attest` | [Attest Asset Data](/endpoints/lending/attest-asset-data), [Confirm Asset Data Attestation](/endpoints/lending/confirm-asset-data-attestation) |
+| `acknowledge` | [Acknowledge Asset Data](/endpoints/lending/acknowledge-asset-data), [Confirm Asset Data Acknowledgement](/endpoints/lending/confirm-asset-data-acknowledgement) |

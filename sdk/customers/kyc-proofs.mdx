@@ -60,7 +60,7 @@ output/
 │   ├── manifest.json                # what was asserted, by whom, on what evidence
 │   ├── manifest.sig                 # ed25519 over a canonical view of the manifest
 │   ├── proofs/<field>.bin           # one STARK per proving leaf
-│   └── secrets.enc                  # encrypted witnesses - keep local
+│   └── secrets.enc                  # encrypted witnesses, keep local
 └── kyc_hashes_<timestamp>.csv       # batch index: one row per subject
 ```
 
@@ -74,34 +74,41 @@ The root hash appears in three places and they are the same value: `kycHash.hex`
 
 <Steps>
   <Step title="Register your operator key, once">
-    Every manifest signature is checked against this key. Take the value `npm run show` prints.
+    Every manifest signature is checked against this key. Take the value `npm run show` prints and send it to [Set Operator Key](/endpoints/customers/set-operator-key). The SDK has no method for this call yet, so send it with `fetch` and the same API key.
 
     ```typescript
-    await trusset.customers.identity.setOperatorKey({
-      publicKey: 'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a',
-      maxStalenessDays: 365,
+    await fetch('https://api.trusset.org/customers/api/identity/operator-key', {
+      method: 'PUT',
+      headers: { 'x-api-key': process.env.TRUSSET_API_KEY!, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        publicKey: 'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a',
+        maxStalenessDays: 365,
+      }),
     })
     ```
 
     Rotating it later does not re-verify anything already filed. Claims added under the old key stay on chain, and their manifests no longer verify against the new one. Keep the old key with the bundles it signed.
   </Step>
   <Step title="Verify on-chain with the root hash">
-    Load the bundle's `manifest.json` and call `verifyFromManifest`. The wallet address, root hash, country, investor type, and expiry days are read straight from the manifest; pass overrides for anything you want to change.
+    Load the bundle's `manifest.json` and call `verifyFromManifest` with the registered issuer wallet as `signer`. The wallet address, root hash, country, investor type, and expiry days are read straight from the manifest. Pass overrides in the second argument for anything you want to change.
 
     ```typescript
     import { readFileSync } from 'node:fs'
+    import { Wallet, providers } from 'ethers'
     import type { KycProofManifest } from '@trusset/sdk'
+
+    const signer = new Wallet(process.env.ISSUER_WALLET_KEY!, new providers.JsonRpcProvider(process.env.RPC_URL))
 
     const manifest: KycProofManifest = JSON.parse(
       readFileSync('output/0xAbCd.../manifest.json', 'utf8'),
     )
 
-    const result = await trusset.customers.identity.verifyFromManifest(manifest)
+    const result = await trusset.customers.identity.verifyFromManifest(manifest, undefined, { signer })
     ```
 
-    `result.kycHash` equals `manifest.kycHash` once the root hash is on-chain. `result.operation` is `verify` for a new identity and `update` for an existing one.
+    The SDK signs, waits for the transaction to mine and confirms it. `result.kycHash` equals `manifest.kycHash` once the root hash is on chain. `result.operation` is `verify` for a new identity and `update` for an existing one. To sign elsewhere, call it without the third argument and confirm with `{ txHash }`, as [Identity Verification](/sdk/customers/identity#sign-prepare-or-confirm-a-write) shows.
 
-    If you only stored the root hash (for example from the batch CSV), call `verify` directly with `kycHash`:
+    If you only stored the root hash, for example from the batch CSV, call `verify` directly with `kycHash`:
 
     ```typescript
     await trusset.customers.identity.verify({
@@ -111,7 +118,7 @@ The root hash appears in three places and they are the same value: `kycHash.hex`
       kycHash: '0x591aa0f6...',
       softExpiryDays: 365,
       hardExpiryDays: 730,
-    })
+    }, { signer })
     ```
   </Step>
   <Step title="Add proof-backed claims">
@@ -128,13 +135,13 @@ The root hash appears in three places and they are the same value: `kycHash.hex`
         country: readFileSync(`${bundle}/proofs/country.bin`).toString('base64'),
         nationality: readFileSync(`${bundle}/proofs/nationality.bin`).toString('base64'),
       },
-    })
+    }, { signer })
     ```
 
-    `claims.added` counts what landed, and `claims.claims` holds one entry per claim as `{ claimType, dataHash, status, txHash }`. One transaction is sent per claim. Use `selected: ['KYC']` to add a subset.
+    One transaction is signed per claim, in the order the backend returns them. `claims.added` counts what landed, and `claims.claims` holds one entry per claim with `claimType`, `dataHash`, `status`, and `txHash` or `error`. Use `selected: ['KYC']` to add a subset.
   </Step>
   <Step title="Check the result">
-    `status.onChain.isVerified` is now `true` and `status.onChain.kycHash` matches the manifest.
+    `status.onChain.isVerified` is now `true` and `status.onChain.kycHash` matches the manifest. Both calls are reads and need no signature.
 
     ```typescript
     const status = await trusset.customers.identity.getStatus(manifest.walletAddress)
@@ -167,7 +174,7 @@ Re-running the tool always produces a new root, because the batch date is bound 
 
 ## Onboard in batch
 
-The tool's batch CSV maps row-for-row onto `batchVerify` entries - up to 500 subjects in one on-chain transaction:
+The tool's batch CSV maps row for row onto `batchVerify` entries, up to 500 subjects in one on-chain transaction:
 
 ```typescript
 await trusset.customers.identity.batchVerify(rows.map(row => ({
@@ -177,10 +184,10 @@ await trusset.customers.identity.batchVerify(rows.map(row => ({
   kycHash: row.kycHash,
   softExpiryDays: Number(row.softExpiryDays) || undefined,
   hardExpiryDays: Number(row.hardExpiryDays) || undefined,
-})))
+})), { signer })
 ```
 
-Addresses that are already actively verified are skipped on-chain (their existing root hash is kept); revoked identities are re-verified.
+Addresses that are already actively verified are skipped on chain and keep their existing root hash; revoked identities are re-verified. Entries that fail validation are left out of the transaction and listed in the result's `rejected`, each with its `index`, `code` and `message`.
 
 Claims still go one bundle at a time, because each one carries its own proofs.
 
@@ -192,7 +199,7 @@ Claims still go one bundle at a time, because each one carries its own proofs.
 | `WALLET_MISMATCH` | Manifest belongs to a different wallet | Use the bundle generated for this wallet |
 | `ROOT_MISMATCH` | The root recomputed from the leaves does not equal the one the manifest states | The bundle is inconsistent. Re-run the tool rather than editing the manifest |
 | `HASH_MISMATCH` | Manifest root differs from the on-chain root | A newer bundle. Rotate the root, or use the bundle that matches the chain |
-| `UNREGISTERED_OPERATOR_KEY` | No operator key on this instance | Register it with `setOperatorKey` |
+| `UNREGISTERED_OPERATOR_KEY` | No operator key on this instance | Register it with [Set Operator Key](/endpoints/customers/set-operator-key) |
 | `INVALID_SIGNATURE` | `manifest.sig` is malformed, or signed by a different key | Send the unmodified `manifest.sig` from the same bundle |
 | `PROOF_MISSING` | A claimed leaf has no STARK, or is commitment-only | Send its `proofs/<field>.bin`. A commitment-only leaf cannot be attested under enforcement |
 | `PROOF_INVALID` | A STARK failed verification | Re-run the tool. Do not hand-edit anything in the bundle |

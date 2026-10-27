@@ -1,0 +1,181 @@
+---
+title: "Oracle and Pricing"
+description: "Read a market's price, push a new one, sign a price for a single transaction, and know what the oracle refuses"
+icon: "chart-line"
+---
+
+This page is for the engineer who keeps a market's price current on behalf of its price authority. After reading it you will know how to read the oracle, push a price, sign a price for a single transaction, and what the oracle refuses.
+
+<Warning>
+  A price the oracle accepts values every loan in the market from then on, including a signed price that arrived inside someone else's transaction. A lower price can make open loans liquidatable as soon as it lands. Push or sign only a price the market's price authority stands behind.
+</Warning>
+
+## Who sets the price
+
+When the lender of record takes a market it declares a price signer, the key that publishes prices for it. That key can sit with a party the lender of record designates, and it does not have to be your instance's wallet. The oracle accepts a price from an authorized signer or from its owner, and from nobody else.
+
+A price attested by the issuer of the collateral carries a conflict of interest, because the party that prices the collateral is the party that issued it. The lending module names this rather than hiding it. Price authority is declared per market and can sit apart from the issuer, every recorded attestation names its signer, and the circuit breaker below limits each single update.
+
+What the oracle accepts depends on the market's price source, which `markets.get` returns as `priceSource`:
+
+| Price source | Price moves by |
+|---|---|
+| `NAV`, `MARKET` | Pushed prices (`sync`) and signed prices carried in a transaction (`signPrice`) |
+| `ORACLE` | An external feed only. Pushes and signed prices are refused with `EXTERNAL_FEED_ACTIVE` |
+| `FIXED` | Nothing upward. The price set at deployment holds for the market's life and can only be [marked down](#mark-down-a-fixed-price) |
+
+## The circuit breaker and staleness
+
+The oracle refuses a price that deviates from the current one by more than `maxDeviationBps`, which defaults to 5000 basis points, the 50 percent deviation bound. The same limit bounds the total movement within a rolling one-hour window. A genuine repricing beyond it takes a sequence of smaller steps, or the oracle owner widening the bound.
+
+A price older than `maxPriceAge` is stale. The threshold defaults to 24 hours, and the oracle owner can set it between 1 minute and 30 days. A stale price makes opening a loan, borrowing more, liquidating and withdrawing collateral against outstanding debt revert, unless the transaction carries a fresh signed price. Repaying never reads a price, so a stale oracle never blocks a repayment.
+
+## Read the oracle
+
+`status` reads the oracle live. Guard on `configured` first: when the oracle could not be read, the call still succeeds with `configured: false`, a price of `0` and `isStale: true`. That is a failed read, not a verdict on the price, so read it again.
+
+```typescript
+const status = await trusset.lending.oracle.status(marketId)
+
+if (!status.configured) {
+  console.log('Oracle unreadable, retry:', status.error)
+} else {
+  console.log(status.price, status.isStale, status.priceAge, status.maxPriceAge, status.maxDeviationBps)
+  console.log(status.priceSigner, status.priceSignerAuthorized, status.fixed)
+}
+```
+
+`price` is a decimal string in units of the settlement token (stablecoin) per whole collateral token, and `priceRaw` the same price in that token's smallest unit. The API calls that token the market's borrow asset. `priceSigner` is the key the lender of record declared, and `priceSignerAuthorized` whether the oracle accepts it.
+
+`verifySigner` answers one narrower question: whether your instance's first verified wallet may push and sign prices. It does not check the declared price signer. A failed chain read answers `isAuthorized: false`, exactly like a wallet without authorization, so read it again before acting on a `false`. To check any other address, use `operators.accessRole` with the `ORACLE_SIGNER` role.
+
+```typescript
+const { signerAddress, isAuthorized } = await trusset.lending.oracle.verifySigner(marketId)
+```
+
+`history` returns two lists, newest first. `signed` holds the attestations recorded for the market, and `pushed` every price that landed on the oracle, read from its events. Neither is complete alone: a signature nobody recorded is absent from `signed`, and the price set at deployment is absent from `pushed`.
+
+```typescript
+const history = await trusset.lending.oracle.history(marketId, { limit: 20, offset: 0 })
+
+console.log(history.signed.length, history.pushed.length, history.signedHasMore, history.pushedHasMore)
+```
+
+Page both lists with the same `offset` until `signedHasMore` and `pushedHasMore` are both `false`. `limit` runs from 1 to 100.
+
+## Push a price
+
+`sync` writes a new price to the oracle in one transaction, signed by the price signer or the oracle owner. `price` is a decimal string per whole collateral token, in units of the borrow asset, and it must be greater than zero.
+
+```typescript
+const pushed = await trusset.lending.oracle.sync(marketId, { price: '1.04' }, { signer: priceSigner })
+
+console.log(pushed.previousPrice, pushed.newPrice, pushed.txHash)
+```
+
+With a signer, the SDK fills `signerAddress` from the signer's wallet. The API checks that wallet against the oracle before it builds anything and refuses an unauthorized one with `SIGNER_NOT_AUTHORIZED`. When a matching [recorded attestation](#sign-a-price-for-one-transaction) exists, the API builds `updatePriceWithSignature` instead, and the attestation authorizes the price whatever wallet sends it.
+
+A price outside the circuit breaker is refused before anything is signed, with `PRICE_DEVIATION_TOO_LARGE` for the single step or `PRICE_WINDOW_DEVIATION_TOO_LARGE` for the hour's movement. Both errors carry the current price and the bound on `err.data`, and the window refusal adds the accepted band. Do not retry the same price: it meets the same breaker. Surface it to the price authority instead.
+
+```typescript
+import { TrussetError } from '@trusset/sdk'
+
+try {
+  await trusset.lending.oracle.sync(marketId, { price: '2.40' }, { signer: priceSigner })
+} catch (err) {
+  if (err instanceof TrussetError && err.code === 'PRICE_WINDOW_DEVIATION_TOO_LARGE') {
+    console.log(err.data?.currentPrice, err.data?.acceptedLow, err.data?.acceptedHigh, err.data?.windowResetsAt)
+  } else {
+    throw err
+  }
+}
+```
+
+To confirm a push you broadcast yourself, send the same `price` with the hash: `sync(marketId, { price: '1.04' }, { txHash })`. Confirm only once the transaction has mined. This route answers a receipt it cannot find yet with `SYNC_FAILED`, not with `TX_NOT_FOUND`.
+
+### Mark down a fixed price
+
+<Warning>
+  A mark-down is final. The market lends and liquidates against the lower price as soon as the transaction mines, and no price update can restore the old one. Push one step at a time when the move is large.
+</Warning>
+
+On a `FIXED` market the oracle owner or an authorized signer can lower the price, and nothing can raise it again. The same `sync` call does it, with a price below the current one. An equal or higher price is refused with `FIXED_PRICE_ACTIVE`, and the error's `details` carries `currentPrice` and `markDownOnly: true`.
+
+```typescript
+const markedDown = await trusset.lending.oracle.sync(marketId, { price: '0.95' }, { signer: priceSigner })
+```
+
+Each mark-down is bounded by the circuit breaker, which on a fixed market can only be tightened. Read the bound in force as `maxDeviationBps` from `status` before you rely on it.
+
+## Sign a price for one transaction
+
+<Warning>
+  A signed price carries no nonce and names no submitter. Anyone who holds it can submit it until `validUntil`, and when it lands every loan in the market is valued at it. Treat it as a bearer credential over its lifetime, and keep `validitySeconds` tight.
+</Warning>
+
+`signPrice` produces an EIP-712 price for the price signer to sign. Signing costs no gas and writes nothing on chain: the price lands only with a transaction that carries it. That suits a borrower who needs a fresh valuation without waiting for the next push. The signature is bound to this market's oracle and chain, and it lands at most once.
+
+`validitySeconds` defaults to 300, and the API holds it between 60 and 3600. `ORACLE`-priced markets refuse it with `EXTERNAL_FEED_ACTIVE`, and `FIXED` markets with `FIXED_PRICE_ACTIVE`.
+
+With `{ signer }`, the SDK signs the typed data with the signer, after checking the chain against your instance, and records the signature as an attestation. The result carries the recorded `attestation` and `signedPrice`, the price, timestamps and signature that loan calls accept.
+
+```typescript
+const { attestation, alreadyRecorded, signedPrice } = await trusset.lending.oracle.signPrice(marketId, {
+  price: '1.04',
+  validitySeconds: 300,
+}, { signer: priceSigner })
+
+const drawn = await trusset.lending.loans.borrowMore(marketId, { loanId, amount: '250', signedPrice }, { signer: borrower })
+```
+
+A recorded attestation lands when a later `sync` of exactly that price submits it, and any wallet may broadcast that push. That works only while the attestation is unexpired, not yet pushed, dated after the oracle's current price, and at most 15 minutes old. Otherwise `sync` falls back to a plain push.
+
+For a key that signs outside your instance, call `signPrice` without options and name the key in `signerAddress`. The response carries `typedData`, with `domain`, `types` and `message`, and a `display` summary to show the signer.
+
+```typescript
+const request = await trusset.lending.oracle.signPrice(marketId, {
+  price: '1.04',
+  validitySeconds: 300,
+  signerAddress: '0xe27f5F858f3909BD0e48b039FA5B6F1b391678aB',
+})
+
+console.log(request.typedData.domain, request.typedData.message, request.display.priceUsd)
+```
+
+Sign `typedData` as EIP-712 typed data in the signer's own environment. The message's `price`, `timestamp` and `validUntil` with that signature form the `signedPrice` that [loan calls](/sdk/lending/loans) accept when opening, borrowing more, withdrawing collateral or repaying. A [liquidation](/sdk/lending/liquidations) accepts it too. `price` there is the raw integer in the borrow asset's smallest unit, exactly as signed.
+
+### Check and record a signed price
+
+`verifyPrice` checks a signed price against the oracle without spending gas, and returns the recovered `signer`. A `signer` of the zero address means the oracle refused before checking the key. The price expired, is dated in the future or too old, is zero, or the signature does not recover.
+
+`recordAttestation` records a signature a key outside your instance produced, so it joins the market's history and a later `sync` can submit it. The oracle is asked to accept it first, and a refusal answers `SIGNATURE_NOT_ACCEPTED`. Recording writes nothing on chain and moves no price. The SDK requires the full 65-byte signature here.
+
+In this block `PRICE_SIGNATURE` holds the signature the external key returned for `typedData`.
+
+```typescript
+const request = await trusset.lending.oracle.signPrice(marketId, { price: '1.04', validitySeconds: 300, signerAddress: walletAddress })
+
+const signedPrice = {
+  price: request.typedData.message.price,
+  timestamp: request.typedData.message.timestamp,
+  validUntil: request.typedData.message.validUntil,
+  signature: process.env.PRICE_SIGNATURE!,
+}
+
+const check = await trusset.lending.oracle.verifyPrice(marketId, signedPrice)
+if (check.valid) await trusset.lending.oracle.recordAttestation(marketId, signedPrice)
+```
+
+`valid: true` does not guarantee the price will land. The check skips the deviation limit, and inside a lending transaction a signature dated no later than the stored price is skipped rather than applied. It is also a point-in-time check: the signature can expire before it is submitted.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `oracle.status` | [Get Oracle Status](/endpoints/lending/get-oracle-status) |
+| `oracle.verifySigner` | [Verify Signer](/endpoints/lending/verify-signer) |
+| `oracle.history` | [Get Oracle History](/endpoints/lending/get-oracle-history) |
+| `oracle.sync` | [Sync Oracle Price](/endpoints/lending/sync-oracle) |
+| `oracle.signPrice` | [Sign Price](/endpoints/lending/sign-price), [Record Price Attestation](/endpoints/lending/record-price-attestation) |
+| `oracle.verifyPrice` | [Verify Signed Price](/endpoints/lending/verify-price) |
+| `oracle.recordAttestation` | [Record Price Attestation](/endpoints/lending/record-price-attestation) |

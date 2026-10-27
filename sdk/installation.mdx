@@ -4,7 +4,7 @@ description: "Install the SDK, initialize a client, and configure options"
 icon: "download"
 ---
 
-This page is for the engineer setting the SDK up for the first time. After reading it you will have a client talking to your instance, and you will know which timeouts the SDK enforces regardless of what you configure.
+This page is for the engineer setting the SDK up for the first time. After reading it you will have a client and a signer for your instance, and you will know which timeouts the SDK enforces.
 
 ## Install
 
@@ -22,7 +22,7 @@ pnpm add @trusset/sdk
 ```
 </CodeGroup>
 
-Requires Node.js 18 or later. The package ships dual CJS/ESM builds with full TypeScript declarations.
+Requires Node.js 22 or later. The package ships dual CommonJS and ES module builds with full TypeScript declarations and has no runtime dependencies.
 
 ## Initialize
 
@@ -30,15 +30,31 @@ Requires Node.js 18 or later. The package ships dual CJS/ESM builds with full Ty
 import { TrussetClient } from '@trusset/sdk'
 
 const trusset = new TrussetClient({
-  apiKey: 'trusset_...',
+  apiKey: process.env.TRUSSET_API_KEY!,
 })
 ```
 
-The API key determines which [instance](/protocol/infrastructure/instances) the client operates against - development instances run on Sepolia, production instances on Ethereum mainnet. Create and manage keys in the [Issuer Platform](https://issuers.trusset.org) under your instance settings.
+The API key determines which [instance](/protocol/infrastructure/instances) the client operates against: development instances run on Sepolia, production instances on Ethereum mainnet. Create and manage keys in the [Issuer Platform](https://issuers.trusset.org) under your instance settings.
 
 <Warning>
   Store API keys in environment variables or a secrets manager. Never commit them to source control.
 </Warning>
+
+## Connect a signer
+
+On-chain writes are signed by a wallet you control, never by Trusset. Any ethers v5 `Signer` works, including a `Wallet`, a browser `JsonRpcSigner` or a signer backed by your own key management. Connect it to the network of your instance; the SDK checks the chain before it sends a request and refuses a mismatch.
+
+```bash
+npm install ethers@5
+```
+
+```typescript
+import { Wallet, providers } from 'ethers'
+
+const signer = new Wallet(process.env.ISSUER_WALLET_KEY!, new providers.JsonRpcProvider(process.env.RPC_URL))
+```
+
+Pass `{ signer }` as the last argument of a write method to sign, wait and confirm in one call. Leave it out to receive the unsigned transaction instead, sign it wherever you keep keys, and confirm with `{ txHash }`. The SDK never sends a key, a seed or a signature anywhere except the confirm call that needs it.
 
 ## Configure the client
 
@@ -53,15 +69,15 @@ All options beyond `apiKey` are optional.
 </ParamField>
 
 <ParamField body="timeoutMs" type="number" default={30000}>
-  Request timeout in milliseconds. Increase for batch operations or slow networks. On-chain write methods enforce higher floors regardless (180s; proof claims 420s), because the backend waits for block confirmations inside the request.
+  Request timeout in milliseconds. Requests that build or confirm an on-chain write use at least 60 seconds, PDF statements 120 seconds and identity claims from a proof 180 seconds, whatever you configure. The timeout covers one request: waiting for a transaction to mine happens on your signer's provider.
 </ParamField>
 
 <ParamField body="maxRetries" type="number" default={3}>
-  Maximum retry attempts on transient failures. Applies to read requests (5xx, 408, 429, network errors); write requests retry only on 429. Set to `0` to disable retries.
+  Maximum retry attempts. Reads retry 408, 429, 500, 502, 503, 504 and network errors. Builds retry only a 429. Confirms retry an outage (408, 502, 503, 504, network errors) and a 429. A 429 always waits for the server's `Retry-After`, up to 60 seconds. Set to `0` to disable retries.
 </ParamField>
 
 <ParamField body="logger" type="Logger">
-  Custom logger implementing `debug`, `info`, `warn`, and `error` methods. Defaults to silent. Pass `console` for quick debugging.
+  Custom logger implementing `debug`, `info`, `warn`, and `error` methods. Defaults to silent. It receives request paths on retries, never a request body, a signature or the API key.
 </ParamField>
 
 ```typescript
@@ -96,6 +112,8 @@ After initialization, product modules are available as properties on the client.
 | `trusset.customers.identity` | On-chain KYC verification and claims |
 | `trusset.customers.idLinks` | KYC verification links |
 | `trusset.customers.profiles` | Verification profiles (beta) |
-| `trusset.customers.sync` | Bulk database import/export |
+| `trusset.customers.sync` | Bulk database import and export |
+| `trusset.lending` | External securities lending, in 17 namespaces from `markets` to `pledges` |
+| `trusset.tokens` | Token import, presentation profile and instrument record |
 
-Additional modules (`tokenization`, `trading`, `lending`) will follow the same pattern as they become available.
+Each module also has its own entry point, `@trusset/sdk/customers`, `@trusset/sdk/lending` and `@trusset/sdk/tokens`, which export the module's classes and types.

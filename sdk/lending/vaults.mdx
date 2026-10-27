@@ -1,0 +1,232 @@
+---
+title: "Vaults"
+description: "Offer an operator's earning vault to investors, and collect the distributor fees your instance earns"
+icon: "vault"
+---
+
+This page is for the engineer offering a lender of record's earning vault to investors, or collecting the distributor fees an instance earns. After reading it you will know how a deposit and a redemption behave, which wallet signs each fee action, and which vault actions are not on this API.
+
+An operator vault is the lender of record's own earning product. Investors deposit the vault's settlement token (stablecoin) and receive vault shares. The operator places the pooled funds as liquidity on its own markets, and a market it consented to can draw from the vault when a loan needs it. The share price covers idle funds plus the vault's value in every market it funds.
+
+Trusset holds no role on any vault. Each vault belongs to the issuer operating it, and every vault record names that operator in `operatedBy`. Show the operator wherever you show the vault. The operator manages its vault in the Issuer Portal, not on this API. That covers creating a vault or vault group, allocating into markets, setting a draw cap, pausing deposits and managing roles.
+
+`trusset.lending.vaults` covers reading vaults, depositing, redeeming and the distributor fees. Every write follows the [signing model](/sdk/lending/signing).
+
+## Find a vault
+
+`list` returns your instance's vaults first, then every vault published on your network and environment, then unpublished vaults in which your instance is a distributor of record. Each row carries an `onChain` block, so a directory can show share price and size without a call per vault.
+
+```typescript
+const { vaults, groups } = await trusset.lending.vaults.list()
+
+for (const vault of vaults) console.log(vault.id, vault.name, vault.own, vault.assetSymbol, vault.operatedBy?.issuerName)
+console.log(groups.map(group => [group.id, group.name, group.currencies]))
+```
+
+`get` adds a holder's position when you name a wallet in `address`. On a vault your instance operates it also carries the operator's view in `implementation`, `jitLiquidity` and `roles`.
+
+```typescript
+const vault = await trusset.lending.vaults.get(vaultId, { address: walletAddress })
+
+if (vault.onChain && !vault.onChain.readFailed) {
+  console.log(vault.onChain.sharePrice, vault.onChain.totalAssets, vault.onChain.redeemableNow, vault.holder?.value)
+}
+```
+
+<Warning>
+  `readFailed: true` means the chain did not answer, not that the vault is empty. Keep your last verified figures on screen with a warning and retry. Never render zeros in their place.
+</Warning>
+
+`sharePrice` is an 18-decimal string whatever the asset's decimals. Every other amount in the block is formatted at `assetDecimals`. Size a redemption against `redeemableNow`, not against `idleAssets`: it adds what each funded market has free to the vault's idle funds.
+
+The smaller reads answer one question each:
+
+```typescript
+const position = await trusset.lending.vaults.position(vaultId, walletAddress)
+const page = await trusset.lending.vaults.transactions(vaultId, { limit: 50, address: walletAddress })
+const group = await trusset.lending.vaults.group(groupId, { holderAddress: walletAddress })
+
+console.log(position.holder?.shares, position.sharePrice, page.transactions.length, page.hasMore, group.tvlByCurrency)
+```
+
+On your own vault, `transactions` returns the full ledger. On another operator's vault it returns one wallet's own deposits and redemptions plus the vault's market losses, and `address` names that wallet. Without it, the list on someone else's vault is empty rather than an error. `limit` runs from 1 to 200.
+
+## Deposit
+
+<Warning>
+  A deposit buys vault shares, not a position in one market. A redemption fills only as far as liquidity allows, so it can pay out part of the value. A loss that reaches any market the vault funds lowers the share price for every holder.
+</Warning>
+
+The depositor signs an approval on the vault's asset, then the deposit, and receives shares at the current share price. When a market the vault funded wrote off accrual the vault has not recorded, one `recordMarketLoss` step per such market comes first, and any wallet may sign those. With `{ signer }` the SDK fills `holderAddress` from the signer.
+
+```typescript
+const deposited = await trusset.lending.vaults.deposit(vaultId, { amount: '1000' }, { signer: depositor })
+
+console.log(deposited.amount, deposited.signedBy, deposited.transactions)
+```
+
+Naming the holder lets the API check it before anything is signed: against the vault's registers, with `DEPOSITOR_NOT_VERIFIED` naming the register that refused, and against its balance, with `INSUFFICIENT_BALANCE`. The vault enforces its registers on chain either way.
+
+### Show the attribution before the depositor signs
+
+The instance whose API key builds a holder's first attributed deposit becomes that holder's distributor. The vault binds the holder once and never rebinds it, and credits the distributor a share of the interest the holder's shares earn. Prepare the deposit to read what it will do:
+
+```typescript
+const prepared = await trusset.lending.vaults.deposit(vaultId, {
+  amount: '1000',
+  holderAddress: await depositor.getAddress(),
+})
+
+console.log(prepared.attribution, prepared.recordsWriteOffs, prepared.writeOffNote)
+```
+
+| `attribution.binding` | Meaning |
+|---|---|
+| `BINDS_NOW` | The holder is not bound yet. This deposit binds it to your instance |
+| `ALREADY_BOUND` | The holder is already bound to your instance |
+| `BOUND_ELSEWHERE` | The holder is bound to another distributor, which keeps the credit |
+| `NOT_APPROVED` | The operator has not approved your instance as a distributor. The deposit names none and still goes through |
+| `UNATTRIBUTED` | Your instance has no verified wallet, so the deposit names no distributor |
+
+Show `attribution.warning` before the depositor signs. The binding follows the wallet that signs, so name the signing wallet as `holderAddress`.
+
+### When a vault refuses deposits
+
+Four refusals are about the vault rather than the depositor, and none affects redemptions. `VAULT_BOOK_INCOMPLETE` means a funded market is not answering, so the vault cannot total its book. `VAULT_WIPED_OUT` means shares are in issue against assets totalling zero. `VAULT_MARKET_IMPAIRED` means a funded market carries a loan below its liquidation threshold or seized debt awaiting sale. `VAULT_RECOVERY_PENDING` means the vault wrote off a market that answers again, and the value that can come back belongs to the holders who bore the loss.
+
+### Deposit into a vault group
+
+A vault group is one product with two to four currency pockets, each a vault holding one settlement token. A deposit goes into one pocket and stays in its currency. Name the pocket by exactly one of `currency` and `asset`; the SDK refuses both or neither before any request.
+
+```typescript
+const deposited = await trusset.lending.vaults.depositToGroup(groupId, { amount: '1000', currency: 'USDC' }, { signer: depositor })
+
+console.log(deposited.amount, deposited.transactions)
+```
+
+`currency` matches a pocket's asset symbol first, such as `USDC`, then its settlement currency, such as `USD`. Two pockets in the same currency make a currency ambiguous, which answers `GROUP_CURRENCY_AMBIGUOUS`; name the asset then. The deposit is confirmed on the pocket, so to confirm one you broadcast yourself, pass the pocket's `vaultId` from the prepared plan:
+
+```typescript
+const prepared = await trusset.lending.vaults.depositToGroup(groupId, { amount: '1000', currency: 'EURC', holderAddress: walletAddress })
+
+const confirmed = await trusset.lending.vaults.depositToGroup(groupId, { vaultId: prepared.vaultId }, {
+  txHash: '0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b',
+})
+
+console.log(prepared.pocket.assetSymbol, confirmed.amount)
+```
+
+## Redeem
+
+<Warning>
+  A redemption fills only as far as liquidity allows. The vault pays from idle funds first, then draws back what its markets have free. When utilization blocks the rest, the holder is paid part of the value and the unpaid shares stay in the wallet. When `priceWarning` is set, the shares burn at a price that understates the vault, and the difference stays with the holders who wait.
+</Warning>
+
+The holder signs one transaction, with no approval, and the payout goes to the signing wallet. Nothing can pause a redemption. Prepare it first to read the fill estimate:
+
+```typescript
+const quote = await trusset.lending.vaults.redeem(vaultId, {
+  shares: '500',
+  holderAddress: await depositor.getAddress(),
+})
+
+console.log(quote.willFillFully, quote.expectedPayout, quote.maxPayableNow, quote.priceWarning, quote.impairmentWarning)
+```
+
+Then sign, which builds the transaction afresh:
+
+```typescript
+const redeemed = await trusset.lending.vaults.redeem(vaultId, { shares: '500' }, { signer: depositor })
+
+console.log(redeemed.amount, redeemed.transactions)
+```
+
+`shares` is parsed at the vault's asset decimals. The confirmed `amount` comes from the vault's `Redeemed` event and is what was actually paid, so compare it with the value of the shares to detect a partial fill. Without a signer, `holderAddress` is required, because the vault burns that wallet's own shares.
+
+## Collect and pay distributor fees
+
+Each market sets aside a distributor share of the interest borrowers repay. The vault's slice waits on each market until someone collects it. Collecting pays nobody out: the vault credits the part earned by attributed shares to their distributors, and the rest to the operator. Two payouts follow.
+
+`earnings` shows where your instance stands: what it was paid, what the vault holds for it, and each market's waiting claim. Every amount is `{ raw, value }`.
+
+```typescript
+const earnings = await trusset.lending.vaults.earnings(vaultId)
+
+if (earnings.supported) {
+  console.log(earnings.claimable.value, earnings.paid.value, earnings.uncollectedEstimate.value)
+  console.log(earnings.markets.map(market => [market.marketAddress, market.vaultClaim?.value]))
+}
+```
+
+Any wallet may sign the collection and both payouts. Each pays a fixed recipient, never the signer, so a keeper can run them.
+
+```typescript
+const collected = await trusset.lending.vaults.collectDistributorFees(vaultId, { marketAddress }, { signer })
+const paid = await trusset.lending.vaults.payDistributor(vaultId, {}, { signer })
+
+console.log(collected.amount, paid.amount, paid.paidTo)
+```
+
+`collectDistributorFees` collects one market at a time, and answers `NOTHING_ACCRUED` when the market holds nothing for the vault. With `{ signer }` the SDK names the signer as `signerAddress`, and the API simulates the collection from it first. `payDistributor` pays your instance's distributor wallet unless `distributor` names another of your verified wallets. The instance that operates the vault may pay any distributor, which still pays that distributor's own payout wallet.
+
+The operator's own credit, earned by shares no distributor brought, goes to the vault's fee recipient. Only the instance that operates the vault can build this call.
+
+```typescript
+const paid = await trusset.lending.vaults.payOperatorFees(vaultId, { signer })
+
+console.log(paid.amount, paid.paidTo)
+```
+
+A market the vault funded can write off accrual with a defaulted loan. Until the vault records that loss, each of these actions starts with one `recordMarketLoss` step per such market. The SDK signs them in order and confirms with the last step.
+
+### Move a payout wallet
+
+<Warning>
+  Once the move mines, only the new wallet can move the payout wallet again, and nobody else can undo it, the vault owner included. A payout wallet whose key is lost keeps receiving the fees with no way back. The API therefore builds a move only to a wallet your instance has verified.
+</Warning>
+
+Only the distributor's current payout wallet can sign. Until it is first moved, that is the distributor address itself. Holders stay bound to the distributor; only the destination of its fees moves.
+
+```typescript
+const moved = await trusset.lending.vaults.setDistributorWallet(vaultId, {
+  wallet: '0x4D0CFE39a3431B145D1A1393D901A36d459a1B13',
+}, { signer })
+
+console.log(moved.distributor, moved.paidTo, moved.events)
+```
+
+With `{ signer }` the SDK names the signer as `signerAddress`, and the API refuses with `NOT_DISTRIBUTOR_WALLET` unless it is the current payout wallet.
+
+### Approve a distributor
+
+On the current vault implementation a deposit can bind a new holder only to the vault owner or to a distributor the operator approved. Only the vault owner can sign, and only the instance that operates the vault can build the call. Withdrawing an approval stops new bindings only: holders already bound stay bound.
+
+```typescript
+const approval = await trusset.lending.vaults.setDistributorApproval(vaultId, {
+  distributor: '0x9C3f1E8B2D4a6C0E7F5b3a1D9e8C7B6A5f4E3d2c',
+  approved: true,
+}, { signer: operator })
+
+console.log(approval.distributor, approval.approved)
+```
+
+The confirmed `distributor` and `approved` come from the vault's `DistributorApprovalSet` event, so they state what the chain recorded.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `list` | [List Vaults](/endpoints/vaults/list-vaults) |
+| `get` | [Get Vault](/endpoints/vaults/get-vault) |
+| `group` | [Get Vault Group](/endpoints/vaults/get-vault-group) |
+| `transactions` | [List Transactions](/endpoints/vaults/list-vault-transactions) |
+| `position` | [Get Position](/endpoints/vaults/get-position) |
+| `earnings` | [Get Earnings](/endpoints/vaults/get-earnings) |
+| `deposit` | [Deposit](/endpoints/vaults/deposit), confirmed through [Confirm Transaction](/endpoints/vaults/confirm-transaction) |
+| `redeem` | [Redeem](/endpoints/vaults/redeem), confirmed through [Confirm Transaction](/endpoints/vaults/confirm-transaction) |
+| `depositToGroup` | [Deposit to Vault Group](/endpoints/vaults/deposit-to-vault-group), confirmed through [Confirm Transaction](/endpoints/vaults/confirm-transaction) |
+| `collectDistributorFees` | [Collect Distributor Fees](/endpoints/vaults/collect-distributor-fees) |
+| `payDistributor` | [Pay Distributor](/endpoints/vaults/pay-distributor) |
+| `payOperatorFees` | [Pay Operator Fees](/endpoints/vaults/pay-operator-fees) |
+| `setDistributorWallet` | [Set Distributor Wallet](/endpoints/vaults/set-distributor-wallet) |
+| `setDistributorApproval` | [Set Distributor Approval](/endpoints/vaults/set-distributor-approval) |

@@ -1,0 +1,110 @@
+---
+title: "Lending Errors"
+description: "Errors the lending module raises, the API codes every area shares, and what the SDK retries"
+icon: "triangle-exclamation"
+---
+
+This page is for the engineer writing the catch blocks around lending calls. After reading it you will know which errors stop a write before anything is signed, which mean a transaction is on chain but not recorded, and which are worth retrying.
+
+The lending module uses the error classes every SDK module shares: `TrussetError` and its subclasses `ValidationError`, `AuthError`, `NetworkError` and `ConfirmationError`. Each carries `code`, `statusCode`, `requestId`, `details`, `data` and `retryAfter`. See [Error handling](/sdk/customers/errors) for the class hierarchy and the codes that apply to every module.
+
+## Know what was sent before you act
+
+The first question for any failed write is whether a transaction went out. The answer decides the next step.
+
+| You caught | Was anything sent | Do |
+|---|---|---|
+| `ValidationError` | No | Fix the input or the signer. Nothing was signed or sent. |
+| `TrussetError` from a build | No | Branch on `code`. A build is never half done. |
+| The wallet's own error | No | The first signature was rejected. Nothing was sent. |
+| `ConfirmationError` with `TRANSACTION_FAILED` | Earlier steps, yes | Read `transactions`. The write itself is not on chain. |
+| `ConfirmationError` with `CONFIRMATION_FAILED` | Every step, yes | Confirm again with `{ txHash: err.txHash }`. |
+
+<Warning>
+  Never repeat a write after a `ConfirmationError`. A second call prepares a second plan, and signing it moves funds or collateral again. Finish the first one with `{ txHash }`. See [finish a write that stopped halfway](/sdk/lending/signing#finish-a-write-that-stopped-halfway).
+</Warning>
+
+## Errors the SDK raises itself
+
+These come from checks the SDK runs before or while it signs. A status of `0` means the error never came from the API.
+
+| Code | Class | Status | Fires when |
+|---|---|---|---|
+| `VALIDATION_ERROR` | `ValidationError` | 400 | An input fails a client check. So does a signer on another chain, a wallet field naming another wallet, a missing role a plan needs, or a batch plan with a signer |
+| `CHAIN_MISMATCH` | `TrussetError` | 0 | A prepared transaction names another chain than the instance. Nothing was signed |
+| `CHAIN_UNRESOLVED` | `TrussetError` | 0 | The instance's network has no EVM chain ID, so nothing can be signed for it |
+| `UNSIGNABLE_STEP` | `TrussetError` | 0 | A step of a prepared plan carries no transaction the SDK can sign |
+| `NOTHING_TO_SIGN` | `TrussetError` | 0 | An adoption, nomination or role build returned no transaction |
+| `ROLE_UNREADABLE` | `TrussetError` | 503 | The role a plan needs could not be read from the market. Nothing was signed |
+| `FUND_OWNER_UNREADABLE` | `TrussetError` | 503 | The insurance fund's owner could not be read. Nothing was signed |
+| `TRANSACTION_FAILED` | `ConfirmationError` | from the failure, or 0 | A step failed after an earlier step went out |
+| `CONFIRMATION_FAILED` | `ConfirmationError` | from the API, or 0 | Every step mined, but the confirm could not be recorded |
+
+`ConfirmationError` also carries `transactions`, one entry per step with `functionName`, `txHash`, `optional` and `error`, plus `txHash`, the hash to confirm, and `failure`, the underlying error.
+
+## API codes every area shares
+
+Area pages list the codes of their own routes. These come back from every area.
+
+| Code | Status | Meaning | Do |
+|---|---|---|---|
+| `MARKET_NOT_FOUND` | 404 | No market of this instance has that ID. A contract address sent in its place is answered with the record ID | Use the record ID from `markets.list` |
+| `NO_MARKET_ADDRESS` | 400 | The market record has no contract address yet | Finish the deployment first |
+| `MARKET_PENDING_CURATOR` | 409 | The market has no lender of record yet, so nobody holds the role the write needs | Adopt the market with `operators.accept` |
+| `MARKET_NOT_ADOPTED` | 409 | No operator wallet is recorded on the market yet | Adopt the market first |
+| `MARKET_UPGRADE_REQUIRED` | 409 | The market's contract implementation predates the feature | Read `markets.upgradeStatus` and upgrade |
+| `TOKEN_PROFILE_REQUIRED` | 422 | The collateral token has no published profile | Publish one with the `tokens` module |
+| `MARKET_STATE_UNAVAILABLE` | 503 | A chain read the route depends on failed | Retry shortly. It is not a verdict |
+| `CHAIN_UNAVAILABLE` | 503 | The chain could not be reached | Retry shortly. It is not a verdict |
+| `TX_NOT_FOUND` | 404 | The transaction being confirmed has no receipt yet | Wait for it to mine. The SDK retries this one itself |
+| `TX_REVERTED` | 400 | The transaction being confirmed reverted on chain | Nothing was recorded. Read the state before preparing again |
+| `TX_WRONG_TARGET` | 400 | The transaction called another contract than the write expects | Confirm with the hash of the step the plan names |
+| `TX_NOT_VERIFIED` | 400 | The mined transaction does not carry the call or event the write expects | Confirm with the hash of the step the plan names |
+| `TX_WOULD_REVERT` | 409 | The API simulated the transaction and it would revert, so there is nothing to sign | Fix the state the revert names, then prepare again |
+| `VALIDATION_ERROR` | 400 | The API rejected the request body, with one entry per field in `details` | Fix the fields `details` names |
+| `RATE_LIMIT_EXCEEDED` | 429 | Too many write or statement requests on this API key | The SDK waits `Retry-After` and sends it again |
+| `CREDIT_LIMIT_EXCEEDED` | 402 | The instance used its monthly API credit allowance | Wait for the next billing period |
+| `KEY_MATERIAL_REJECTED` | 400 | A request body carried a field named for key material. Trusset never accepts one | Remove the field |
+
+A `503` from a lending route means a chain read or a record could not be read just then. It is never a verdict about the market, the loan or the wallet. Treat it as unknown and retry, not as a refusal.
+
+## Retry behavior
+
+The SDK retries by request kind. A build or an off-chain write is never repeated after an ambiguous failure, because the first attempt may already have taken effect.
+
+| Request | Retried on | Never retried on |
+|---|---|---|
+| Read (`GET`) | `408`, `429`, `500`, `502`, `503`, `504`, network errors and timeouts | Any other `4xx` |
+| Build, and off-chain writes such as hooks and terms | `429` only | Everything else |
+| Confirm | `408`, `429`, `502`, `503`, `504`, network errors and timeouts. `TX_NOT_FOUND` three more times, after 3, 6 and 12 seconds | `500` and any other `4xx` |
+| Confirm sent once | `429` only | Everything else |
+
+On a `429` the SDK waits as long as `Retry-After` says, at most 60 seconds. Other retries back off 1, 2 and 4 seconds, capped at 10. `maxRetries` on the client caps the attempts, and `0` turns retries off.
+
+The confirms sent once belong to `bots.deploy`, `liquidations.withdrawCollateralForSale`, `liquidations.reportPartialSale` and `liquidations.handleTimeout`. The API does not record them idempotently. When one fails ambiguously, read the bot or the liquidation before you confirm again.
+
+## Catch a lending write
+
+Order the branches from most specific to least. `ConfirmationError` extends `TrussetError`, so test it first.
+
+```typescript
+import { ConfirmationError, TrussetError, ValidationError } from '@trusset/sdk'
+
+try {
+  await trusset.lending.loans.repay(marketId, { loanId, all: true }, { signer: payer })
+} catch (err) {
+  if (err instanceof ValidationError) {
+    console.error('nothing was sent:', err.message)
+  } else if (err instanceof ConfirmationError) {
+    console.error(err.code, err.txHash, err.transactions)
+  } else if (err instanceof TrussetError && err.statusCode === 503) {
+    console.error('could not be read just now, retry:', err.code)
+  } else if (err instanceof TrussetError) {
+    console.error(err.code, err.statusCode, err.message, err.data)
+  } else {
+    throw err
+  }
+}
+```
+
+An error the API returns may carry extra fields beside `code` and `message`, such as `candidates` on an unknown market or the role a refusal names. They land in `err.data`.

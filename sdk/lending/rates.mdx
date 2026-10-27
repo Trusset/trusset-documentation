@@ -1,0 +1,194 @@
+---
+title: "Rates and Loan Terms"
+description: "Set how a market prices borrowing, how long loans run, what it holds back for exits, and extend maturities"
+icon: "percent"
+---
+
+This page is for the engineer who manages a market's offering for the lender of record. After reading it you will know which wallet signs each setting, which loans a change reaches, and how to move a maturity later.
+
+A market's offering has five settings: the rate mode, the fixed-rate ceiling, the loan terms, the reserve ratio and the extension switch. Each is one transaction, and each takes the three call shapes of the [signing model](/sdk/lending/signing). Every build is refused with `MARKET_PENDING_CURATOR` until a lender of record has taken the market, because nobody holds the roles before that.
+
+## Who signs
+
+| Setting | Method | Signed by |
+|---|---|---|
+| Rate mode | `setRateMode` | The interest model owner |
+| Fixed-rate ceiling | `setMaxFixedRate` | The interest model owner |
+| Loan terms | `setTermConfig` | The holder of `ISSUER_ROLE` |
+| Reserve ratio | `setReserveRatio` | The holder of `ISSUER_ROLE` |
+| Extension switch | `setAllowExtension` | The market admin (`DEFAULT_ADMIN_ROLE`) |
+| Propose an extension | `proposeExtension` | The holder of `ISSUER_ROLE` |
+| Confirm an extension | `confirmExtension` | The market admin |
+| Apply a batch page, cancel a proposal | `applyExtension`, `cancelExtension` | The holder of `ISSUER_ROLE` or the market admin |
+
+At adoption, the interest model passes to the `issuer` wallet the lender of record named, and moves later only by a two-step transfer. Read `modelOwner` from `rateMode` rather than assuming it. The examples name the signers `issuer` and `admin`.
+
+With `{ signer }`, the SDK checks the signer before anything is signed. For the rate mode and the fixed-rate ceiling, the prepared response names the interest model owner in `requiredSigner`, and the SDK compares the two. For every other setting and each extension step, it reads whether the signer holds the role from the market. A signer without it gets a `ValidationError`, and a read that failed gets `ROLE_UNREADABLE` with status `503`, with nothing sent either way.
+
+## Read the offering
+
+```typescript
+const rate = await trusset.lending.rates.rateMode(marketId)
+const terms = await trusset.lending.rates.termConfig(marketId)
+const exit = await trusset.lending.rates.exitLiquidity(marketId)
+const { proposals, chainReadFailed } = await trusset.lending.rates.extensions(marketId)
+```
+
+Each one reads the chain live. `rate` carries the mode, the clamp or fixed rate, `maxFixedRateBps`, the jump-rate `curve` underneath and `modelOwner`. `terms` carries the maximum duration and grace period in seconds, the terminal due date, the term penalty, the extension switch and `termStamping`. `extensions` merges the proposals on chain with those recorded through this API. With `chainReadFailed: true` it lists only recorded proposals in their last known state, so read it again before acting on one.
+
+## Set the rate mode
+
+<Warning>
+  A clamp reaches every open variable-rate loan from its next accrual, not only new loans. Only a `FIXED` stamp is limited to new loans. Under `FIXED`, loans opened before the switch keep accruing on the raw, unclamped curve.
+</Warning>
+
+| `rateMode` | Takes | New loans |
+|---|---|---|
+| `CURVE` | No bounds | Variable, on the utilization curve |
+| `CLAMPED` | `rateCapBps`, and optionally `rateFloorBps` up to the cap | Variable, on the curve held between floor and cap |
+| `FIXED` | `fixedRateBps` | Stamped with that rate for their whole life |
+
+```typescript
+const changed = await trusset.lending.rates.setRateMode(marketId, {
+  rateMode: 'CLAMPED',
+  rateFloorBps: 300,
+  rateCapBps: 1200,
+}, { signer: issuer })
+
+console.log(changed.offering.rateMode, changed.updatedColumns)
+```
+
+The SDK refuses a bound that belongs to another mode before any request, and so does the API. Rates are whole basis points up to 50000. The model brings interest accrual up to date under the old mode before it switches, so elapsed time is charged at the rate that actually ran.
+
+A clamp is a price bound, not a volume bound: once the curve crosses the cap the rate stays there, and liquidity alone limits a borrow. `FIXED` is refused with `FIXED_RATE_REQUIRES_TERMS` until the market runs a maximum loan duration. A stamped loan keeps its rate through every later change and cannot draw more, so a further draw is a new loan. A `fixedRateBps` above the ceiling is refused with `RATE_ABOVE_MAX_FIXED`.
+
+The confirmed result carries `offering`, the rate and term offering read back from the chain, and `updatedColumns`, the stored market fields the change updated. To confirm a transaction you broadcast yourself, pass `null` as the input: `setRateMode(marketId, null, { txHash })`.
+
+## Tighten the fixed-rate ceiling
+
+The ceiling on any fixed rate the owner can set moves down only. A market with no ceiling takes a first one here, and once recorded it can never be cleared. It bounds the rates the owner can set, not the loans: loans already stamped keep their rate.
+
+```typescript
+const tightened = await trusset.lending.rates.setMaxFixedRate(marketId, 1200, { signer: issuer })
+```
+
+A value above the recorded ceiling is refused with `MAX_FIXED_RATE_ONLY_DECREASES`. While the market runs `FIXED`, the ceiling cannot drop below the rate new loans are stamped with (`MAX_FIXED_RATE_BELOW_STAMP`): lower the stamp with `setRateMode` first.
+
+## Set loan terms
+
+<Warning>
+  Every call writes the whole term configuration. An omitted `terminalDueDate` clears the terminal date, and an omitted `termPenaltyBps` sets the term penalty to zero. Only an omitted `termGracePeriodDays` keeps the value the market already runs. Send every term you want to keep.
+</Warning>
+
+A termed loan falls due at its maturity. Once the grace period after it has run out, an unrepaid loan becomes realizable whatever its health. The whole claim is then realized at the term penalty, and collateral beyond what that needs returns to the borrower in the same transaction.
+
+A new maturity reaches new loans only, and nothing here moves an open loan's maturity earlier. Whether the grace period and the penalty also stay with new loans depends on the market implementation, which the prepared response names in `termStamping`. Prepare the change first to read it, and the `OPEN_TERMED_LOANS_AFFECTED` warning when a shorter grace period or a higher penalty reaches open loans.
+
+```typescript
+const preview = await trusset.lending.rates.setTermConfig(marketId, {
+  maxLoanDurationDays: 180,
+  termGracePeriodDays: 3,
+  termPenaltyBps: 200,
+})
+
+console.log(preview.termStamping, preview.appliesToOpenLoans, preview.warnings)
+```
+
+On `PER_LOAN`, each loan keeps the grace period and penalty it was signed under, so the whole change reaches new loans only. On `MARKET_CONFIG`, the grace period and the penalty are read at realization, so a change reaches every open termed loan. Then sign it from the holder of `ISSUER_ROLE`:
+
+```typescript
+const set = await trusset.lending.rates.setTermConfig(marketId, {
+  maxLoanDurationDays: 180,
+  termGracePeriodDays: 3,
+  termPenaltyBps: 200,
+}, { signer: issuer })
+```
+
+`maxLoanDurationDays` is a whole number of days up to 3650. `terminalDueDate` is a future date every new loan falls due by, as unix seconds or an ISO date. `termGracePeriodDays` runs from 1 to 30. The term penalty cannot exceed the market's liquidation penalty, and a penalty above zero needs terms (`INVALID_TERM_OFFERING`).
+
+To switch terms off for new loans, send `maxLoanDurationDays: 0` with no terminal date, grace period or penalty. That is refused with `TERMS_REQUIRED_BY_FIXED_RATE` while the model stamps a fixed rate. A terminal date that has passed closes the market to new loans until a future date or a duration is set.
+
+## Set the reserve ratio
+
+The reserve holds a share of total liquidity back from borrowing, as a buffer for liquidity providers who want to exit. It binds borrowing only, so a withdrawal can always consume it. It serves whichever provider exits first and guarantees no one an exit. The slice held back is not lent and earns no interest, a cost the lender of record discloses to its liquidity providers.
+
+```typescript
+const reserved = await trusset.lending.rates.setReserveRatio(marketId, 500, { signer: issuer })
+```
+
+The ratio is whole basis points from 0 to 5000, and the contract refuses anything above 50 percent. `0` clears it. It applies at once to what a new borrow can draw and moves no open loan. When withdrawals have used the reserve up, repayments refill it before any new borrow can draw again.
+
+`exitLiquidity` shows the effect: `borrowableLiquidity` is what a new borrow can draw, `availableLiquidity` what a withdrawal can reach, and `exitHorizon` when the whole book could have turned liquid. `disclosure` says the same in one sentence for a liquidity provider. The horizon holds only absent new borrows, and while a loan without a term is outstanding, no exit date exists at all.
+
+## Extend a maturity
+
+<Warning>
+  An extension moves a maturity the borrower signed, and it needs no signature from the borrower. Switch the flow on only where the lender of record's terms of use provide for extensions. Extensions only ever push dates out and never change a rate.
+</Warning>
+
+The flow has a master switch and two signed steps. The market admin switches it on, the holder of `ISSUER_ROLE` proposes, and the market admin confirms within seven days. No maturity moves before that confirmation.
+
+```typescript
+const switched = await trusset.lending.rates.setAllowExtension(marketId, true, { signer: admin })
+```
+
+| `kind` | Reaches | Applies |
+|---|---|---|
+| `LOAN` | One loan, named by `loanId` | When the admin confirms |
+| `BATCH` | Every loan opened up to the moment of the proposal | In pages of up to 200 loans, after the admin confirms |
+| `FLOOR` | The market due floor: every termed loan matures no earlier than `newDueAt`, including later loans | When the admin confirms |
+
+`newDueAt` is unix seconds and must push the maturity, or the floor, later. The proposal id exists only once the transaction mines, so read it from the confirmed result's `activity`:
+
+```typescript
+const proposed = await trusset.lending.rates.proposeExtension(marketId, {
+  kind: 'LOAN',
+  loanId,
+  newDueAt: 1814313600,
+}, { signer: issuer })
+
+const entry = proposed.activity.find(item => item.event === 'ExtensionProposed')
+console.log(entry?.proposalId)
+```
+
+The market admin confirms it. A `LOAN` or `FLOOR` proposal applies on the spot, and a `BATCH` becomes applicable. A proposal not confirmed within seven days lapses and is refused with `EXTENSION_EXPIRED`.
+
+```typescript
+const confirmed = await trusset.lending.rates.confirmExtension(marketId, proposalId, { signer: admin })
+
+console.log(confirmed.appliedLoans)
+```
+
+The API does not re-check that a `LOAN` proposal's loan is still open. A loan repaid or liquidated since the proposal makes the confirmation revert on chain, so read it with `loans.getByLoanId` before the admin signs.
+
+Apply a confirmed `BATCH` in pages of 1 to 200 loan ids. Re-running a page is harmless: a loan that is closed, has no maturity, or already matures on or after `newDueAt` is skipped on chain. A batch reaches only loans that existed when it was proposed, and a page naming a later loan is refused with `EXTENSION_LOAN_OUT_OF_SCOPE`.
+
+```typescript
+const page = await trusset.lending.rates.applyExtension(marketId, proposalId, ['1', '2', '3'], { signer: issuer })
+
+if (page.noOp) console.log(page.notice)
+```
+
+A page can mine without extending anything. It then reads `noOp: true` and `outcome: 'NO_LOAN_EXTENDED'`: the transaction cost gas, and no maturity moved.
+
+`cancelExtension` withdraws a proposal, confirmed or not, that has not been used up. It works with the switch off too, so a proposal can always be withdrawn. With the switch off, confirming and applying are refused with `EXTENSION_NOT_ALLOWED`, and open proposals stay on the market.
+
+To confirm any extension transaction you broadcast yourself, pass `null` for the arguments the build needed: `confirmExtension(marketId, null, { txHash })`. The API records proposals, confirmations, applied pages, cancellations and the switch through the same confirm call.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `rates.rateMode` | [Get Rate Mode](/endpoints/lending/get-rate-mode) |
+| `rates.termConfig` | [Get Term Config](/endpoints/lending/get-term-config) |
+| `rates.exitLiquidity` | [Get Exit Liquidity](/endpoints/lending/get-exit-liquidity) |
+| `rates.extensions` | [List Extensions](/endpoints/lending/list-extensions) |
+| `rates.setRateMode` | [Set Rate Mode](/endpoints/lending/set-rate-mode) |
+| `rates.setMaxFixedRate` | [Set Max Fixed Rate](/endpoints/lending/set-max-fixed-rate) |
+| `rates.setTermConfig` | [Set Term Config](/endpoints/lending/set-term-config) |
+| `rates.setReserveRatio` | [Set Reserve Ratio](/endpoints/lending/set-reserve-ratio) |
+| `rates.setAllowExtension` | [Set Allow Extension](/endpoints/lending/set-allow-extension) |
+| `rates.proposeExtension` | [Propose Extension](/endpoints/lending/propose-extension), [Confirm Extension Transaction](/endpoints/lending/confirm-extension-transaction) |
+| `rates.confirmExtension` | [Extension Action](/endpoints/lending/extension-action), [Confirm Extension Transaction](/endpoints/lending/confirm-extension-transaction) |
+| `rates.applyExtension` | [Extension Action](/endpoints/lending/extension-action), [Confirm Extension Transaction](/endpoints/lending/confirm-extension-transaction) |
+| `rates.cancelExtension` | [Extension Action](/endpoints/lending/extension-action), [Confirm Extension Transaction](/endpoints/lending/confirm-extension-transaction) |

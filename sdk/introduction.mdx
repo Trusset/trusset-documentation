@@ -4,32 +4,35 @@ description: "TypeScript SDK for integrating Trusset tokenization infrastructure
 icon: "cube"
 ---
 
-This page is for the engineer integrating Trusset into a backend. After reading it you will know which product modules exist today, which are still planned, and how the SDK behaves when a request fails.
+This page is for the engineer integrating Trusset into a backend. After reading it you will know which modules exist today, how the SDK signs on-chain writes without holding a key, and how it handles failures.
 
-The Trusset SDK is a typed client library for the Trusset REST API. It handles authentication, retries, input validation, and error mapping so your integration code stays minimal and reliable.
+The Trusset SDK is a typed client library for the Trusset REST API. It handles authentication, input validation, retries, error mapping and the signing flow of on-chain writes, so your integration code stays small.
 
-The SDK is structured by product module. Each module maps directly to a group of [API endpoints](/endpoints/introduction) and exposes the same operations with full type safety and client-side validation before any request hits the wire.
+The SDK is structured by product module. Each module maps to a group of [API endpoints](/endpoints/introduction) and exposes the same operations with full type safety and client-side validation before any request leaves your process.
 
-One module is available. Three are planned, and the endpoints they will wrap are already documented in the [API reference](/endpoints/introduction), so an integration that needs tokenization, trading, or lending today calls those endpoints directly.
+Three modules are available and two are planned. The endpoints the planned modules will wrap are already documented in the [API reference](/endpoints/introduction), so an integration that needs them today calls those endpoints directly.
 
-| Module | Status | Description |
+| Module | Status | Covers |
 |---|---|---|
 | `customers` | Available | Customer management, on-chain identity verification and claims, KYC links, verification profiles, database sync |
+| `lending` | Available | External securities lending: markets, the lender of record, loans and repayment, liquidations, vaults, whitelists, liquidation bots, hooks, asset data |
+| `tokens` | Available | Importing an existing security token, its presentation profile and its instrument record |
 | `tokenization` | Planned | Token deployment, issuance, redemption, management |
 | `trading` | Planned | Order book creation, order submission, settlement |
-| `lending` | Planned | Market deployment, liquidity, borrowing, liquidations |
 
 ## Design principles
 
-**Zero dependencies.** The SDK uses native `fetch` and ships no runtime dependencies. It works in Node.js 18+ and any runtime with a standard `fetch` implementation.
+**Non-custodial signing.** Trusset never asks for, holds or uses a private key. Every write that changes chain state returns unsigned calldata, a wallet you control signs it, and a confirm call lets the API verify the mined receipt before anything is recorded. Pass any ethers v5 `Signer` and the SDK runs both legs for you, or sign the calldata in your own environment and confirm with the transaction hash.
 
-**KYC data stays with you.** KYC hashing happens in the separate [trusset-kyc-zk-proofs](https://github.com/Trusset/trusset-kyc-zk-proofs) tool you run locally. Only the resulting root hash and proof manifest ever reach Trusset - see [KYC proofs](/sdk/customers/kyc-proofs).
+**The network comes from the API.** An API key belongs to one [instance](/protocol/infrastructure/instances), and the instance decides the network: Sepolia for development, Ethereum mainnet for production, Polygon for production lending where it is enabled. The SDK refuses a signer connected to another chain before it sends a request, and it never switches networks.
 
-**Fail early.** Inputs are validated before requests are sent. Invalid addresses, missing fields, malformed hashes, and out-of-range values throw a `ValidationError` immediately rather than producing a 400 from the server.
+**Zero dependencies.** The SDK uses the platform's `fetch` and ships no runtime dependencies. It runs on Node.js 22 or later.
 
-**Safe retries.** Read requests retry transient failures (5xx, 408, 429, network errors) with exponential backoff. Write requests are never blindly retried - identity writes execute on-chain transactions, and repeating an ambiguous failure could submit a transaction twice. Writes retry only on 429.
+**KYC data stays with you.** KYC hashing happens in the separate [trusset-kyc-zk-proofs](https://github.com/Trusset/trusset-kyc-zk-proofs) tool you run locally. Only the resulting root hash and proof manifest reach Trusset. See [KYC proofs](/sdk/customers/kyc-proofs).
 
-**Instance-scoped.** Each `TrussetClient` is bound to one API key, which is scoped to one [instance](/protocol/infrastructure/instances). If you operate multiple instances, create one client per instance.
+**Fail early.** Inputs are checked before a request is sent. Addresses follow the same EIP-55 rule the API applies, and amounts are decimal strings, never JavaScript numbers. A bad input throws a `ValidationError` instead of producing a 400 from the server.
+
+**Safe retries.** Reads retry transient failures with exponential backoff. Requests that build a transaction are never repeated, except after a 429, which the server answers before doing any work. Confirm calls retry an outage because the API records one transaction exactly once. Every 429 waits for the server's `Retry-After`. A 503 means the chain or a record could not be read, never a verdict.
 
 <CardGroup cols={2}>
   <Card title="Installation" icon="download" href="/sdk/installation">
@@ -41,7 +44,10 @@ One module is available. Three are planned, and the endpoints they will wrap are
   <Card title="Customers" icon="users" href="/sdk/customers/overview">
     Customer management, verification, and database sync
   </Card>
-  <Card title="Error Handling" icon="triangle-exclamation" href="/sdk/customers/errors">
-    Error types, codes, and retry behavior
+  <Card title="Lending" icon="building-columns" href="/sdk/lending/overview">
+    Markets, the lender of record, loans, liquidations and vaults, with every write signed by your own wallets
+  </Card>
+  <Card title="Tokens" icon="file-import" href="/sdk/tokens/overview">
+    Import a security token and publish the profile a market needs
   </Card>
 </CardGroup>

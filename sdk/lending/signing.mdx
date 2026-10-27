@@ -1,0 +1,162 @@
+---
+title: "Signing Model"
+description: "Prepare, sign or confirm every lending write, and finish one that failed halfway"
+icon: "signature"
+---
+
+This page is for the engineer connecting wallets to lending writes. After reading it you will know the three ways to call a write, what the SDK checks before it signs, and how to finish a write that stopped halfway.
+
+Every write that changes chain state has two legs. The API builds unsigned calldata, a wallet signs and broadcasts it, and a confirm call sends the transaction hash so the backend reads the mined receipt before it records anything. Trusset builds transactions. Your wallets sign them.
+
+## Call a write three ways
+
+Each write method takes the same three shapes. The shape decides how much of the work the SDK does.
+
+| Call | Returns | The SDK signs | Trusset records |
+|---|---|---|---|
+| Input alone | The unsigned transaction or plan | No | No |
+| Input and `{ signer }` | The recorded result and every transaction sent | Every step, in order | Yes, after the receipt |
+| Input and `{ txHash }` | The recorded result | No | Yes, after the receipt |
+
+Without options a write returns the plan and does nothing else. A plan is either one transaction (`action: 'SIGN_TRANSACTION'` with `transaction`) or ordered steps (`action: 'SIGN_TRANSACTIONS'` with `steps`).
+
+```typescript
+const prepared = await trusset.lending.loans.open(marketId, {
+  collateralAmount: '1000',
+  borrowAmount: '500',
+  borrowerAddress: walletAddress,
+})
+```
+
+With `{ signer }` the SDK signs every step in order, waits for each to mine on the signer's own provider, and confirms with the hash of the step the API names. The result carries `transactions`, one entry per step sent.
+
+```typescript
+const loan = await trusset.lending.loans.open(marketId, { collateralAmount: '1000', borrowAmount: '500' }, { signer: borrower })
+
+for (const step of loan.transactions) {
+  console.log(step.functionName, step.txHash, step.optional, step.error)
+}
+```
+
+With `{ txHash }` the SDK only confirms a transaction you broadcast yourself. See [confirm a transaction you broadcast](#confirm-a-transaction-you-broadcast).
+
+```typescript
+const recorded = await trusset.lending.loans.open(marketId, {}, { txHash: '0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b' })
+```
+
+## What the SDK checks before it signs
+
+The SDK reads the instance's chain from the API once per client. It refuses a signer connected to another chain before it sends a single request, with a `ValidationError` naming both chains. It never switches networks. A plan that names a different chain than the instance is refused with `CHAIN_MISMATCH` before anything is signed.
+
+A field that names the signing wallet is filled from the signer when you omit it, and refused when it names another wallet. The fields are `payer`, `borrowerAddress`, `provider`, `holderAddress`, `signerAddress`, `fromAddress` and `bidder`. The API checks balances, allowances and roles against that field, so it has to be the wallet that signs.
+
+Where a write needs a role or an owner that the market can report, the SDK reads it before signing and refuses when the signer lacks it:
+
+- `bots.connect` and `bots.disconnect` need the bot owner and the market admin.
+- `operators.setAccessRole` and `operators.setLiquidatorRole` need the market admin or the router admin, by role, and the oracle owner for `ORACLE_SIGNER`.
+- The `rates` settings and extension steps need the interest model owner, the market issuer or the market admin, as the prepared response names.
+- `auctions.wireModule` needs the market admin and the router admin, and refuses outright when the plan holds a step only the token's agent can sign.
+- `insurance.withdraw` needs the fund owner.
+
+When the role cannot be read just then, the SDK signs nothing and throws `ROLE_UNREADABLE` or `FUND_OWNER_UNREADABLE` with status `503`. That is an unread role, not a missing one. Retry shortly.
+
+The signer must expose `getAddress` and `getChainId`, and `_signTypedData` or `signMessage` for the writes that sign a message. Every ethers v5 `Signer` does.
+
+## How a plan runs
+
+Steps run strictly in order. Each step waits for `confirmations` blocks on the signer's own provider, 1 by default and at most 12, before the next one starts.
+
+```typescript
+const result = await trusset.lending.liquidity.add(marketId, { amount: '100000' }, { signer: liquidityProvider, confirmations: 2 })
+```
+
+The API names the step to confirm with `confirmStepIndex`. Without it the SDK confirms the last step that is not optional. An optional step, such as clearing a leftover allowance after a full repayment, never blocks the confirm. Its failure is recorded in `transactions` with an `error`, and the write still succeeds.
+
+The SDK forwards `to`, `data`, `value`, `chainId` and the API's `gasLimit` exactly. Where the API sends no `gasLimit` and the signer can estimate gas, the SDK sets the limit to 1.5 times the signer's own estimate. It adds nothing else to a transaction.
+
+A step can be a contract creation with no `to`, as in the auction venue wiring, and it runs like any other step. A transaction your wallet speeds up counts under the replacement's hash when the replacement succeeds.
+
+The SDK broadcasts the calldata the API returned without decoding it. If your controls require it, prepare without a signer, decode `to` and `data` in your own pinned code, and sign only what you checked.
+
+## Writes that sign a message
+
+Some writes sign typed data or a message instead of, or before, a transaction. With `{ signer }` the SDK handles both parts.
+
+| Write | What the signer signs |
+|---|---|
+| `loans.repay` in `mode: 'permit'` | An EIP-2612 permit as EIP-712 typed data, then one repayment transaction |
+| `oracle.signPrice` | An EIP-712 price attestation, which the SDK records and returns as `signedPrice`. No transaction |
+| `tokens.saveInstrument` | An EIP-191 approval of the instrument record. No transaction |
+
+A `markets.configure` step that verifies a holder on the token's registry comes back as a holder onboarding plan. It signs claims and registers identities from the onboarding wallet, so the SDK refuses it with a signer. Prepare it, run the plan from that wallet, and confirm the registration with `{ txHash }`.
+
+## Writes with no confirm leg
+
+Six writes change chain state that the API reads back from the chain on the next read. They have no confirm leg, so nothing is recorded and `{ txHash }` is refused. With `{ signer }` they return only `transactions`.
+
+- `operators.nominate` and `operators.withdrawNomination`
+- `liquidity.setVaultLiquidity`, `liquidity.registerVault` and `liquidity.deregisterVault`
+- `insurance.withdraw`
+
+`auctions.wireModule` has no confirm leg either. With `{ signer }` it returns `transactions` and the `moduleAddress` of the venue it wired or deployed.
+
+## Confirm a transaction you broadcast
+
+Prepare the write, broadcast its steps in order from any wallet, and confirm with the hash of the step the plan names.
+
+```typescript
+const prepared = await trusset.lending.loans.open(marketId, {
+  collateralAmount: '1000',
+  borrowAmount: '500',
+  borrowerAddress: walletAddress,
+})
+
+let confirmHash = ''
+for (const [index, step] of prepared.steps.entries()) {
+  const tx = await borrower.sendTransaction(step.transaction)
+  await tx.wait(1)
+  if (index === (prepared.confirmStepIndex ?? prepared.steps.length - 1)) confirmHash = tx.hash
+}
+
+const loan = await trusset.lending.loans.open(marketId, {}, { txHash: confirmHash })
+```
+
+A smart-contract wallet wraps the call. Send the hash of the mined outer transaction. The API finds the call it expects inside a Safe `execTransaction`, an ERC-4337 bundle, or the `execute` call of a smart account, including an EIP-7702 account.
+
+A repayment in `mode: 'batch'` is one atomic bundle for a wallet that supports `wallet_sendCalls`. The SDK refuses it with a signer. Prepare it, send the bundle from that wallet, and confirm with the hash of the bundle transaction.
+
+## Finish a write that stopped halfway
+
+<Warning>
+  Never call the same write again after a partial failure. A second call builds a second plan, and its steps would move funds or collateral a second time. Read `err.transactions`, then confirm with `{ txHash }`.
+</Warning>
+
+When a step fails after an earlier step went out, or every step mined but the confirm could not be recorded, the SDK throws `ConfirmationError`. Its `code` is `TRANSACTION_FAILED` in the first case and `CONFIRMATION_FAILED` in the second. `transactions` lists every step with its hash, and `txHash` is the hash to confirm.
+
+When the first signature is rejected and nothing was sent, the SDK rethrows the wallet's own error untouched.
+
+```typescript
+import { ConfirmationError } from '@trusset/sdk'
+
+try {
+  await trusset.lending.loans.open(marketId, { collateralAmount: '1000', borrowAmount: '500' }, { signer: borrower })
+} catch (err) {
+  if (err instanceof ConfirmationError && err.code === 'CONFIRMATION_FAILED' && err.txHash) {
+    await trusset.lending.loans.open(marketId, {}, { txHash: err.txHash })
+  } else if (err instanceof ConfirmationError) {
+    console.error(err.message, err.transactions)
+  } else {
+    throw err
+  }
+}
+```
+
+After `TRANSACTION_FAILED`, check the market before you decide anything. An earlier step, usually an approval, is on chain, but the write itself is not.
+
+The SDK retries a confirm by itself in two cases. A confirm answered `TX_NOT_FOUND` means the API cannot see the receipt yet, so the SDK asks again after 3, 6 and 12 seconds. A confirm that met an outage (`408`, `502`, `503`, `504` or a dropped connection) is retried with backoff, because the API records one mined transaction once.
+
+Four confirms are sent once and never retried, because the API does not record them idempotently. They are the confirm of `bots.deploy`, and `liquidations.withdrawCollateralForSale`, `liquidations.reportPartialSale` and `liquidations.handleTimeout`. When one of these fails ambiguously, read the bot or the liquidation before you confirm again.
+
+## Rate limits
+
+Every lending write route and every statement download shares a limit of 10 requests per minute per API key, the build and the confirm alike. On a `429` the SDK waits as long as the server's `Retry-After` says, at most 60 seconds, then sends the request again. A burst of writes therefore waits rather than fails. See [Lending errors](/sdk/lending/errors) for the full retry rules.

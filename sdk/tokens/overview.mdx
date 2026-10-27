@@ -1,0 +1,207 @@
+---
+title: "Tokens"
+description: "Import an existing security token, publish its overview and its instrument record"
+icon: "file-import"
+---
+
+This page is for the platform engineer who brings an existing security token into an instance. After reading it you will know how to import the token, publish the overview a lending market needs, and publish its instrument record with the controller's signature.
+
+Importing creates a record in your instance. Trusset does not deploy the token, does not hold it, and does not become a party to it. A lending market can only be deployed against a token your instance imported and holds as active, with a published overview. The deployment refuses a token without one with `TOKEN_PROFILE_REQUIRED`.
+
+The module hangs off the client as `trusset.tokens`. None of its calls sends a transaction. The one signature it can ask for is the controller's approval of an instrument record, a message signature that costs no gas.
+
+## Import a token
+
+Detect first. Detection reads the contract and writes nothing, so a token that can only be refused is caught before the import.
+
+```typescript
+const detected = await trusset.tokens.detect({ tokenAddress })
+console.log(detected.framework, detected.decimals, detected.alreadyImported, detected.isOwn)
+
+if (!detected.alreadyImported && !detected.isOwn) {
+  const imported = await trusset.tokens.import({ tokenAddress, assetType: 'BOND' })
+  console.log(imported.framework, imported.status)
+}
+```
+
+Detection recognizes seven standards and stops at the first match, in this order: `erc3643`, `erc1400`, `erc7943`, `erc1404`, `erc721`, `erc1155`, `erc20`. A contract that answers none of them is refused with `UNSUPPORTED_TOKEN`. The import detects the contract again, so the stored framework is the chain's answer, not anything you send.
+
+`assetType` is your classification of the asset. It is not read from the chain and not verified. It is one of `PUBLIC_EQUITY`, `PRIVATE_EQUITY`, `REAL_ESTATE`, `COMMODITY`, `ART`, `WATCH`, `INFRASTRUCTURE`, `BOND` or `CRYPTO_ASSET`. An instance holds at most 200 active imports.
+
+A token your instance issued through Trusset already belongs to it, so the import refuses it with `TOKEN_IS_OWN`. For an ERC-721 or ERC-1155 collection that does not declare its standard through ERC-165, pass `assetStandard: 'ERC721'` or `'ERC1155'` to both calls. A collection that declares the other standard is refused with `COLLECTION_STANDARD_MISMATCH`.
+
+### Check which collateral mode a token supports
+
+```typescript
+const imports = await trusset.tokens.list({ withLendingEligibility: true })
+
+for (const t of imports) {
+  console.log(t.symbol, t.lendingEligibility?.freeze, t.lendingEligibility?.freezeReason, t.lendingEligibility?.custody)
+}
+```
+
+`list` returns every active import, newest first, unpaginated. With `withLendingEligibility`, each entry says whether a `FREEZE` or a `CUSTODY` market can be deployed on the token, with the reason when it cannot. `lendingEligibility` is `null` when the token could not be read just now, which is not a verdict. A `FREEZE` market needs the ERC-3643 agent surface. See [Markets](/sdk/lending/markets) for what each mode means.
+
+## Publish the overview
+
+The overview is your instance's description of the asset: `description`, `issuerName`, `sector`, `website`, `ammAddress` and `reserveURI`. Every importer edits its own, whether or not it controls the token on chain.
+
+```typescript
+const { presentation } = await trusset.tokens.instrument(tokenAddress)
+
+await trusset.tokens.setProfile(tokenAddress, {
+  ...presentation,
+  description: 'Senior secured bond, series A, EUR 1,000 nominal',
+  issuerName: 'Example Issuer AG',
+})
+```
+
+`setProfile` replaces the whole overview. A key you leave out is cleared, so read the current overview and send it back with your changes, as above. `null` clears it. The SDK refuses any other key before sending: identifiers, the jurisdiction and offering documents belong to the instrument record.
+
+Everything in the overview is your assertion. No field is verified against a register, a regulator or the chain, and wherever it surfaces downstream it is labelled `ISSUER_ASSERTED`.
+
+### Add an icon
+
+`upload` pins a file to IPFS and returns the URI to reference it by. It takes a `Blob` or the file's bytes.
+
+```typescript
+import { readFileSync } from 'node:fs'
+
+const upload = await trusset.tokens.upload(readFileSync('logo.png'), 'logo.png', { purpose: 'image' })
+
+await trusset.tokens.setImage(tokenAddress, upload.ipfsUri)
+```
+
+The API decides the file type from its bytes, not its name. It accepts PNG, JPEG, WebP, GIF, PDF and JSON, and with `purpose: 'image'` only the four image types. SVG is refused because it can carry scripts. A document must be 1022 KB or smaller, and images are re-encoded before pinning. `setImage(tokenAddress, null)` clears the icon.
+
+## Publish the instrument record
+
+The instrument record holds the token's identifiers, legal terms, ranking, term, redemption, register and offering documents. There is one record per token and chain, and it is what a lender of record reads before it takes a market on the token.
+
+Everything in the record is an assertion of the instance that publishes it. A standard ISIN or LEI is checked against its check digits and marked `ARITHMETIC_VALIDATED`, and anything else is stored as stated and marked `ISSUER_STATED`. Nothing is verified against a register or a regulator.
+
+Only the token's controller publishes the record: its `owner()`, a T-REX agent, or a holder of `DEFAULT_ADMIN_ROLE`. The API accepts a save on one of two authorities.
+
+### Your instance controls the token
+
+When one of your instance's verified wallets controls the token, or the token was issued through your instance, send the record alone.
+
+```typescript
+const saved = await trusset.tokens.saveInstrument(tokenAddress, {
+  instrument: { securityClass: 'BOND', isin: 'DE000A0F5UF5', currency: 'EUR', nominalPerUnit: '1000' },
+})
+
+console.log(saved.instrument.version, saved.instrument.missingRequired)
+```
+
+`missingRequired` lists the fields and documents the security class requires that the record still lacks. `instrumentSchema()` returns every field, its allowed values, and what each class requires.
+
+### The controller signs
+
+When your instance does not control the token, the controller approves the record with a signature and your instance carries it. Pass the controller's wallet as the signer. The controller's wallet never becomes a wallet of your instance.
+
+```typescript
+const saved = await trusset.tokens.saveInstrument(tokenAddress, {
+  instrument: { securityClass: 'BOND', isin: 'DE000A0F5UF5', currency: 'EUR', nominalPerUnit: '1000' },
+}, { signer: issuer })
+
+console.log(saved.issuerApproval?.signer, saved.issuerApproval?.method)
+```
+
+With `{ signer }` the SDK runs the whole flow. It checks the signer is on the instance's chain and requests the approval message for exactly this body. The signer signs it with `signMessage` (EIP-191), and the SDK saves the record with that signature. Nothing is broadcast. At the save, the API reads the signer's role on chain and refuses a wallet that is not the controller now with `ISSUER_NOT_CONTROLLER`.
+
+The message binds the token, the chain, your instance, the exact content, the record version and the time. A signature older than ten minutes is refused with `ISSUER_APPROVAL_EXPIRED`, and one made before the record changed with `ISSUER_APPROVAL_STALE`. With a signer the SDK requests and saves in one call, so neither normally arises.
+
+When another instance asserts the record, the SDK refuses before asking for a signature unless you send `takeOver: true`. A controller's signed save with `takeOver: true` replaces that record.
+
+Where the controller signs in another system, for example a Safe whose owners approve messages in their own flow, request the message, collect the signature there, and pass it as `issuerApproval`. Trusset checks a contract wallet's signature through ERC-1271.
+
+```typescript
+import type { InstrumentInput } from '@trusset/sdk'
+
+const record: InstrumentInput = {
+  instrument: { securityClass: 'BOND', isin: 'DE000A0F5UF5', currency: 'EUR', nominalPerUnit: '1000' },
+}
+const request = await trusset.tokens.requestApproval(tokenAddress, record)
+const signature = await issuer.signMessage(request.message)
+
+await trusset.tokens.saveInstrument(tokenAddress, {
+  ...record,
+  ...(request.takeOverRequired ? { takeOver: true } : {}),
+  issuerApproval: { signer: await issuer.getAddress(), signature, recordVersion: request.recordVersion, signedAt: request.signedAt },
+})
+```
+
+`requestApproval` runs every check the save runs on that body and writes nothing, so a record that would be refused is refused before anybody signs. Send the same body to both calls.
+
+### Release the record
+
+```typescript
+const released = await trusset.tokens.releaseInstrument(tokenAddress)
+```
+
+The record stays readable for every lender with its values and their provenance, but no instance stands behind it any more. The token's controller can then take it over. Only the asserting instance can release, and a release needs no signature.
+
+## Read a token
+
+```typescript
+const record = await trusset.tokens.get(tokenAddress)
+
+const view = await trusset.tokens.instrument(tokenAddress)
+console.log(view.authority.holds, view.assertedHere, view.instrument?.missingRequired)
+```
+
+`get` returns the import record. `instrument` returns the instrument record with each field's `provenance` and `verification`, your instance's overview, and `authority.holds`, which says whether your instance can publish the record on its own.
+
+`holders()` returns holder counts per imported token, keyed by the lowercase token address. Each count carries `complete` and `indexing`, because the counts come from an index that fills over time.
+
+## Keep the record current
+
+Name, symbol, decimals, supply and metadata are read from the chain at import and then frozen.
+
+```typescript
+const refreshed = await trusset.tokens.refresh(tokenAddress)
+console.log(refreshed.frameworkMatches, refreshed.persisted)
+
+const redetected = await trusset.tokens.redetect(tokenAddress)
+console.log(redetected.frameworkChanged, redetected.previous.framework)
+
+await trusset.tokens.setAssetType(tokenAddress, 'PRIVATE_EQUITY')
+```
+
+`refresh` reads the contract again and stores the new values only when the framework still matches the record. `redetect` runs detection again and stores its answer even when the framework changed, reporting the `previous` values. `setAssetType` changes your classification.
+
+## Remove an import
+
+<Warning>
+  Removing an import does not unwind anything. A lending market already deployed against the token keeps running: loans stay open, collateral stays locked, and liquidation still works. Removal only stops new markets, because a deployment refuses a token that is not an active import.
+</Warning>
+
+```typescript
+const removed = await trusset.tokens.remove(tokenAddress)
+console.log(removed.cleared, removed.instrumentRecordKept)
+```
+
+Nothing on chain changes. Removal clears your overview and icon. An instrument record your instance asserts stays in place, and `instrumentRecordKept` says so. Importing the same address again creates a fresh record.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `tokens.detect` | [Detect Token](/endpoints/tokenization/detect-token) |
+| `tokens.import` | [Import Token](/endpoints/tokenization/import-token) |
+| `tokens.upload` | [Upload File](/endpoints/tokenization/upload-file) |
+| `tokens.list` | [List Imports](/endpoints/tokenization/list-imports) |
+| `tokens.get` | [Get Import](/endpoints/tokenization/get-import) |
+| `tokens.holders` | Not documented yet |
+| `tokens.refresh` | [Refresh On-Chain State](/endpoints/tokenization/refresh-onchain) |
+| `tokens.redetect` | Not documented yet |
+| `tokens.setAssetType` | Not documented yet |
+| `tokens.setProfile` | [Update Profile](/endpoints/tokenization/update-profile) |
+| `tokens.setImage` | [Update Image](/endpoints/tokenization/update-image) |
+| `tokens.remove` | [Remove Import](/endpoints/tokenization/remove-import) |
+| `tokens.instrumentSchema` | [Get Instrument Schema](/endpoints/tokenization/get-instrument-schema) |
+| `tokens.instrument` | [Get Instrument](/endpoints/tokenization/get-instrument) |
+| `tokens.requestApproval` | [Request Instrument Approval](/endpoints/tokenization/request-instrument-approval) |
+| `tokens.saveInstrument` | [Save Instrument](/endpoints/tokenization/save-instrument), and the [issuer-signed flow](/endpoints/tokenization/issuer-signed-record) |
+| `tokens.releaseInstrument` | [Release Instrument](/endpoints/tokenization/release-instrument) |

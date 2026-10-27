@@ -1,0 +1,203 @@
+---
+title: "Whitelists"
+description: "Create and maintain the wallet lists a market or vault can install as its borrower, provider or depositor gate"
+icon: "list-check"
+---
+
+This page is for the engineer who maintains whitelists for a lender of record. After reading it you will know how to create a whitelist, list and remove wallets, and hand its upkeep to the lender of record. You will also know how to keep the instance record in step with the chain.
+
+A whitelist is a list contract that admits exactly the wallets its owner and its managers listed. It examines no identity. Installed as a market's borrower or provider gate with [`markets.setIdentityGates`](/sdk/lending/markets), or as a vault's depositor gate, it decides who passes.
+
+A whitelist is a lighter gate than a verification profile, because nothing records why a wallet is on it. It cannot be the borrower gate of a market priced from a `MARKET` source. It gates liquidity providers and vault depositors only on the word of the instance that curates it. See [Whitelists as gates](/endpoints/lending/set-identity-gates#whitelists-as-gates) for the full rules.
+
+<Warning>
+  A change to a whitelist applies at once to every gate it serves, including markets and vaults of other instances that installed it. Listing a wallet admits it everywhere the list is installed. Removing a wallet from a list that gates a market's borrowers stops that wallet's next draw there.
+</Warning>
+
+## Who signs
+
+Every change to a whitelist is a transaction a wallet you control signs. Each write takes the three call shapes of the [signing model](/sdk/lending/signing): no options returns the unsigned transaction, `{ signer }` signs and confirms, `{ txHash }` confirms a transaction you broadcast yourself.
+
+| Change | Signed by |
+|---|---|
+| Create a list | The wallet that will own it, a verified wallet of your instance |
+| List or remove wallets | The owner or any manager |
+| Add or remove a manager | The owner |
+| Propose a new owner | The owner |
+| Accept ownership | The wallet the pending transfer names |
+
+With a signer, the SDK fills `signerAddress` from the signer's wallet. It refuses a `signerAddress` that names a different wallet before any request, because the API checks ownership and management against that address.
+
+## Create a whitelist
+
+The signing wallet becomes the owner. `purpose` is `BORROWER`, `DEPOSITOR` or `ANY`, and defaults to `ANY`. A list kept for `BORROWER` is refused as a provider or depositor gate, and one kept for `DEPOSITOR` as a borrower gate.
+
+```typescript
+const created = await trusset.lending.accessLists.create({
+  name: 'Professional depositors',
+  purpose: 'DEPOSITOR',
+  managers: ['0xD6Db11DfdFFA5CB2A7572DC10F22E293E8EE527F'],
+  members: [
+    '0x4A2F73c33EEb2dFD7237B1442159369CaF2d24fc',
+    '0xe9b06D1ecd6B6db848A206D02C447ad5cB0CA647',
+  ],
+}, { signer: listOwner })
+
+const newListId = created.list.id
+```
+
+The creating transaction writes up to 200 managers and 200 members itself. Larger member sets follow in batches once the list exists. `name` and `purpose` live on your instance's record, not on chain: the contract holds only its owner, managers and members.
+
+`created.list.id` is the id every other call on this page takes. `created.created` is `false` when the transaction was already recorded, and `recordMoved: true` means the record moved to your instance because your instance now holds the owner wallet. The API refuses a list another instance recorded first with `ACCESS_LIST_ALREADY_REGISTERED`.
+
+To confirm a creation you broadcast yourself, send the same `name` and `purpose` the build used, with the hash:
+
+```typescript
+const recorded = await trusset.lending.accessLists.create({
+  name: 'Professional depositors',
+  purpose: 'DEPOSITOR',
+}, { txHash: '0x7c1d9a54e3b2f08f6a19c4e27d58b3a06e9f12c4d7b85a30e6f9c21d48ab7e05' })
+```
+
+## List or remove wallets
+
+<Warning>
+  A removal takes effect only when its transaction mines. Until then the wallet stays listed and keeps passing every gate the list serves. A removed borrower can still repay, add collateral and close its loan, but cannot draw more on it. A wallet removed while it is the fixed payee of an open loan blocks every further draw on that loan, because a loan's payee cannot be changed.
+</Warning>
+
+Prepare a removal first to read what it reaches. The prepared response names in `warnings` the open loans whose borrower or payee is being removed (`AFFECTS_OPEN_LOANS`), and every market, vault and vault group the list gates (`LIST_SCOPE`). The signed result does not carry these warnings.
+
+```typescript
+const preview = await trusset.lending.accessLists.setMembers(listId, {
+  accounts: ['0x4A2F73c33EEb2dFD7237B1442159369CaF2d24fc'],
+  listed: false,
+})
+
+for (const warning of preview.warnings) {
+  console.log(warning.code, warning.message)
+}
+```
+
+Then sign it from the owner or a manager. `listed: true` lists the wallets, `listed: false` removes them.
+
+```typescript
+const removed = await trusset.lending.accessLists.setMembers(listId, {
+  accounts: ['0x4A2F73c33EEb2dFD7237B1442159369CaF2d24fc'],
+  listed: false,
+}, { signer: listOwner })
+
+for (const batch of removed.confirmations) {
+  console.log(batch.txHash, batch.listedCount, batch.removedCount)
+}
+```
+
+One call takes up to 2,000 wallets. The API splits them into transactions of at most 200, and the SDK signs and confirms each one in order before it sends the next. `confirmations` holds one confirmed result per transaction, and `transactions` every hash.
+
+When a later transaction fails after earlier ones were confirmed, the SDK throws `ConfirmationError` with every hash it sent. The earlier batches are on chain and recorded. Confirm an unrecorded hash with `setMembers(listId, undefined, { txHash })`, or catch the record up with a [rescan](#catch-the-record-up-with-the-chain).
+
+A wallet that is neither the owner nor a manager on chain is refused with `NOT_ACCESS_LIST_MANAGER`. A manager of a list another instance keeps can list and remove wallets on it too; the prepared response then carries `managed: true`.
+
+## Add or remove a manager
+
+<Warning>
+  A manager decides who passes every gate the list serves, also on a market or vault of another instance that installed the list. Managers keep that power when ownership moves, until the new owner removes them.
+</Warning>
+
+A manager lists and removes wallets with the same reach as the owner. It cannot add or remove managers or transfer the list. Adding the market's lender of record as a manager is how a whitelist gate comes to be maintained by the lender of record itself.
+
+```typescript
+const updated = await trusset.lending.accessLists.setManager(listId, {
+  account: '0xD6Db11DfdFFA5CB2A7572DC10F22E293E8EE527F',
+  enabled: true,
+}, { signer: listOwner })
+```
+
+Only the owner signs, and only the instance that keeps the list builds the transaction. Any other signer is refused with `NOT_ACCESS_LIST_OWNER`. `updated.applied` lists each manager the transaction changed with its state after the block.
+
+## Transfer ownership
+
+<Warning>
+  A transfer does not change the managers. Every manager keeps listing and removing wallets after the new owner accepts. Remove a manager before the transfer if it should not keep that power.
+</Warning>
+
+Ownership moves in two steps. The owner proposes a new owner, and the proposed wallet accepts. Until it accepts, the current owner keeps every right over the list, and a later proposal replaces a pending one.
+
+```typescript
+const proposed = await trusset.lending.accessLists.transferOwnership(
+  listId,
+  '0x52955825Bcb467977B33Fc2c8B6e0fdE0eB88f4d',
+  {},
+  { signer: listOwner },
+)
+```
+
+The wallet the transfer names then accepts. Without a pending transfer naming it, the API refuses with `NOT_PENDING_OWNER`.
+
+```typescript
+const accepted = await trusset.lending.accessLists.acceptOwnership(listId, {}, { signer })
+
+console.log(accepted.outcome, accepted.owner, accepted.recordHeldByThisInstance)
+```
+
+When the new owner is not a verified wallet of your instance, the record moves to the instance that holds it once the transfer is accepted. The name goes with it, and so does the right to change managers and transfer the list. The prepared proposal warns about this with `OWNER_LEAVES_INSTANCE`, and names the managers that stay in `MANAGERS_KEEP_LISTING`. `recordHeldByThisInstance` on the result says where the record stands afterwards.
+
+## Read whitelists
+
+`list` returns the whitelists your instance keeps under `lists`, and under `managed` the lists of other instances that one of your verified wallets owns, manages or is named to take over.
+
+```typescript
+const { lists, managed, maxBatch } = await trusset.lending.accessLists.list()
+```
+
+Archived lists are left out unless you pass `{ includeArchived: true }`. A list under `managed` carries `own: false` and `name: null`, because the name belongs to the instance that keeps it.
+
+`get` returns one list with the members its record holds. Pass up to 200 `wallets` to also read, live from the chain, whether the list admits each of them right now.
+
+```typescript
+const wallet = '0x4A2F73c33EEb2dFD7237B1442159369CaF2d24fc'
+const detail = await trusset.lending.accessLists.get(listId, { wallets: [wallet] })
+
+const admitted = detail.live?.verified[wallet.toLowerCase()]
+```
+
+The members come from confirmed transactions and rescans. A wallet listed or removed by a transaction nobody confirmed appears only after a rescan, so check `live.verified` before acting on one wallet. It is keyed by the lowercased address. A value of `null` there, or `live.readFailed: true`, means the chain could not be read, not that the wallet is refused.
+
+## Catch the record up with the chain
+
+`rescan` reads the list's events from the last block its record saw and records every member, manager and owner change, confirmed or not. Use it after a change signed outside these calls, or when a confirm was never sent. Nothing is signed.
+
+```typescript
+const scan = await trusset.lending.accessLists.rescan(listId)
+
+console.log(scan.applied, scan.syncedBlock, scan.complete)
+```
+
+One call reads a bounded range of blocks. `complete: false` means the record has not reached the chain head yet, so call it again until `complete` reads `true`.
+
+## Rename, re-purpose or archive the record
+
+<Warning>
+  Archiving never changes the list on chain. Its owner and managers can still list and remove wallets, and a market or vault of another instance that installed it keeps admitting its members.
+</Warning>
+
+`update` changes only your instance's record. Nothing is signed, and only the instance that keeps the record can update it. Send at least one of `name`, `purpose` and `archived`.
+
+```typescript
+const { list, changed } = await trusset.lending.accessLists.update(listId, { name: 'Professional depositors, EU' })
+```
+
+A list that still gates a market, vault or vault group of your instance cannot be archived: the API answers `ACCESS_LIST_IN_USE` and names those gates in `details.usedBy`. A purpose that contradicts a gate the list already fills is refused with `ACCESS_LIST_PURPOSE_MISMATCH`. `ANY` is always accepted.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `accessLists.list` | [List Whitelists](/endpoints/lending/list-access-lists) |
+| `accessLists.get` | [Get Whitelist](/endpoints/lending/get-access-list) |
+| `accessLists.create` | [Create Whitelist](/endpoints/lending/create-access-list), [Confirm Whitelist Creation](/endpoints/lending/confirm-access-list-creation) |
+| `accessLists.setMembers` | [Set Whitelist Members](/endpoints/lending/set-access-list-members), [Confirm Whitelist Members](/endpoints/lending/confirm-access-list-members) |
+| `accessLists.setManager` | [Set Whitelist Manager](/endpoints/lending/set-access-list-manager), [Confirm Whitelist Manager](/endpoints/lending/confirm-access-list-manager) |
+| `accessLists.transferOwnership` | [Transfer Whitelist Ownership](/endpoints/lending/transfer-access-list-ownership), [Confirm Whitelist Ownership](/endpoints/lending/confirm-access-list-ownership) |
+| `accessLists.acceptOwnership` | [Transfer Whitelist Ownership](/endpoints/lending/transfer-access-list-ownership), [Confirm Whitelist Ownership](/endpoints/lending/confirm-access-list-ownership) |
+| `accessLists.rescan` | [Rescan Whitelist](/endpoints/lending/rescan-access-list) |
+| `accessLists.update` | [Update Whitelist](/endpoints/lending/update-access-list) |

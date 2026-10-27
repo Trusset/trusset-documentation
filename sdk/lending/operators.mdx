@@ -1,0 +1,202 @@
+---
+title: "Lender of Record"
+description: "Take a market's lender-of-record role, nominate candidates and manage market roles with the SDK"
+icon: "user-tie"
+---
+
+This page is for the engineer at a lender of record who takes markets and manages their roles from a backend, and for the deploying issuer who nominates candidates. After reading it, both know how to review and adopt a market, complete the handover, and grant or revoke market roles with the wallet that holds the authority.
+
+A market is deployed seeking a lender of record. Until an institution takes the role, the market names no admin, no issuer and no collateral agent, and it refuses every loan and every deposit. The lender of record is always the named counterparty and security taker. Only an account Trusset approved as a lender of record can take the role through the API.
+
+`trusset.lending.operators` covers the queue, the adoption and the roles. Every write takes the three call shapes of the [signing model](/sdk/lending/signing), except the nominations, which have no confirm leg.
+
+## Find markets to take
+
+`queued` returns your instance's queue: markets one of your wallets is nominated on (`NOMINATED`), markets offered beyond their candidates (`OPEN`), and markets your instance deployed that still wait (`OWN`). `canAccept` says whether the lender of record can take a row, and `acceptBlock` says why not.
+
+```typescript
+const queue = await trusset.lending.operators.queued()
+
+for (const row of queue.markets) {
+  console.log(row.marketAddress, row.origin, row.canAccept, row.acceptBlock?.code)
+}
+```
+
+The queue holds at most 25 rows and says so in `truncated`. A nomination made a moment ago can take up to 30 seconds to appear. `pending` lists every market the factory publishes as seeking a lender of record on your network, including other issuers' markets. It reports what the factory publishes, not what your instance may act on.
+
+```typescript
+const page = await trusset.lending.operators.pending({ limit: 25 })
+
+console.log(page.total, page.markets.map(m => m.marketAddress))
+```
+
+## Review a market before adopting it
+
+`queuedMarket` returns everything the lender of record underwrites: the instrument, the offering, the fee split, the asset data status and the published terms. `disagreements` lists every field where two sources state different values, each value with its provenance. The queue takes the market's contract address, because a market waiting for a lender of record has no record on the adopting instance yet.
+
+```typescript
+const details = await trusset.lending.operators.queuedMarket(marketAddress)
+
+console.log(details.termsStatus.status, details.assetData?.status, details.disagreements, details.market.generation)
+```
+
+The issuer's asset data is attested, not verified. Read the bundle and recompute its hash before the adoption approves it, as [Read the asset data](/sdk/lending/asset-data#read-the-asset-data) shows.
+
+## Take the lender-of-record role
+
+<Warning>
+  Adoption is final: no path returns the market to seeking a lender of record. Every address in the terms receives its role in the same transaction. `saleRecipient` is the fixed destination for seized collateral, and rotating it is not available through this API. Check each address before signing.
+</Warning>
+
+`accept` builds the factory transaction that takes the role, signs it with the nominated wallet and records the adoption. The terms name seven parties, declare how seized collateral is realized and approve the asset data version the lender of record reviewed. One wallet may hold several parties. The signing wallet also becomes the market's operator wallet, which receives the fixed operator share of repaid interest.
+
+Prepare first to read what the adoption will do before any wallet signs. With a signer, the confirmed adoption also carries the build's `warnings` and `requiredFollowUp`.
+
+```typescript
+const lenderAddress = await lender.getAddress()
+const record = await trusset.lending.assetData.get(marketAddress)
+const terms = {
+  admin: lenderAddress,
+  issuer: lenderAddress,
+  collateralAgent: lenderAddress,
+  saleRecipient: lenderAddress,
+  liquidationOperator: lenderAddress,
+  oracleOwner: lenderAddress,
+  priceSigner: lenderAddress,
+  realizationMode: 'ISSUER_REDEMPTION' as const,
+  assetDataHash: record.attested?.contentHash,
+}
+
+const prepared = await trusset.lending.operators.accept(marketAddress, terms)
+if (!('claimFlow' in prepared)) console.log(prepared.signer, prepared.warnings, prepared.requiredFollowUp, prepared.handoverNote)
+
+const adopted = await trusset.lending.operators.accept(marketAddress, terms, { signer: lender })
+if ('curator' in adopted) console.log(adopted.market.id, adopted.curator, adopted.requiredFollowUp, adopted.warnings, adopted.transactions)
+```
+
+The SDK compares the signer with the wallet the build names and refuses a mismatch before anything is signed. `adopted.market.id` is your instance's `marketId` for the market from here on. `requiredFollowUp: { action: 'SET_IDENTITY_GATES' }` means the deployer installed a borrower register that does not qualify as a professional gate. Replace it with [setIdentityGates](/sdk/lending/markets#set-the-identity-gates) right after adoption, because until then the API opens no loan on the market.
+
+`realizationMode` is `EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION`, limited by the price source. `assetDataHash` must equal the issuer's standing attestation, or the build is refused with `ASSET_DATA_STALE`. A market that carries an attestation cannot be adopted without one unless the terms send `acknowledgeAssetData: false`. The parameters and refusals are on [Accept Lender Role](/endpoints/operators/accept-lender-role).
+
+### Claim an open market
+
+A market can be open to any approved lender of record. When no wallet of your instance is nominated on it, `accept` with a signer first broadcasts a `commitCuratorClaim` announcing a hash of the terms. It returns `status: 'CLAIM_COMMITTED'` with a `claimSalt`. After `claimDelaySeconds`, the same terms with that `claimSalt` complete the adoption. A backend stores the salt and schedules the second call.
+
+```typescript
+const lenderAddress = await lender.getAddress()
+const record = await trusset.lending.assetData.get(marketAddress)
+const terms = {
+  admin: lenderAddress,
+  issuer: lenderAddress,
+  collateralAgent: lenderAddress,
+  saleRecipient: lenderAddress,
+  liquidationOperator: lenderAddress,
+  oracleOwner: lenderAddress,
+  priceSigner: lenderAddress,
+  realizationMode: 'AUCTION' as const,
+  assetDataHash: record.attested?.contentHash,
+}
+
+const first = await trusset.lending.operators.accept(marketAddress, terms, { signer: lender })
+
+if ('status' in first && first.status === 'CLAIM_COMMITTED') {
+  await new Promise(resolve => setTimeout(resolve, first.claimDelaySeconds * 1000))
+  const adopted = await trusset.lending.operators.accept(marketAddress, { ...terms, claimSalt: first.claimSalt }, { signer: lender })
+  console.log(adopted)
+}
+```
+
+The announcement lapses after `claimWindowSeconds`, and any change to the terms, including a newly attested asset data version, starts the wait again. A market with no borrower register cannot be claimed without a nomination.
+
+## Complete the handover
+
+On a market from the current factory, the oracle, the interest model and the insurance fund pass to their named owners inside the adoption, and `handover` reads `COMPLETE`. A market from an earlier generation needs each nominee to accept ownership itself. Until then the lender of record cannot set price signers, tune the rate model or upgrade either satellite.
+
+```typescript
+const handover = await trusset.lending.operators.handover(marketId)
+
+if (handover.readable && !handover.complete) {
+  for (const call of handover.acceptOwnershipCalldata) console.log(call.key, call.signer, call.to, call.data)
+}
+
+const operator = await trusset.lending.operators.operator(marketId)
+console.log(operator.status, operator.operator?.wallet, operator.fees)
+```
+
+Each `acceptOwnershipCalldata` entry names the wallet that signs it in `signer`. Broadcast it from that wallet. `readable: false` means the chain could not be read, not that nothing is pending. `operator` reconciles the deploying instance's record with the factory, which is how the deploying issuer learns its market was adopted.
+
+## Nominate candidates
+
+Nominating is the deploying side's act. The factory accepts a nomination only from the wallet that deployed the market, or from the factory owner. The SDK checks the signer against that wallet before signing. A nomination has no confirm leg: the factory records it, and `nominations` reads it back live.
+
+```typescript
+const sent = await trusset.lending.operators.nominate(marketId, walletAddress, { signer: deployer })
+const { candidates, curator, seekingCurator } = await trusset.lending.operators.nominations(marketId)
+
+console.log(sent.transactions, candidates, curator, seekingCurator)
+```
+
+`withdrawNomination` removes one candidate while the market still seeks a lender of record. A withdrawn wallet can still claim an open market like any claimant nobody nominated.
+
+```typescript
+const withdrawn = await trusset.lending.operators.withdrawNomination(marketId, walletAddress, { signer: deployer })
+```
+
+## Grant and revoke market roles
+
+<Warning>
+  Revoking `MARKET_ADMIN` or `ROUTER_ADMIN` from its last holder leaves that contract with no admin, and neither the contracts nor the API stop it. Nobody could then grant its roles, upgrade it, pause the market or write off a timed-out liquidation.
+</Warning>
+
+`setAccessRole` grants or revokes one of six roles across the market, its liquidation router and its oracle. The wallet that administers the role signs:
+
+| `role` | Contract | Signed by |
+|---|---|---|
+| `MARKET_ADMIN` | Market | Market admin |
+| `MARKET_ISSUER` | Market | Market admin |
+| `MARKET_LIQUIDATOR` | Market | Market admin |
+| `ROUTER_ADMIN` | Liquidation router | Router admin |
+| `ROUTER_OPERATOR` | Liquidation router | Router admin |
+| `ORACLE_SIGNER` | Price oracle | Oracle owner |
+
+`accessRole` reads whether an address holds a role. `granted: null` with `failed: true` means the chain could not answer, which is not a refusal.
+
+```typescript
+const role = await trusset.lending.operators.accessRole(marketId, walletAddress, 'ROUTER_OPERATOR')
+
+console.log(role.granted, role.failed)
+```
+
+When the address is already in the requested state, the build answers `unchanged: true` and nothing is signed. Before signing a change, the SDK reads whether the signer holds `MARKET_ADMIN` for a market role or `ROUTER_ADMIN` for a router role. For `ORACLE_SIGNER` it compares the signer with the oracle owner. A signer without the authority is refused before anything is sent.
+
+```typescript
+const prepared = await trusset.lending.operators.setAccessRole(marketId, { address: walletAddress, action: 'grant', role: 'ROUTER_OPERATOR' })
+
+if (!('unchanged' in prepared)) console.log(prepared.requiredSigner, prepared.description)
+
+const change = await trusset.lending.operators.setAccessRole(marketId, { address: walletAddress, action: 'grant', role: 'ROUTER_OPERATOR' }, { signer: admin })
+console.log(change.unchanged, change.transactions)
+```
+
+`setLiquidatorRole` is the same change for `MARKET_LIQUIDATOR` alone. Revoking it from every holder leaves the market with no liquidator: loans still become liquidatable, but no liquidation can start.
+
+```typescript
+const liquidatorRole = await trusset.lending.operators.setLiquidatorRole(marketId, { address: walletAddress, action: 'grant' }, { signer: admin })
+```
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `queued` | [List Queued Markets](/endpoints/operators/list-queued-markets) |
+| `pending` | [List Pending Markets](/endpoints/operators/list-pending-markets) |
+| `queuedMarket` | [Get Queued Market](/endpoints/operators/get-queued-market) |
+| `accept` | [Accept Lender Role](/endpoints/operators/accept-lender-role), [Confirm Lender Role](/endpoints/operators/confirm-lender-role) |
+| `handover` | [Get Handover](/endpoints/operators/get-handover) |
+| `operator` | [Get Operator](/endpoints/operators/get-operator) |
+| `nominations` | [Get Nominations](/endpoints/lending/get-nominations) |
+| `nominate` | [Nominate Candidate](/endpoints/lending/nominate-candidate) |
+| `withdrawNomination` | [Withdraw Nomination](/endpoints/lending/withdraw-nomination) |
+| `accessRole` | [Get Access Role](/endpoints/operators/get-access-role) |
+| `setAccessRole` | [Set Access Role](/endpoints/operators/set-access-role) |
+| `setLiquidatorRole` | [Set Liquidator Role](/endpoints/operators/set-liquidator-role) |

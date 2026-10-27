@@ -1,0 +1,183 @@
+---
+title: "Liquidation Bots"
+description: "Deploy, connect, fund and stop the liquidation contracts an operator owns"
+icon: "robot"
+---
+
+This page is for the operator who runs liquidation bots for its markets. After reading it you will know how to deploy a bot from the wallet that will own it, connect it to a market, fund its gas refunds, and stop it.
+
+A liquidation bot is a small contract you deploy and own. It holds `LIQUIDATOR_ROLE` on the markets connected to it, so any caller can trigger a liquidation through it and no wallet has to hold the role itself. The wallet that deploys a bot owns it and signs every change to it. Trusset holds no key to a bot and never calls one.
+
+The SDK builds no call to the bot's own `liquidate`, because the API builds none. A keeper you run, or any third party, encodes that call from the bot contract's ABI. The bot forwards it to the market, which checks the role, the price and the loan, and reverts otherwise.
+
+Every write on this page follows the [signing model](/sdk/lending/signing): without options it returns the unsigned transaction, with `{ signer }` it signs and confirms, and with `{ txHash }` it confirms one you broadcast. Any ethers v5 `Signer` works, self-custody or regulated custodian, with no preference.
+
+## Deploy a bot
+
+<Warning>
+  The API records a new bot every time it confirms the same hash, so a repeated confirm leaves two records for one contract. The SDK therefore never repeats the deployment confirm after a timeout or a `5xx`. It asks again only after `TX_NOT_FOUND`, which records nothing. When the confirm fails, the SDK throws `ConfirmationError` with the hash. Look for a bot with that `deployTxHash` in `bots.list()` before you confirm again with `{ txHash }`.
+</Warning>
+
+The owner is the wallet that signs the deployment. With `{ signer }`, the SDK fills `signerAddress` from the signer and refuses a different one, so the bot is owned by the wallet you pass.
+
+```typescript
+const deployed = await trusset.lending.bots.deploy({ label: 'Primary keeper' }, { signer: botOwner })
+
+console.log(deployed.bot.id, deployed.bot.botAddress, deployed.bot.ownerWallet)
+```
+
+The result carries the new record in `bot`, the confirmed `txHash`, and `transactions`. The API takes the bot's address and owner from the factory's `ShimDeployed` event, never from the request. A `label` is at most 64 characters.
+
+Only the owner can enable markets on the bot, pause it, set its refund policy and withdraw its float. The bot is not upgradeable. Replacing one means deploying another and moving the market roles to it.
+
+## Connect a bot to a market
+
+A connection has two halves held by two parties. The bot side is `setMarketEnabled` on the bot, signed by the bot's owner. The market side grants the bot `LIQUIDATOR_ROLE` on the market, signed by the market admin. The API reads both halves and returns only the steps not already in the requested state, the bot step first.
+
+When one wallet is both the bot's owner and the market admin, pass it as the signer:
+
+```typescript
+const connected = await trusset.lending.bots.connect(botId, marketId, { signer: admin })
+
+if ('alreadyInState' in connected) console.log('already connected')
+else console.log(connected.transactions.map(t => t.functionName))
+```
+
+Before it signs anything, the SDK checks the signer against each step's `authority`. A `BOT_OWNER` step needs the bot's `ownerWallet`. A `MARKET_ADMIN` step needs a wallet holding `MARKET_ADMIN` on the market, which the SDK reads from the API. A wrong wallet throws a `ValidationError`, and a role that cannot be read throws `ROLE_UNREADABLE` with status 503. In both cases nothing was signed.
+
+When the two halves belong to two wallets, prepare without a signer and have each wallet sign the step its `authority` names:
+
+```typescript
+const prepared = await trusset.lending.bots.connect(botId, marketId)
+
+if ('steps' in prepared) {
+  let lastHash = ''
+  for (const step of prepared.steps) {
+    const wallet = step.authority === 'BOT_OWNER' ? botOwner : admin
+    const tx = await wallet.sendTransaction(step.transaction)
+    await tx.wait(1)
+    lastHash = tx.hash
+  }
+  await trusset.lending.bots.connect(botId, marketId, { txHash: lastHash })
+}
+```
+
+The two steps are independent transactions, and either half alone stops the bot acting on the market. Confirming is optional. The connection is read from the chain every time, and a confirm only clears the cached read so `bots.get` shows the change at once.
+
+A market still looking for its lender of record has no market admin, so its market step cannot succeed. The lender of record can grant the role instead while accepting the market, by naming the bot as `liquidator`. See [Operators](/sdk/lending/operators).
+
+`disconnect` takes the same arguments and returns the reverse steps: `setMarketEnabled(market, false)` and `revokeRole`.
+
+```typescript
+await trusset.lending.bots.disconnect(botId, marketId, { signer: botOwner })
+```
+
+The bot step alone is enough to stop the bot on that market, and it is the one the owner can take without the market admin. With a signer, the SDK signs the whole plan, so it refuses when the plan also holds a `MARKET_ADMIN` step the owner cannot sign. Prepare without a signer then, and have the owner sign the bot step.
+
+## Fund the refunds
+
+<Warning>
+  Coin sent to a bot leaves it in only two ways: as refunds to callers within the refund policy, and through the owner's withdrawal. If the owner wallet is lost, the float is stranded. The factory keeps no role on the bot and Trusset holds no key to it.
+</Warning>
+
+After a successful liquidation, the bot refunds the caller's gas from its float of the network's native coin. A reverted liquidation pays nothing. Any wallet can fund a bot.
+
+```typescript
+await trusset.lending.bots.fund(botId, '0.25', { signer })
+```
+
+The amount is a decimal string in whole units of the native coin, such as ETH on Ethereum, with at most 18 decimal places. Unlike other writes, the transaction carries the amount as `value` and no calldata. The SDK sends `value` exactly as the API returned it.
+
+## Set the refund policy
+
+<Warning>
+  Refunds pay out the float to whoever triggers a successful liquidation, up to `maxRefundPerCallerPerBlockWei` per caller per block. Each calling address has its own cap, so several callers in one block can each draw it. A `maxRefundGasPriceWei` of `"0"` sets no gas price ceiling.
+</Warning>
+
+```typescript
+await trusset.lending.bots.setRefundPolicy(botId, {
+  maxRefundPerCallerPerBlockWei: '2000000000000000',
+  maxRefundGasPriceWei: '50000000000',
+}, { signer: botOwner })
+```
+
+Both limits are integer strings in wei, and the SDK requires both. A per-caller cap of `"0"` disables refunds, and callers then pay their own gas.
+
+## Pause and resume a bot
+
+A paused bot refuses every trigger on every market. The markets enabled on it stay enabled, so `resume` puts it back to work on the same markets.
+
+```typescript
+await trusset.lending.bots.pause(botId, { signer: botOwner })
+
+await trusset.lending.bots.resume(botId, { signer: botOwner })
+```
+
+Only the owner can sign either one. The same transaction from any other wallet reverts.
+
+## Withdraw the float
+
+<Warning>
+  The withdrawal amount is settled when the transaction executes. `"0"`, an omitted `amountWei`, or an amount above the balance at that moment pays out the whole balance.
+</Warning>
+
+```typescript
+const prepared = await trusset.lending.bots.withdraw(botId, { amountWei: '100000000000000000', to: walletAddress })
+console.log(prepared.balance, prepared.amountWei, prepared.withdrawsAll, prepared.note)
+
+await trusset.lending.bots.withdraw(botId, { amountWei: '100000000000000000', to: walletAddress }, { signer: botOwner })
+```
+
+Prepare first when you want to see the payout: the response discloses the balance and what the transaction pays at that balance. `to` defaults to the bot's recorded owner. A bot whose balance is zero is refused with `NOTHING_TO_WITHDRAW`, because the contract would revert.
+
+## Label or archive a bot
+
+```typescript
+await trusset.lending.bots.update(botId, { label: 'Keeper, EU markets' })
+
+await trusset.lending.bots.update(botId, { archived: true })
+```
+
+<Warning>
+  Archiving only hides the bot from the default `bots.list()`. The contract stays deployed with its float, its market roles and its enabled markets, and any caller can still liquidate through it. To stop it, pause it or disconnect it.
+</Warning>
+
+Nothing goes on chain. A `label` of `null` clears it. A request that changes nothing, such as `archived` at its current value, is refused with `VALIDATION_ERROR`.
+
+## Read bots
+
+`list` returns the instance's bots, newest first, each with its state read from the chain. It also returns the instance's deployed markets, which are the markets a bot can be connected to. Archived bots are left out unless you pass `includeArchived: true`.
+
+```typescript
+const { bots, markets } = await trusset.lending.bots.list()
+
+const bot = await trusset.lending.bots.get(botId)
+if (bot.onChain && bot.onChain.isOnChain) {
+  for (const c of bot.onChain.connections) console.log(c.marketId, c.connected, c.enabled, c.roleGranted)
+}
+```
+
+`onChain` carries the owner, the `paused` switch, the refund policy, the float in `balance`, and one entry per market in `connections`. A market counts as `connected` only when both halves hold. A read that failed is marked `readFailed: true` and is never reported as a disconnected market. Chain reads are cached for up to 15 seconds.
+
+`transactions` returns the bot's activity read from its own contract events, newest first, with the deployment as the last entry:
+
+```typescript
+const { transactions } = await trusset.lending.bots.transactions(botId, { limit: 100 })
+
+for (const t of transactions) console.log(t.txType, t.amount, t.txHash)
+```
+
+`limit` runs from 1 to 200 and defaults to 50. There is no offset, so the newest 200 events are the furthest back it reaches. An event appears once its block is six blocks deep.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `bots.list` | [List Liquidation Bots](/endpoints/lending/list-bots) |
+| `bots.get` | [Get Liquidation Bot](/endpoints/lending/get-bot) |
+| `bots.transactions` | [List Bot Transactions](/endpoints/lending/list-bot-transactions) |
+| `bots.deploy` | [Deploy Liquidation Bot](/endpoints/lending/deploy-bot), then [Confirm Bot Deployment](/endpoints/lending/confirm-bot-deployment) |
+| `bots.connect`, `bots.disconnect` | [Connect Bot to Market](/endpoints/lending/connect-bot), then [Confirm Bot Transaction](/endpoints/lending/confirm-bot-transaction) |
+| `bots.pause`, `bots.resume`, `bots.setRefundPolicy`, `bots.withdraw` | [Bot Owner Action](/endpoints/lending/bot-action), then [Confirm Bot Transaction](/endpoints/lending/confirm-bot-transaction) |
+| `bots.fund` | [Fund Bot](/endpoints/lending/fund-bot), then [Confirm Bot Transaction](/endpoints/lending/confirm-bot-transaction) |
+| `bots.update` | [Update Bot](/endpoints/lending/update-bot) |

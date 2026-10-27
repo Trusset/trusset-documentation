@@ -8,7 +8,7 @@ This page is for the engineer migrating an existing customer database into Truss
 
 The `sync` sub-module handles bulk migration of customer data between your existing systems and Trusset. It is designed for institutions with established customer databases that need to onboard thousands of records without manual entry.
 
-Records are mapped by `externalId` - your system's unique customer identifier. This key is used for deduplication and conflict resolution across syncs.
+Records are mapped by `externalId`, your system's unique customer identifier. The SDK uses it for deduplication and conflict resolution across syncs.
 
 ## Import records
 
@@ -57,12 +57,15 @@ The SDK processes records in configurable batches to avoid overloading the API. 
 
 ### Verify on-chain during import
 
-Set `verifyOnChain: true` to automatically batch-verify imported records that have both a `walletAddress` and a `country`. This runs after the database import completes and requires a verified [registered wallet](/protocol/infrastructure/custody) on the instance. Each record's `kycHash` (the root hash from the [KYC proof tool](/sdk/customers/kyc-proofs)) is passed through to the on-chain verification, so proof-backed claims can be added later.
+Set `verifyOnChain: true` to batch-verify imported records on chain once the database import completes. It applies to records that were created or updated, not skipped, and that carry both a `walletAddress` and a `country`. Each record's `kycHash`, the root hash from the [KYC proof tool](/sdk/customers/kyc-proofs), goes into the on-chain verification, so proof-backed claims can be added later.
+
+The verification transactions are signed by your registered issuer wallet, so `verifyOnChain` requires `signer`, any ethers v5 `Signer` for that wallet. The import throws a `ValidationError` before touching any record when `signer` is missing.
 
 ```typescript
 const result = await trusset.customers.sync.importRecords(records, {
   onConflict: 'update',
   verifyOnChain: true,
+  signer,
   verificationDefaults: {
     softExpiryDays: 365,
     hardExpiryDays: 730,
@@ -70,7 +73,7 @@ const result = await trusset.customers.sync.importRecords(records, {
 })
 ```
 
-On-chain verification failures do not roll back the database import. Failed verifications appear in `result.errors` with code `VERIFY_FAILED`.
+On-chain verification failures do not roll back the database import. Entries the API rejects appear in `result.errors` with the API's code. When a whole verification batch fails, each of its entries appears with code `VERIFY_FAILED`. For these verification errors, `externalId` holds the wallet address of the entry rather than your customer ID.
 
 <Expandable title="SyncOptions reference">
   <ParamField body="batchSize" type="number" default={50}>
@@ -80,7 +83,13 @@ On-chain verification failures do not roll back the database import. Failed veri
     `update` or `skip`. Determines behavior when a customer with the same `externalId` already exists.
   </ParamField>
   <ParamField body="verifyOnChain" type="boolean" default={false}>
-    If `true`, batch-verifies addresses on the IdentityRegistry after import. Only applies to records with both `walletAddress` and `country`.
+    If `true`, batch-verifies addresses on the IdentityRegistry after import, in batches of up to 500. Only applies to created or updated records with both `walletAddress` and `country`. Requires `signer`.
+  </ParamField>
+  <ParamField body="signer" type="Signer">
+    An ethers v5 `Signer` for the registered issuer wallet. Required when `verifyOnChain` is `true`. The SDK signs with it and never asks for the key.
+  </ParamField>
+  <ParamField body="confirmations" type="number" default={1}>
+    Confirmations to wait for per verification batch before confirming it with Trusset. Range: 1-12.
   </ParamField>
   <ParamField body="verificationDefaults" type="object">
     Default `softExpiryDays` and `hardExpiryDays` for on-chain verification.
@@ -100,7 +109,7 @@ const records = await trusset.customers.sync.exportRecords({
 })
 ```
 
-The method paginates internally - it fetches all records regardless of total count. For very large datasets (50k+ customers), consider using the [list endpoint](/endpoints/customers/list) directly with pagination for more control.
+The method paginates internally and fetches all records regardless of total count. For very large datasets (50k+ customers), consider using the [list endpoint](/endpoints/customers/list) directly with pagination for more control.
 
 ## SyncRecord schema
 
@@ -135,7 +144,7 @@ Import errors are collected per-record rather than failing the entire batch. The
 const result = await trusset.customers.sync.importRecords(records)
 
 for (const err of result.errors) {
-  console.error(`Failed: ${err.externalId} - ${err.code}: ${err.message}`)
+  console.error(`Failed ${err.externalId}: ${err.code}: ${err.message}`)
 }
 ```
 
@@ -145,5 +154,5 @@ Common error codes:
 |---|---|
 | `INVALID_ADDRESS` | Wallet address failed checksum validation |
 | `CUSTOMER_EXISTS` | Duplicate wallet address (different externalId) |
-| `VERIFY_FAILED` | On-chain batch verification failed for this entry |
-| `UNKNOWN` | Unexpected server error - check `message` for details |
+| `VERIFY_FAILED` | On-chain batch verification failed for this entry; `externalId` holds its wallet address |
+| `UNKNOWN` | Unexpected server error. Check `message` for details |

@@ -1,0 +1,282 @@
+---
+title: "Liquidations"
+description: "Liquidate loans, sell and settle seized collateral, and write off what never sells"
+icon: "gavel"
+---
+
+This page is for the engineer who runs liquidations for a lender of record. After reading it you will know how to find and liquidate a loan, how seized collateral is sold and settled, and what happens to collateral that never sells.
+
+A loan qualifies for liquidation on either of two triggers. Its health factor is below `1.0`, or its term has run past its effective due date plus the grace period, however healthy its collateral is. Where the seized collateral goes depends on the market:
+
+| Market setting | Seized collateral goes to | Realized by |
+|---|---|---|
+| Dutch auctions off, router in two-step mode (the default) | The market's liquidation router | The router operator, who sells it through their own channel and settles the proceeds |
+| Dutch auctions off, router in atomic mode | The sale recipient, inside the liquidation transaction | The sale recipient's standing bid |
+| Dutch auctions on | The market's auction venue | Verified bidders. See [Auctions](/sdk/lending/auctions) |
+
+There is no auto-sell for external securities. In two-step mode, collateral that reaches the router stays there until the router operator sells it and settles the proceeds.
+
+## Who signs each step
+
+| Step | Signs | Role it needs |
+|---|---|---|
+| `liquidate` | The liquidator | `LIQUIDATOR_ROLE` on the market, or a connected liquidation bot |
+| `setAtomicMode` | The router administrator | `DEFAULT_ADMIN_ROLE` on the router |
+| `setSaleBid` | The sale recipient | None. The router accepts the bid only from the sale recipient |
+| `sell`, `withdrawCollateralForSale`, `reportPartialSale`, `settle` | The router operator | `OPERATOR_ROLE` on the router |
+| `close`, `reopen` | The router administrator | `DEFAULT_ADMIN_ROLE` on the router |
+| `handleTimeout` | The market admin | `DEFAULT_ADMIN_ROLE` on the market |
+
+Any wallet that holds the role works, self-custody or regulated custodian, no preference. One limitation applies to the settlement routes. `withdrawCollateralForSale`, `reportPartialSale`, `settle`, `close`, `reopen` and `handleTimeout` take no signer address, so the API checks the role of your instance's primary verified wallet, not of the signer. Sign them with that wallet. A market whose router operator is another wallet settles outside this API.
+
+The record methods take the router's `liquidationId` together with `marketId`. The SDK requires `marketId`, because every market runs its own router and numbers its records from `1`.
+
+## Check that liquidation can run
+
+A market can accept loans while its liquidation path is incomplete, which leaves bad debt with no remedy. Read the readiness before relying on liquidation, naming the wallet you intend to liquidate with.
+
+```typescript
+const readiness = await trusset.lending.liquidations.config(marketId, { signerAddress: walletAddress })
+console.log(readiness.canSeizeNow, readiness.canRealizeNow, readiness.blockedReason)
+
+const role = await trusset.lending.operators.accessRole(marketId, walletAddress, 'MARKET_LIQUIDATOR')
+console.log(role.granted)
+```
+
+`seizureConfigured` covers everything up to moving collateral to the router, or to the auction venue when Dutch auctions are on. `isConfigured` adds the second hop: the router operator holds its role, and the collateral can leave the router for the sale recipient. `unverifiedSections` lists the gates that could not be read, which are unknowns rather than passes.
+
+<Warning>
+  `routerTokenEligible` reads `true` when the collateral token exposes no identity registry and no allow-list, because eligibility cannot be evaluated without one. That is an unknown, not a pass, and `routerTokenRequirement` reads `none_required`. Confirm the router's compliance status with the register provider for such a token.
+</Warning>
+
+## Find liquidatable loans
+
+```typescript
+const scan = await trusset.lending.liquidations.liquidatable(marketId)
+for (const loan of scan.liquidatableLoans) {
+  console.log(loan.loanId, loan.trigger, loan.healthFactor)
+}
+```
+
+<Warning>
+  A failed chain read is not reported as an error. When the market's loan counter cannot be read, the response carries `totalActiveLoans: 0` and empty lists, and a loan whose own read fails is left out. An empty `liquidatableLoans` is therefore not proof that the book is healthy.
+</Warning>
+
+Health factors use the oracle's stored price. When that price is stale, the figures are stale too, and `liquidate` refuses every loan with `PRICE_STALE`. Push a current price through the [oracle](/sdk/lending/oracle) first. A loan with an open auction appears under `auctionedLoans` instead, and `liquidate` refuses it until the auction clears or is settled.
+
+## Liquidate a loan
+
+```typescript
+const result = await trusset.lending.liquidations.liquidate(marketId, loanId, {}, { signer: liquidator })
+console.log(result.liquidationId, result.collateralSeized, result.debtRepaid, result.status)
+```
+
+The API does not block the transaction on the liquidator's role, so a wallet without `LIQUIDATOR_ROLE` fails at the contract. Usually the signer's gas estimate fails first and nothing is sent. Otherwise the transaction reverts on chain, and the SDK throws a [ConfirmationError](/sdk/lending/errors) carrying its hash. The SDK fills `signerAddress` from the signer, so the prepared `readiness` answers for that wallet. On a collateral token whose ERC-1400 granularity is above one base unit, that address also lets the API simulate the seizure first.
+
+On the health trigger one call does not close the whole loan. The debt it discharges is capped by the market's `closeFactor`, and the collateral seized for it is marked up by `liquidationPenalty`, so a deeply underwater loan needs several liquidations. On the term trigger the whole debt is realized in one call, marked up by the loan's term penalty. When the collateral runs out before the debt, all of it is seized and the rest is written off, against the insurance fund first and the pool second.
+
+To liquidate on a fresh price without a separate oracle update, pass `signedPrice`: the `{ price, timestamp, validUntil, signature }` the price signer produced from the [oracle's typed data](/sdk/lending/oracle). The API checks it against the oracle before building and refuses a stale, unauthorized or deviating quote.
+
+With Dutch auctions on, the result carries `auctionId`, and `liquidationId` is the market's own record ID rather than a router ID. Continue on [Auctions](/sdk/lending/auctions).
+
+## Settle a two-step liquidation
+
+<Warning>
+  Once collateral leaves the router, the record can only settle with sale proceeds reported against it. If the sale realizes nothing, the router refuses a settlement at zero, and the market's record waits for the 7-day write-off. Withdraw only what a sale is arranged for.
+</Warning>
+
+The destination is not yours to choose. The lender of record fixed the sale recipient when it adopted the market, and the router call carries no recipient. `recipientAddress` may be left out or set to exactly that wallet, and any other address is refused with `RECIPIENT_FIXED`.
+
+Withdraw the collateral, in tranches if sales are arranged one by one. Amounts are decimal strings in the collateral token's units.
+
+```typescript
+const withdrawn = await trusset.lending.liquidations.withdrawCollateralForSale(liquidationId, { marketId, amount: '400' }, { signer: operator })
+console.log(withdrawn.txHash)
+```
+
+The record's `status` stays `PENDING` through every withdrawal, so track progress through `onChainData.collateralRemaining` on `pending`. If the router administrator set a sale rate limit for the token, a tranche above it reverts.
+
+Settle once the sale is done. `usdcProceeds` is the final payment in the borrow asset, and the plan approves the router to pull it from the signer before `settleLiquidation`, so the signing wallet must hold the proceeds.
+
+```typescript
+const settled = await trusset.lending.liquidations.settle(liquidationId, { marketId, usdcProceeds: '600' }, { signer: operator })
+console.log(settled.finalLegProceeds, settled.settlement?.shortfall, settled.surplus)
+```
+
+<Warning>
+  A settlement closes the router's record for good, and collateral still on the router afterwards can no longer be withdrawn. The API therefore refuses to settle while any collateral is on the router, with `COLLATERAL_UNSOLD`.
+</Warning>
+
+When a position sells down in tranches, bank each tranche's proceeds with `reportPartialSale`, then settle at zero. The router forwards everything it already holds. `collateralSold` is recorded for the audit trail and does not move collateral; only `withdrawCollateralForSale` does.
+
+```typescript
+await trusset.lending.liquidations.reportPartialSale(liquidationId, { marketId, collateralSold: '150', usdcProceeds: '220' }, { signer: operator })
+await trusset.lending.liquidations.settle(liquidationId, { marketId, usdcProceeds: '0' }, { signer: operator })
+```
+
+A zero settlement is refused with `SALE_NOT_REPORTED` when all collateral left the router and no sale was reported, and with `NO_PROCEEDS_COLLECTED` when nothing was collected at all.
+
+The market keeps at most what the position owed at seizure plus the penalty. Anything above that is surplus and goes to the borrower's wallet. When the settlement token (stablecoin) refuses that transfer, the market escrows the surplus for the borrower to claim through [loans](/sdk/lending/loans). A shortfall draws on the [insurance fund](/sdk/lending/insurance) in the same transaction, and only principal neither the sale nor the fund covers is the pool's loss, reported as `settlement.shortfall`.
+
+## Sell atomically to the sale recipient
+
+The atomic sale sells seized collateral to the sale recipient at its standing bid and settles the record in the same transaction. It is offered only on a market priced from a live market price (`MARKET`) whose lender of record declared `EXCHANGE_SALE` as its realization mode. Every other market is refused with `ATOMIC_SALE_UNAVAILABLE` and settles two-step.
+
+<Warning>
+  In atomic mode a liquidation succeeds only while the sale recipient can buy. Without a live bid, enough allowance and balance, or a fresh price, every liquidation reverts and loans stay liquidatable, including loans the pool is losing money on. Read the state before switching, and switch back to two-step when the sale recipient stops bidding.
+</Warning>
+
+```typescript
+const atomic = await trusset.lending.liquidations.atomicSale(marketId)
+console.log(atomic.available, atomic.saleBasis.reason, atomic.buyerAvailable, atomic.reasonCode)
+```
+
+The sale recipient can also be the lender of record, the collateral agent, the liquidation operator or the controller. `saleRecipientLenderSide` then names those roles. Whether such a sale at the standing bid counts as a free-hand sale at the current price is open with counsel. Until counsel confirms, keep the bid at 100 percent or above, or name an independent sale recipient.
+
+### Post the standing bid
+
+The sale recipient posts a bid as basis points of the oracle price, with an expiry. The money stays in its wallet: the router takes the payment from its allowance only when a sale executes. Send `allowance` to add the approve step, and keep both the allowance and the expiry short.
+
+```typescript
+const validUntil = Math.floor(Date.now() / 1000) + 3600
+const bid = await trusset.lending.liquidations.setSaleBid(marketId, { priceFactorBps: 10000, validUntil, allowance: '250000' }, { signer })
+console.log(bid.currentBid?.live, bid.allowance?.amount)
+```
+
+<Warning>
+  A bid below 100 percent costs the borrower a larger seizure. The market seizes enough collateral at the bid price to cover the debt and the liquidation charge. The pool is made whole either way, and the borrower loses the difference.
+</Warning>
+
+The SDK accepts `priceFactorBps` of `0`, or from `9500` to `20000`, and requires `validUntil` in Unix seconds for any bid above `0`. Withdraw the bid with `priceFactorBps: 0`, and send `allowance: '0'` with it to revoke the approval too. The SDK refuses a withdrawal that would raise the allowance at the same time, because that plan ends on an approval the API cannot confirm.
+
+### Switch the router to atomic mode
+
+The router administrator switches the mode: `1` for atomic, `0` for two-step. When the router already runs the requested mode, nothing is signed and the result carries `alreadySet: true`.
+
+```typescript
+const switched = await trusset.lending.liquidations.setAtomicMode(marketId, { mode: 1 }, { signer: admin })
+if ('alreadySet' in switched) console.log(`The router already runs ${switched.modeName}`)
+else console.log(`The router now runs ${switched.currentModeName}`)
+```
+
+Read `warnings` on the prepared transaction before you sign. `DUTCH_AUCTIONS_ON` means liquidations keep opening auctions, and `ATOMIC_BUYER_UNAVAILABLE` means every atomic liquidation would revert now. Switching back to two-step is never refused on the market's pricing.
+
+### Sell a record already on the router
+
+`sell` runs the atomic sale for a record that is already on the router: one seized in two-step mode, or the remainder of an expired auction. The router operator signs, and the SDK fills `signerAddress` from the signer so the API checks that wallet's role.
+
+```typescript
+const sold = await trusset.lending.liquidations.sell(liquidationId, { marketId }, { signer: operator })
+console.log(sold.payment, sold.buyer, sold.surplus.returned, sold.settlement.shortfall)
+```
+
+The router sells only a whole record. Once any of its collateral left the router, the record is refused with `COLLATERAL_ALREADY_OUT_FOR_SALE` and settles two-step.
+
+## Write off a liquidation that never settles
+
+<Warning>
+  Write-off does not touch the liquidation router. Whatever collateral the router still holds stays there, and this API refuses every further action on a written-off record. Withdraw that collateral for sale before writing off, otherwise it is stranded as far as this API is concerned.
+</Warning>
+
+`handleTimeout` is a loss-recognition step, not a recovery step. The market closes its pending record, asks the insurance fund for the whole claim, and deducts what the fund could not cover from pool liquidity. The market admin signs.
+
+The 7-day window starts at the seizure. Before it has elapsed the API refuses with `LIQUIDATION_NOT_TIMED_OUT`, and the error's `data.eligibleAt` names the moment after which a retry succeeds.
+
+```typescript
+import { TrussetError } from '@trusset/sdk'
+
+try {
+  const writtenOff = await trusset.lending.liquidations.handleTimeout(liquidationId, { marketId }, { signer: admin })
+  console.log(writtenOff.marketLiquidationId, writtenOff.reserve)
+} catch (err) {
+  if (!(err instanceof TrussetError) || err.code !== 'LIQUIDATION_NOT_TIMED_OUT') throw err
+  console.log(`Eligible for write-off after ${err.data?.eligibleAt}`)
+}
+```
+
+On chain the router's record stays settleable by its operator, so late proceeds can still reach the market. The market applies them to the pool's loss first and then to what the insurance fund advanced.
+
+## Recover collateral a settlement left behind
+
+<Warning>
+  A settlement that leaves collateral on the router strands it: it can no longer be withdrawn. Reopening is the only way back, and the router allows it only while the record collected nothing. A record whose settlement routed any cash to the market can never be reopened.
+</Warning>
+
+This API refuses to settle while collateral is on the router, so such records come from settlements made directly against the router. Find them on `settled`, where they read `collateralStranded` and `reopenable`. The router administrator reopens the record, and the ordinary legs apply to it again.
+
+```typescript
+const { settledLiquidations } = await trusset.lending.liquidations.settled(marketId, { limit: 50 })
+const stranded = settledLiquidations.filter(row => row.reopenable === true)
+
+for (const row of stranded) {
+  const reopened = await trusset.lending.liquidations.reopen(row.liquidationId, { marketId }, { signer: admin })
+  console.log(reopened.liquidationId, reopened.status)
+}
+```
+
+`close` is the opposite case. It releases a router record that collected nothing and holds no collateral once the market has settled or written off its own record. It moves no collateral and no cash and books no loss, despite the router function's name, `writeOffLiquidation`. The router administrator signs.
+
+```typescript
+const closed = await trusset.lending.liquidations.close(liquidationId, { marketId }, { signer: admin })
+console.log(closed.status)
+```
+
+## Read liquidation records
+
+```typescript
+const pending = await trusset.lending.liquidations.pending(marketId)
+for (const row of pending.pendingLiquidations) {
+  console.log(row.liquidationId, row.onChainData?.collateralRemaining, row.onChainData?.proceedsCollected)
+}
+
+const stats = await trusset.lending.liquidations.stats(marketId)
+const router = await trusset.lending.liquidations.routerStats(marketId)
+console.log(stats.database.pending, stats.onChain?.pendingLiquidationDebt, router.totalReceived, router.totalSettled)
+```
+
+`pending` reconciles against the chain before it reads, so a liquidation triggered outside this API appears once its collateral reaches the router. It returns at most the 100 newest open records, and a failed read of the records answers an empty list, so an empty list is not a verdict. `onChainData` is the authoritative view of what the router holds: treat `onChainData.timestamp` of `0` as not found.
+
+`settled` pages newest first, 50 records by default and at most 200. `stats` puts the contract counters beside Trusset's record counts. Its `database.stuck` is always `0` on these markets and carries no signal, so find a stalled settlement as a long-lived pending record instead. `routerStats` reads one market's router: a router counts as quiet only while `totalSettled` equals `totalReceived`.
+
+## When a confirm fails
+
+With `{ signer }`, the SDK confirms each step after it mines and waits out `TX_NOT_FOUND` at 3, 6 and 12 seconds. When the confirm still fails, it throws a `ConfirmationError` with the hash, so the transaction can be confirmed again with `{ txHash }` instead of being sent twice.
+
+The confirms of `withdrawCollateralForSale`, `reportPartialSale` and `handleTimeout` are sent once and never retried on a timeout or a 503. The API refuses those confirms once a record reads settled or written off, and its chain reconciliation can get there first. Read the record before confirming again.
+
+```typescript
+import { ConfirmationError } from '@trusset/sdk'
+
+try {
+  await trusset.lending.liquidations.withdrawCollateralForSale(liquidationId, { marketId, amount: '400' }, { signer: operator })
+} catch (err) {
+  if (!(err instanceof ConfirmationError) || !err.txHash) throw err
+  const { pendingLiquidations } = await trusset.lending.liquidations.pending(marketId)
+  const record = pendingLiquidations.find(row => row.liquidationId === liquidationId)
+  if (record) await trusset.lending.liquidations.withdrawCollateralForSale(liquidationId, { marketId, amount: '400' }, { txHash: err.txHash })
+}
+```
+
+A write-off whose confirm answers `ALREADY_SETTLED` after the transaction mined has been recorded by the reconciliation. `settled` shows it as written off. See [Lending errors](/sdk/lending/errors) for the full list of codes.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `liquidations.config` | [Get Liquidation Config](/endpoints/lending/get-liquidation-config) |
+| `liquidations.liquidatable` | [Get Liquidatable Loans](/endpoints/lending/get-liquidatable-loans) |
+| `liquidations.pending` | [Get Pending Liquidations](/endpoints/lending/get-pending-liquidations) |
+| `liquidations.settled` | [List Settled Liquidations](/endpoints/lending/list-settled-liquidations) |
+| `liquidations.stats` | [Get Liquidation Stats](/endpoints/lending/get-liquidation-stats) |
+| `liquidations.routerStats` | [Get Router Stats](/endpoints/lending/get-router-stats) |
+| `liquidations.atomicSale` | [Get Atomic Sale](/endpoints/lending/get-atomic-sale) |
+| `liquidations.setAtomicMode` | [Set Atomic Mode](/endpoints/lending/set-atomic-mode) |
+| `liquidations.setSaleBid` | [Set Sale Bid](/endpoints/lending/set-sale-bid) |
+| `liquidations.liquidate` | [Liquidate Loan](/endpoints/lending/liquidate) |
+| `liquidations.sell` | [Sell Pending Liquidation](/endpoints/lending/sell-pending-liquidation) |
+| `liquidations.withdrawCollateralForSale` | [Withdraw Collateral for Sale](/endpoints/lending/withdraw-collateral-for-sale) |
+| `liquidations.reportPartialSale` | [Report Partial Sale](/endpoints/lending/report-partial-sale) |
+| `liquidations.settle` | [Settle Liquidation](/endpoints/lending/settle-liquidation) |
+| `liquidations.close` | [Close Liquidation](/endpoints/lending/close-liquidation) |
+| `liquidations.handleTimeout` | [Handle Liquidation Timeout](/endpoints/lending/handle-timeout) |
+| `liquidations.reopen` | [Reopen Liquidation](/endpoints/lending/reopen-liquidation) |

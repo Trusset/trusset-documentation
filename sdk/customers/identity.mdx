@@ -4,33 +4,76 @@ description: "On-chain KYC verification, claims, status queries, and transfer co
 icon: "shield-check"
 ---
 
-The `identity` sub-module interacts with the <Tooltip tip="UUPS-upgradeable, MiCA/eWpG-compliant smart contract that stores KYC state and enforces transfer restrictions">IdentityRegistry</Tooltip> contract. All write operations (`verify`, `batchVerify`, `revoke`, and the claim methods) result in on-chain transactions signed by a [registered wallet](/protocol/infrastructure/custody) on your instance.
+This page is for the engineer writing customer identities to the register from a backend. After reading it you will know how to sign each identity write with your own wallet and how to confirm a transaction you broadcast yourself.
 
-<Note>
-  Write operations wait for on-chain confirmations inside the request, so expect them to take tens of seconds. The SDK raises its own timeout for these calls automatically (180s, proof claims 420s).
-</Note>
+The `identity` sub-module works against the <Tooltip tip="UUPS-upgradeable, MiCA/eWpG-compliant smart contract that stores KYC state and enforces transfer restrictions">IdentityRegistry</Tooltip> contract. Every write (`verify`, `verifyFromManifest`, `batchVerify`, `revoke`, `addClaimsFromProof`, `addClaim`, `revokeClaim`) is signed by the registered issuer wallet of your instance. Trusset builds the transaction. Your wallet signs it.
+
+## Sign, prepare, or confirm a write
+
+Each write method takes the same three shapes. Without options it returns the unsigned transaction. With `{ signer }` it signs, broadcasts, waits for the transaction to mine and confirms it with Trusset. With `{ txHash }` it only confirms a transaction you broadcast yourself.
+
+<Warning>
+  Only a confirmed transaction updates the customer record, and the backend confirms nothing until it has read the mined receipt. If the confirm call fails after the transaction mined, the identity is on chain but the record is not. With `{ signer }` the error is the API's own and does not carry the hash, so check `getStatus` before you repeat the write. When you broadcast yourself, confirm again with `{ txHash }`.
+</Warning>
+
+The signer must be the registered issuer wallet, because the registry checks its KYC provider role on chain. Any ethers v5 `Signer` works, from a self-custody wallet or a regulated custodian, with no preference between them. The SDK never asks for, stores or sends a private key.
+
+```typescript
+import { Wallet, providers } from 'ethers'
+
+const provider = new providers.JsonRpcProvider(process.env.RPC_URL)
+const signer = new Wallet(process.env.ISSUER_WALLET_KEY!, provider)
+
+const result = await trusset.customers.identity.verify({
+  walletAddress: '0x1234567890abcdef1234567890abcdef12345678',
+  country: 'DEU',
+  kycHash: '0x591aa0f6c2a3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d',
+}, { signer })
+```
+
+To sign in your own infrastructure instead, call the method without options. The result has `action: 'SIGN_TRANSACTION'` and a `transaction` with `to`, `data` and the `chainId` of your instance. Broadcast it, wait for it to mine, then call the same method again with the hash.
+
+```typescript
+const prepared = await trusset.customers.identity.verify({
+  walletAddress: '0x1234567890abcdef1234567890abcdef12345678',
+  country: 'DEU',
+  kycHash: '0x591aa0f6c2a3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d',
+})
+
+const tx = await signer.sendTransaction(prepared.transaction)
+await tx.wait(1)
+
+const confirmed = await trusset.customers.identity.verify({
+  walletAddress: '0x1234567890abcdef1234567890abcdef12345678',
+  country: 'DEU',
+  kycHash: prepared.kycHash,
+}, { txHash: tx.hash })
+```
+
+Confirm with the values the prepared response returned, here `kycHash`. The backend checks the mined transaction against them. A transaction the backend cannot read yet answers `TX_NOT_FOUND`; wait for it to mine and confirm again.
+
+The SDK broadcasts the calldata the API returned without decoding it. If your compliance process requires checking calldata before signing, decode `transaction.to` and `transaction.data` in your own code before you broadcast.
+
+With a signer, a write waits for the transaction to mine, so expect tens of seconds. The SDK raises its own request timeout for these calls to 60 seconds, and to 180 seconds for proof claims, because the backend verifies the proof bundle on both legs.
 
 ## Verify an identity
 
-Registers an address as KYC-verified on the IdentityRegistry. The address can then participate in compliant token transfers.
+Registers an address as KYC-verified on the IdentityRegistry. The address can then take part in compliant token transfers.
 
-Pass `kycHash` with the root hash from the [KYC proof tool](/sdk/customers/kyc-proofs) - it is stored on-chain verbatim and later checked when adding proof-backed claims. If the address already has an active on-chain identity, it is updated instead of failing; `result.operation` tells you which happened.
+Pass `kycHash` with the root hash from the [KYC proof tool](/sdk/customers/kyc-proofs). It is stored on chain verbatim and later checked when adding proof-backed claims. If the address already has an active on-chain identity, it is updated instead of failing, and `result.operation` tells you which happened.
 
 ```typescript
 const result = await trusset.customers.identity.verify({
-  walletAddress: '0x1234...abcd',
+  walletAddress: '0x1234567890abcdef1234567890abcdef12345678',
   country: 'DEU',
   investorType: 'RETAIL',
-  kycHash: '0x591aa0f6...',   // root hash from the zk-proof tool
+  kycHash: '0x591aa0f6c2a3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d',
   softExpiryDays: 365,
   hardExpiryDays: 730,
-})
-
-// result.txHash     - on-chain transaction hash
-// result.gasUsed    - gas consumed
-// result.kycHash    - the hash now stored on-chain
-// result.operation  - 'verify' (new identity) or 'update' (existing)
+}, { signer })
 ```
+
+The result carries `txHash`, `gasUsed`, the `kycHash` now stored on chain, and `operation`, which is `verify` for a new identity and `update` for an existing one.
 
 <Expandable title="VerifyIdentityInput fields">
   <ParamField body="walletAddress" type="string" required>
@@ -49,7 +92,7 @@ const result = await trusset.customers.identity.verify({
     Days until KYC status changes to `hard_expired`. Transfers are blocked until re-verification.
   </ParamField>
   <ParamField body="kycHash" type="string">
-    32-byte hex root hash from the KYC proof tool. Stored on-chain verbatim. Required if you plan to add claims from the proof manifest later.
+    32-byte hex root hash from the KYC proof tool. Stored on chain verbatim. Required if you plan to add claims from the proof manifest later.
   </ParamField>
   <ParamField body="kycData" type="object">
     Legacy fallback: arbitrary data the backend hashes with `keccak256(JSON.stringify(kycData))`. Ignored when `kycHash` is set. A hash produced this way can never match a proof manifest, so prefer `kycHash`.
@@ -58,69 +101,65 @@ const result = await trusset.customers.identity.verify({
 
 ### Verify from a proof manifest
 
-`verifyFromManifest` reads the wallet address, root hash, and verification parameters (country, investor type, expiry days) straight from the bundle's `manifest.json`. Overrides win where given.
+`verifyFromManifest` reads the wallet address, root hash, and verification parameters (country, investor type, expiry days) straight from the bundle's `manifest.json`. Overrides in the second argument win where given, and the signing options go third.
 
 ```typescript
-const result = await trusset.customers.identity.verifyFromManifest(manifest)
+const result = await trusset.customers.identity.verifyFromManifest(manifest, undefined, { signer })
 
-// override selectively:
-await trusset.customers.identity.verifyFromManifest(manifest, { investorType: 'RETAIL' })
+await trusset.customers.identity.verifyFromManifest(manifest, { investorType: 'RETAIL' }, { signer })
 ```
 
-The root hash itself cannot be overridden - it must match the manifest, otherwise proof-backed claims would fail later with `HASH_MISMATCH`.
+The root hash itself cannot be overridden. It must match the manifest, otherwise proof-backed claims fail later with `HASH_MISMATCH`.
 
 ## Batch verify
 
-Verify up to 500 addresses in a single on-chain transaction. Significantly more gas-efficient than individual calls for bulk onboarding. Give each entry its own `kycHash` - the rows of the proof tool's batch CSV map directly onto entries.
+Verify up to 500 addresses in a single on-chain transaction. Give each entry its own `kycHash`: the rows of the proof tool's batch CSV map directly onto entries.
+
+Entries that fail validation are left out of the transaction and reported one by one in `rejected`, each with its `index` in the array you sent, the `walletAddress`, a `code` and a `message`. The rest go on chain. Addresses that are already actively verified are skipped by the contract and keep their existing identity; revoked identities are re-verified.
 
 ```typescript
 const result = await trusset.customers.identity.batchVerify([
-  { walletAddress: '0xaaa...', country: 'DEU', kycHash: '0x591a...' },
-  { walletAddress: '0xbbb...', country: 'FRA', investorType: 'PROFESSIONAL', kycHash: '0x65c5...' },
-  { walletAddress: '0xccc...', country: 'AUT', softExpiryDays: 365, hardExpiryDays: 730 },
-])
-
-// result.totalEntries - number of accepted entries submitted on-chain
-// result.txHash       - single transaction hash
-// result.gasUsed      - total gas consumed
+  { walletAddress: '0xaaaa000000000000000000000000000000000001', country: 'DEU', kycHash: '0x591aa0f6c2a3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d' },
+  { walletAddress: '0xbbbb000000000000000000000000000000000002', country: 'FRA', investorType: 'PROFESSIONAL', kycHash: '0x65c5e1f0a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d' },
+], { signer })
 ```
 
-<Warning>
-  Entries whose address is already actively verified are skipped by the contract (their existing identity is kept unchanged); revoked identities are re-verified. Entries that fail validation (bad address, missing country, malformed kycHash) are dropped before the transaction and are not reported individually - validate inputs beforehand. Use single `verify` calls when you need per-address update semantics or precise feedback.
-</Warning>
+The result counts `submitted`, `accepted`, `totalEntries` and `rejectedCount`, and carries `rejected`, `txHash` and `gasUsed`. Use single `verify` calls when you need per-address update semantics.
+
+When you confirm a batch yourself with `{ txHash }`, pass the `entries` from the prepared response, not the ones you submitted. Rejected entries never reached the transaction, and the confirm is checked against the accepted ones.
 
 ## Revoke an identity
 
-Permanently marks an address as revoked on the IdentityRegistry. Revoked addresses cannot send or receive compliant tokens.
+<Warning>
+  Revocation takes effect for the address at once. A revoked address cannot send or receive compliant tokens until it is verified again.
+</Warning>
 
 ```typescript
-const result = await trusset.customers.identity.revoke('0x1234...abcd')
-// result.txHash, result.gasUsed
+const result = await trusset.customers.identity.revoke('0x1234567890abcdef1234567890abcdef12345678', { signer })
 ```
+
+The result carries `walletAddress`, `status`, `txHash` and `gasUsed`.
 
 ## Get identity status
 
-Returns combined on-chain and off-chain status for an address. The on-chain data comes from the IdentityRegistry contract; the off-chain data comes from the Trusset database.
+Returns combined on-chain and off-chain status for an address. The on-chain part comes from the IdentityRegistry contract and the off-chain part from the customer record. It is a read and needs no signature.
 
 ```typescript
-const status = await trusset.customers.identity.getStatus('0x1234...abcd')
-
-// On-chain state
-status.onChain.isVerified   // true/false
-status.onChain.status       // 'active' | 'soft_expired' | 'hard_expired' | 'revoked'
-status.onChain.frozen       // regulatory freeze
-status.onChain.kycHash      // the stored root hash
-status.onChain.investorType
-status.onChain.timestamp    // unix timestamp of last verification
-
-// Off-chain record
-status.offChain.status      // 'pending' | 'verified' | 'revoked'
-status.offChain.country
-status.offChain.investorType
-status.offChain.verifiedAt
+const status = await trusset.customers.identity.getStatus('0x1234567890abcdef1234567890abcdef12345678')
 ```
 
-If no customer record exists in the database, `offChain` is `null`. If the address was never verified on-chain, `onChain.isVerified` is `false` with a status of `none`.
+| Field | Holds |
+|---|---|
+| `status.onChain.isVerified` | `true` while the identity is active |
+| `status.onChain.status` | `active`, `soft_expired`, `hard_expired`, `revoked`, or `none` |
+| `status.onChain.frozen` | Whether a regulatory freeze applies |
+| `status.onChain.kycHash` | The stored root hash |
+| `status.onChain.investorType` | The numeric on-chain classification |
+| `status.onChain.timestamp` | Unix time of the last verification |
+| `status.offChain.status` | `pending`, `verified`, or `revoked` |
+| `status.offChain.country`, `investorType`, `verifiedAt` | The customer record's values |
+
+If no customer record exists, `offChain` is `null`. If the address was never verified on chain, `onChain.isVerified` is `false` with a status of `none`.
 
 ## On-chain claims
 
@@ -135,81 +174,88 @@ The first four are reserved. `addClaim` refuses them with `PROOF_REQUIRED`, so a
 ### Read claims
 
 ```typescript
-const { claims } = await trusset.customers.identity.getClaims('0x1234...abcd')
-
-// each active claim:
-// { claimType: 0, claimTypeLabel: 'KYC', dataHash: '0x...',
-//   issuer: '0x...', issuedAt: 1780000000, expiry: 1811536000, active: true }
+const { claims } = await trusset.customers.identity.getClaims('0x1234567890abcdef1234567890abcdef12345678')
 ```
+
+Each active claim carries `claimType`, `claimTypeLabel` (for example `KYC`), `dataHash`, `issuer`, `issuedAt`, `expiry` and `active`.
 
 ### Claims from a proof
 
-Adds every claim the bundle can back (or a `selected` subset). The wallet must already be verified on-chain with the manifest's root hash - the backend compares them before sending any transaction. One transaction is sent per claim; per-claim outcomes are reported individually.
+Adds every claim the bundle can back, or a `selected` subset. The wallet must already be verified on chain with the manifest's root hash, and the backend compares them before preparing any transaction. One transaction is prepared per claim, to be signed in the order returned.
 
-Send the manifest signature and the STARK bytes with it. A production instance verifies each proof before filing anything, and refuses a claimed leaf that arrives without one.
+Send the manifest signature and the STARK bytes with it. A production instance verifies each proof before preparing anything, and refuses a claimed leaf that arrives without one.
 
 ```typescript
 const result = await trusset.customers.identity.addClaimsFromProof({
   walletAddress: manifest.walletAddress,
-  manifest,                    // the bundle's manifest.json object
-  manifestSig,                 // the bundle's manifest.sig
-  proofs: { country: countryProofBase64 },  // proofs/<field>.bin, base64
-  selected: ['KYC', 'RESIDENCY'],  // optional subset
-  expiryDays: 365,             // optional; defaults to the identity's hardExpiry
-})
-
-// result.added        - claims confirmed on-chain
-// result.total        - claims attempted
-// result.claims       - [{ claimType, dataHash, status: 'confirmed' | 'failed', txHash?, error? }]
-// result.verification - { verified, mode, reportId, verifierVersion, cached }
+  manifest,
+  manifestSig,
+  proofs: { country: countryProofBase64 },
+  selected: ['KYC', 'RESIDENCY'],
+  expiryDays: 365,
+}, { signer })
 ```
 
-Failure modes: `NOT_VERIFIED`, `HASH_MISMATCH`, `WALLET_MISMATCH`, `PROOF_MISSING`, `PROOF_INVALID`, `UNREGISTERED_OPERATOR_KEY`, `STUB_NOT_ALLOWED`, `INVALID_MANIFEST`, `NO_SELECTED_CLAIMS` - see the [troubleshooting table](/sdk/customers/kyc-proofs#troubleshooting).
+`result.added` counts the claims confirmed on chain and `result.total` the claims attempted. `result.claims` holds one entry per claim with `claimType`, `dataHash`, `status` (`confirmed`, `failed` or `skipped`), and `txHash` or `error`. `result.verification` reports how the proof bundle was verified.
+
+Without options the method returns `action: 'SIGN_TRANSACTIONS'` with ordered `steps`. Broadcast them in order, then confirm all of them at once with `{ txResults }`, pairing each step's `claimType` with its hash:
+
+```typescript
+const prepared = await trusset.customers.identity.addClaimsFromProof({ walletAddress, manifest, manifestSig, proofs })
+
+const txResults = []
+for (const step of prepared.steps) {
+  const tx = await signer.sendTransaction(step.transaction)
+  await tx.wait(1)
+  txResults.push({ claimType: step.claimType, txHash: tx.hash })
+}
+
+const result = await trusset.customers.identity.addClaimsFromProof({ walletAddress, manifest, manifestSig, proofs }, { txResults })
+```
+
+Failure modes: `NOT_VERIFIED`, `HASH_MISMATCH`, `WALLET_MISMATCH`, `PROOF_MISSING`, `PROOF_INVALID`, `UNREGISTERED_OPERATOR_KEY`, `STUB_NOT_ALLOWED`, `INVALID_MANIFEST`, `NO_SELECTED_CLAIMS`. See the [troubleshooting table](/sdk/customers/kyc-proofs#troubleshooting).
 
 ### Manual claims
 
-For attestations that come from your own screening processes rather than the proof tool. Provide either a pre-computed 32-byte `dataHash` or a `dataInput` string the backend hashes for you.
+For attestations from your own screening processes rather than the proof tool. Provide either a pre-computed 32-byte `dataHash` or a `dataInput` string the backend hashes for you.
 
 ```typescript
 const added = await trusset.customers.identity.addClaim({
-  walletAddress: '0x1234...abcd',
+  walletAddress: '0x1234567890abcdef1234567890abcdef12345678',
   claimType: 'AML',
-  dataInput: 'aml-screening-ref-2026-07-01',  // or dataHash: '0x...' (32 bytes)
+  dataInput: 'aml-screening-ref-2026-07-01',
   expiryDays: 365,
-})
-// added.claimType, added.dataHash, added.expiry, added.txHash
+}, { signer })
 ```
 
-Attempting to add a proof-backed type manually fails with `PROOF_REQUIRED`. Re-adding an existing claim type overwrites it.
+The result carries `claimType`, `dataHash`, `expiry`, `txHash` and `gasUsed`. When you confirm yourself, send the `dataHash` from the prepared response. Adding a proof-backed type manually fails with `PROOF_REQUIRED`, and re-adding an existing claim type overwrites it.
 
 ### Revoke a claim
 
 ```typescript
-await trusset.customers.identity.revokeClaim('0x1234...abcd', 'AML')
-// { claimType: 'AML', txHash, gasUsed }
+await trusset.customers.identity.revokeClaim('0x1234567890abcdef1234567890abcdef12345678', 'AML', { signer })
 ```
+
+The result carries `claimType`, `txHash` and `gasUsed`.
 
 ## Check transfer compliance
 
-Validates whether a token transfer between two addresses would be allowed. This runs the full compliance pipeline: identity checks for both parties, KYC expiry validation, freeze checks, and all registered [compliance modules](/endpoints/customers/can-transfer).
+Validates whether a token transfer between two addresses would be allowed. This runs the full compliance pipeline: identity checks for both parties, KYC expiry, freeze checks, and all registered [compliance modules](/endpoints/customers/can-transfer). Amounts and balances are integer strings in the token's smallest unit.
 
 ```typescript
 const check = await trusset.customers.identity.canTransfer({
-  from: '0xaaa...',
-  to: '0xbbb...',
-  amount: '1000000000000000000',      // 1 token in wei
-  fromBalance: '5000000000000000000', // sender's current balance
-  toBalance: '0',                     // receiver's current balance
+  from: '0xaaaa000000000000000000000000000000000001',
+  to: '0xbbbb000000000000000000000000000000000002',
+  amount: '1000000000000000000',
+  fromBalance: '5000000000000000000',
+  toBalance: '0',
 })
-
-check.allowed         // true or false
-check.reason          // numeric rejection code (0 = none)
-check.senderStatus    // 'active', 'soft_expired', etc.
-check.receiverStatus  // 'active', 'soft_expired', etc.
 ```
 
+`check.allowed` is the verdict and `check.reason` the numeric rejection code, `0` when there is none. `check.senderStatus` and `check.receiverStatus` hold each party's KYC status.
+
 <Tip>
-  Call `canTransfer` before submitting transfer transactions to get a specific rejection reason rather than a generic revert.
+  Call `canTransfer` before submitting a transfer to get a specific rejection reason rather than a generic revert.
 </Tip>
 
-This is a read-only operation - it needs no signature and costs no gas.
+This is a read. It needs no signature and costs no gas.

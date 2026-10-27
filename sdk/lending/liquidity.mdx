@@ -1,0 +1,174 @@
+---
+title: "Liquidity"
+description: "Fund a market's pool, withdraw from it, and connect the operator's vaults as liquidity sources"
+icon: "coins"
+---
+
+This page is for the engineer who funds a market for its lender of record and connects the lender of record's vaults to it. After reading it you will know which wallet may deposit, why a withdrawal can be refused, and how vault money reaches a market.
+
+The pool is how a market is funded. It is never a counterparty, never the lender and never the pledgee. The lender of record is the counterparty to every loan and funds it through the pool. Depositors receive pool shares, not fixed claims, and a share's value rises with repaid interest and falls with losses.
+
+`trusset.lending.liquidity` covers the pool and the market side of vault liquidity. Every write follows the [signing model](/sdk/lending/signing). The pool holds the market's settlement token (stablecoin), which the API calls the borrow asset.
+
+## Who can deposit directly
+
+On current markets only two kinds of address can deposit into the pool: the market's operator wallet and the vaults the market admin registered. The operator wallet starts as the wallet that took the lender-of-record role. Every other liquidity provider funds the market through one of the operator's vaults, and the vault examines that depositor against its registers.
+
+A direct deposit from any other wallet would revert on chain, so the API refuses it first with `LIQUIDITY_VAULT_ONLY`. `vaultOnlyLiquidity` and `operatorWallet` on [`markets.metrics`](/sdk/lending/markets) show which rule a market runs.
+
+## Add liquidity
+
+The operator wallet signs two steps: an approval for exactly the amount, then `addLiquidity`. With `{ signer }` the SDK fills `provider` from the signer and refuses a different one.
+
+```typescript
+const added = await trusset.lending.liquidity.add(marketId, { amount: '250000' }, { signer: lender })
+
+console.log(added.amount, added.txHash, added.transactions)
+```
+
+`amount` is in the settlement token's units. The confirmed `amount` is read from the market's `LiquidityAdded` event, not from the request. The depositor receives shares at the current share price, which already includes accrued interest, so a deposit does not dilute existing providers.
+
+<Warning>
+  The first deposit into an empty pool must be at least 1,000 whole units of the settlement token, for example 1,000 USDC. The API checks the minimum when it builds the plan, not when it confirms. An undersized first deposit that reaches the chain reverts there instead of answering `BELOW_MIN_DEPOSIT`.
+</Warning>
+
+To prepare the plan for a wallet you sign with elsewhere, name it as `provider`. On a current market the API needs it to check the deposit against the operator wallet and the registered vaults, and answers `PROVIDER_REQUIRED` without it.
+
+```typescript
+const prepared = await trusset.lending.liquidity.add(marketId, {
+  amount: '250000',
+  provider: '0x2B6eD29A95753C3Ad948348e3e7b1A251080Ffb9',
+})
+
+console.log(prepared.steps.map(step => step.functionName), prepared.confirmStepIndex)
+```
+
+A `MARKET`-priced market takes no liquidity until its borrower register qualifies as a professional gate, and answers `PROFESSIONAL_BORROWER_GATE_REQUIRED` meanwhile. A market still seeking a lender of record answers `MARKET_PENDING_CURATOR`.
+
+## Withdraw liquidity
+
+<Warning>
+  A withdrawal is bounded by the liquidity the pool has not lent out, not by the provider's share balance. Shares worth more than the pool's idle balance cannot exit in full while borrowers hold the difference, and the contract reverts rather than paying part. The API refuses such a redemption first with `INSUFFICIENT_LIQUIDITY`, and the message names the largest share count that would fill.
+</Warning>
+
+Redeem shares for the settlement token at the current share price. No approval is needed, so it is one transaction signed by the provider, and a paused market does not block it. `shares` is always at 18 decimals, whatever the settlement token's precision, so read the balance and pass it through unchanged.
+
+```typescript
+const balance = await trusset.lending.liquidity.providerBalance(marketId, await lender.getAddress())
+
+if (balance.source === 'onchain') {
+  const removed = await trusset.lending.liquidity.remove(marketId, { shares: balance.shares }, { signer: lender })
+  console.log(removed.sharesRedeemed, removed.amount)
+}
+```
+
+`source: 'database'` means the chain read failed and the figures are the last recorded values, with `currentValue` set to `null`. Do not size a redemption against them. The liquidity check behind a prepared redemption holds for `quoteValidForSeconds`, 120 seconds, because it reserves the interest the book accrues over that window.
+
+Without a signer, `provider` is required: the SDK refuses the call before any request, because both the share balance and the pool's liquidity are checked against that wallet.
+
+## Read providers
+
+`providers` lists the market's active liquidity providers, newest first. `source` is `vault` for a vault registered with Trusset that funds the market for its depositors, and `wallet` otherwise.
+
+```typescript
+const { providers } = await trusset.lending.liquidity.providers(marketId)
+const viaVaults = providers.filter(provider => provider.source === 'vault')
+
+console.log(providers.length, viaVaults.map(provider => provider.vault?.name))
+```
+
+The list reconciles against the market contract at most once a minute per market, so it can trail the chain by up to a minute. `amountDeposited` is the total ever deposited and does not fall with withdrawals. `currentValue` is what the shares are worth now. For one provider's authoritative balance, use `providerBalance`, which reads the contract directly.
+
+## Connect vault liquidity
+
+A market can draw a borrow's shortfall from the operator's vaults inside the borrower's own transaction. Both sides must agree. The market admin, the wallet holding `DEFAULT_ADMIN_ROLE`, turns the switch on and registers each vault. The vault operator sets a draw cap for the market on the vault, in the Issuer Portal, which is not on this API.
+
+Each leg alone funds nothing. A switch with no registered vault draws on nobody, and a registered vault whose cap is zero lends nothing.
+
+```typescript
+const switched = await trusset.lending.liquidity.setVaultLiquidity(marketId, true, { signer: admin })
+const registered = await trusset.lending.liquidity.registerVault(marketId, vaultAddress, { signer: admin })
+
+console.log(switched.transactions, registered.transactions)
+```
+
+These three routes have no confirm leg. With `{ signer }` the SDK returns the hashes in `transactions` and confirms nothing, and `{ txHash }` is refused with a `ValidationError`. Check the result with `vaultLiquidity`, which reads every figure from the chain on the call:
+
+```typescript
+const status = await trusset.lending.liquidity.vaultLiquidity(marketId)
+
+console.log(status.useVaultLiquidity, status.registeredVaults.map(vault => [vault.vaultAddress, vault.drawCap, vault.inert]), status.inertHalves)
+```
+
+`drawCap`, `idleAssets` and `drawnValue` on this read are integer strings in base units, not decimal strings. A registered vault with `inert: true` has not set a cap for the market.
+
+<Warning>
+  Neither call checks the current draw list. Registering a vault that is already registered, or deregistering one that is not, reverts on chain after the admin paid gas. Read `vaultLiquidity` first. When `heldByThisInstance` on the prepared transaction is `false`, no wallet of your instance holds `DEFAULT_ADMIN_ROLE` and a transaction it signs reverts.
+</Warning>
+
+Prepare without a signer to read who must sign before anyone does:
+
+```typescript
+const prepared = await trusset.lending.liquidity.registerVault(marketId, vaultAddress)
+
+console.log(prepared.heldByThisInstance, prepared.signerAddress, prepared.note, prepared.warnings)
+```
+
+Registration checks three things: the address is a vault from the vault factory, it settles in the market's asset, and its depositor registers fit the market's provider register. A mismatch answers `NOT_A_VAULT`, `ASSET_MISMATCH` or `PROVIDER_GATE_MISMATCH` before any calldata is built.
+
+Turning the switch off, or deregistering a vault, stops further draws only. Nothing already drawn moves: a vault's position stays ordinary pool liquidity and leaves the way any provider's does.
+
+```typescript
+await trusset.lending.liquidity.deregisterVault(marketId, vaultAddress, { signer: admin })
+```
+
+## Fund a market through a connected vault
+
+<Warning>
+  A deposit buys shares in the vault, not a position in this market. The vault operator places the pooled funds across its own markets. A redemption is paid from idle funds first and then from what those markets have free, so it can fill only partially. A loss in any market the vault funds lowers the share price for every holder.
+</Warning>
+
+`connectedVaults` lists the vaults the market takes liquidity through. `depositable` says whether a deposit through this market is offered for your instance, and `depositRefusal` says why not. Show `riskDisclosure` and `riskDisclosureUrl` next to the deposit control.
+
+```typescript
+const { vaults } = await trusset.lending.liquidity.connectedVaults(marketId)
+const open = vaults.filter(vault => vault.depositable)
+
+console.log(open.map(vault => [vault.vaultAddress, vault.name, vault.sharePrice, vault.riskDisclosure]))
+```
+
+The depositor signs an approval on the settlement token, then the deposit. When a market the vault funded wrote off accrual the vault has not recorded, one `recordMarketLoss` step per such market comes first. With `{ signer }` the SDK fills `holderAddress` from the signer, so the API checks that wallet against the vault's registers and its balance before anything is signed.
+
+```typescript
+const deposited = await trusset.lending.liquidity.depositToVault(marketId, vaultAddress, { amount: '1000' }, { signer: depositor })
+
+console.log(deposited.amount, deposited.investor, deposited.recorded)
+```
+
+A depositor the vault's registers refuse answers `DEPOSITOR_NOT_VERIFIED`, which names the register. The deposit names your instance as the depositor's distributor, as described on [Vaults](/sdk/lending/vaults).
+
+The holder redeems through the same market. The vault burns the holder's own shares, so there is no approval, and nothing on the vault can pause a redemption.
+
+```typescript
+const redeemed = await trusset.lending.liquidity.redeemFromVault(marketId, vaultAddress, { shares: '500' }, { signer: depositor })
+
+console.log(redeemed.amount)
+```
+
+This route checks only the holder's share balance and carries no estimate of the fill. The confirmed `amount` is what the vault actually paid, so an `amount` below the value of the shares redeemed means a partial fill. For a fill estimate before signing, redeem through `vaults.redeem`, which returns `willFillFully` and `expectedPayout`.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `providers` | [List Liquidity Providers](/endpoints/lending/list-providers) |
+| `providerBalance` | [Get Provider Balance](/endpoints/lending/get-provider-balance) |
+| `add` | [Add Liquidity](/endpoints/lending/add-liquidity) |
+| `remove` | [Remove Liquidity](/endpoints/lending/remove-liquidity) |
+| `vaultLiquidity` | [Get Vault Liquidity](/endpoints/lending/get-vault-liquidity) |
+| `setVaultLiquidity` | [Set Vault Liquidity](/endpoints/lending/set-vault-liquidity) |
+| `registerVault` | [Register Vault](/endpoints/lending/register-vault) |
+| `deregisterVault` | [Register Vault](/endpoints/lending/register-vault) |
+| `connectedVaults` | [List Connected Vaults](/endpoints/lending/list-connected-vaults) |
+| `depositToVault` | [Deposit to Vault](/endpoints/lending/deposit-to-vault) |
+| `redeemFromVault` | [Redeem from Vault](/endpoints/lending/redeem-from-vault) |

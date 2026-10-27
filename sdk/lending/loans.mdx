@@ -1,0 +1,355 @@
+---
+title: "Loans"
+description: "Open, extend, repay and close loans against pledged securities, and read every position"
+icon: "hand-holding-dollar"
+---
+
+This page is for the engineer building a borrower journey on a market. After reading it you will know which wallet signs each loan action, how each repayment mode works, and how to finish a write that mined but was not recorded.
+
+`trusset.lending.loans` covers the life of a loan. The borrower pledges security tokens, draws the settlement token (stablecoin), adds or withdraws collateral, draws more, repays and closes. Every write follows the [signing model](/sdk/lending/signing): no options prepares the plan, `{ signer }` signs and confirms, `{ txHash }` confirms a transaction you broadcast yourself.
+
+Repayment and release never need a price. A repayment sent without a `signedPrice` reads no price, so neither a stale price nor a paused market blocks it. Closing a debt-free loan moves no money and reads no price, and a debt-free withdrawal is never refused for a stale price. A stale price blocks new borrowing, additional draws and withdrawals from a loan that still carries debt.
+
+How the collateral is held depends on the market's mode. `FREEZE`, the reference model, freezes the tokens in the borrower's own wallet, so they never move during a healthy loan. `CUSTODY` moves them into the market's adapter for the loan term. It exists for tokens without the ERC-3643 agent functions, is a different construction from a pledge in place, and sits outside the reference configuration.
+
+## Open a loan
+
+<Warning>
+  If the SDK throws `ConfirmationError` with code `CONFIRMATION_FAILED`, the `openLoan` transaction mined and the collateral is locked, but Trusset has not recorded the loan. Do not open it again. Confirm it with `{ txHash: err.txHash }`. Code `TRANSACTION_FAILED` means a step did not go through, so the loan did not open and nothing is locked. On a `CUSTODY` market an approval that already mined stays in place as an allowance.
+</Warning>
+
+The borrower signs every step. On a `CUSTODY` market the plan is an approval on the collateral token, then `openLoan`. A `FREEZE` market needs no approval, so the plan is `openLoan` alone. With `{ signer }` the SDK fills `borrowerAddress` from the signer and refuses a different one.
+
+```typescript
+const loan = await trusset.lending.loans.open(marketId, {
+  collateralAmount: '1000',
+  borrowAmount: '500',
+}, { signer: borrower })
+
+console.log(loan.loanId, loan.positionId, loan.paidTo, loan.vaultDraws, loan.transactions)
+```
+
+`collateralAmount` is in the collateral token's units and `borrowAmount` in the settlement token's, both as decimal strings. When the API sends no gas limit, as for `openLoan` today, the SDK sets one at 1.5 times the signer's own estimate. A market that charges an opening fee pays out the borrow amount less the fee, and the loan owes the full amount.
+
+To recover from the warning above, confirm with the hash the error carries:
+
+```typescript
+import { ConfirmationError } from '@trusset/sdk'
+
+try {
+  await trusset.lending.loans.open(marketId, { collateralAmount: '1000', borrowAmount: '500' }, { signer: borrower })
+} catch (err) {
+  if (err instanceof ConfirmationError && err.code === 'CONFIRMATION_FAILED' && err.txHash) {
+    const loan = await trusset.lending.loans.open(marketId, {}, { txHash: err.txHash })
+    console.log(loan.loanId)
+  } else {
+    throw err
+  }
+}
+```
+
+### Show the terms before the borrower signs
+
+The terms of a loan appear only on the prepared plan. `offering` carries the due date, the grace period and any stamped fixed rate, `transactionFee` the opening fee, and `warnings` the preflight findings that do not block the loan. Quote the borrowing limit first with `markets.maxBorrow`.
+
+```typescript
+const limit = await trusset.lending.markets.maxBorrow(marketId, '1000')
+
+const prepared = await trusset.lending.loans.open(marketId, {
+  collateralAmount: '1000',
+  borrowAmount: '500',
+  borrowerAddress: await borrower.getAddress(),
+})
+
+console.log(limit.maxBorrow, limit.isStale, prepared.mode, prepared.offering, prepared.transactionFee, prepared.warnings)
+```
+
+Without a signer, `borrowerAddress` is required: every collateral, identity and cap check runs against it. Calling `open` again with `{ signer: borrower }` builds the plan afresh. To sign the prepared plan in your own infrastructure instead, broadcast `steps` in order and confirm with the hash of the step at `confirmStepIndex`.
+
+Every warning carries `enforcement: 'OFF_CHAIN'`. The contract does not know about them, so acting on one is the lender of record's decision.
+
+### Attribute the loan to a client
+
+`clientReference` names the client the loan is for: a customer's `referenceKey`, `externalId` or customer ID on your instance. The API refuses an ineligible client with `CLIENT_NOT_ELIGIBLE` before anything is signed. With `{ signer }` the SDK sends the reference on both legs, so the confirm records the attribution.
+
+```typescript
+const loan = await trusset.lending.loans.open(marketId, {
+  collateralAmount: '1000',
+  borrowAmount: '500',
+  clientReference: 'CRM-104233',
+}, { signer: borrower })
+
+console.log(loan.customerId, loan.attribution)
+```
+
+### Pay the proceeds to another wallet
+
+<Warning>
+  The payee is fixed for the life of the loan and receives every later draw. The market examines it against its borrower register at every draw, so a payee the register stops admitting blocks all further draws on the loan. Repaying, adding collateral and closing stay open.
+</Warning>
+
+`payToAddress` sends the borrowed amount to a wallet other than the borrower. The borrower stays the borrower of record: it owes the debt and receives every collateral return and any liquidation surplus.
+
+```typescript
+const loan = await trusset.lending.loans.open(marketId, {
+  collateralAmount: '1000',
+  borrowAmount: '500',
+  payToAddress: '0x4D0CFE39a3431B145D1A1393D901A36d459a1B13',
+}, { signer: borrower })
+
+console.log(loan.payeeAddress, loan.paidTo)
+```
+
+A market whose implementation predates pay-to answers `PAY_TO_UNSUPPORTED`. A payee that is one of the market's own contracts answers `PAY_TO_NOT_ALLOWED`.
+
+## Add collateral
+
+Adding collateral raises the health factor without repaying debt, which is the fastest way to move a loan away from liquidation. Only the borrower can sign. A `CUSTODY` market adds an approval step first, and a paused market does not block it.
+
+```typescript
+const added = await trusset.lending.loans.addCollateral(marketId, { loanId, amount: '250' }, { signer: borrower })
+
+console.log(added.amount, added.transactions)
+```
+
+The market's per-borrower and total collateral caps are checked before the plan is built, so a pledge over a cap answers `USER_SUPPLY_CAP_EXCEEDED` or `SUPPLY_CAP_EXCEEDED`. While a Dutch auction is open against the loan, the contract reverts the top-up, and the API does not check for one first.
+
+## Borrow more
+
+Draws more of the settlement token against the same collateral. Only the borrower can sign, and the draw moves the loan closer to its liquidation threshold. Read the resulting health factor from `getByLoanId` afterwards.
+
+```typescript
+const drawn = await trusset.lending.loans.borrowMore(marketId, { loanId, amount: '100' }, { signer: borrower })
+
+console.log(drawn.additionalBorrow, drawn.paidTo, drawn.vaultDraws)
+```
+
+A loan with a stamped fixed rate cannot be drawn on again and answers `FIXED_RATE_LOAN`: open a new loan at current terms instead. The opening fee applies to every draw. A loan opened with a payee pays every draw to that payee.
+
+On a stale price the draw reverts unless it carries a fresh `signedPrice`. The price signer produces one with [`oracle.signPrice`](/sdk/lending/oracle#sign-a-price-for-one-transaction), and `open` and `withdrawCollateral` take it the same way.
+
+## Withdraw collateral
+
+<Warning>
+  On a `CUSTODY` market, a withdrawal the collateral token refuses does not revert. The adapter escrows the tokens instead, so the borrower signs a transaction that confirms and delivers nothing. The prepared plan then carries `collateralRelease` and `warning`. Show them before the borrower signs, and reclaim the tokens later with `claimEscrowedCollateral`.
+</Warning>
+
+```typescript
+const prepared = await trusset.lending.loans.withdrawCollateral(marketId, { loanId, amount: '200' })
+
+console.log(prepared.warning, prepared.collateralRelease?.message)
+```
+
+Once the borrower has seen it, sign:
+
+```typescript
+const released = await trusset.lending.loans.withdrawCollateral(marketId, { loanId, amount: '200' }, { signer: borrower })
+
+console.log(released.amount, released.escrowed, released.escrowedAmount)
+```
+
+The API refuses a withdrawal that would leave the debt above what the remaining collateral supports at the collateral factor, with `WOULD_BREACH_HEALTH_FACTOR`. That bound is stricter than the contract's, which measures at the liquidation threshold. `FREEZE` markets unfreeze the released tokens in place, and `CUSTODY` markets transfer them back to the borrower.
+
+## Repay a loan
+
+<Warning>
+  To close a loan, repay with `all: true`. A payment of exactly a debt quoted earlier leaves the interest accrued since then outstanding, so the loan stays open and keeps accruing. `all: true` sizes the payment to the live debt plus the interest it can accrue before the transaction mines, plus any repayment fee.
+</Warning>
+
+Any wallet can repay any loan. A third party can rescue a loan approaching liquidation, and an omnibus wallet can pay for its client. The collateral always returns to the borrower, never to the payer. With `{ signer }` the SDK fills `payer` from the signer, so the allowance and the plan are checked from the wallet that pays.
+
+```typescript
+const repaid = await trusset.lending.loans.repay(marketId, { loanId, amount: '100' }, { signer: borrower })
+
+console.log(repaid.repaidAmount, repaid.loanClosed, repaid.remainder)
+```
+
+A full repayment from a third-party payer looks the same with `all: true`:
+
+```typescript
+const repaid = await trusset.lending.loans.repay(marketId, { loanId, all: true }, { signer: payer })
+
+console.log(repaid.loanClosed, repaid.collateralReturned, repaid.collateralReturnEscrowed)
+for (const step of repaid.transactions) console.log(step.functionName, step.txHash, step.optional, step.error)
+```
+
+A repayment that clears the debt closes the loan in the same transaction and releases the collateral, so no `close` call follows it. `loanClosed` is `true` when the loan is closed, `false` while it is open, and `null` when it could not be read. When a full repayment still left debt open, `remainder.offerRepayRemainder` is `true`: repay again with `all: true`, which is sized afresh.
+
+### Choose a mode
+
+| Mode | Wallet prompts | With `{ signer }` |
+|---|---|---|
+| `sequential` | One to three transactions: an approval when the allowance falls short, the repayment, and a clearing step after a full repayment | The default. The SDK signs each step in order |
+| `permit` | One signature and one transaction | The SDK quotes the permit, signs it with the signer's `_signTypedData`, then sends `repayWithPermit` |
+| `batch` | One bundle | Refused with a `ValidationError`. Prepare it without a signer and send it from a wallet that bundles calls |
+
+In `sequential` and `permit` mode the clearing step after a full repayment is optional. It resets the payer's whole allowance for the market to zero, including allowance it keeps there for other loans. If it fails or is rejected, the repayment still confirms, and `transactions` reports the step with its `error`.
+
+The repay step carries a gas limit from the API, which the SDK forwards unchanged. It is the gas the simulated repayment used plus 50 percent, with a floor.
+
+### Repay with a permit
+
+The permit path exists only where the settlement token implements EIP-2612, which `permitSupported` on a prepared plan reports. The payer must be a wallet without contract code, and it sends the transaction itself, because the market redeems the permit for its sender.
+
+```typescript
+const repaid = await trusset.lending.loans.repay(marketId, { loanId, all: true, mode: 'permit' }, { signer: payer })
+
+console.log(repaid.loanClosed, repaid.transactions)
+```
+
+To show the payer what it signs before it signs, read the quote. `permit.value` is the amount the permit covers, `forecast` breaks a full repayment into debt, forecast interest and fee, and `description` states it in words.
+
+```typescript
+const quote = await trusset.lending.loans.permitQuote(marketId, {
+  loanId,
+  all: true,
+  payer: walletAddress,
+})
+
+console.log(quote.permit.value, quote.permit.deadline, quote.forecast, quote.transactionFee, quote.description)
+```
+
+`deadlineSeconds` sets how long the permit stays valid, from 300 to 1800 seconds, and defaults to 1800. A permit that lapsed while the payer reviewed it is refused with `INVALID_PERMIT`: quote again and sign the new one. A multisig or smart account repays with `sequential` or `batch` instead and answers `PERMIT_REQUIRES_EOA` here.
+
+### Repay in one wallet bundle
+
+`batch` is for a payer's wallet that supports atomic batching with `wallet_sendCalls`. Prepare the plan with the payer named, send every step that is not in `optionalStepIndexes` as one bundle, then confirm with the hash of the bundle's transaction. The bundle ends with an approval to zero, so nothing stays approved.
+
+```typescript
+const plan = await trusset.lending.loans.repay(marketId, {
+  loanId,
+  all: true,
+  mode: 'batch',
+  payer: walletAddress,
+})
+
+const calls = plan.steps
+  .filter((_, index) => !plan.optionalStepIndexes.includes(index))
+  .map(step => ({ to: step.transaction.to, data: step.transaction.data }))
+
+console.log(plan.walletPrompts.label, plan.walletPrompts.why, calls)
+```
+
+A bundle must settle atomically. If the wallet settles it as separate transactions, check what was applied before building again. Confirm with the same `all` or `amount` the plan was built with:
+
+```typescript
+const repaid = await trusset.lending.loans.repay(marketId, { loanId, all: true }, {
+  txHash: '0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b',
+})
+
+console.log(repaid.loanClosed)
+```
+
+Confirming with an approval's hash answers `TX_WRONG_TARGET`. On every mode, `walletPrompts.label` and `walletPrompts.why` say what the wallet will ask for and why. Show both before the first signature.
+
+## Close a debt-free loan
+
+<Warning>
+  On a `CUSTODY` market whose collateral token refuses the return, closing does not revert. The adapter escrows the collateral, so the borrower signs a transaction that confirms and delivers nothing. Prepare first and show `collateralRelease` and `warning` when they are present.
+</Warning>
+
+Closing releases the collateral of a loan whose debt is zero. Only the borrower can sign, and closing moves no settlement money and charges no fee. A loan repaid with `all: true` is already closed and answers `LOAN_ALREADY_CLOSED`.
+
+```typescript
+const closed = await trusset.lending.loans.close(marketId, loanId, { signer: borrower })
+
+console.log(closed.collateralReturned, closed.collateralReturnEscrowed)
+```
+
+A loan with any balance left answers `DEBT_OUTSTANDING`, and the message states the exact remainder. Repay it with `all: true`, which closes the loan itself.
+
+## Reclaim escrowed collateral and surplus
+
+<Warning>
+  A claim repeats the transfer the token refused. While that restriction stands, the claim reverts after the holder has paid gas. Lift the restriction on the holder's address first. `getByLoanId` names what the collateral token currently blocks in its `compliance` block.
+</Warning>
+
+Two balances can wait for a borrower. Escrowed collateral is held by a `CUSTODY` market's adapter in the collateral token, after a blocked return. A realization surplus is held by the market itself in the settlement token, after a liquidation paid out more than the debt plus its penalty and the payout was refused. Both are per holder and cover every loan of that address on the market.
+
+```typescript
+const holderAddress = await holder.getAddress()
+const escrow = await trusset.lending.loans.escrowedCollateral(marketId, holderAddress)
+
+if (BigInt(escrow.escrowedCollateralRaw) > 0n) {
+  const claimed = await trusset.lending.loans.claimEscrowedCollateral(marketId, {}, { signer: holder })
+  console.log(claimed.claims, claimed.recordedRows)
+}
+```
+
+The claim pays out the escrow of the wallet that signs it, so the holder must sign. With `{ signer }` the SDK names the signer as `holderAddress`, and the API refuses a claim the token still blocks with `COLLATERAL_TRANSFER_RESTRICTED` instead of handing back a transaction that reverts. A `FREEZE` market never escrows collateral and answers `NOT_CUSTODY_MODE`.
+
+```typescript
+const holderAddress = await holder.getAddress()
+const surplus = await trusset.lending.loans.escrowedSurplus(marketId, holderAddress)
+
+if (surplus.claimable) {
+  const claimed = await trusset.lending.loans.claimSurplus(marketId, {}, { signer: holder })
+  console.log(claimed.amount, surplus.asset.symbol)
+}
+```
+
+`claimable: true` says a surplus exists, not that the claim will succeed. Unlike the collateral claim, the API does not check whether the settlement token would now accept the transfer.
+
+## Read loans and positions
+
+A position is Trusset's record of a loan. A loan is the market contract's own state, keyed by its on-chain `loanId`.
+
+```typescript
+const { positions } = await trusset.lending.loans.list(marketId)
+const position = await trusset.lending.loans.get(marketId, positionId)
+const loan = await trusset.lending.loans.getByLoanId(marketId, loanId)
+
+console.log(positions.length, position.status, position.healthFactor, loan.active, loan.healthFactor, loan.compliance?.restricted)
+```
+
+| Method | Reads | Keep in mind |
+|---|---|---|
+| `list` | Every position of the market, newest first, each with its five latest transactions | No pagination. Live figures for the first 50 open positions, stored values beyond |
+| `get` | One position with live figures and its full transaction history | `status` comes from the record. A loan repaid without a confirm can read `ACTIVE` until the next reconciliation |
+| `getByLoanId` | The loan straight from the market contract, with its term and a `compliance` block | Use it for payoff quotes, health checks and liquidation decisions |
+| `byWallet` | Every open loan of one address, and the loans that pay it as payee | An empty list also comes back when the chain read failed |
+| `collateral` | One address's total collateral across its open loans | The figure the per-borrower cap is checked against |
+
+`compliance.restricted: null` means the collateral token did not answer enough probes to establish its state. Treat it as unknown, never as unrestricted.
+
+```typescript
+const { loans, payeeLoans } = await trusset.lending.loans.byWallet(marketId, walletAddress)
+const { collateral } = await trusset.lending.loans.collateral(marketId, walletAddress)
+
+console.log(loans.length, payeeLoans.length, collateral)
+```
+
+### Download a loan statement
+
+`statement` returns a PDF of one loan with its terms, every recorded movement and an audit trail checked against the chain. It comes back as bytes with the file name the API set.
+
+```typescript
+import { writeFileSync } from 'node:fs'
+
+const statement = await trusset.lending.loans.statement(marketId, positionId)
+writeFileSync(statement.filename ?? 'loan-statement.pdf', statement.bytes)
+```
+
+The SDK allows the statement 120 seconds, because the API assembles it at request time.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `list` | [List Positions](/endpoints/lending/list-positions) |
+| `get` | [Get Position](/endpoints/lending/get-position) |
+| `statement` | [Get Position Statement](/endpoints/lending/get-position-statement) |
+| `getByLoanId` | [Get Loan](/endpoints/lending/get-loan) |
+| `byWallet` | [Get User Loans](/endpoints/lending/get-user-loans) |
+| `collateral` | [Get User Collateral](/endpoints/lending/get-user-collateral) |
+| `escrowedCollateral` | [Get Escrowed Collateral](/endpoints/lending/get-escrowed-collateral) |
+| `escrowedSurplus` | [Get Escrowed Surplus](/endpoints/lending/get-escrowed-surplus) |
+| `open` | [Open Loan](/endpoints/lending/open-loan) |
+| `addCollateral` | [Add Collateral](/endpoints/lending/add-collateral) |
+| `withdrawCollateral` | [Withdraw Collateral](/endpoints/lending/withdraw-collateral) |
+| `borrowMore` | [Borrow More](/endpoints/lending/borrow-more) |
+| `close` | [Close Loan](/endpoints/lending/close-loan) |
+| `permitQuote` | [Get Permit Quote](/endpoints/lending/get-permit-quote) |
+| `repay` | [Repay Loan](/endpoints/lending/repay) |
+| `claimEscrowedCollateral` | [Claim Escrowed Collateral](/endpoints/lending/claim-escrowed-collateral) |
+| `claimSurplus` | [Claim Surplus](/endpoints/lending/claim-surplus) |

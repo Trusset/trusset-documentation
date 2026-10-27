@@ -1,0 +1,122 @@
+---
+title: "Lending Overview"
+description: "What the lending module covers, who signs each write, and the names the examples use"
+icon: "building-columns"
+---
+
+This page is for the engineer building a lending integration for a lender of record, a register provider or a tokenization platform. After reading it you will know which namespace covers which part of a market's life, which role signs each write, and the names the examples on these pages use.
+
+The `lending` module wraps the [Lending API](/endpoints/lending/introduction). A market lends a settlement token (stablecoin) such as USDC against security tokens that were issued outside Trusset and imported into your instance. The lender of record is always the named counterparty and the party taking the security. The pool is a funding technique inside the lender of record's setup, never a counterparty.
+
+Trusset builds transactions. Your wallets sign them. The SDK never asks for, holds or sends a private key, and every write on these pages is signed by the wallet of the role its section names. See the [signing model](/sdk/lending/signing).
+
+## Who signs what
+
+Each write belongs to one role. The SDK checks that the signer's wallet matches the wallet a request names, and it refuses before signing when they differ.
+
+| Role | Typically | Signs |
+|---|---|---|
+| Deployer | A wallet of the instance operator | `markets.deploy` |
+| Lender of record | A bank or licensed lender | `operators.accept`, risk and rate settings, pricing when it is the price signer, funding the pool, liquidations, fee sweeps |
+| Register provider | The party holding the token's agent role | The token-side `markets.configure` steps: the agent role for the adapter, and verifying the router as a holder |
+| Borrower | The token holder | `loans.open`, collateral changes, repayment |
+| Payer | Anyone repaying on a borrower's behalf | `loans.repay` |
+| Liquidity provider | The lender of record, or verified professional depositors through its vaults | `liquidity.add`, `vaults.deposit` |
+| Price signer | The party the lender of record designates | `oracle.signPrice`, `oracle.sync` |
+| Liquidator | The lender of record or its keeper | `liquidations.liquidate`, liquidation bots |
+
+The SDK works with any wallet, self-custody or regulated custodian, no preference. Anything that implements the ethers v5 `Signer` interface signs, and a wallet that cannot run inside your process signs the prepared calldata elsewhere and confirms with the hash.
+
+## Namespaces
+
+| Namespace | Covers |
+|---|---|
+| [`markets`](/sdk/lending/markets) | Market reads, deployment, setup and wiring, upgrades, risk configuration, identity gates, borrow assets |
+| [`operators`](/sdk/lending/operators) | The lender-of-record queue and adoption, nominations, roles |
+| [`assetData`](/sdk/lending/asset-data) | The asset data a market attests and the lender of record acknowledges |
+| [`accessLists`](/sdk/lending/access-lists) | Whitelists: creation, members, managers, ownership |
+| [`rates`](/sdk/lending/rates) | Rate mode, loan terms, extensions, exit liquidity, reserve ratio |
+| [`terms`](/sdk/lending/terms) | Terms of use and their versions |
+| [`oracle`](/sdk/lending/oracle) | Price status, price signing, attestations, on-chain price updates |
+| [`liquidity`](/sdk/lending/liquidity) | Direct liquidity and vault liquidity on a market |
+| [`vaults`](/sdk/lending/vaults) | Vault deposits, redemptions and distributor fees |
+| [`loans`](/sdk/lending/loans) | Borrowing, collateral, repayment, escrow and surplus, position reads |
+| [`fees`](/sdk/lending/fees) | Fee split, cashflows, sweeps, operator wallet |
+| [`insurance`](/sdk/lending/insurance) | The market's insurance fund |
+| [`liquidations`](/sdk/lending/liquidations) | Liquidation, the atomic sale, router settlement, write-off |
+| [`auctions`](/sdk/lending/auctions) | The Dutch auction venue, bids and expiry |
+| [`bots`](/sdk/lending/bots) | Liquidation bots |
+| [`hooks`](/sdk/lending/hooks) | Risk monitors and liquidation hooks |
+| [`pledges`](/sdk/lending/pledges) | The pledge record a register provider enters |
+
+## Bring a market to life
+
+A market goes through the same steps whichever party drives the integration. Each step names the role that signs it.
+
+<Steps>
+  <Step title="Import the collateral token">
+    Import the token into your instance and publish its profile with the [`tokens`](/sdk/tokens/overview) module. A market attests asset data built from that profile, so a token without one is refused with `TOKEN_PROFILE_REQUIRED`.
+  </Step>
+  <Step title="Deploy the market">
+    The deployer calls `markets.deploy` with the collateral token, the collateral mode, the price source and the lender-of-record candidates. See [Markets](/sdk/lending/markets).
+  </Step>
+  <Step title="Adopt it as lender of record">
+    A nominated candidate calls `operators.accept` and names every role on the market in one transaction: admin, issuer, collateral agent, sale recipient, liquidation operator, oracle owner and price signer. See [Lender of record](/sdk/lending/operators).
+  </Step>
+  <Step title="Wire the token side">
+    The register provider grants the collateral adapter its agent role on the token and verifies the router as a holder. `markets.setupSteps` lists what is outstanding, and `markets.configure` prepares each step for the wallet that holds the authority.
+  </Step>
+  <Step title="Price the collateral">
+    The price signer signs a price, and the oracle owner or an authorized price signer pushes it on chain. See [Pricing](/sdk/lending/oracle).
+  </Step>
+  <Step title="Fund the pool">
+    The lender of record adds liquidity from its operator wallet. Other liquidity providers deposit through its vaults. See [Liquidity](/sdk/lending/liquidity).
+  </Step>
+  <Step title="Lend">
+    Borrowers open loans, add or withdraw collateral, and repay. See [Loans](/sdk/lending/loans).
+  </Step>
+</Steps>
+
+## Collateral modes
+
+A `FREEZE` market is the reference model. It locks the borrower's tokens where they sit through the token's ERC-3643 agent functions, so the borrower stays the registered holder for the whole loan. The register provider keeps final control because it can revoke the adapter's agent role at any time, but revocation strands live locks.
+
+A `CUSTODY` market escrows the tokens in an immutable adapter for the loan term. That is a transfer for security purposes rather than a pledge, and it sits outside the reference configuration. Use it only for a token without agent functions. See [collateral token standards](/endpoints/lending/introduction#collateral-token-standards) for what each mode accepts.
+
+## Names the examples use
+
+The examples on these pages assume a client called `trusset` and a few values you already hold. Each block is otherwise complete.
+
+```typescript
+import { TrussetClient } from '@trusset/sdk'
+
+const trusset = new TrussetClient({ apiKey: process.env.TRUSSET_API_KEY! })
+
+const { markets } = await trusset.lending.markets.list()
+const market = markets.find(m => m.marketAddress && m.curator)
+```
+
+`marketId` is a market's record ID from `markets.list`, and `marketAddress` its contract address. Methods keyed by a market take the record ID, and the SDK refuses a contract address in its place before sending anything. Other IDs, such as `loanId`, `liquidationId`, `vaultId` or `botId`, come from the list reads of their namespace.
+
+A signer is named for the role that signs: `borrower`, `lender`, `payer`, `priceSigner`, `liquidityProvider` and so on. Each is an ethers v5 `Signer` connected to the instance's network.
+
+```typescript
+import { Wallet, providers } from 'ethers'
+
+const rpc = new providers.JsonRpcProvider(process.env.RPC_URL)
+const borrower = new Wallet(process.env.BORROWER_KEY!, rpc)
+
+const loan = await trusset.lending.loans.open(marketId, { collateralAmount: '1000', borrowAmount: '500' }, { signer: borrower })
+```
+
+A `Wallet` built from an environment variable is only the shortest way to show a signer. A `JsonRpcSigner` from a browser wallet, or the signer your custodian provides, takes its place unchanged.
+
+## Units and addresses
+
+Amounts are decimal strings in the asset's own units, such as `'100'` or `'12.5'`. The SDK refuses a JavaScript number for a token amount, because a float cannot carry 18 decimals exactly. Rates, factors and thresholds are basis-point numbers where the method's types say so.
+
+Addresses follow the rule the API applies: `0x` and 40 hex characters, with a valid EIP-55 checksum when mixed case. The zero address is refused wherever it would mean nobody.
+
+The instance decides the network. A development instance runs on Sepolia, and a production instance on Ethereum mainnet or, for lending where it is enabled, Polygon. The SDK reads the chain from the API and never switches networks.
+
+Older markets run older contract implementations. Read what a market supports from the API, through `markets.upgradeStatus`, `markets.config` and its `thresholdStep`, `markets.identityGates`, and `payToSupported` on market reads, instead of assuming a feature.

@@ -1,0 +1,276 @@
+---
+title: "Markets"
+description: "Deploy, read, configure and upgrade lending markets with the SDK"
+icon: "store"
+---
+
+This page is for the engineer who deploys or runs lending markets from a backend, at a deploying issuer or at a lender of record. After reading it you will know how to read and deploy a market, run its setup steps with the right wallets, and change its configuration, identity gates and implementation.
+
+A market lends one settlement token (stablecoin) against one collateral token. The API calls it `borrowAsset`. Each market has two identifiers: `marketId`, the record ID your instance keeps, and `marketAddress`, the contract. Every method on `trusset.lending.markets` that names a market takes the `marketId`, and sending a contract address in its place throws a `ValidationError` before any request.
+
+Every write on this page takes the three call shapes of the [signing model](/sdk/lending/signing): no options to prepare, `{ signer }` to sign and confirm, `{ txHash }` to confirm a transaction you broadcast yourself.
+
+## Read a market
+
+`list` returns every market your instance records, from the stored record. Pass `includeOnChain: true` to add the live pool figures to each row. That runs a chain read per market, so for one market prefer `get` or `metrics`.
+
+```typescript
+const { markets } = await trusset.lending.markets.list({ includeOnChain: true })
+
+for (const market of markets) {
+  console.log(market.id, market.marketAddress, market.collateralTokenSymbol, market.borrowAssetSymbol, market.seekingCurator)
+}
+```
+
+`get` returns one market with its record, its on-chain state, its oracle status and its wiring. A section the API could not read is listed in `errors` and left `null`, so a missing section means unknown, not empty. When the chain read fails, `onChain.isOnChain` is `false`, the figures are zero and `readFailed` is `true`. Treat those zeros as an outage.
+
+```typescript
+const market = await trusset.lending.markets.get(marketId)
+const config = await trusset.lending.markets.config(marketId)
+const quote = await trusset.lending.markets.maxBorrow(marketId, '1000')
+
+console.log(market.curator, market.errors, config?.liquidationThreshold, quote.maxBorrow, quote.isStale)
+```
+
+`maxBorrow` takes a collateral amount as a decimal string, parsed at the collateral token's decimals, and returns the most the market lends against it in the borrow asset. The quote is the collateral bound alone: it does not check pool liquidity, supply caps or the minimum borrow. `isStale: true` means the oracle price is older than its `maxPriceAge`. A stale price blocks opening loans, drawing more, withdrawing collateral against open debt and liquidating. Repayment never waits on a price.
+
+Further reads cover the pool over time:
+
+| Method | Returns |
+|---|---|
+| `metrics` | The live pool: deposits, borrows, utilization, rates, open loans, pending liquidations, fees payable |
+| `supplyCaps` | The collateral caps and current total collateral, or `null` when unreadable |
+| `transactions` | Recorded market transactions, 50 per page by default, at most 200 |
+| `history` | Indexed snapshots over `24h`, `7d`, `30d`, `90d`, `1y` or `all`, by `hour` or `day` |
+| `indexStatus` | How far the index trails the chain |
+
+`history` answers `available: false` with a `reason` when the index cannot be reached, and `indexed: false` for a market the index does not cover yet. Neither is an empty market.
+
+```typescript
+const page = await trusset.lending.markets.transactions(marketId, { limit: 50, offset: 0 })
+const history = await trusset.lending.markets.history(marketId, { range: '30d', resolution: 'day' })
+
+if (history.available && history.indexed) console.log(history.points.length, history.totals?.loanCount)
+console.log(page.total, page.hasMore)
+```
+
+### Download the lifecycle statement
+
+`lifecycleStatement` returns a PDF assembled from indexed events: configuration, roles, encumbrances, loans, liquidations and auctions. It resolves to `{ bytes, contentType, filename }`. The API refuses with `INDEX_STALE` when the index trails the chain by more than 300 seconds, because the statement would omit everything since. Pass `allowStale: true` only when that gap is acceptable.
+
+```typescript
+import { writeFile } from 'node:fs/promises'
+
+const statement = await trusset.lending.markets.lifecycleStatement(marketId, { categories: ['loans', 'liquidations'], from: '2026-01-01' })
+await writeFile(statement.filename ?? 'lifecycle-statement.pdf', statement.bytes)
+```
+
+`from` and `to` are dates written as `YYYY-MM-DD`, and `loanId` narrows the statement to one loan.
+
+## Prepare a deployment
+
+Three reads come before a deployment. `deploymentOptions` returns what the factory accepts today: price sources, rate and term ranges, the fixed fee shares, the identity gate rules and your whitelists. `borrowAssets` returns the settlement tokens Trusset curates for your network. Any ERC-20 with 6 to 18 decimals is accepted as well, and a custom one you deploy with is saved to your instance.
+
+```typescript
+const options = await trusset.lending.markets.deploymentOptions()
+const { assets } = await trusset.lending.markets.borrowAssets()
+const { stablecoins, max } = await trusset.lending.markets.savedStablecoins()
+
+console.log(options.priceSources.options, options.rateOffering.modes, assets.map(a => a.symbol), stablecoins.length, max)
+```
+
+`forgetStablecoin` removes a saved custom asset from that list. It changes nothing on chain.
+
+```typescript
+const forgotten = await trusset.lending.markets.forgetStablecoin(stablecoinAddress)
+```
+
+The third read is the asset data the deployment will attest. See [Preview the asset data](/sdk/lending/asset-data#preview-the-asset-data).
+
+## Deploy a market
+
+<Warning>
+  A freshly deployed market cannot take loans or liquidity. A nominated candidate must take the lender-of-record role, and the collateral token's own authorities must admit the market's adapter and router on the token. Those authorities are typically neither Trusset nor the deploying issuer. Read the outstanding work with `setupSteps` after deployment.
+</Warning>
+
+`deploy` builds one factory transaction that creates the market, its oracle, interest model, insurance fund, collateral adapter and liquidation router. The same signature attests the market's asset data. Sign with your instance's registered wallet, which the prepared response names in `signer`. The factory records that wallet as the market's deployer.
+
+```typescript
+const deployed = await trusset.lending.markets.deploy({
+  collateralTokenAddress: tokenAddress,
+  mode: 'FREEZE',
+  priceSource: 'NAV',
+  initialPrice: '104.82',
+  candidates: [walletAddress],
+  rateMode: 'CLAMPED',
+  rateFloorBps: 200,
+  rateCapBps: 1200,
+  maxLoanDurationDays: 180,
+}, { signer: deployer })
+
+console.log(deployed.market.id, deployed.market.marketAddress, deployed.configurationSteps, deployed.transactions)
+```
+
+Here `walletAddress` is the wallet nominated as lender of record. The market is born seeking a lender of record: it names no admin, no issuer and no collateral agent until a candidate adopts it. `openToAnyCurator: true` also offers it to approved lenders of record beyond the candidates.
+
+`mode` decides how collateral is held. `FREEZE`, the reference model, locks tokens in the borrower's own wallet through the ERC-3643 agent surface. `CUSTODY` escrows them in the adapter, which is structurally a fiduciary transfer rather than a pledge. It is outside the reference configuration, and the factory refuses it for some tokens with `CUSTODY_MODE_EXCLUDED`. Neither `mode`, `priceSource` nor `borrowAssetAddress` can change after deployment.
+
+The SDK checks the request before sending it:
+
+- `initialPrice` is a decimal string with at most 18 decimal places, required for `NAV`, `MARKET` and `FIXED`. `ORACLE` takes `oracleAddress` instead and refuses a price.
+- `rateMode` decides the rate bounds: `CLAMPED` needs `rateCapBps`, `FIXED` needs `fixedRateBps` and `maxLoanDurationDays`, and `CURVE` takes no bounds.
+- `candidates` holds at most 20 addresses, and `termGracePeriodDays` needs `maxLoanDurationDays` or `terminalDueDate`.
+- `operatorShareBps` is refused. Every market pays the fixed operator and distributor shares the factory sets.
+
+To review the transaction before a wallet signs it, prepare first. The prepared response carries the exact bytes being attested in `assetData.canonicalJson`, the fee shares and, on a `FIXED` market, `warnings` to show the signer. Confirm with the hash once it mines.
+
+```typescript
+const prepared = await trusset.lending.markets.deploy({ collateralTokenAddress: tokenAddress, mode: 'FREEZE', priceSource: 'NAV', initialPrice: '104.82', candidates: [walletAddress] })
+
+console.log(prepared.signer, prepared.assetData.contentHash, prepared.feeShares, prepared.warnings)
+
+const tx = await deployer.sendTransaction(prepared.transaction)
+await tx.wait(1)
+
+const recorded = await trusset.lending.markets.deploy({ collateralTokenAddress: prepared.collateralTokenAddress }, { txHash: tx.hash })
+```
+
+A second market for the same token, mode and borrow asset is refused with `MARKET_EXISTS`, and a token without a published profile with `TOKEN_PROFILE_REQUIRED`. The [Deploy Market](/endpoints/lending/deploy-market#error-codes) reference lists every refusal.
+
+## Run the setup steps
+
+`setupSteps` returns the ordered checklist a market still needs before it can lend. `configurationStatus` returns the readiness verdict, `fullyConfigured`, with ready-to-sign calldata for every outstanding step and the authority that signs it.
+
+```typescript
+const status = await trusset.lending.markets.configurationStatus(marketId)
+const checklist = await trusset.lending.markets.setupSteps(marketId)
+
+console.log(status.fullyConfigured, Object.keys(status.configurationCalldata), status.blockedSteps)
+for (const step of checklist.steps) console.log(step.key, step.done, step.requiredRole, step.blockedReason ?? '')
+```
+
+Each step has its own signer. The market admin, the router admin and the oracle owner sign the market-side steps, and those wait for a lender of record. The collateral token's agent administrator, its compliance administrator or an agent of its identity registry signs the token-side steps, which never wait. See the [action table](/endpoints/lending/configure-market#actions).
+
+`configure` with an `action` and a signer runs that one step and confirms it. Without an `action` the SDK refuses a signer, because the outstanding steps belong to different wallets.
+
+```typescript
+const configured = await trusset.lending.markets.configure(marketId, { action: 'grantLiquidatorRole' }, { signer: admin })
+
+console.log(configured.transactions)
+```
+
+A token-side step usually goes to a wallet outside your instance. Prepare it, hand the calldata to the token's authority, and confirm under the same action once it mines. In this block `signer` is the token's agent administrator.
+
+```typescript
+const prepared = await trusset.lending.markets.configure(marketId, { action: 'grantAgentRoleToAdapter' })
+const step = prepared.configurationCalldata?.grantAgentRoleToAdapter
+
+if (step) {
+  const tx = await signer.sendTransaction({ to: step.to, data: step.data, chainId: step.chainId })
+  await tx.wait(1)
+  await trusset.lending.markets.configure(marketId, { action: 'grantAgentRoleToAdapter' }, { txHash: tx.hash })
+}
+```
+
+A step already complete on chain comes back with nothing to sign, and the signed call then returns with an empty `transactions`. The three `verify*AsHolder` actions can answer with a holder onboarding plan instead: an identity deployment, claim signatures and registrations on the token's registry. The SDK refuses to run that plan with a signer. Prepare it without one, run it from the onboarding wallet, and confirm the registration with `{ txHash }`. See [Registering a holder from your own wallet](/endpoints/lending/configure-market#registering-a-holder-from-your-own-wallet).
+
+## Change the risk configuration
+
+<Warning>
+  Lowering `liquidationThreshold` makes loans liquidatable that were healthy a moment earlier. While a loan or a liquidation is open, the contract caps each change at 10 percentage points per call. `thresholdStep` on `config` says whether the cap applies.
+</Warning>
+
+`updateConfig` writes the whole risk configuration. Every field is required on every call, so read the current values, change what you need and send all twelve back. The wallet holding `ISSUER_ROLE` signs, which is the issuer the lender of record named at adoption.
+
+```typescript
+const current = await trusset.lending.markets.config(marketId)
+
+if (current) {
+  const updated = await trusset.lending.markets.updateConfig(marketId, {
+    collateralFactor: 7000,
+    liquidationThreshold: Number(current.liquidationThreshold),
+    liquidationPenalty: Number(current.liquidationPenalty),
+    protocolFeeRate: Number(current.protocolFeeRate),
+    minBorrowAmount: current.minBorrowAmount,
+    closeFactor: Number(current.closeFactor),
+    maxTotalCollateral: current.maxTotalCollateral,
+    maxUserCollateral: current.maxUserCollateral,
+    useDutchAuction: current.useDutchAuction,
+    auctionDuration: Number(current.auctionDuration),
+    auctionStartPremium: Number(current.auctionStartPremium),
+    auctionMinPremium: Number(current.auctionMinPremium),
+  }, { signer: issuer })
+
+  console.log(updated.txHash, updated.publicListingWithdrawn)
+}
+```
+
+The read returns the values as strings, and the write takes basis points and seconds as numbers. The amounts stay decimal strings. The SDK refuses what the contract would revert. The collateral factor must sit within 1000 to 9000 and the threshold within 1000 to 9500, strictly above the collateral factor. The liquidation penalty is at most 5000, and the close factor sits within 1000 to 5000. With auctions on, the start premium must sit above the minimum premium. The API adds the checks that need chain state, listed on [Update Config](/endpoints/lending/update-config#checks-run-before-a-signature).
+
+## Set the identity gates
+
+The borrower register gates opening a loan and drawing more. The provider register is read by every vault on the market before it admits a depositor. `identityGates` reads both, and `setIdentityGates` changes them in one transaction signed by the market admin.
+
+```typescript
+const gates = await trusset.lending.markets.identityGates(marketId)
+
+console.log(gates.borrower, gates.provider, gates.borrowerGateCompliant, gates.accessListSteps)
+```
+
+Each side is read on its own. Omit a field to keep that side, send an address or a verification profile key to install a register, and send `null` to clear it. A side can also name one of your whitelists by ID. A change applies from the next open, draw or vault deposit, and existing loans are not examined again.
+
+```typescript
+const changed = await trusset.lending.markets.setIdentityGates(marketId, { borrowerProfile: 'PROFESSIONAL' }, { signer: admin })
+
+console.log(changed.borrowerRegistry, changed.previousBorrowerRegistry, changed.transactions)
+```
+
+A `MARKET`-priced market lends to professional borrowers only, so its borrower register must stay a qualifying professional gate. A whitelist installed as the provider register needs `attestIdentifiedMembers: true`, and the SDK sends it again on the confirm leg. The rules are on [Set Identity Gates](/endpoints/lending/set-identity-gates).
+
+## Upgrade a market
+
+<Warning>
+  An upgrade onto the fixed fee shares changes what liquidity providers earn from the moment it mines. While providers hold shares or loans are open, the build is refused with `FEE_MODEL_IMPACT_UNACKNOWLEDGED`. Tell the providers first, then send `acknowledgeFeeModelImpact: true`.
+</Warning>
+
+`upgradeStatus` shows each proxy's current and target implementation before anything is built. `upgrade` moves one proxy onto the implementation the factory serves: `market` and `router` are signed by their admins, `rateModel` and `insuranceFund` by their owners. The target implementation is always read from the factory and cannot be named.
+
+```typescript
+const status = await trusset.lending.markets.upgradeStatus(marketId)
+
+if (status.upgradeAvailable) {
+  const upgraded = await trusset.lending.markets.upgrade(marketId, { target: 'market' }, { signer: admin })
+
+  console.log(upgraded.implementation, upgraded.pokeSnapshot, upgraded.followUps)
+}
+```
+
+`upgrade` signs and confirms the upgrade only. A market upgrade can return `pokeSnapshot`, a transaction that seeds the history series, and `followUps`, which re-register the market's vaults. Send `pokeSnapshot`, then each `followUps.steps` entry in order, from the market admin. They have no confirm leg.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `list` | [List Markets](/endpoints/lending/list-markets) |
+| `get` | [Get Market](/endpoints/lending/get-market) |
+| `metrics` | [Get Metrics](/endpoints/lending/get-metrics) |
+| `config` | [Get Config](/endpoints/lending/get-config) |
+| `supplyCaps` | [Get Supply Caps](/endpoints/lending/get-supply-caps) |
+| `maxBorrow` | [Get Max Borrow](/endpoints/lending/get-max-borrow) |
+| `transactions` | [List Transactions](/endpoints/lending/list-transactions) |
+| `history` | [Get History](/endpoints/lending/get-history) |
+| `indexStatus` | [Get Index Status](/endpoints/lending/get-index-status) |
+| `lifecycleStatement` | [Get Lifecycle Statement](/endpoints/lending/get-lifecycle-statement) |
+| `borrowAssets` | [List Borrow Assets](/endpoints/lending/list-borrow-assets) |
+| `savedStablecoins` | [Saved stablecoins](/endpoints/lending/list-borrow-assets#saved-stablecoins) |
+| `forgetStablecoin` | [Saved stablecoins](/endpoints/lending/list-borrow-assets#saved-stablecoins) |
+| `deploymentOptions` | [Get Deployment Options](/endpoints/lending/get-deployment-options) |
+| `deploy` | [Deploy Market](/endpoints/lending/deploy-market) |
+| `configurationStatus` | [Get Configuration Status](/endpoints/lending/get-configuration-status) |
+| `setupSteps` | [Get Setup Steps](/endpoints/lending/get-setup-steps) |
+| `configure` | [Configure Market](/endpoints/lending/configure-market), [Confirm Configuration](/endpoints/lending/confirm-configuration) |
+| `updateConfig` | [Update Config](/endpoints/lending/update-config) |
+| `identityGates` | [Get Identity Gates](/endpoints/lending/get-identity-gates) |
+| `setIdentityGates` | [Set Identity Gates](/endpoints/lending/set-identity-gates) |
+| `upgradeStatus` | [Get Upgrade Status](/endpoints/lending/get-upgrade-status) |
+| `upgrade` | [Upgrade Market](/endpoints/lending/upgrade-market) |

@@ -1,0 +1,119 @@
+---
+title: "Fees"
+description: "Read how a market splits repaid interest, pay out each fee leg, and rotate the operator wallet"
+icon: "coins"
+---
+
+This page is for the engineer running a market's books for the lender of record. After reading it you will know how a market divides repaid interest, how each fee leg is paid out, and how the operator wallet moves to a new address.
+
+A market splits every unit of repaid interest into fee legs and books each leg as a liability on the market. Nothing is paid out inline. Each leg leaves through its own sweep, a transaction any wallet may sign, because the destination is fixed on the market and nothing reaches the signer. Every amount is in the market's settlement token (stablecoin), which the API calls the borrow asset.
+
+## Read the fee split
+
+`split` reads the split from the contracts on each call. It returns five legs in the order the market applies them: `INFRASTRUCTURE`, `OPERATOR`, `DISTRIBUTOR`, `INSURANCE_FUND` and `LIQUIDITY_PROVIDERS`.
+
+```typescript
+const split = await trusset.lending.fees.split(marketId)
+const providers = split.legs.find(leg => leg.key === 'LIQUIDITY_PROVIDERS')
+console.log(`Liquidity providers keep ${providers?.perHundred} percent of repaid interest`)
+```
+
+`rateBps` is a leg's rate against its own base, which is what the contracts store. `effectiveBps` is what the leg takes out of repaid interest once the legs before it came off, and the five always sum to 10000. Only the insurance-fund leg can move: it is the market's `protocolFeeRate`, zero by default, which the issuer sets through [market configuration](/sdk/lending/markets).
+
+`operatorWallet` names the wallet the operator share is paid to. `transactionFees` carries the fixed open and repay fees stamped on the market at deployment, which are separate from the interest split. The API caches the split for up to 60 seconds, so a change made on chain can take that long to appear.
+
+## Read what each leg accrued
+
+`cashflows` returns, for every leg, what accrued over the market's life, what was swept out and what is still pending on the market. Every amount is `{ raw, value }`: `raw` in the smallest unit, `value` as a decimal string.
+
+```typescript
+const flows = await trusset.lending.fees.cashflows(marketId)
+console.log(flows.legs.operator.pending.value, flows.asset.symbol)
+if (!flows.history.complete) console.log(flows.history.note)
+```
+
+The figures trail the chain. Accrued and paid amounts come from the market's fee events, read only up to a settled block. A sweep mined a moment ago appears once its block is final. A partial history is flagged, never presented as complete: `history.complete` is `false`, `reconciliation` is `null`, and `history.note` says why. On a complete history, `reconciliation` checks each leg to the smallest unit.
+
+## Sweep a fee leg
+
+Four sweeps pay out the legs that leave the market. Each pays a destination the market fixes, so the signer can neither withhold the payment nor redirect it.
+
+| Method | Pays | Refused when nothing is booked |
+|---|---|---|
+| `sweepOperatorFees` | The operator wallet | `NO_OPERATOR_FEES` |
+| `sweepProtocolFees` | The market's insurance fund | `NO_PROTOCOL_FEES` |
+| `sweepInfrastructureFees` | The Trusset wallet fixed in the market contract | `NO_INFRASTRUCTURE_FEES` |
+| `sweepDistributorFees` | A direct liquidity provider's distributor slice | `NOTHING_ACCRUED` |
+
+Any wallet works, self-custody or regulated custodian, no preference. The API refuses before anything is signed whenever the contract would revert, for example when nothing is booked.
+
+```typescript
+const swept = await trusset.lending.fees.sweepOperatorFees(marketId, { signer })
+console.log(`Paid ${swept.amount} ${swept.asset.symbol} to ${swept.recipient}`)
+```
+
+A sweep pays what is booked when it mines, not the amount quoted when the transaction was prepared. A repayment landing in between raises the figure, so read the paid `amount` from the result. The result also carries `txHash`, `signedBy` and the `transactions` the SDK sent. See the [signing model](/sdk/lending/signing) for the prepare and `{ txHash }` shapes.
+
+### Deposit the protocol fee into the insurance fund
+
+<Warning>
+  The insurance fund accepts a deposit only from a market it authorizes. If the fund owner withdrew this market's authorization, `sweepProtocolFees` reverts on chain, and the API does not check for it first. Read `marketAuthorized` from [insurance status](/sdk/lending/insurance) before signing.
+</Warning>
+
+```typescript
+const fund = await trusset.lending.insurance.status(marketId)
+if (fund.marketAuthorized) {
+  const deposited = await trusset.lending.fees.sweepProtocolFees(marketId, { signer })
+  console.log(deposited.kind, deposited.amount, deposited.destination)
+}
+```
+
+At the default insurance-fund rate of zero, nothing accrues and the sweep is refused with `NO_PROTOCOL_FEES`.
+
+### Pay a distributor slice
+
+The market credits the distributor share to liquidity providers in proportion to the liquidity each supplied. `sweepDistributorFees` pays the slice of one direct provider, a provider that funds the pool itself rather than through a registered vault. Omit `provider` and the sweep is built for the operator wallet.
+
+```typescript
+const slice = await trusset.lending.fees.sweepDistributorFees(marketId, { provider: walletAddress }, { signer })
+console.log(slice.recipient, slice.amount)
+```
+
+A registered vault cannot be swept here and is refused with `VAULT_COLLECTS_ITSELF`: it collects its own slice through [vault distributor fees](/sdk/lending/vaults). When the provider is a contract, such as a multisig, the market accepts the sweep only from that contract itself. On the current market implementation the slice goes to the provider. On the earlier fee implementation it goes to the operator wallet, and `recipient` names which.
+
+## Rotate the operator wallet
+
+<Warning>
+  Once the rotation mines, only the new wallet can move the operator wallet again. The previous wallet loses that right, and no other party holds it: not the market admin, and not Trusset. The API therefore accepts only a new wallet that this instance has registered and verified, which proves it controls the key.
+</Warning>
+
+The operator wallet collects the operator share and is the one wallet, besides registered vaults, that may deposit liquidity directly. Both rights move together. Only the current operator wallet signs, which is the wallet that took the lender-of-record role unless it rotated since.
+
+```typescript
+const rotated = await trusset.lending.fees.rotateOperatorWallet(marketId, { newRecipient: walletAddress }, { signer: lender })
+console.log(`Operator wallet moved from ${rotated.previous} to ${rotated.operatorWallet}`)
+```
+
+The SDK fills `signerAddress` from the signer, so the API refuses another wallet with `NOT_OPERATOR_WALLET` before anything is built. The SDK checks the prepared `requiredSigner` against the signer again before it signs.
+
+| Item | After the rotation |
+|---|---|
+| Operator share | Paid to the new wallet, including shares booked before the rotation and not yet swept |
+| Direct deposits | Accepted from the new wallet only |
+| Liquidity the previous wallet supplied | Stays its own. It can still withdraw it, but cannot add more |
+| The previous wallet's distributor slice | Keeps accruing. Sweep it with `sweepDistributorFees`, passing the previous wallet as `provider` |
+| Market roles | Unchanged |
+
+The API refuses a new wallet that is not verified on this instance with `WALLET_NOT_VERIFIED`, and the current wallet with `WALLET_UNCHANGED`. A market without a lender of record answers `MARKET_NOT_ADOPTED`, and an implementation without rotation answers `MARKET_UPGRADE_REQUIRED`. See [Lending errors](/sdk/lending/errors).
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `fees.split` | [Get Fee Split](/endpoints/lending/get-fee-split) |
+| `fees.cashflows` | [Get Cashflows](/endpoints/lending/get-cashflows) |
+| `fees.sweepOperatorFees` | [Sweep Operator Fees](/endpoints/lending/sweep-operator-fees) |
+| `fees.sweepProtocolFees` | [Sweep Protocol Fees](/endpoints/lending/sweep-protocol-fees) |
+| `fees.sweepInfrastructureFees` | [Sweep Infrastructure Fees](/endpoints/lending/sweep-infrastructure-fees) |
+| `fees.sweepDistributorFees` | [Sweep Distributor Fees](/endpoints/lending/sweep-distributor-fees) |
+| `fees.rotateOperatorWallet` | [Rotate Operator Wallet](/endpoints/lending/rotate-operator-wallet) |

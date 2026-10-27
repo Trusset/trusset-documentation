@@ -1,0 +1,90 @@
+---
+title: "Insurance Fund"
+description: "Read a market's default reserve, add capital to it, and withdraw as the fund owner"
+icon: "shield-halved"
+---
+
+This page is for the engineer running a market's books for the lender of record. After reading it you will know what a market's reserve covers and what it does not, how any wallet adds capital to it, and how the fund owner withdraws.
+
+The API and the contracts call it the insurance fund. It is a default reserve bound to one market: not a guarantee, and not insurance. It absorbs a shortfall ahead of the liquidity providers, but only up to what it holds. A draw larger than the balance pays the balance, and the pool books the rest.
+
+## Read the fund
+
+```typescript
+const fund = await trusset.lending.insurance.status(marketId)
+console.log(fund.stats.currentBalance, fund.borrowAssetSymbol, fund.marketAuthorized)
+console.log(fund.disclosure.draws)
+```
+
+`stats.currentBalance` is what the fund can pay today. `marketAuthorized` says whether the fund covers this market at all: an unauthorized market gets no coverage, and its protocol-fee sweep reverts. It also reads `false` when the read failed, so a `false` is not proof of a withdrawn authorization.
+
+Read `marketBadDebt` beside the fund, because a fund that covered nothing and a market that never took a loss otherwise look the same. `borneByProviders` is the loss the liquidity providers carried. `earmarkedProtocolFees` is protocol fee the market booked for the fund and has not swept yet, so an empty fund can still have money waiting. The [fees page](/sdk/lending/fees) sweeps it.
+
+`disclosure` holds plain-language statements chosen for this market's generation, written to be shown to liquidity providers as they are. `generation.settlementDrawsReserve` decides when the market draws on the reserve.
+
+| `settlementDrawsReserve` | The market draws on the reserve |
+|---|---|
+| `true` | On every first settlement that retains less than the record's claim. Also on the write-off after the 7-day window, and for the residual of an instant whole-position realization |
+| `false` | Only on the write-off after the 7-day window and for the residual of an instant whole-position realization. A sale settled below the debt books its shortfall on the pool |
+| `null` | Could not be read. Retry shortly |
+
+A fund whose owner withdrew this market's authorization pays nothing and blocks nothing, so the whole loss lands on the pool.
+
+## Top up the fund
+
+<Warning>
+  A top-up is a one-way transfer. The wallet that sends it receives no shares, holds no claim on the fund, and nothing is owed back to it. Money leaves the fund only as coverage paid to a market it authorizes, or through a withdrawal by the fund owner.
+</Warning>
+
+Any wallet may top up, whether the operator funding its own reserve or a third party standing behind the pool. The plan approves the fund to pull the settlement token (stablecoin), then calls the fund's `topUp`. The SDK fills `fromAddress` from the signer, signs both steps in order, and records the top-up with the `topUp` step's hash.
+
+```typescript
+const topUp = await trusset.lending.insurance.topUp(marketId, { amount: '5000' }, { signer })
+console.log(topUp.booked, topUp.duplicate, topUp.transactions.map(t => t.functionName))
+```
+
+`amount` is a decimal string in the borrow asset. The API checks that the wallet holds enough before offering anything, and refuses a short balance with `INSUFFICIENT_BALANCE`. A fund on the earlier implementation cannot book a top-up and is refused with `FUND_UPGRADE_REQUIRED` until the fund owner upgrades it.
+
+To sign in your own environment, prepare with `fromAddress`, which the SDK requires when there is no signer. Both steps must come from that wallet, because the fund pulls from the sender of `topUp` and records it as the source. Confirm with the `topUp` step's hash and the same `amount` and `fromAddress`.
+
+```typescript
+const prepared = await trusset.lending.insurance.topUp(marketId, { amount: '5000', fromAddress: walletAddress })
+let topUpHash = ''
+for (const [index, step] of prepared.steps.entries()) {
+  const tx = await signer.sendTransaction(step.transaction)
+  await tx.wait(1)
+  if (index === prepared.confirmStepIndex) topUpHash = tx.hash
+}
+const recorded = await trusset.lending.insurance.topUp(marketId, { amount: '5000', fromAddress: walletAddress }, { txHash: topUpHash })
+console.log(recorded.recorded, recorded.booked)
+```
+
+Recording reads the receipt, not the calldata, so a top-up signed outside this API can be recorded too. `duplicate: true` means the hash was already recorded for the same amount, so the call is safe to repeat. A booked top-up nobody records is still picked up when the fund status is read, if it falls within the last 50,000 blocks.
+
+## Withdraw from the fund
+
+<Warning>
+  Every unit withdrawn is a unit the reserve can no longer pay toward this market's losses, and whatever the reserve cannot cover lands on the liquidity providers. The API checks the amount against the balance when it builds the transaction. A draw that lands before the withdrawal mines can make it revert.
+</Warning>
+
+Only the fund owner signs: the admin the lender of record named when it took the role. Before a lender of record takes the market, the market itself or the deploying factory owns the fund, and no wallet can withdraw.
+
+```typescript
+const sent = await trusset.lending.insurance.withdraw(marketId, { amount: '1000', recipient: walletAddress }, { signer: admin })
+console.log(sent.transactions[0]?.txHash)
+
+const after = await trusset.lending.insurance.status(marketId)
+console.log(after.stats.totalWithdrawn, after.stats.currentBalance)
+```
+
+With a signer, the SDK checks that the signer is the prepared `fundOwner` before it signs. When the owner could not be read, it refuses with `FUND_OWNER_UNREADABLE` and a status of 503, and nothing is signed.
+
+The route has no confirm leg, and the API records nothing. With a signer the result is `{ transactions }` only, and `{ txHash }` is refused. Once the withdrawal mines, `stats.totalWithdrawn` and `stats.currentBalance` reflect it. Without options the method returns the unsigned transaction under `calldata`, with `fundOwner`, `fundAddress` and `currentBalance` beside it.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `insurance.status` | [Get Insurance Status](/endpoints/lending/get-insurance-status) |
+| `insurance.topUp` | [Top Up Insurance Fund](/endpoints/lending/top-up-insurance), confirmed through [Record Insurance Top-Up](/endpoints/lending/record-insurance-top-up) |
+| `insurance.withdraw` | [Withdraw from Insurance Fund](/endpoints/lending/withdraw-insurance) |

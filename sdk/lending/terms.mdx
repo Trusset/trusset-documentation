@@ -1,0 +1,116 @@
+---
+title: "Terms of Use"
+description: "Publish a market's terms of use, present them to borrowers, read every version and export a copy for the record"
+icon: "file-contract"
+---
+
+This page is for the engineer who publishes a market's terms of use for the lender of record and shows them to borrowers. After reading it you will know how to save and publish terms, take them offline, read any version, and export a copy for the record.
+
+Terms of use are stored against the market's contract address, not against an instance. Every instance that holds the market reads the same document, including the instance that deployed it. Saving is a database write, not a transaction: nothing is signed and nothing goes on chain, so none of these methods takes a signer.
+
+<Warning>
+  Nothing on chain enforces terms of use. A market without published terms still lends: loan builds there carry a `TERMS_NOT_PUBLISHED` warning, and the decision to stop is yours. Check for published terms before you offer a borrow.
+</Warning>
+
+## Publish terms
+
+Authority is read from the chain at the moment of the save. One of your instance's verified wallets must be the lender of record recorded on the factory, or hold the market's admin or issuer role. Before a lender of record takes the market nobody qualifies, and every save is refused with `NOT_CURATOR`.
+
+```typescript
+const saved = await trusset.lending.terms.save(marketId, {
+  title: 'Terms of use, secured credit line',
+  content: '# Terms of use\n\nThese terms govern borrowing against pledged securities on this market.',
+  published: true,
+})
+
+console.log(saved.terms.version, saved.terms.contentHash, saved.terms.changed)
+```
+
+`content` is markdown, stored as written apart from Windows line endings, which become `\n`. The SDK refuses content over 262,144 bytes of UTF-8 and control characters other than tab, newline and carriage return before any request. `title` takes at most 200 characters.
+
+Every save that changes something writes a new version and keeps the old ones. A save identical to the current record writes nothing and answers `changed: false`. `authority` on the result says which role the save was made under.
+
+To bind a template from your instance's terms library instead, send `templateId`. The template's text is saved and `content` is ignored. Templates are managed in the issuer app, and only the instance that authored a template can bind it.
+
+### Stage a draft
+
+`published: false` saves a draft. While published terms exist, the draft is staged beside them as the next version, and the published terms stay what borrowers are shown. The result then carries `draft: true`, the `liveVersion` still served, and a `notice`. Publish a version with a later save that sends `published: true`.
+
+```typescript
+const draft = await trusset.lending.terms.save(marketId, {
+  content: '# Terms of use\n\nRevised terms, effective from the next quarter.',
+  published: false,
+})
+```
+
+<Note>
+  A draft is not private to your instance. Every instance that holds the market can list it with `versions` and read it with `version`, because terms are stored against the market's address.
+</Note>
+
+## Show terms to a borrower
+
+`get` returns the published terms only, as `markdown` (the default, with `content` and `plainText`) or `html`. A market without published terms answers `TERMS_NOT_PUBLISHED`, which is a `404` that means "no terms to show", not a missing market.
+
+```typescript
+import { TrussetError } from '@trusset/sdk'
+
+try {
+  const { terms, binding } = await trusset.lending.terms.get(marketId, { format: 'html' })
+  if (terms.format === 'html') console.log(terms.version, terms.contentHash, terms.html, binding?.status)
+} catch (err) {
+  if (err instanceof TrussetError && err.code === 'TERMS_NOT_PUBLISHED') console.log('This market has no published terms')
+  else throw err
+}
+```
+
+`version` and `contentHash` identify exactly which text was shown. `binding` reports whether the terms follow a template from the library and whether that template has a newer version since.
+
+## Read every version
+
+`versions` lists the history newest first, without the document bodies. `current` is the live version, or `null` when the terms are offline. `limit` runs from 1 to 100 and defaults to 25.
+
+```typescript
+const { versions, current } = await trusset.lending.terms.versions(marketId, { limit: 50 })
+
+const first = await trusset.lending.terms.version(marketId, 1, { format: 'markdown' })
+```
+
+`version` returns one saved version in full, whether or not it was published and whether or not the terms are live today. Each entry in `versions` keeps `published` as the record of how it was saved, and `live` marks the one served now.
+
+## Take terms offline
+
+```typescript
+const { unpublished } = await trusset.lending.terms.unpublish(marketId)
+```
+
+Nothing is deleted. The text stays stored, every version stays readable, and no new version is written. From then on `get` answers `TERMS_NOT_PUBLISHED` for every instance, and loan builds on the market carry the warning. A later `save` with `published: true` puts the terms back online as a new version. The same authority check as for saving applies.
+
+## Export a copy for the record
+
+<Warning>
+  An instance that can author the terms exports its current record even when it is a draft or offline. The PDF then still prints a **Published** line, filled from the last write. Before filing such an export as the published text, check that `get` returns the same `contentHash`.
+</Warning>
+
+`export` returns the file itself: `bytes`, its `contentType` and the `filename` the API suggests. `format` is `pdf` (the default), `text` or `markdown`. The SDK allows the call up to two minutes.
+
+```typescript
+import { writeFile } from 'node:fs/promises'
+
+const document = await trusset.lending.terms.export(marketId, { format: 'pdf' })
+await writeFile(document.filename ?? 'terms.pdf', document.bytes)
+```
+
+The PDF header carries the market and collateral token addresses, the version and the content hash, so a printed copy can be checked against the API. Its eligibility lines are read live from the market. When the market's registers cannot be read, no PDF is produced and the call answers `IDENTITY_GATES_UNREADABLE`, a `503` worth retrying. The `text` and `markdown` formats do not read them.
+
+The **Lender of record** line prints the wallet that saved the version. That can be a wallet holding the market's admin or issuer role rather than the lender of record's own.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `terms.get` | [Get Terms](/endpoints/lending/get-terms) |
+| `terms.versions` | [List Terms Versions](/endpoints/lending/list-terms-versions) |
+| `terms.version` | [Get Terms Version](/endpoints/lending/get-terms-version) |
+| `terms.save` | [Save Terms](/endpoints/lending/save-terms) |
+| `terms.unpublish` | [Unpublish Terms](/endpoints/lending/unpublish-terms) |
+| `terms.export` | [Export Terms](/endpoints/lending/export-terms) |
