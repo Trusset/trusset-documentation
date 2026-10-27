@@ -8,17 +8,16 @@ description: 'Calldata that delivers the asset to the buyer after full payment'
   Seller Financing is in beta and runs on Ethereum Sepolia instances only for now (`DEVELOPMENT` instances on Ethereum). A `PRODUCTION` instance, or one on another network, answers `503 SELLER_FINANCING_UNAVAILABLE`. See [Seller Financing](/endpoints/seller-financing/introduction).
 </Note>
 
-Builds the delivery of the asset on a `REPAID` listing. Only the buyer can sign it. The asset goes to `recipient`, the buyer's own wallet unless you name another, and the listing reads `COMPLETED`. On a delivery-against-payment market the claim also credits the held price to the seller, in `release`. The seller or an operator can deliver to the buyer's own wallet instead with [Deliver Asset](/endpoints/seller-financing/deliver-asset).
+Builds the delivery of the asset on a `REPAID` listing. Only the buyer can sign it. The asset goes to `recipient`, the buyer's own wallet unless you name another, and the listing reads `COMPLETED`.
 
 In freeze mode the adapter unfreezes the amount in the seller's wallet and force-transfers it to the recipient. In custody mode the adapter transfers it from its own holdings. Either way the asset token checks the recipient, so the recipient must be a wallet the token admits, for example one verified on its identity register.
 
 Before building, the API checks, in order:
 
-1. On a delivery-against-payment market, the market has recounted its live sales. Otherwise `409 MIGRATION_PENDING`.
-2. `from` is the buyer. Any other wallet answers `409 TX_WOULD_REVERT` with `NotBuyer`, naming the buyer in the message and in `details.buyer`.
-3. The asset can still be delivered. While it cannot (`assetLeg.deliverable: false`), the claim answers `409 ASSET_NOT_DELIVERABLE` with `details.assetLeg`, and on a delivery-against-payment market `details.heldPayment`, whose `unwindableAt` says when the buyer can unwind the sale instead. See [Asset leg](/endpoints/seller-financing/introduction#asset-leg).
-4. The recipient is verified on the asset token's own identity register, when the token names one. A recipient the register answers as not verified is refused with `409 RECIPIENT_NOT_VERIFIED`, naming `recipient` and `registry`.
-5. In custody mode, the token admits the delivery: the transfer from the custody adapter to the recipient is simulated, and a refusal answers `409 RECIPIENT_REFUSED` with the token's `reason`.
+1. `from` is the buyer. Any other wallet answers `409 TX_WOULD_REVERT` with `NotBuyer`, naming the buyer in the message and in `details.buyer`.
+2. The asset can still be delivered. While it cannot (`assetLeg.deliverable: false`), the claim answers `409 ASSET_NOT_DELIVERABLE` with `details.assetLeg`. See [Asset leg](/endpoints/seller-financing/introduction#asset-leg).
+3. The recipient is verified on the asset token's own identity register, when the token names one. A recipient the register answers as not verified is refused with `409 RECIPIENT_NOT_VERIFIED`, naming `recipient` and `registry`.
+4. In custody mode, the token admits the delivery: the transfer from the custody adapter to the recipient is simulated, and a refusal answers `409 RECIPIENT_REFUSED` with the token's `reason`.
 
 A check that cannot be read does not refuse the claim. The claim is then simulated from `from`, and a revert there, such as a freeze-mode forced transfer the token refuses, answers `409 TX_WOULD_REVERT` with the token's reason. Nothing is lost on any refusal: the listing stays `REPAID`. Claim again later, or name another admitted wallet. A claim stays open while the market is paused.
 
@@ -44,8 +43,6 @@ A check that cannot be read does not refuse the claim. The claim is then simulat
     <ResponseField name="confirmStepIndex" type="integer">`0`.</ResponseField>
     <ResponseField name="preflight" type="object">`{ simulated: true, gasEstimate }`.</ResponseField>
     <ResponseField name="recipient" type="string">The wallet that receives the asset.</ResponseField>
-    <ResponseField name="heldPayment" type="object">Delivery against payment only: the price the market holds for this sale, as on [Get Listing](/endpoints/seller-financing/get-listing#response-fields).</ResponseField>
-    <ResponseField name="release" type="object">Delivery against payment only: `{ to, amount, amountFormatted, note }`, the seller and what the claim credits it. `amount` is `"0"` for a sale paid off before the market moved to delivery against payment.</ResponseField>
     <ResponseField name="assetLeg" type="object">Present only when the asset leg carries a warning while the asset can still be delivered, for example a freeze partly released or a seller balance that covers fewer than all of its sold listings. As on [Get Listing](/endpoints/seller-financing/get-listing#response-fields).</ResponseField>
     <ResponseField name="warning" type="string">`assetLeg.warning`, present with it.</ResponseField>
   </Expandable>
@@ -159,8 +156,7 @@ await (await buyer.sendTransaction({ to: step.to, data: step.data, value: 0, gas
 | `MARKET_NOT_FOUND` | `404` | No market with this ID that your instance reaches on its network |
 | `LISTING_NOT_FOUND` | `404` | No listing with this ID on the market |
 | `INVALID_STATUS` | `409` | The listing is not `REPAID`. `details.status` names its status |
-| `MIGRATION_PENDING` | `409` | The market runs delivery against payment but has not recounted its live sales. [Upgrade Market](/endpoints/seller-financing/upgrade-market) builds the recount, which any wallet can sign |
-| `ASSET_NOT_DELIVERABLE` | `409` | The asset can no longer be delivered: the seller's wallet or the custody adapter holds less than the listing sold. `details.assetLeg` carries the check, `details.heldPayment` the held price on a delivery-against-payment market |
+| `ASSET_NOT_DELIVERABLE` | `409` | The asset can no longer be delivered: the seller's wallet or the custody adapter holds less than the listing sold. `details.assetLeg` carries the check |
 | `RECIPIENT_NOT_VERIFIED` | `409` | The recipient is not verified on the asset token's identity register. `details` carries `recipient` and `registry` |
 | `RECIPIENT_REFUSED` | `409` | Custody mode: the asset token refuses the delivery from the adapter to the recipient. `details` carries `recipient` and the token's `reason`, `null` when it gave none |
 | `TX_WOULD_REVERT` | `409` | The claim would revert: `NotBuyer` with `details.requiredRole` and `details.buyer`, `InvalidRecipient`, a token refusal of the recipient with the token's reason, or an adapter error such as `ForcedTransferFailed` or `TransferShortfall` |

@@ -10,8 +10,6 @@ description: 'One listing with its stamped terms, its loan, what an active loan 
 
 Returns one listing as the market contract holds it: the terms stamped when it was created, and the loan once a buyer has purchased it. While the loan is `ACTIVE`, `loan.status` adds what it owes now, as [Get Loan Status](/endpoints/seller-financing/get-loan-status) returns it. While it is `ACTIVE` or `REPAID`, `assetLeg` says whether the asset can still be delivered to the buyer. A cancelled or liquidated listing on a custody market carries `collateralEscrow`, what the custody adapter holds in escrow for the seller.
 
-A `LIQUIDATED` listing carries `liquidation`, the account of the liquidation, as on [Get Loan Status](/endpoints/seller-financing/get-loan-status#response-fields), and its `loan.principalOutstanding` reads `"0"`. A listing whose interest periods are shorter than its runtime and whose grace period is under one day reads `graceBelowFloor: true` and carries `graceWarning`: while `OPEN` it says a purchase through the API is refused, while `ACTIVE` it carries the next due date and what a payment before it leaves owed.
-
 The terms never change after creation. A configuration change on the market reaches new listings only.
 
 ## Path Parameters
@@ -25,7 +23,7 @@ The terms never change after creation. A configuration change on the market reac
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="id" type="string">The listing ID.</ResponseField>
-    <ResponseField name="status" type="string">`OPEN`, `CANCELLED`, `ACTIVE`, `REPAID`, `COMPLETED`, `LIQUIDATED` or `UNWOUND`. See [Lifecycle](/endpoints/seller-financing/introduction#lifecycle).</ResponseField>
+    <ResponseField name="status" type="string">`OPEN`, `CANCELLED`, `ACTIVE`, `REPAID`, `COMPLETED` or `LIQUIDATED`. See [Lifecycle](/endpoints/seller-financing/introduction#lifecycle).</ResponseField>
     <ResponseField name="expired" type="boolean">`true` for an `OPEN` listing past its `expiresAt`. It can no longer be bought, and a purchase is refused with `ListingExpired`, but it stays `OPEN` on chain until the seller or the operator cancels it. `false` otherwise.</ResponseField>
     <ResponseField name="seller" type="string">The wallet that listed.</ResponseField>
     <ResponseField name="rateMode" type="string">`FIXED` or `DERIVED`. See [Interest](/endpoints/seller-financing/introduction#interest).</ResponseField>
@@ -41,7 +39,6 @@ The terms never change after creation. A configuration change on the market reac
     <ResponseField name="duration" type="integer">The runtime from purchase to maturity, in seconds.</ResponseField>
     <ResponseField name="interestPeriod" type="integer">The interest period, in seconds.</ResponseField>
     <ResponseField name="gracePeriod" type="integer">The grace period after each due date, in seconds.</ResponseField>
-    <ResponseField name="graceBelowFloor" type="boolean">`true` when the interest period is shorter than the runtime and the grace period is under one day (86400 seconds). [Purchase](/endpoints/seller-financing/purchase) refuses such a listing with `409 GRACE_PERIOD_REQUIRED`.</ResponseField>
     <ResponseField name="rate" type="string">The annual rate, as an 18-decimal fixed-point fraction. For `FIXED` the fixed rate, for `DERIVED` the base rate.</ResponseField>
     <ResponseField name="rateBps" type="integer">The rate in basis points.</ResponseField>
     <ResponseField name="premiumA" type="string">The walk-away premium's first coefficient. `"0"` on a `FIXED` listing.</ResponseField>
@@ -59,10 +56,7 @@ The terms never change after creation. A configuration change on the market reac
         <ResponseField name="checkpointAt" type="integer">Unix time of the last principal payment, or the purchase.</ResponseField>
         <ResponseField name="principal" type="string">Principal still outstanding, in smallest units. `"0"` once repaid.</ResponseField>
         <ResponseField name="principalFormatted" type="string">The same in whole units.</ResponseField>
-        <ResponseField name="principalOutstanding" type="string">What the buyer still owes in principal: `principal` while the listing is `ACTIVE`, `"0"` in every other status. A liquidation leaves `principal` at what was owed when it was mined, but nothing more can be paid to the market for the listing.</ResponseField>
-        <ResponseField name="principalOutstandingFormatted" type="string">The same in whole units.</ResponseField>
-        <ResponseField name="principalNote" type="string">Only on a `LIQUIDATED` listing: says that `principal` is what was owed at the liquidation and that nothing more can be paid to the market for the listing.</ResponseField>
-        <ResponseField name="escrowedPrincipal" type="string">Principal repaid so far and held in escrow, in smallest units. It moves to the seller on completion, into `heldPayment` on a delivery-against-payment market, and becomes refundable on liquidation, so it reads `"0"` after either.</ResponseField>
+        <ResponseField name="escrowedPrincipal" type="string">Principal repaid so far and held in escrow, in smallest units. It moves to the seller on completion and becomes refundable on liquidation, so it reads `"0"` after either.</ResponseField>
         <ResponseField name="escrowedPrincipalFormatted" type="string">The same in whole units.</ResponseField>
         <ResponseField name="baseAccrued" type="string">Base interest accrued up to `checkpointAt`, in smallest units.</ResponseField>
         <ResponseField name="interestPaid" type="string">Interest paid so far, in smallest units, including what a liquidation took.</ResponseField>
@@ -70,39 +64,12 @@ The terms never change after creation. A configuration change on the market reac
         <ResponseField name="status" type="object">Only while the listing is `ACTIVE`: `interestDue`, `payoff`, `nextDue`, `isLiquidatable` and `liquidatableAt`, as on [Get Loan Status](/endpoints/seller-financing/get-loan-status#response-fields). `null` when those reads failed.</ResponseField>
       </Expandable>
     </ResponseField>
-    <ResponseField name="settlementModel" type="string">`CREDIT_AT_PAYOFF` on a first-generation market, `DELIVERY_AGAINST_PAYMENT` on a market that holds the price until delivery, `null` when the market implementation could not be read. See [Market generations](/endpoints/seller-financing/introduction#market-generations).</ResponseField>
-    <ResponseField name="heldPayment" type="object">
-      Delivery against payment only, on a `REPAID` listing: the payment the market holds until the asset is delivered. See [Market generations](/endpoints/seller-financing/introduction#market-generations).
-      <Expandable>
-        <ResponseField name="readable" type="boolean">`false` when `heldPayment(id)` could not be read. `amount` is then `null` and `note` says so.</ResponseField>
-        <ResponseField name="amount" type="string">The downpayment plus the principal, in the payment token's smallest unit. `"0"` for a sale paid off before the market moved to delivery against payment: the seller was credited at that payoff, and the sale cannot be unwound.</ResponseField>
-        <ResponseField name="amountFormatted" type="string">The same in whole units.</ResponseField>
-        <ResponseField name="repaidAt" type="integer">Unix time of the payoff. `null` when nothing is held.</ResponseField>
-        <ResponseField name="deliverBy" type="integer">The last second of the delivery period, 30 days after the payoff.</ResponseField>
-        <ResponseField name="unwindableAt" type="integer">Unix time from which the sale can be unwound with [Unwind Sale](/endpoints/seller-financing/unwind-sale): `deliverBy` plus one second.</ResponseField>
-        <ResponseField name="unwindable" type="boolean">`true` once `unwindableAt` has passed, against the server clock. [Unwind Sale](/endpoints/seller-financing/unwind-sale) checks it against the latest block.</ResponseField>
-        <ResponseField name="note" type="string">What the held amount means.</ResponseField>
-      </Expandable>
-    </ResponseField>
-    <ResponseField name="settlement" type="object">
-      On a `REPAID`, `COMPLETED` or `UNWOUND` listing: where the price went, read from the market's event log.
-      <Expandable>
-        <ResponseField name="model" type="string">`DELIVERY_AGAINST_PAYMENT` when the payoff was held (`PaymentHeld`), `CREDIT_AT_PAYOFF` when it credited the seller (`LoanRepaid` with a non-zero `sellerCredit`), `null` when neither is in the log read.</ResponseField>
-        <ResponseField name="priceCreditedToSeller" type="string">The downpayment and principal credited to the seller: `sellerCredit` of `LoanRepaid` plus `amount` of `PaymentReleased`, in smallest units. Interest credits are not counted here.</ResponseField>
-        <ResponseField name="priceCreditedToSellerFormatted" type="string">The same in whole units.</ResponseField>
-        <ResponseField name="refundedToBuyer" type="string">`refund` of `SaleUnwound`, in smallest units.</ResponseField>
-        <ResponseField name="refundedToBuyerFormatted" type="string">The same in whole units.</ResponseField>
-        <ResponseField name="events" type="array">The listing's `LoanRepaid`, `PaymentHeld`, `PaymentReleased`, `SaleUnwound` and `AssetClaimed` events with `blockNumber`, `transactionHash`, `logIndex`, `listingId` and their arguments, each amount with a `...Formatted` twin. `null` when the log could not be read.</ResponseField>
-        <ResponseField name="complete" type="boolean">`false` when the market's log was read in part. Read again for the rest.</ResponseField>
-      </Expandable>
-    </ResponseField>
     <ResponseField name="assetLeg" type="object">
       Only while the listing is `ACTIVE` or `REPAID`: whether the asset can still reach the buyer. See [Asset leg](/endpoints/seller-financing/introduction#asset-leg).
       <Expandable>
         <ResponseField name="checked" type="boolean">`false` when the lock or the seller's balance could not be read. `deliverable`, `locked` and `warning` are then `null` and `note` says what was not read. An unchecked leg never refuses a payoff or a claim.</ResponseField>
         <ResponseField name="mode" type="string">`FREEZE` or `CUSTODY`.</ResponseField>
-        <ResponseField name="basis" type="string">`MARKET` on a delivery-against-payment market that has recounted its live sales: `deliverable` is the market's own `isDeliverable(id)` and `encumbrance` replaces the `seller...` fields. Absent on a first-generation market, where the check reads the listings, the adapter and the token.</ResponseField>
-        <ResponseField name="deliverable" type="boolean">`true` when the asset can be delivered in full: in freeze mode the seller's wallet holds at least `assetAmount` (and, with `basis: "MARKET"`, the freeze adapter is an agent of the token), in custody mode the adapter holds at least `assetAmount`. With `false`, the asset claim and the delivery are refused with `409 ASSET_NOT_DELIVERABLE`, and on a first-generation market the payoff too.</ResponseField>
+        <ResponseField name="deliverable" type="boolean">`true` when the asset can be delivered in full: in freeze mode the seller's wallet holds at least `assetAmount`, in custody mode the adapter holds at least `assetAmount` under this listing. With `false`, a payoff and the asset claim are refused with `409 ASSET_NOT_DELIVERABLE`.</ResponseField>
         <ResponseField name="locked" type="boolean">In custody mode the same as `deliverable`. In freeze mode `true` while the freeze still covers every `ACTIVE` and `REPAID` listing of the seller on this market and this listing's lock is whole.</ResponseField>
         <ResponseField name="pooled" type="boolean">Freeze mode only. `true` when every listing of the market was read, so `sellerRequired` counts all of the seller's sold listings.</ResponseField>
         <ResponseField name="seller" type="string">Freeze mode only. The seller's wallet, checksummed.</ResponseField>
@@ -111,16 +78,12 @@ The terms never change after creation. A configuration change on the market reac
         <ResponseField name="sellerRequired" type="string">Freeze mode only. The asset all of the seller's `ACTIVE` and `REPAID` listings on this market sold, in smallest units.</ResponseField>
         <ResponseField name="sellerFrozen" type="string">Freeze mode only. The seller's frozen balance on the token, in smallest units.</ResponseField>
         <ResponseField name="sellerBalance" type="string">Freeze mode only. The seller's balance on the token, frozen tokens included, in smallest units.</ResponseField>
-        <ResponseField name="encumbrance" type="object">With `basis: "MARKET"`: `{ pool, required, requiredFormatted, backed, backedFormatted }`. `pool` is the seller's wallet in freeze mode and the custody adapter in custody mode, `required` what the market counts as sold from it on live sales, `backed` what covers it (the smaller of frozen balance and balance in freeze mode, the adapter's balance in custody mode).</ResponseField>
-        <ResponseField name="adapterIsAgent" type="boolean">With `basis: "MARKET"` in freeze mode: whether the freeze adapter still holds the agent role on the token. `null` when unread.</ResponseField>
         <ResponseField name="shortfall" type="string">What is missing to deliver this listing in full, in smallest units. `"0"` when deliverable.</ResponseField>
         <ResponseField name="shortfallFormatted" type="string">The same in whole units.</ResponseField>
         <ResponseField name="warning" type="string">What is wrong, in words: the asset left the seller's wallet or the adapter, part of the freeze was released, or the seller's balance covers fewer than all of its sold listings, so the buyers who claim first are delivered first. `null` when nothing is wrong.</ResponseField>
         <ResponseField name="note" type="string">On an unchecked leg, what could not be read. On a freeze leg, set when the market holds more listings than one scan reads, so not every lock of the seller was counted. `null` otherwise.</ResponseField>
       </Expandable>
     </ResponseField>
-    <ResponseField name="graceWarning" type="object">Only on a listing with `graceBelowFloor: true` that is `OPEN` or `ACTIVE`: `code` (`GRACE_PERIOD_BELOW_FLOOR`), `gracePeriod`, `interestPeriod`, `minimum` and `message`; while `ACTIVE` also `dueAt`, `liquidatableAt` and `interestAccruingBeforeDueAt`, as on [Get Loan Status](/endpoints/seller-financing/get-loan-status#response-fields).</ResponseField>
-    <ResponseField name="liquidation" type="object">Only on a `LIQUIDATED` listing: the account of the liquidation read from the market's `LoanLiquidated` event, as on [Get Loan Status](/endpoints/seller-financing/get-loan-status#response-fields).</ResponseField>
     <ResponseField name="collateralEscrow" type="object">Only on a `CANCELLED` or `LIQUIDATED` listing of a custody market: `{ holder, amount, amountFormatted, note }`. `holder` is the seller. `amount` is what the custody adapter holds in escrow for the seller across every listing on the market, in the asset token's smallest unit, `"0"` when the return went through. `note` says how to reclaim it, with [Claim Escrowed Collateral](/endpoints/seller-financing/claim-escrowed-collateral), once the token admits the seller again. When the escrow could not be read, `amount` is `null` and `note` says so.</ResponseField>
   </Expandable>
 </ResponseField>
@@ -167,7 +130,6 @@ if (data.assetLeg?.checked && data.assetLeg.warning) {
     "duration": 2592000,
     "interestPeriod": 604800,
     "gracePeriod": 172800,
-    "graceBelowFloor": false,
     "rate": "40000000000000000",
     "rateBps": 400,
     "premiumA": "781805364",
@@ -183,8 +145,6 @@ if (data.assetLeg?.checked && data.assetLeg.warning) {
       "checkpointAt": 1792400400,
       "principal": "8000000000",
       "principalFormatted": "8000.0",
-      "principalOutstanding": "8000000000",
-      "principalOutstandingFormatted": "8000.0",
       "escrowedPrincipal": "0",
       "escrowedPrincipalFormatted": "0.0",
       "baseAccrued": "0",

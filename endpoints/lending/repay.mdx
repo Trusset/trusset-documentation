@@ -23,7 +23,7 @@ Any wallet can repay any loan, so a third party can rescue a position approachin
 </ParamField>
 
 <ParamField body="amount" type="string">
-  Amount to pay, as a positive decimal string in borrow asset units. The contract caps the payment at the debt plus the repayment fee, so overpaying does not transfer more than that. An amount that covers the current debt plus the repayment fee closes the loan, so it is built as a full repayment: `fullRepayment` is `true`, a `CUSTODY` loan carries `collateralRelease` when the collateral would be escrowed, and an approval is followed by a step that clears the leftover allowance. Required unless `all` is `true` or you are confirming with `txHash`.
+  Amount to pay, as a positive decimal string in borrow asset units. The contract caps the payment at the debt plus the repayment fee, so overpaying does not transfer more than that. An amount that covers the current debt plus the repayment fee closes the loan, so it is built as a full repayment: `fullRepayment` is `true`, a `CUSTODY` loan carries `collateralRelease` when the collateral would be escrowed, and an approval is followed by a step that clears the leftover allowance. An amount above what a full repayment can need is sized like `all: true`: the approval and the repayment carry the figure in `forecast`, not the amount sent, `requestedAmount` echoes what you sent, and `warning` says so. Required unless `all` is `true` or you are confirming with `txHash`.
 </ParamField>
 
 <ParamField body="all" type="boolean">
@@ -91,7 +91,7 @@ The window depends on how long the payer's wallet can take to sign and mine:
 | A named `payer` that is a contract (a multisig or smart account) | 24 hours |
 | No `payer` named | 24 hours |
 
-The interest over the window uses the loan's stamped fixed rate where it has one. On a variable-rate loan it uses the curve rate at full utilization, the highest rate the curve can charge, so the figure is an upper bound. A variable-rate loan also counts the interest the market has accrued but not booked yet. `forecast` carries every part of the figure, and `forecast.leftoverMax` is the most that can be left over as allowance. A partial `amount` is approved exactly.
+The interest over the window uses the loan's stamped fixed rate where it has one. On a variable-rate loan it uses the curve rate at full utilization, the highest rate the curve can charge, so the figure is an upper bound. A variable-rate loan also counts the interest the market has accrued but not booked yet. `forecast` carries every part of the figure, and `forecast.leftoverMax` is the most that can be left over as allowance. A partial `amount` is approved exactly. An `amount` above this figure is approved at the figure, so a typed amount never leaves a larger allowance on the market than `all: true` would.
 
 ## Transaction Shape
 
@@ -137,7 +137,7 @@ The permit is the payer's own. `payer` is required, it must be a wallet without 
 
 `repayWithPermit` binds the permit to the amount it repays, so the signed value decides what the calldata carries:
 
-- With `amount`, the permit covers exactly `amount`. A `permit.value` that differs is refused with `INVALID_PERMIT`.
+- With `amount`, the permit covers exactly `amount`. A `permit.value` that differs is refused with `INVALID_PERMIT`. An `amount` above what a full repayment can need is treated as `all: true`, so the rules below apply to it.
 - With `all: true`, `permit.value` is required, or the call returns `PERMIT_VALUE_REQUIRED`. It becomes the amount the calldata offers, and it must cover the live debt plus the repayment fee, or the call returns `INVALID_PERMIT`.
 - A full-repayment value that covers the debt now but not the debt plus the interest it can accrue until the permit's deadline builds with a `warning`. If interest outgrows the value before the transaction mines, the market takes the permit's value as a partial repayment and the loan stays open. A value quoted by [Get Permit Quote](/endpoints/lending/get-permit-quote) and signed unchanged does not trigger it.
 
@@ -145,10 +145,10 @@ Before any calldata is offered, the API recovers the signature against the token
 
 ## Confirming
 
-Send the hash of the repay step, or of the bundle's one transaction, as `txHash`. The API verifies the receipt, records the repayment and, when the loan closed, the collateral release. It then reads the loan at the receipt's block.
+Send the hash of the repay step, or of the bundle's one transaction, as `txHash`, with the same `all` or `amount` the build was sent. The API verifies the receipt, records the repayment and, when the loan closed, the collateral release. It then reads the loan at the receipt's block.
 
 - `loanClosed` is `true` when the loan is closed, `false` when it is still open, and `null` when the loan could not be read.
-- `remainder` is present while the loan is still open. `remainder.offerRepayRemainder` is `true` only when what is left is dust, smaller than one percent of the payment: interest accrued past the amount the repayment carried. Repay it as a new full repayment, which is sized afresh. On a deliberate partial repayment it is `false`, and `remainder.note` states what is still outstanding.
+- `remainder` is present while the loan is still open. `remainder.offerRepayRemainder` is `true` when a full repayment (`all: true`, or an `amount` sized down to the forecast) left debt open: interest accrued past the amount the repayment carried. Repay it as a new full repayment, which is sized afresh. After a partial `amount` it is `false`, and `remainder.note` states what is still outstanding. A confirmation sent with neither `all` nor `amount` falls back to the size of what is left: dust smaller than one percent of the payment is treated as interest past the amount.
 
 ## On-chain path
 
@@ -201,7 +201,8 @@ The chart traces the three repay entries on the market contract. None of them ch
     <ResponseField name="repayAmount" type="string">Amount the repay step offers. On a full repayment it is `forecast.amount`. On the permit path it is the permit's value. `repayAmountRaw` in base units.</ResponseField>
     <ResponseField name="transactionFee" type="object">The repayment fee, present only when it is not zero. Carries `kind: "REPAY"`, `fee`, `feeRaw` and `message`, plus `debtReduction` on a partial repayment. On a full repayment `fee` is computed on the debt at build time.</ResponseField>
     <ResponseField name="collateralRelease" type="object">Present on a full repayment of a `CUSTODY` loan when the collateral token would refuse to return the collateral to the borrower, or when its verdict cannot be read. The repayment still succeeds, and the adapter escrows the collateral instead of delivering it.</ResponseField>
-    <ResponseField name="warning" type="string">One string joining whichever apply: the permit headroom warning, the fee message and the collateral release message.</ResponseField>
+    <ResponseField name="requestedAmount" type="string">Only when the `amount` sent was more than closing the loan can need: that amount. `repayAmount` and the approval carry the forecast instead.</ResponseField>
+    <ResponseField name="warning" type="string">One string joining whichever apply: the note on an `amount` sized down to the forecast, the permit headroom warning, the fee message and the collateral release message.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming.</ResponseField>
     <ResponseField name="loanId" type="string">Loan ID, echoed back as a string. Returned when confirming.</ResponseField>
     <ResponseField name="repaidAmount" type="string">Principal plus interest the payment settled, read from the `LoanRepaid` event rather than from the calldata. It excludes the repayment fee. On a full repayment it is lower than `repayAmount`, because the contract pulls only what closes the loan. Returned when confirming.</ResponseField>
