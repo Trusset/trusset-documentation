@@ -63,9 +63,17 @@ Readiness spans three parties. Contract wiring is set up by the factory at deplo
         <ResponseField name="requiredAuthority" type="string">Who must sign it, for example `the market administrator (DEFAULT_ADMIN_ROLE)` or `the collateral token's agent admin`.</ResponseField>
         <ResponseField name="heldByThisInstance" type="boolean">Whether one of your instance's verified wallets holds that authority. `null` when it could not be established, which is not the same as `false`.</ResponseField>
         <ResponseField name="note" type="string">Set when `heldByThisInstance` is `false`: the step belongs to another party on this market. Otherwise `null`.</ResponseField>
+        <ResponseField name="tokenWhitelist" type="boolean">Present and `true` on a holder step that whitelists the subject on the collateral token itself with `modifyKYCData`, rather than registering it on an identity registry. See [KYC whitelist tokens](#kyc-whitelist-tokens).</ResponseField>
       </Expandable>
     </ResponseField>
-    <ResponseField name="blockedSteps" type="object">Steps that cannot be built at all, keyed by step name, each with a `code` and a `message` saying why. A step here is not waiting on a signature: something about the token, its registry or the signing wallet prevents a transaction that would work.</ResponseField>
+    <ResponseField name="blockedSteps" type="object">
+      Steps that cannot be built at all, keyed by step name, each with a `code` and a `message` saying why. A step here is not waiting on a signature: something about the token, its registry or the signing wallet prevents a transaction that would work. See [Blocked Step Codes](#blocked-step-codes).
+      <Expandable>
+        <ResponseField name="code" type="string">The blocked step code.</ResponseField>
+        <ResponseField name="message" type="string">What is missing and who completes it.</ResponseField>
+        <ResponseField name="registryAgent" type="string">On `ONCHAINID_REQUIRED` only. The wallet of your instance that is an agent of the token's identity registry and can register an ONCHAINID the KYC operator hands you, passed as `identityAddress` to [Configure Market](/endpoints/lending/configure-market). `null` when no wallet of your instance is an agent: the registry's own agent then registers it, and an `identityAddress` sent from your instance is refused with `IDENTITY_REGISTRY_WRITE_REJECTED`.</ResponseField>
+      </Expandable>
+    </ResponseField>
     <ResponseField name="holderOnboarding" type="object">Registry steps a wallet of your instance can complete itself, keyed by step (`verifyAdapterAsHolder`, `verifyRouterAsHolder`, `verifyVenueAsHolder`), each with `onboarder`, `phase`, `transactions`, `signatures` and `description`. Run them with [Configure Market](/endpoints/lending/configure-market#registering-a-holder-from-your-own-wallet).</ResponseField>
   </Expandable>
 </ResponseField>
@@ -77,9 +85,9 @@ Readiness spans three parties. Contract wiring is set up by the factory at deplo
 | `setInsuranceFund` | No insurance fund is set on the market | The market admin |
 | `grantAgentRoleToAdapter` | `FREEZE`: the adapter lacks the agent role | The collateral token's agent administrator |
 | `authorizeAdapterOnToken` | `CUSTODY`: the token gates holders through its own contract allow-list | The collateral token's compliance administrator |
-| `verifyAdapterAsHolder` | `CUSTODY`: the token gates holders through an identity registry | An agent of that registry |
+| `verifyAdapterAsHolder` | `CUSTODY`: the token gates holders through an identity registry, or keeps its own KYC whitelist | An agent of that registry, or a holder of the token's `WHITELIST_ROLE` |
 | `authorizeRouterOnToken` | The router must be allow-listed on the token | The collateral token's compliance administrator |
-| `verifyRouterAsHolder` | The router must be registered on the token's identity registry | An agent of that registry |
+| `verifyRouterAsHolder` | The router must be registered on the token's identity registry, or whitelisted on a token that keeps its own KYC whitelist | An agent of that registry, or a holder of the token's `WHITELIST_ROLE` |
 | `authorizeVenueOnToken` | An auction venue is wired and must be allow-listed on the token | The collateral token's compliance administrator |
 | `verifyVenueAsHolder` | An auction venue is wired and must be registered on the token's identity registry | An agent of that registry |
 | `authorizeRelayerOnOracle` | The instance's wallet cannot sign prices on the oracle | The oracle owner |
@@ -108,10 +116,19 @@ The key is the `action` to name on [Configure Market](/endpoints/lending/configu
 |---|---|
 | `IDENTITY_REGISTRY_UNRECOGNISED` | The registry answers neither the Trusset registry interface nor the ERC-3643 reference interface. The token issuer has to authorize the subject on it directly |
 | `IDENTITY_REGISTRY_WRITE_REJECTED` | Replayed from your instance's wallet, the registration reverts. The registry's own agent, usually the token issuer's KYC operator, must send it |
-| `ONCHAINID_REQUIRED` | The ERC-3643 registry admits a holder only through an ONCHAINID, and the subject has none. The token issuer's KYC operator issues it. Then pass `identityAddress` to [Configure Market](/endpoints/lending/configure-market) |
+| `ONCHAINID_REQUIRED` | The ERC-3643 registry admits a holder only through an ONCHAINID, and the subject has none, and no wallet of your instance is both an agent of that registry and a claim signer. Send the subject's address to the token issuer's KYC operator, who registers it. When `registryAgent` names a wallet of your instance, an ONCHAINID they hand you can instead be passed as `identityAddress` to [Configure Market](/endpoints/lending/configure-market) and signed by that wallet |
 | `IDENTITY_CLAIMS_REQUIRED` | The subject is registered, but its ONCHAINID carries no valid claim for a required topic from a trusted issuer |
 | `IDENTITY_ALREADY_REGISTERED` | The subject already holds a valid ONCHAINID on the registry. Refresh to pick up the registry's answer |
 | `CLAIM_TOPICS_UNREADABLE` | The ERC-3643 registry did not return the claim topics it requires |
+| `HOLDER_ONBOARDING_UNREAD` | Whether a wallet of your instance can register the subject, or the subject's registration or claims, could not be read just now. Nothing was decided. Refresh shortly |
+| `ONCHAINID_AUTHORITY_UNKNOWN` | A wallet of your instance can register the subject, but the ONCHAINID implementation the token uses is read from the ONCHAINID of an instance wallet registered on that registry, and none could be read. Register an instance wallet on it, or refresh |
+| `TOKEN_REFUSES_HOLDER` | The token has no identity registry and no contract allow-list, and its own transfer rule refuses the subject (`canReceive` on ERC-7943, `detectTransferRestriction` on ERC-1404). On a token that keeps its own KYC whitelist, the message names the `WHITELIST_ROLE` the token issuer needs. Only the token issuer can admit it |
+
+## KYC whitelist tokens
+
+Some ERC-1404 tokens, DigiShares v1.3 among them, keep their own KYC whitelist: `getKYCData(address)` returns a receive and a send restriction, and `modifyKYCData(address, receive, send)` writes both, restricted to `WHITELIST_ROLE`. When such a token refuses the adapter, the router or the auction venue because of that whitelist, and one of your instance's verified wallets holds `WHITELIST_ROLE`, the step is offered as a `modifyKYCData` transaction under its usual key with `tokenWhitelist: true`. The values that already admit the subject are kept, and a value that does not is set to `1`, a time in the past. Sign it from that wallet. When no wallet of your instance holds the role, the step is in `blockedSteps` with `TOKEN_REFUSES_HOLDER` and a message naming the role.
+
+A token's verdict is read as it would apply to a real transfer: where a token refuses a zero-amount transfer for its own sake, as DigiShares does with restriction code 3, the check is asked again with one base unit and that answer counts.
 
 <Warning>
   With `none_required` and `authorizedVia` `unrestricted_token`, the adapter and the router both report as authorized, because nothing the platform can read gates who holds the token. That is not proof of eligibility. If the token restricts transfers through a surface this platform cannot read, only its issuer can admit the adapter and the router, and a liquidation would fail until it does. Verify out of band before letting borrowers in. With `authorizedVia` `token_transfer_rules`, the token's own rule was asked and admits the adapter, so this warning does not apply.
