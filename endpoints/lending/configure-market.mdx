@@ -25,7 +25,19 @@ The steps have different signers. The collateral token steps are signed by the t
 </ParamField>
 
 <ParamField body="country" type="integer">
-  The same three actions only. Country code for the ERC-3643 registration, an integer from 0 to 65535. Defaults to `0`.
+  The same three actions only. Country code for the ERC-3643 registration, an integer from 0 to 65535. Defaults to the country a wallet of your instance is registered under on that registry, or `0` when none is.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The same three actions only. The wallet that will sign. If it is an agent of the token's identity registry and holds a claim key of its trusted issuer for every required topic, the answer is a `holderPlan`. See below.
+</ParamField>
+
+<ParamField body="identities" type="object">
+  The same three actions only. The ONCHAINID deployed in the `DEPLOY_IDENTITY` phase, keyed by the subject's address: `{ "<subject>": "<contractAddress from the deployment receipt>" }`. At most 4 entries.
+</ParamField>
+
+<ParamField body="claimSignatures" type="array">
+  The same three actions only. The signatures of a `SIGN_CLAIMS` phase, each `{ walletAddress, signature, claimType }`, where `walletAddress` is the subject and `signature` the EIP-191 signature over the message's `messageHash`. At most 10 entries.
 </ParamField>
 
 <ParamField body="acknowledgeFeeModelImpact" type="boolean">
@@ -52,6 +64,16 @@ The steps have different signers. The collateral token steps are signed by the t
 
 `upgradeMarket` and `upgradeRouter` build the same transactions as [Upgrade Market](/endpoints/lending/upgrade-market), which also covers the interest rate model and the insurance fund.
 
+## Registering a holder from your own wallet
+
+For a token your instance issued, a wallet of your instance is usually an agent of its identity registry and a claim key of its trusted issuer. In that case the three registry actions answer with `holderPlan` instead of one call. The subject gets its own ONCHAINID with the registry's required claims, signed by that wallet:
+
+1. `DEPLOY_IDENTITY`: one contract-creation transaction deploys the subject's ONCHAINID, managed by that wallet. Send it, then call again with `identities` set to the deployed address.
+2. `SIGN_CLAIMS`: `messages` to sign as EIP-191 personal messages, one per required claim. Call again with `claimSignatures`.
+3. `REGISTER`: `steps` adding each claim and calling `registerIdentity`, sent in order. Confirm the last one with [Confirm Configuration](/endpoints/lending/confirm-configuration).
+
+Each answer names the next phase, so a client repeats the same call with what it has collected. Trusset builds the transactions and never signs one. Where no wallet of your instance can write to the registry, the answer stays plain. The step is blocked with `ONCHAINID_REQUIRED` and names the address to send to the token issuer's KYC operator.
+
 <Note>
   `verifyAdapterAsHolder` checks the router as well. Once the adapter is registered it returns the router's registration, keyed `verifyRouterAsHolder`. On a token that gates holders through a contract allow-list, `verifyAdapterAsHolder` and `verifyRouterAsHolder` return the allow-list call instead of a registration. Confirm a transaction under the action that matches the function it calls, because [Confirm Configuration](/endpoints/lending/confirm-configuration) checks the function and the subject.
 </Note>
@@ -66,6 +88,10 @@ The steps have different signers. The collateral token steps are signed by the t
       The transactions to sign, keyed by step. Each entry carries `to`, `data`, `value` (`"0"`), `chainId` and `description`. Entries built from the configuration status also carry `requiredAuthority`, `heldByThisInstance` and `note`, as on [Get Configuration Status](/endpoints/lending/get-configuration-status).
     </ResponseField>
     <ResponseField name="message" type="string">Who should sign, in words.</ResponseField>
+    <ResponseField name="holderPlan" type="object">
+      Registry actions answered for your own wallet: the current phase. `action` is `SIGN_TRANSACTIONS` or `SIGN_MESSAGES`, and `phase` is `DEPLOY_IDENTITY`, `SIGN_CLAIMS` or `REGISTER`. `signerAddress` is the wallet that signs. `steps` lists the transactions; a deployment carries `create: true` and no `to`. `messages` lists what to sign, each with `messageHash`, `walletAddress`, `claimType` and `claimIssuer`. `identities` carries the subject's ONCHAINID once it exists, and `next` says what to send back.
+    </ResponseField>
+    <ResponseField name="onboarding" type="object">With `holderPlan`: `onboarder`, `phase`, the `transactions` and `signatures` still to go, and `description`.</ResponseField>
     <ResponseField name="blockedSteps" type="object">When `action` is omitted: steps that cannot be built, keyed by step, each `{ code, message }`.</ResponseField>
     <ResponseField name="waitingForCurator" type="array">When `action` is omitted: step keys withheld until a lender of record takes the market.</ResponseField>
     <ResponseField name="pendingCurator" type="boolean">When `action` is omitted: whether the market still has no lender of record.</ResponseField>
@@ -164,6 +190,11 @@ for (const [key, tx] of Object.entries(data.configurationCalldata ?? {})) {
 | `UNSUPPORTED_CONFIGURE_ACTION` | `400` | `action` is not one of the supported values. The error carries `supportedActions` |
 | `INVALID_IDENTITY_ADDRESS` | `400` | `identityAddress` is not an address |
 | `INVALID_COUNTRY` | `400` | `country` is not an integer from 0 to 65535 |
+| `INVALID_SIGNER_ADDRESS` | `400` | `signerAddress` is not an address |
+| `INVALID_IDENTITIES` | `400` | `identities` is not an object of at most 4 subject addresses mapped to ONCHAINID addresses |
+| `INVALID_CLAIM_SIGNATURES` | `400` | `claimSignatures` is not a list of at most 10 `{ walletAddress, signature, claimType }` entries with 65-byte signatures |
+| `INVALID_CLAIM_SIGNATURE`, `CLAIM_SIGNER_NOT_TRUSTED` | `400` | A claim signature does not recover, or recovers to a wallet that holds no claim key on the registry's trusted issuer |
+| `HOLDER_ONBOARDER_REQUIRED` | `409` | Another wallet of your instance can register the subject, but `signerAddress` cannot. The message names the wallet to connect |
 | `MARKET_PENDING_CURATOR` | `409` | The action needs the market admin, the router admin or the oracle owner, and no lender of record has taken the market |
 | `NO_COLLATERAL_TOKEN` | `400` | Allow-list actions: the market has no collateral token recorded |
 | `NO_ADAPTER` | `400` | The market has no collateral adapter |

@@ -11,7 +11,7 @@ Requires `ISSUER_ROLE` on the market contract. The lender of record names the wa
 The market brings its interest accrual up to date under the old values before the new ones apply.
 
 <Warning>
-  Changing `liquidationThreshold` moves the point at which existing loans become liquidatable. Lowering it immediately puts loans at risk that were healthy a moment earlier. The contract caps each change at 10 percent per call. That cap is counted in percentage points of the threshold: from `8500`, one call reaches anywhere from `7500` to `9500`.
+  Changing `liquidationThreshold` moves the point at which existing loans become liquidatable. Lowering it immediately puts loans at risk that were healthy a moment earlier. While the market has an open loan or an open liquidation, the contract caps each change at 10 percentage points per call. From `8500`, one call then reaches anywhere from `7500` to `9500`. With no loan and no liquidation open, no loan can be put at risk. A market on the current implementation then takes any threshold within the bounds in one call, for example `8500` to `6000`. A market on an earlier implementation keeps the cap until its admin upgrades it. `thresholdStep` on [Get Market Config](/endpoints/lending/get-config) says which applies.
 </Warning>
 
 ## Path Parameters
@@ -23,7 +23,7 @@ The market brings its interest accrual up to date under the old values before th
 <ParamField body="config" type="object" required>
   <Expandable>
     <ParamField body="collateralFactor" type="integer" required>Maximum loan to value for new borrowing, in basis points. The schema accepts 1000 to 9500, but anything above 9000 is refused with `INVALID_CONFIG`, because the contract caps it at 90 percent.</ParamField>
-    <ParamField body="liquidationThreshold" type="integer" required>Loan to value at which a loan becomes liquidatable, in basis points. The schema accepts 1000 to 9800, but anything above 9500 is refused with `INVALID_CONFIG`. Must exceed `collateralFactor` to leave borrowers any buffer, and may move at most 1000 from its current value in one call.</ParamField>
+    <ParamField body="liquidationThreshold" type="integer" required>Loan to value at which a loan becomes liquidatable, in basis points. The schema accepts 1000 to 9800, but anything above 9500 is refused with `INVALID_CONFIG`. Must exceed `collateralFactor` to leave borrowers any buffer. While a loan or liquidation is open, or on an earlier market implementation, it may move at most 1000 from its current value in one call.</ParamField>
     <ParamField body="liquidationPenalty" type="integer" required>Penalty on liquidated debt in basis points. 0 to 5000. It cannot drop below the market's term penalty, set with [Set Term Config](/endpoints/lending/set-term-config).</ParamField>
     <ParamField body="protocolFeeRate" type="integer" required>The insurance-fund rate, in basis points. 0 to 10000, and 0 on a new market. Repaid interest first loses Trusset's 15 percent infrastructure fee, then the fixed 8 percent operator and 5 percent distributor shares of the remainder. This rate of what is left goes to the market's insurance fund, and the rest to liquidity providers.</ParamField>
     <ParamField body="minBorrowAmount" type="string" required>Minimum borrow per loan, as a decimal string in borrow asset units.</ParamField>
@@ -56,7 +56,7 @@ The per-field ranges above are what the request schema accepts. Before building 
 | `liquidationThreshold` strictly greater than `collateralFactor` | `INVALID_CONFIG` |
 | `auctionStartPremium` strictly greater than `auctionMinPremium`, when auctions are on | `INVALID_CONFIG` |
 | `liquidationPenalty` not below the market's term penalty | `INVALID_CONFIG` |
-| `liquidationThreshold` within 1000 of its current value | `CONFIG_CHANGE_TOO_LARGE` |
+| `liquidationThreshold` within 1000 of its current value, while a loan or liquidation is open or the market runs an earlier implementation | `CONFIG_CHANGE_TOO_LARGE` |
 | An auction venue is wired before `useDutchAuction` turns on | `AUCTION_MODULE_NOT_SET` |
 | That venue is admitted on the collateral token | `AUCTION_VENUE_NOT_ADMITTED` |
 
@@ -179,7 +179,11 @@ const { data } = await confirm.json();
   "success": false,
   "error": {
     "code": "CONFIG_CHANGE_TOO_LARGE",
-    "message": "The liquidation threshold can move at most 10 percentage points per update; it is 8500 bps now. Stage the change across multiple updates."
+    "message": "While this market has an open loan or liquidation, the liquidation threshold moves at most 10 percentage points per update; it is 85% now. Stage the change across updates, or make it in one update once no loan or liquidation is open.",
+    "details": {
+      "thresholdStep": { "maxChangeBps": 1000, "limited": true, "reason": "OPEN_DEBT", "debtFree": false, "implementationLiftsStep": true },
+      "currentLiquidationThresholdBps": 8500
+    }
   }
 }
 ```
@@ -205,12 +209,13 @@ const { data } = await confirm.json();
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
 | `VALIDATION_ERROR` | `400` | A `config` field is missing or outside its accepted range, or `txHash` is malformed. `error.details` names each offending field |
 | `INVALID_CONFIG` | `400` | A cross-field rule the contract enforces was broken. The message names which one |
-| `CONFIG_CHANGE_TOO_LARGE` | `400` | `liquidationThreshold` would move more than 1000 from its current value. Stage the change across several calls |
+| `CONFIG_CHANGE_TOO_LARGE` | `400` | `liquidationThreshold` would move more than 1000 from its current value while the cap applies. `details.thresholdStep.reason` says why. `OPEN_DEBT`: a loan or liquidation is open, so stage the change or wait until the book is clear. `IMPLEMENTATION`: the market runs an earlier implementation, so upgrade it with [Upgrade Market](/endpoints/lending/upgrade-market) or stage the change |
 | `AUCTION_UNSUPPORTED_PRICE_SOURCE` | `400` | Dutch auctions were turned on for a market whose `priceSource` is `MARKET` |
 | `CONFIG_UPDATE_FAILED` | `400` | The calldata could not be built, for example because an amount carries more decimal places than its token supports. On the confirm call, the receipt could not be read |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `AUCTION_MODULE_NOT_SET` | `409` | `useDutchAuction` is `true` and no auction venue is wired to the market. Wire one with [Wire Auction Module](/endpoints/lending/wire-auction-module) first |
 | `AUCTION_VENUE_NOT_ADMITTED` | `409` | The wired auction venue is not admitted on the collateral token, so every realization delivering to it would revert |
 | `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds the `ISSUER_ROLE` this change requires. Skipped when confirming with `txHash` |
+| `THRESHOLD_STEP_UNREAD` | `503` | The move exceeds 1000 and whether the cap applies could not be read: the market's open loans or its implementation did not answer. Nothing was built. Retry shortly |
 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction). On this endpoint every one of them answers `400`, including `TX_NOT_FOUND`.

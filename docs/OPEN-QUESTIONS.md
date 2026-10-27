@@ -310,6 +310,8 @@ Two neighbouring 7 day sentences were kept byte for byte, each followed by a qua
 
 **Needed:** confirmation of the first replacement, and a decision on restating the second as "10 percentage points".
 
+Update 2026-10-27: the second sentence no longer describes the contract. Since the liquidation threshold step round, the cap applies only while a loan or liquidation is open, or on an earlier market implementation. The warning now says "10 percentage points" and states when the cap applies.
+
 ---
 
 ## 19. Two sentences on sync-oracle were false on v2
