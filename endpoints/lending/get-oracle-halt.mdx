@@ -1,0 +1,123 @@
+---
+title: 'Get Oracle Halt'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/oracle-halt'
+description: 'Whether a guardian has halted the market oracle, until when, and when the next halt may start'
+---
+
+Reports the guardian halt on the market's price oracle: whether one runs, when it ends, and when a new one may start. [Halt Prices](/endpoints/lending/halt-prices) builds the halt and the lift. [Guardian and brakes](/endpoints/lending/introduction#guardian-and-brakes) says what a halt stops.
+
+While a halt runs, every price on the oracle reads stale, on every price source and the fixed price included, and the oracle accepts no attestation. Opening loans, drawing more, withdrawing collateral against debt and liquidating are refused with `PRICE_HALTED`. Repayment, closure, surplus claims and every withdrawal that reads no price stay open.
+
+A halt lasts at most 24 hours and ends by itself, or earlier when the oracle owner lifts it. A new halt can start only 24 hours after the previous one ended, by expiry or by lift, so a guardian can keep the price stale for at most half of any stretch of time. An oracle whose implementation predates the halt answers `supported: false`, and nothing can halt it until its owner upgrades it.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="oracleAddress" type="string">The market's price oracle, lowercased.</ResponseField>
+    <ResponseField name="supported" type="boolean">Whether the oracle's implementation carries the guardian halt. `false` on an earlier implementation, `null` when it could not be read. The fields below past `maxHaltSeconds` are present only when it is `true`.</ResponseField>
+    <ResponseField name="halted" type="boolean">Whether a halt runs now, by chain time.</ResponseField>
+    <ResponseField name="haltedUntil" type="integer">Unix seconds. When `halted` is `true`, the moment the running halt ends. Otherwise the moment the last halt ended. `null` when the oracle never recorded a halt.</ResponseField>
+    <ResponseField name="haltedUntilIso" type="string">The same instant as ISO 8601.</ResponseField>
+    <ResponseField name="nextHaltAllowedAt" type="integer">Unix seconds from which a new halt may start: 24 hours after `haltedUntil`. `null` when no halt was ever recorded, in which case one may start at once.</ResponseField>
+    <ResponseField name="nextHaltAllowedAtIso" type="string">The same instant as ISO 8601.</ResponseField>
+    <ResponseField name="canHaltNow" type="boolean">`true` when a guardian could start a halt now. `false` while one runs or the day after it has not passed, and on an oracle that cannot be halted. `null` when the halt state could not be read.</ResponseField>
+    <ResponseField name="maxHaltSeconds" type="integer">`86400`: the longest halt the oracle accepts.</ResponseField>
+    <ResponseField name="readable" type="boolean">Whether the halt state could be read. `false` leaves `halted` at `false` and `canHaltNow` at `null`; retry rather than treating the oracle as open.</ResponseField>
+    <ResponseField name="secondsUntilHaltAllowed" type="integer">Seconds until `nextHaltAllowedAt`, or `0`. Present only when `readable` is `true`.</ResponseField>
+    <ResponseField name="owner" type="string">The oracle owner, the only wallet that can lift a running halt. Present only when `readable` is `true`, and `null` when the owner itself could not be read.</ResponseField>
+    <ResponseField name="guardianWallets" type="array">The verified wallets of your instance the oracle recognizes as guardians, lowercased. Empty when none is, and absent when your instance has no verified wallet or the oracle cannot be halted. The oracle reads the role off the market, so this matches [Get Guardians](/endpoints/lending/get-guardians) for those wallets.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+The same object is carried as `halt` on [Get Oracle Status](/endpoints/lending/get-oracle-status), which also folds the halt into `isStale`.
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/oracle-halt" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/oracle-halt`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+if (data.halted) {
+  console.log(`Prices are halted until ${data.haltedUntilIso}; repay without a signed price meanwhile`);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response - Halted
+{
+  "success": true,
+  "data": {
+    "oracleAddress": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+    "supported": true,
+    "halted": true,
+    "haltedUntil": 1794132000,
+    "haltedUntilIso": "2026-11-07T17:20:00.000Z",
+    "nextHaltAllowedAt": 1794218400,
+    "nextHaltAllowedAtIso": "2026-11-08T17:20:00.000Z",
+    "canHaltNow": false,
+    "maxHaltSeconds": 86400,
+    "readable": true,
+    "secondsUntilHaltAllowed": 112800,
+    "owner": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70",
+    "guardianWallets": ["0x7d3c2b91e04a58f6c1d9a72b3c8f40e6d15a9c27"]
+  }
+}
+```
+```json Response - Open
+{
+  "success": true,
+  "data": {
+    "oracleAddress": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+    "supported": true,
+    "halted": false,
+    "haltedUntil": null,
+    "haltedUntilIso": null,
+    "nextHaltAllowedAt": null,
+    "nextHaltAllowedAtIso": null,
+    "canHaltNow": true,
+    "maxHaltSeconds": 86400,
+    "readable": true,
+    "secondsUntilHaltAllowed": 0,
+    "owner": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70",
+    "guardianWallets": []
+  }
+}
+```
+```json Response - Earlier Implementation
+{
+  "success": true,
+  "data": {
+    "oracleAddress": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+    "supported": false,
+    "halted": false,
+    "haltedUntil": null,
+    "haltedUntilIso": null,
+    "nextHaltAllowedAt": null,
+    "nextHaltAllowedAtIso": null,
+    "canHaltNow": false,
+    "maxHaltSeconds": 86400
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_ORACLE` | `400` | The market records no oracle and none could be read from the market contract |
+| `ORACLE_HALT_READ_FAILED` | `500` | The halt state could not be read for a reason no other code covers |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read just now. Retry shortly |

@@ -1,18 +1,24 @@
 ---
 title: 'Withdraw from Insurance Fund'
 api: 'POST /lending-external-securities-v2/api/markets/{marketId}/insurance/withdraw-calldata'
-description: 'Calldata for the fund owner to withdraw from the market insurance fund'
+description: 'Announce, cancel or execute a withdrawal from the market insurance fund, and confirm it'
 ---
 
-Builds the fund's `emergencyWithdraw` transaction, which pays an amount out of the market's insurance fund to a recipient. Only the fund owner can sign it: the admin the lender of record named when it took the role.
+Builds the fund owner's withdrawal from the market's insurance fund, and confirms it once mined. On the current fund implementation a withdrawal is announced with `propose`, may be withdrawn with `cancel`, and executes with `execute` no earlier than 7 days after the announcement and no later than 14, for exactly the announced amount and destination. Only the fund owner can sign any of the three: the admin the lender of record named when it took the role.
 
 <Warning>
-  Every unit withdrawn is a unit the reserve can no longer pay toward this market's losses. Whatever the reserve cannot cover lands on the liquidity providers. [Get Insurance Status](/endpoints/lending/get-insurance-status) shows the balance, when the reserve is drawn on this market, and the losses it has absorbed so far.
+  Every unit withdrawn is a unit the reserve can no longer pay toward this market's losses. Whatever the reserve cannot cover lands on the liquidity providers. The notice exists so that every provider can see the first-loss buffer leaving a week before it does. [Get Insurance Status](/endpoints/lending/get-insurance-status) shows the balance, what is announced, when the reserve is drawn on this market, and the losses it has absorbed so far.
 </Warning>
 
-The API checks the amount against the fund's balance when it builds the calldata, but it does not check who will sign. A transaction from any wallet other than `fundOwner` reverts. So does one whose amount exceeds the balance by the time it mines, for example after a draw in between.
+Coverage keeps running during the notice. A draw that empties the fund in the meantime leaves the announced amount unpayable, and `emergencyWithdraw` then reverts `InsufficientBalance`, rather than leaving the market uncovered. An announcement not executed within 7 days of becoming ready lapses, and a fresh one is needed. A later `propose` replaces a pending one and restarts the week.
 
-Before a lender of record takes the market, the market itself or the deploying factory owns the fund. Neither can call a withdrawal, so no wallet can sign one until adoption.
+The API checks the amount against the fund's balance when it builds `propose` and `execute`, but it does not check who will sign. A transaction from any wallet other than `fundOwner` reverts.
+
+Before a lender of record takes the market, the market itself or the deploying factory owns the fund. Neither can announce or sign a withdrawal, so no wallet can withdraw until adoption.
+
+## Earlier fund implementations
+
+A fund still on an implementation without the notice withdraws in one step. `execute` builds `emergencyWithdraw` at once, the response carries `notice: { supported: false }` and no `confirmWith`, and `propose` or `cancel` on it is refused with `WITHDRAWAL_NOTICE_UNSUPPORTED`. A mined one-step withdrawal can still be confirmed here with `action: execute`. `withdrawalNotice.supported` on [Get Insurance Status](/endpoints/lending/get-insurance-status) says which applies, and the fund owner moves the fund onto the current implementation with [Upgrade Market](/endpoints/lending/upgrade-market), target `insuranceFund`.
 
 ## Path Parameters
 
@@ -20,54 +26,135 @@ Before a lender of record takes the market, the market itself or the deploying f
 
 ## Body Parameters
 
-<ParamField body="amount" type="string" required>
-  Amount to withdraw as a positive decimal string, in the market's borrow asset. It may carry at most as many decimal places as the borrow asset supports, and must not exceed the fund's balance.
+<ParamField body="action" type="string" default="execute">
+  `propose`, `cancel` or `execute`. Required on the confirm call too, where it selects the function and event the receipt must carry.
 </ParamField>
 
-<ParamField body="recipient" type="string" required>
-  The wallet that receives the withdrawal, as a 0x-prefixed 20-byte address. The fund reverts on the zero address.
+<ParamField body="amount" type="string">
+  Amount to withdraw as a positive decimal string, in the market's borrow asset. It may carry at most as many decimal places as the borrow asset supports, and must not exceed the fund's balance. Required on `propose` and `execute`, and on `execute` it must repeat the announced amount exactly. Not needed on `cancel` or when confirming.
 </ParamField>
 
-## Response Fields
+<ParamField body="recipient" type="string">
+  The wallet that receives the withdrawal, as a 0x-prefixed 20-byte address other than the zero address. Required on `propose` and `execute`, and on `execute` it must repeat the announced destination. Not needed on `cancel` or when confirming.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined transaction. Send it with the same `action` to confirm. Omit it to receive the calldata.
+</ParamField>
+
+## Calldata Response
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="calldata" type="object">The unsigned transaction, `{ to, data, description, chainId, value }`, targeting the fund. `description` names the amount and a shortened recipient.</ResponseField>
-    <ResponseField name="fundOwner" type="string">The wallet that must sign. The zero address when the owner could not be read.</ResponseField>
+    <ResponseField name="action" type="string">`propose`, `cancel` or `execute`, echoed back.</ResponseField>
+    <ResponseField name="calldata" type="object">The unsigned transaction, `{ to, data, description, chainId, value }`, targeting the fund. `description` names the step, the amount and a shortened recipient.</ResponseField>
+    <ResponseField name="functionName" type="string">`proposeEmergencyWithdraw`, `cancelEmergencyWithdrawProposal` or `emergencyWithdraw`.</ResponseField>
+    <ResponseField name="fundOwner" type="string">The wallet that must sign. On an earlier fund implementation, the zero address when the owner could not be read; on the current one, `null`.</ResponseField>
     <ResponseField name="fundAddress" type="string">The insurance fund.</ResponseField>
-    <ResponseField name="currentBalance" type="string">The fund's balance when the calldata was built, as a decimal string.</ResponseField>
     <ResponseField name="requiredRole" type="string">Always `OWNER`.</ResponseField>
+    <ResponseField name="notice" type="object">The fund's withdrawal notice before this transaction, as `withdrawalNotice` on [Get Insurance Status](/endpoints/lending/get-insurance-status). `{ supported: false }` on an earlier fund implementation.</ResponseField>
+    <ResponseField name="amount" type="string">`propose` and `execute`. The amount, echoed back. `amountRaw` is the same in the borrow asset's smallest unit.</ResponseField>
+    <ResponseField name="recipient" type="string">`propose` and `execute`. The destination, lowercased.</ResponseField>
+    <ResponseField name="activatesAt" type="integer">`propose` only. Unix seconds from which the announced withdrawal can execute, counted from the chain time the calldata was built. `activatesAtIso` is the same as ISO 8601. The contract counts from the block the announcement lands in.</ResponseField>
+    <ResponseField name="replacesPending" type="boolean">`propose` only. Present and `true` when an earlier announcement is still pending. This one replaces it and restarts the week.</ResponseField>
+    <ResponseField name="currentBalance" type="string">The fund's balance when the calldata was built, as a decimal string. `null` on a notice step; read it from Get Insurance Status.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: this endpoint, with `body` carrying the `action`, the `amount` and `recipient` where the step has them, and `txHash: null`. Absent on an earlier fund implementation.</ResponseField>
   </Expandable>
 </ResponseField>
 
-The response has no `action` field and the route has no confirm step. The API does not record the withdrawal. Once it mines, `stats.totalWithdrawn` and `stats.currentBalance` on [Get Insurance Status](/endpoints/lending/get-insurance-status) reflect it.
+## Confirmed Response
+
+The confirm call verifies that the transaction targeted the fund, called the function `action` names, and emitted `EmergencyWithdrawProposed`, `EmergencyWithdrawProposalCancelled` or `EmergencyWithdraw` on it. It records nothing. Once an execution mines, `stats.totalWithdrawn` and `stats.currentBalance` on [Get Insurance Status](/endpoints/lending/get-insurance-status) reflect it.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="confirmed" type="boolean">Always `true`.</ResponseField>
+    <ResponseField name="action" type="string">`propose`, `cancel` or `execute`.</ResponseField>
+    <ResponseField name="fundAddress" type="string">The fund, lowercased.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
+    <ResponseField name="signer" type="string">The address that sent the transaction, lowercased.</ResponseField>
+    <ResponseField name="amount" type="string">The amount the event names, as a decimal string. `amountRaw` in the borrow asset's smallest unit.</ResponseField>
+    <ResponseField name="recipient" type="string">The destination the event names, lowercased.</ResponseField>
+    <ResponseField name="activatesAt" type="integer">`propose` only. When the announced withdrawal can execute, from the event. `activatesAtIso` is the same as ISO 8601.</ResponseField>
+  </Expandable>
+</ResponseField>
 
 <RequestExample>
 ```bash cURL
 curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/insurance/withdraw-calldata" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"amount": "500", "recipient": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab"}'
+  -d '{"action": "propose", "amount": "500", "recipient": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab"}'
 ```
 ```typescript TypeScript
-const res = await fetch(
-  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/insurance/withdraw-calldata`,
-  {
-    method: 'POST',
-    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ amount: '500', recipient })
-  }
-);
-const { data } = await res.json();
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/insurance/withdraw-calldata`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+const withdrawal = { amount: '500', recipient };
+
+const built = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ action: 'propose', ...withdrawal }) });
+const { success, data, error } = await built.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
 const owner = await fundOwnerWallet.getAddress();
-if (owner.toLowerCase() !== data.fundOwner) throw new Error(`Only ${data.fundOwner} can sign this withdrawal`);
-const tx = await fundOwnerWallet.sendTransaction({ to: data.calldata.to, data: data.calldata.data });
+if (data.fundOwner && owner.toLowerCase() !== data.fundOwner) throw new Error(`Only ${data.fundOwner} can sign this withdrawal`);
+
+const tx = await fundOwnerWallet.sendTransaction({ to: data.calldata.to, data: data.calldata.data, value: 0, chainId: data.calldata.chainId });
 await tx.wait();
+await fetch(url, { method: 'POST', headers, body: JSON.stringify({ action: 'propose', txHash: tx.hash }) });
+console.log(`Execute the withdrawal with action "execute" from ${data.activatesAtIso}, within seven days`);
 ```
 </RequestExample>
 
 <ResponseExample>
-```json Calldata Response
+```json Calldata Response - Propose
+{
+  "success": true,
+  "data": {
+    "action": "propose",
+    "calldata": {
+      "to": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+      "data": "0x...",
+      "description": "Announce a reserve withdrawal of 500 USDC to 0x5ad8...40ab; it can execute seven days from now, for seven days, and only for this amount and destination (requires fund owner)",
+      "chainId": 11155111,
+      "value": "0"
+    },
+    "functionName": "proposeEmergencyWithdraw",
+    "fundOwner": "0x3f9c1e7a2b5d48e06c1a9f3b7d2e5a8c0f4b6d13",
+    "fundAddress": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+    "requiredRole": "OWNER",
+    "notice": {
+      "fundAddress": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+      "supported": true,
+      "readable": true,
+      "pending": false,
+      "pendingAmount": null,
+      "pendingAmountRaw": null,
+      "pendingRecipient": null,
+      "activatesAt": null,
+      "activatesAtIso": null,
+      "lapsesAt": null,
+      "lapsesAtIso": null,
+      "ready": false,
+      "lapsed": false,
+      "secondsUntilReady": 0,
+      "delaySeconds": 604800,
+      "executionWindowSeconds": 604800,
+      "owner": "0x3f9c1e7a2b5d48e06c1a9f3b7d2e5a8c0f4b6d13"
+    },
+    "amount": "500",
+    "amountRaw": "500000000",
+    "recipient": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+    "activatesAt": 1794700800,
+    "activatesAtIso": "2026-11-14T07:20:00.000Z",
+    "currentBalance": null,
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/cmssh7p1k0001cghxq2m4v8rz/insurance/withdraw-calldata",
+      "field": "txHash",
+      "body": { "action": "propose", "amount": "500", "recipient": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab", "txHash": null }
+    }
+  }
+}
+```
+```json Calldata Response - Earlier Fund Implementation
 {
   "success": true,
   "data": {
@@ -78,19 +165,57 @@ await tx.wait();
       "chainId": 11155111,
       "value": "0"
     },
+    "action": "execute",
+    "functionName": "emergencyWithdraw",
     "fundOwner": "0x3f9c1e7a2b5d48e06c1a9f3b7d2e5a8c0f4b6d13",
     "fundAddress": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
     "currentBalance": "5036.975",
-    "requiredRole": "OWNER"
+    "requiredRole": "OWNER",
+    "notice": { "supported": false }
   }
 }
 ```
-```json Error - Exceeds Balance
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "confirmed": true,
+    "action": "execute",
+    "fundAddress": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+    "txHash": "0x8d2f5a1c7e4b9036a2d5f8c1e4b7a0d3f6c9e2b5a8d1f4c7e0b3a6d9f2c5e8b1",
+    "signer": "0x3f9c1e7a2b5d48e06c1a9f3b7d2e5a8c0f4b6d13",
+    "amount": "500.0",
+    "amountRaw": "500000000",
+    "recipient": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab"
+  }
+}
+```
+```json Error - Not Ready
 {
   "success": false,
   "error": {
-    "code": "INSUFFICIENT_BALANCE",
-    "message": "Requested amount exceeds fund balance. Available: 5036.975 USDC"
+    "code": "WITHDRAWAL_NOT_READY",
+    "message": "The reserve withdrawal is not ready: it must be announced with proposeEmergencyWithdraw for the same amount and destination, and executes only once the seven-day notice has passed.",
+    "details": {
+      "reason": "NOTICE_RUNNING",
+      "activatesAt": 1794700800,
+      "activatesAtIso": "2026-11-14T07:20:00.000Z",
+      "secondsUntilReady": 432000
+    }
+  }
+}
+```
+```json Error - Lapsed
+{
+  "success": false,
+  "error": {
+    "code": "WITHDRAWAL_LAPSED",
+    "message": "The announced reserve withdrawal lapsed: it was not executed within seven days of becoming ready. Announce it again.",
+    "details": {
+      "activatesAt": 1794700800,
+      "lapsesAt": 1795305600,
+      "lapsesAtIso": "2026-11-21T07:20:00.000Z"
+    }
   }
 }
 ```
@@ -100,9 +225,20 @@ await tx.wait();
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | `amount` is missing, not a positive decimal string, or carries more decimal places than the borrow asset supports, or `recipient` is missing or malformed |
+| `VALIDATION_ERROR` | `400` | `action` is not `propose`, `cancel` or `execute`; `amount` or `recipient` is missing on `propose` or `execute`; `amount` is not a positive decimal string or carries more decimal places than the borrow asset supports; or `recipient` or `txHash` is malformed |
+| `INVALID_ADDRESS` | `400` | `recipient` is the zero address |
+| `ZERO_AMOUNT` | `400` | `amount` rounds to zero at the borrow asset's decimals |
 | `MISSING_MARKET_ID` | `400` | The market ID in the path is longer than 100 characters |
 | `NO_INSURANCE_FUND` | `400` | The market records no insurance fund |
-| `FUND_NOT_READABLE` | `400` | The fund could not be read on chain. A network failure answers this way too, so retry before treating it as a configuration problem |
+| `FUND_NOT_READABLE` | `400` | Earlier fund implementation: the fund could not be read on chain. A network failure answers this way too, so retry before treating it as a configuration problem |
 | `INSUFFICIENT_BALANCE` | `400` | `amount` exceeds the fund's balance. The message states what is available |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction emitted no event of the kind `action` names on the fund |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `WITHDRAWAL_NOT_READY` | `409` | `execute` without an announcement (`details.reason` is `NO_PROPOSAL`), for another amount or destination than announced (`PROPOSAL_DIFFERS`, with `pendingAmount` and `pendingRecipient`), or before the notice has passed (`NOTICE_RUNNING`, with `activatesAt` and `secondsUntilReady`) |
+| `WITHDRAWAL_LAPSED` | `409` | The announced withdrawal was not executed within 7 days of becoming ready. `details.lapsesAt` says when it lapsed. Announce it again |
+| `WITHDRAWAL_ALREADY_PROPOSED` | `409` | `propose` repeats the pending amount and destination. `details.notice` carries the announcement. Wait for it, or cancel first |
+| `NO_WITHDRAWAL_PROPOSAL` | `409` | `cancel` while nothing is announced |
+| `WITHDRAWAL_NOTICE_UNSUPPORTED` | `409` | `propose` or `cancel` on a fund whose implementation predates the notice. Withdraw with `execute`, or upgrade the fund first |
+| `FUND_STATE_UNAVAILABLE` | `503` | Whether the fund carries the notice, or the notice itself, could not be read. Nothing was built. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

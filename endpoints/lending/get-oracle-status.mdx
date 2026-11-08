@@ -1,12 +1,14 @@
 ---
 title: 'Get Oracle Status'
 api: 'GET /lending-external-securities-v2/api/markets/{marketId}/oracle-status'
-description: 'Read the current price, staleness, and signer authorization'
+description: 'Read the current price, staleness, the guardian halt and signer authorization'
 ---
 
 Returns the market oracle's current state. Check this before any borrow or liquidation flow, since the contract rejects actions priced against a stale oracle.
 
 A stale price makes opening a loan, borrowing more, liquidating, and withdrawing collateral against outstanding debt revert, unless the transaction carries a fresh [signed price](/endpoints/lending/sign-price). Repaying never reads a price, so a stale oracle never blocks a repayment.
+
+A guardian halt is the one staleness a signed price cannot lift. While `halted` is `true`, every price reads stale on every price source, the fixed price included, and the oracle refuses every attestation with `PriceHalted`. The halt ends at `halt.haltedUntil` or when the oracle owner lifts it. See [Get Oracle Halt](/endpoints/lending/get-oracle-halt).
 
 ## Path Parameters
 
@@ -21,12 +23,14 @@ A stale price makes opening a loan, borrowing more, liquidating, and withdrawing
     <ResponseField name="priceRaw" type="string">Same price in base units.</ResponseField>
     <ResponseField name="timestamp" type="integer">Unix seconds the current price is dated at. A pushed price carries its block time and a signed price its signed `timestamp`. On an `ORACLE`-priced market it is the external feed's own date.</ResponseField>
     <ResponseField name="lastUpdate" type="string">The same instant as an ISO 8601 string. `null` only when `configured` is `false`.</ResponseField>
-    <ResponseField name="isStale" type="boolean">Whether the price is older than `maxPriceAge`. An external feed that cannot answer reads as stale. Always `false` on a fixed price, which never goes stale.</ResponseField>
+    <ResponseField name="isStale" type="boolean">Whether the price is older than `maxPriceAge`. An external feed that cannot answer reads as stale. `false` on a fixed price, which never ages, except during a guardian halt. `true` throughout a guardian halt on every price source.</ResponseField>
     <ResponseField name="priceAge" type="integer">Seconds since the price's date. Conditional on `configured`.</ResponseField>
     <ResponseField name="maxPriceAge" type="integer">Staleness threshold in seconds, read from the oracle. It is an oracle setting and is not part of the market config struct. It defaults to 24 hours, and the oracle owner can set it between 1 minute and 30 days. Conditional on `configured`.</ResponseField>
     <ResponseField name="maxDeviationBps" type="integer">Circuit breaker limit in basis points. A price push differing from the current price by more than this is rejected, and the same limit bounds the total movement within any one-hour window. Reported as `5000` when the oracle does not expose the value. It does not apply to an external feed. On a fixed price it bounds each mark-down, and the Issuer Portal only tightens it. See [Mark down a fixed price](/endpoints/lending/sync-oracle#mark-down-a-fixed-price). Conditional on `configured`.</ResponseField>
     <ResponseField name="fixed" type="boolean">Whether the oracle holds a fixed price set at deployment. `true` on a `FIXED` market, `false` on any other, `null` when it could not be read. Conditional on `configured`.</ResponseField>
     <ResponseField name="markDownOnly" type="boolean">`true` when `fixed` is `true`: the price can only be lowered. Conditional on `configured`.</ResponseField>
+    <ResponseField name="halted" type="boolean">Whether a guardian halt runs on the oracle now. Conditional on `configured`.</ResponseField>
+    <ResponseField name="halt" type="object">The halt state: `supported`, `halted`, `haltedUntil`, `haltedUntilIso`, `nextHaltAllowedAt`, `nextHaltAllowedAtIso`, `canHaltNow`, `secondsUntilHaltAllowed`, `maxHaltSeconds`, `readable` and `owner`, as on [Get Oracle Halt](/endpoints/lending/get-oracle-halt) without `guardianWallets`. `supported` is `false` on an oracle whose implementation predates the halt, and the object is `null` when the halt could not be read at all. Conditional on `configured`.</ResponseField>
     <ResponseField name="owner" type="string">Oracle owner address. The owner is implicitly an authorized signer. Conditional on `configured`.</ResponseField>
     <ResponseField name="ownerIsInstanceWallet" type="boolean">Whether that owner is a verified wallet of your instance. When `false`, the oracle belongs to another party and no wallet of this instance can authorize signers on it. Conditional on `configured`.</ResponseField>
     <ResponseField name="signerAddress" type="string">This instance's first verified wallet, primary wallet first, or `null` when none is verified. Conditional on `configured`.</ResponseField>
@@ -38,7 +42,7 @@ A stale price makes opening a loan, borrowing more, liquidating, and withdrawing
 </ResponseField>
 
 <Warning>
-  The failure response is a different shape, not an error status. When `configured` is `false` the endpoint still returns `200` with `price: "0"`, `isStale: true`, and no `priceAge`, `maxPriceAge`, `maxDeviationBps`, `fixed`, `markDownOnly`, `owner`, `ownerIsInstanceWallet` or `signerAddress`. Guard on `configured` before reading those fields.
+  The failure response is a different shape, not an error status. When `configured` is `false` the endpoint still returns `200` with `price: "0"`, `isStale: true`, and no `priceAge`, `maxPriceAge`, `maxDeviationBps`, `fixed`, `markDownOnly`, `halted`, `halt`, `owner`, `ownerIsInstanceWallet` or `signerAddress`. Guard on `configured` before reading those fields.
 </Warning>
 
 A healthy answer is held for up to 15 seconds per market and instance. Any successful write through this API clears it, so a read right after a confirmed price push reaches the chain.
@@ -49,7 +53,7 @@ Oracle prices carry the market's borrow asset decimals, not a fixed precision. T
 
 ## Fixed Price Markets
 
-A market deployed with the `FIXED` price source holds the price stated at deployment for its whole life. `fixed` and `markDownOnly` read `true`, and the answer adds `stale: false` and `staleness: null`. The price never goes stale and accepts no signed price. The oracle owner or an authorized signer can only mark it down with [Sync Oracle Price](/endpoints/lending/sync-oracle#mark-down-a-fixed-price), within `maxDeviationBps`. Whoever owns the oracle, `owner` here, could still replace its implementation through an upgrade and with it the fixed price, so the lender of record keeps the oracle owner in its own control.
+A market deployed with the `FIXED` price source holds the price stated at deployment for its whole life. `fixed` and `markDownOnly` read `true`, and the answer adds `stale: false` and `staleness: null`. The price never ages and accepts no signed price. A guardian halt is the one exception: while it runs, `isStale` reads `true` here too and the two extra fields are left out. The oracle owner or an authorized signer can only mark it down with [Sync Oracle Price](/endpoints/lending/sync-oracle#mark-down-a-fixed-price), within `maxDeviationBps`. Whoever owns the oracle, `owner` here, could still replace its implementation through an upgrade and with it the fixed price, so the lender of record keeps the oracle owner in its own control.
 
 ## External Feed Markets
 
@@ -82,6 +86,23 @@ const { data } = await res.json();
     "priceAge": 1200,
     "maxPriceAge": 86400,
     "maxDeviationBps": 5000,
+    "fixed": false,
+    "markDownOnly": false,
+    "halted": false,
+    "halt": {
+      "oracleAddress": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+      "supported": true,
+      "halted": false,
+      "haltedUntil": null,
+      "haltedUntilIso": null,
+      "nextHaltAllowedAt": null,
+      "nextHaltAllowedAtIso": null,
+      "canHaltNow": true,
+      "maxHaltSeconds": 86400,
+      "readable": true,
+      "secondsUntilHaltAllowed": 0,
+      "owner": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70"
+    },
     "configured": true,
     "owner": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70",
     "ownerIsInstanceWallet": false,

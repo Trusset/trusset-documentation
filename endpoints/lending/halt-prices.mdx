@@ -1,0 +1,249 @@
+---
+title: 'Halt Prices'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/oracle-halt'
+description: 'Build the guardian halt of the market oracle, or the owner lift, and confirm it'
+---
+
+Builds `haltPrices` on the market's price oracle for a guardian, or `liftPriceHalt` for the oracle owner, and confirms either once mined. `action` picks which. The endpoint never submits the transaction.
+
+<Warning>
+  A halt stops every price-dependent path on the market for as long as it runs: no loan opens, no draw, no collateral withdrawal against debt, and no liquidation. Loans the pool is losing money on cannot be realized until the halt ends or the owner lifts it. Repayment, closure and exits stay open. Halt only on a decision the lender of record stands behind, and revoke a guardian that halts without cause.
+</Warning>
+
+A halt lasts `durationSeconds`, at most 24 hours, and ends by itself. The oracle owner can end it earlier with `lift`, which records the halt as ended at that moment. A new halt can start only 24 hours after the previous one ended, either way. While a halt runs the oracle refuses every attestation with `PriceHalted`, pushed or signed, and `isPriceStale` answers `true` on every price source, the fixed price included.
+
+The guardian is any wallet holding `GUARDIAN_ROLE` on the market, named with [Set Access Role](/endpoints/operators/set-access-role) as `MARKET_GUARDIAN`. The oracle reads the role off the market, so a revocation there ends the guardian's standing here at once. [Get Oracle Halt](/endpoints/lending/get-oracle-halt) reads the state without building anything.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
+
+## Body Parameters
+
+<ParamField body="action" type="string" required>
+  `halt` or `lift`. Required on the confirm call too, where it selects the function and event the receipt must carry.
+</ParamField>
+
+<ParamField body="durationSeconds" type="integer">
+  `halt` only. How long the halt runs, 1 to 86400 seconds. Required when building a halt.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  `halt` only. The guardian that will sign. When sent, the oracle is asked whether it recognizes the wallet as a guardian, and the build is refused with `NOT_GUARDIAN` when it does not. Omit it and no role check runs: a wallet without the role has its transaction reverted on chain.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined transaction. Send it with the same `action` to confirm. Omit it to receive the calldata.
+</ParamField>
+
+## Calldata Response
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="haltAction" type="string">`halt` or `lift`, echoed back.</ResponseField>
+    <ResponseField name="transaction" type="object">The call on the oracle, `{ to, data }`.</ResponseField>
+    <ResponseField name="to" type="string">The same `to`, repeated at the top level.</ResponseField>
+    <ResponseField name="data" type="string">The same `data`, repeated at the top level.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain your instance resolves to. It is set on the top level of this response, not inside `transaction`. `value` is always `"0"` beside it.</ResponseField>
+    <ResponseField name="functionName" type="string">`haltPrices` or `liftPriceHalt`.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`GUARDIAN_ROLE` on a halt, `ORACLE_OWNER` on a lift.</ResponseField>
+    <ResponseField name="requiredSigner" type="string">`lift` only. The oracle owner.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction does and who signs it, in words.</ResponseField>
+    <ResponseField name="oracleAddress" type="string">The oracle, lowercased.</ResponseField>
+    <ResponseField name="durationSeconds" type="integer">`halt` only. The duration requested.</ResponseField>
+    <ResponseField name="haltsUntil" type="integer">`halt` only. Unix seconds the halt would end if it mined at the chain time the calldata was built. `haltsUntilIso` is the same as ISO 8601. The contract counts from the block the transaction lands in.</ResponseField>
+    <ResponseField name="halt" type="object">The halt state before this transaction, as on [Get Oracle Halt](/endpoints/lending/get-oracle-halt).</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: this endpoint, with `body` carrying the `action` and `txHash: null`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Confirmed Response
+
+The confirm call verifies that the transaction targeted the oracle, called the function `action` names, and emitted `PricesHalted` or `PriceHaltLifted` on it. It then clears the cached oracle status, so the next [Get Oracle Status](/endpoints/lending/get-oracle-status) reflects the change, and writes the audit log entry `LENDING_ORACLE_HALTED` or `LENDING_ORACLE_HALT_LIFTED`.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="confirmed" type="boolean">Always `true`.</ResponseField>
+    <ResponseField name="action" type="string">`halt` or `lift`.</ResponseField>
+    <ResponseField name="oracleAddress" type="string">The oracle, lowercased.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
+    <ResponseField name="signer" type="string">The address that sent the transaction, lowercased.</ResponseField>
+    <ResponseField name="haltedUntil" type="integer">`halt` only. When the halt ends, from the `PricesHalted` event. `haltedUntilIso` is the same as ISO 8601, and `guardian` the wallet the event names.</ResponseField>
+    <ResponseField name="liftedBy" type="string">`lift` only. The wallet the `PriceHaltLifted` event names.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/oracle-halt" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"action": "halt", "durationSeconds": 14400, "signerAddress": "0x7d3c2b91e04a58f6c1d9a72b3c8f40e6d15a9c27"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/oracle-halt`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+const signerAddress = await guardianWallet.getAddress();
+
+const built = await fetch(url, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ action: 'halt', durationSeconds: 14400, signerAddress })
+});
+const { success, data, error } = await built.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+
+const tx = await guardianWallet.sendTransaction(data.transaction);
+await tx.wait();
+await fetch(url, { method: 'POST', headers, body: JSON.stringify({ action: 'halt', txHash: tx.hash }) });
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response - Halt
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "haltAction": "halt",
+    "transaction": {
+      "to": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+      "data": "0x..."
+    },
+    "to": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+    "data": "0x...",
+    "chainId": 11155111,
+    "value": "0",
+    "functionName": "haltPrices",
+    "requiredRole": "GUARDIAN_ROLE",
+    "description": "Halt the oracle price for 14400 seconds: every price reads stale, no attestation is accepted, borrowing and realization stop while repayment, closure and exits stay open; the halt ends by itself or the oracle owner lifts it (requires GUARDIAN_ROLE on the market)",
+    "oracleAddress": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+    "durationSeconds": 14400,
+    "haltsUntil": 1794132000,
+    "haltsUntilIso": "2026-11-07T17:20:00.000Z",
+    "halt": {
+      "oracleAddress": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+      "supported": true,
+      "halted": false,
+      "haltedUntil": null,
+      "haltedUntilIso": null,
+      "nextHaltAllowedAt": null,
+      "nextHaltAllowedAtIso": null,
+      "canHaltNow": true,
+      "maxHaltSeconds": 86400,
+      "readable": true,
+      "secondsUntilHaltAllowed": 0,
+      "owner": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70"
+    },
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/cmssh7p1k0001cghxq2m4v8rz/oracle-halt",
+      "field": "txHash",
+      "body": { "action": "halt", "txHash": null }
+    }
+  }
+}
+```
+```json Calldata Response - Lift
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "haltAction": "lift",
+    "transaction": {
+      "to": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+      "data": "0x..."
+    },
+    "to": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+    "data": "0x...",
+    "chainId": 11155111,
+    "value": "0",
+    "functionName": "liftPriceHalt",
+    "requiredRole": "ORACLE_OWNER",
+    "requiredSigner": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70",
+    "description": "Lift the running price halt now; the next halt can start 24 hours after this moment (requires the oracle owner 0x9c1e...4b70)",
+    "oracleAddress": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+    "halt": {
+      "oracleAddress": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+      "supported": true,
+      "halted": true,
+      "haltedUntil": 1794132000,
+      "haltedUntilIso": "2026-11-07T17:20:00.000Z",
+      "nextHaltAllowedAt": 1794218400,
+      "nextHaltAllowedAtIso": "2026-11-08T17:20:00.000Z",
+      "canHaltNow": false,
+      "maxHaltSeconds": 86400,
+      "readable": true,
+      "secondsUntilHaltAllowed": 112800,
+      "owner": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70"
+    },
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/cmssh7p1k0001cghxq2m4v8rz/oracle-halt",
+      "field": "txHash",
+      "body": { "action": "lift", "txHash": null }
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "confirmed": true,
+    "action": "halt",
+    "oracleAddress": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+    "txHash": "0x6b1e4d9a2c7f05e38a1c4b7d9f2e6a0c3b5d8f1a4c7e0b3d6f9a2c5e8b1d4f70",
+    "signer": "0x7d3c2b91e04a58f6c1d9a72b3c8f40e6d15a9c27",
+    "haltedUntil": 1794132000,
+    "haltedUntilIso": "2026-11-07T17:20:00.000Z",
+    "guardian": "0x7d3c2b91e04a58f6c1d9a72b3c8f40e6d15a9c27"
+  }
+}
+```
+```json Error - Halt Active
+{
+  "success": false,
+  "error": {
+    "code": "PRICE_HALT_ACTIVE",
+    "message": "A halt is running, or the previous halt ended less than 24 hours ago. A new halt can start only 24 hours after the previous one ended.",
+    "details": {
+      "halted": false,
+      "nextHaltAllowedAt": 1794218400,
+      "nextHaltAllowedAtIso": "2026-11-08T17:20:00.000Z",
+      "secondsUntilHaltAllowed": 41200
+    }
+  }
+}
+```
+```json Error - Not Guardian
+{
+  "success": false,
+  "error": {
+    "code": "NOT_GUARDIAN",
+    "message": "Only a wallet holding GUARDIAN_ROLE on the market may halt its prices.",
+    "details": { "signerAddress": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab" }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `action` is not `halt` or `lift`, `durationSeconds` is not an integer between 1 and 86400, or an address or hash is malformed |
+| `NO_ORACLE` | `400` | The market records no oracle and none could be read from the market contract |
+| `INVALID_HALT_DURATION` | `400` | `durationSeconds` is missing on a halt. `details.maxHaltSeconds` is `86400` |
+| `TX_NOT_VERIFIED` | `400` | The confirmed transaction emitted no `PricesHalted` or `PriceHaltLifted` on the oracle |
+| `ORACLE_HALT_FAILED` | `500` | The call could not be prepared or confirmed for a reason no other code covers |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read just now. Nothing was prepared; retry shortly |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `NOT_GUARDIAN` | `403` | `signerAddress` holds no `GUARDIAN_ROLE` on the market. `details.signerAddress` names it |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `PRICE_HALT_ACTIVE` | `409` | A halt runs, with `details.halted` `true` and `haltedUntil`, or the previous one ended less than 24 hours ago, with `details.nextHaltAllowedAt` and `secondsUntilHaltAllowed` |
+| `NO_PRICE_HALT` | `409` | `lift` while no halt runs |
+| `PRICE_HALT_UNSUPPORTED` | `409` | The oracle runs an implementation without the guardian halt. Its owner upgrades it with [Upgrade Market](/endpoints/lending/upgrade-market), target `oracle` |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds the guardian role or owns the oracle. Skipped when confirming with `txHash` |
+| `ORACLE_STATE_UNAVAILABLE` | `503` | Whether the oracle carries the halt, or its halt state, could not be read. Nothing was built. Retry shortly |
+
+Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

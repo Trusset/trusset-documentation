@@ -4,7 +4,9 @@ api: 'GET /lending-external-securities-v2/api/markets/{marketId}/upgrade'
 description: 'Compare the implementations a market runs with the ones the factory serves'
 ---
 
-Reports, for the market and each of its three upgradeable satellites, which implementation it runs, which one the factory serves today, and whether an upgrade is available. The market, its interest rate model, its liquidation router and its insurance fund are separate proxies with separate administrators, and each entry names who must sign its upgrade. [Upgrade Market](/endpoints/lending/upgrade-market) builds the transaction.
+Reports, for the market and each of its four upgradeable satellites, which implementation it runs, which one the factory serves today, whether an upgrade is available, and what is announced. The market, its interest rate model, its liquidation router, its price oracle and its insurance fund are separate proxies with separate authorities, and each entry names who must sign its upgrade. [Upgrade Market](/endpoints/lending/upgrade-market) builds the transactions.
+
+Each entry carries a `notice`. On the current implementations an upgrade is announced 7 days before it can execute, and the notice says whether the proxy announces at all, which implementation is announced, and when it becomes `ready`. A proxy whose implementation predates the notice takes one instant upgrade, after which it announces like the rest. `roleModel` says whether the market itself already runs that generation.
 
 An upgrade is offered only to a market the factory deployed and recorded. A market from another factory generation runs its own storage layout, so the factory's implementation is never an upgrade for it: `inFactory` is then `false` and no entry offers an upgrade.
 
@@ -21,6 +23,21 @@ The read never fails outright. When the factory or the chain cannot be reached, 
     <ResponseField name="marketId" type="string">Market ID.</ResponseField>
     <ResponseField name="marketAddress" type="string">Market contract address.</ResponseField>
     <ResponseField name="readable" type="boolean">Whether the market's implementation pointer could be read.</ResponseField>
+    <ResponseField name="roleModel" type="boolean">Whether the market runs the role-model implementation: guardian role, upgrade notice, admin guard, threshold cooldown and the 20 percent infrastructure fee. `null` when unreadable.</ResponseField>
+    <ResponseField name="notice" type="object">
+      The market's upgrade notice. `null` when it could not be read.
+      <Expandable>
+        <ResponseField name="address" type="string">The proxy, lowercased.</ResponseField>
+        <ResponseField name="supported" type="boolean">Whether the implementation announces upgrades. `false` on an implementation from before the notice, whose one instant upgrade executes at once. `null` when unreadable.</ResponseField>
+        <ResponseField name="readable" type="boolean">Present when `supported` is `true`. `false` when the announced values could not be read.</ResponseField>
+        <ResponseField name="pendingImplementation" type="string">The announced implementation, lowercased, or `null` when nothing is announced.</ResponseField>
+        <ResponseField name="activatesAt" type="integer">Unix seconds from which the announced upgrade can execute, or `null`. `activatesAtIso` is the same as ISO 8601.</ResponseField>
+        <ResponseField name="ready" type="boolean">`true` when an announced upgrade can execute now.</ResponseField>
+        <ResponseField name="secondsUntilReady" type="integer">Seconds until `activatesAt`, or `0`.</ResponseField>
+        <ResponseField name="delaySeconds" type="integer">`604800`, the 7-day notice.</ResponseField>
+        <ResponseField name="authority" type="object">Who announces and executes. `kind` is `role`, with `role`, `contract` and `requiredRole`, or `owner`, with `owner`, `ownedByMarket` and `requiredRole`, plus a `label` in words. On the rate model a `note` says the owner keeps the parameters.</ResponseField>
+      </Expandable>
+    </ResponseField>
     <ResponseField name="currentImplementation" type="string">The implementation the market runs, or `null`.</ResponseField>
     <ResponseField name="targetImplementation" type="string">The market implementation the factory serves, or `null` when it serves none or the market is not in the factory.</ResponseField>
     <ResponseField name="upgradeAvailable" type="boolean">Whether the two differ, so an upgrade can be built.</ResponseField>
@@ -65,16 +82,18 @@ The read never fails outright. When the factory or the chain cannot be reached, 
         <ResponseField name="owner" type="string">Its owner, who signs the upgrade.</ResponseField>
         <ResponseField name="pendingOwner" type="string">The owner nominated by the lender of record and not yet accepted, or `null`.</ResponseField>
         <ResponseField name="ownedByMarket" type="boolean">`true` while the market or the factory still owns it. No wallet can upgrade it until the nominated owner accepts. See [Get Handover](/endpoints/operators/get-handover).</ResponseField>
-        <ResponseField name="requiredRole" type="string">`owner`.</ResponseField>
+        <ResponseField name="requiredRole" type="string">`DEFAULT_ADMIN_ROLE` when the model carries the notice: the market admin announces and executes its upgrade, while `owner` keeps the curve parameters, the rate mode and the ceiling. `owner` on an earlier model implementation, for its one instant upgrade.</ResponseField>
+        <ResponseField name="notice" type="object">The model's upgrade notice, shaped like the market's. When the model cannot be resolved it is `{ address: null, supported: null, reason }`.</ResponseField>
         <ResponseField name="description" type="string">What the upgrade changes, when one is available.</ResponseField>
       </Expandable>
     </ResponseField>
-    <ResponseField name="router" type="object">The liquidation router: `routerAddress`, `currentImplementation`, `targetImplementation`, `upgradeAvailable`, and `description` when an upgrade is available, naming only what the target adds over the implementation the router runs. The router admin signs its upgrade. `null` when it could not be resolved.</ResponseField>
-    <ResponseField name="insuranceFund" type="object">The insurance fund, with the same fields as `rateModel` plus `heldByFactory`, `true` while the deploying factory still owns it, and `carriesTopUp`, whether it already takes permissionless top-ups. `null` when it could not be resolved.</ResponseField>
+    <ResponseField name="router" type="object">The liquidation router: `routerAddress`, `currentImplementation`, `targetImplementation`, `upgradeAvailable`, `notice`, and `description` when an upgrade is available, naming only what the target adds over the implementation the router runs. The router admin signs its upgrade. `null` when it could not be resolved.</ResponseField>
+    <ResponseField name="insuranceFund" type="object">The insurance fund, with the same fields as `rateModel` plus `heldByFactory`, `true` while the deploying factory still owns it, and `carriesTopUp`, whether it already takes permissionless top-ups. Its `requiredRole` is always `owner`. `null` when it could not be resolved.</ResponseField>
+    <ResponseField name="oracle" type="object">The price oracle: `address`, `readable`, `currentImplementation`, `targetImplementation`, `upgradeAvailable`, `owner`, `pendingOwner`, `ownedByMarket`, `requiredRole` (`owner`), `notice`, and `description` when an upgrade is available. `null` when it could not be resolved.</ResponseField>
   </Expandable>
 </ResponseField>
 
-When `inFactory` is `false`, `rateModel`, `router` and `insuranceFund` each carry `upgradeAvailable: false`, `targetImplementation: null` and `reason: "MARKET_NOT_IN_FACTORY"`.
+When `inFactory` is `false`, `rateModel`, `router`, `insuranceFund` and `oracle` each carry `upgradeAvailable: false`, `targetImplementation: null` and `reason: "MARKET_NOT_IN_FACTORY"`.
 
 <RequestExample>
 ```bash cURL
@@ -91,8 +110,12 @@ const pending = [
   data.upgradeAvailable && 'market',
   data.rateModel?.upgradeAvailable && 'rateModel',
   data.router?.upgradeAvailable && 'router',
-  data.insuranceFund?.upgradeAvailable && 'insuranceFund'
+  data.insuranceFund?.upgradeAvailable && 'insuranceFund',
+  data.oracle?.upgradeAvailable && 'oracle'
 ].filter(Boolean);
+if (data.notice?.ready) {
+  console.log(`The announced market upgrade to ${data.notice.pendingImplementation} can execute now`);
+}
 ```
 </RequestExample>
 
@@ -104,6 +127,25 @@ const pending = [
     "marketId": "cmssh7p1k0001cghxq2m4v8rz",
     "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
     "readable": true,
+    "roleModel": true,
+    "notice": {
+      "address": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "supported": true,
+      "readable": true,
+      "pendingImplementation": "0x1d5e7b9a3c0f2e4d6b8a0c2e4f6a8b0d2e4f6a81",
+      "activatesAt": 1794700812,
+      "activatesAtIso": "2026-11-14T07:20:12.000Z",
+      "ready": false,
+      "secondsUntilReady": 432000,
+      "delaySeconds": 604800,
+      "authority": {
+        "kind": "role",
+        "role": "DEFAULT_ADMIN_ROLE",
+        "contract": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "requiredRole": "DEFAULT_ADMIN_ROLE",
+        "label": "market DEFAULT_ADMIN_ROLE"
+      }
+    },
     "instrumented": true,
     "stampsLoanTerms": true,
     "currentImplementation": "0x894956CB1c7E0a5D2f3B8e4A6d9C1b7F0e2A5c83",
@@ -126,13 +168,50 @@ const pending = [
       "owner": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
       "pendingOwner": null,
       "ownedByMarket": false,
-      "requiredRole": "owner"
+      "requiredRole": "DEFAULT_ADMIN_ROLE",
+      "notice": {
+        "address": "0x2c7e91d4a3b05f68e1c2a4b7d9f03e5a6c8b1d42",
+        "supported": true,
+        "readable": true,
+        "pendingImplementation": null,
+        "activatesAt": null,
+        "activatesAtIso": null,
+        "ready": false,
+        "secondsUntilReady": 0,
+        "delaySeconds": 604800,
+        "authority": {
+          "kind": "role",
+          "role": "DEFAULT_ADMIN_ROLE",
+          "contract": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+          "requiredRole": "DEFAULT_ADMIN_ROLE",
+          "label": "market DEFAULT_ADMIN_ROLE",
+          "note": "The interest rate model answers to the market admin for its code; its owner keeps the curve parameters, the rate mode and the fixed-rate ceiling."
+        }
+      }
     },
     "router": {
       "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
       "currentImplementation": "0x3F5a7C9e1B3d5F7a9C1e3B5d7F9a1C3e5B7d9F12",
       "targetImplementation": "0x3F5a7C9e1B3d5F7a9C1e3B5d7F9a1C3e5B7d9F12",
-      "upgradeAvailable": false
+      "upgradeAvailable": false,
+      "notice": {
+        "address": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+        "supported": true,
+        "readable": true,
+        "pendingImplementation": null,
+        "activatesAt": null,
+        "activatesAtIso": null,
+        "ready": false,
+        "secondsUntilReady": 0,
+        "delaySeconds": 604800,
+        "authority": {
+          "kind": "role",
+          "role": "DEFAULT_ADMIN_ROLE",
+          "contract": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+          "requiredRole": "DEFAULT_ADMIN_ROLE",
+          "label": "liquidation router DEFAULT_ADMIN_ROLE"
+        }
+      }
     },
     "insuranceFund": {
       "address": "0x8f1a4c2e9b7d3056a1e8c4f29d0b7a3e5c619c22",
@@ -145,7 +224,54 @@ const pending = [
       "ownedByMarket": false,
       "heldByFactory": false,
       "carriesTopUp": true,
-      "requiredRole": "owner"
+      "requiredRole": "owner",
+      "notice": {
+        "address": "0x8f1a4c2e9b7d3056a1e8c4f29d0b7a3e5c619c22",
+        "supported": true,
+        "readable": true,
+        "pendingImplementation": null,
+        "activatesAt": null,
+        "activatesAtIso": null,
+        "ready": false,
+        "secondsUntilReady": 0,
+        "delaySeconds": 604800,
+        "authority": {
+          "kind": "owner",
+          "owner": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+          "ownedByMarket": false,
+          "requiredRole": "owner",
+          "label": "insurance fund owner 0x4e91...4e93"
+        }
+      }
+    },
+    "oracle": {
+      "address": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+      "readable": true,
+      "currentImplementation": "0x5C1e3A7b9D2f4E6a8C0b2D4f6A8c0E2b4D6f8A14",
+      "targetImplementation": "0x5C1e3A7b9D2f4E6a8C0b2D4f6A8c0E2b4D6f8A14",
+      "upgradeAvailable": false,
+      "owner": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70",
+      "pendingOwner": null,
+      "ownedByMarket": false,
+      "requiredRole": "owner",
+      "notice": {
+        "address": "0x3b25752c1459c5cf1b0bfcfdf0d56883c8047423",
+        "supported": true,
+        "readable": true,
+        "pendingImplementation": null,
+        "activatesAt": null,
+        "activatesAtIso": null,
+        "ready": false,
+        "secondsUntilReady": 0,
+        "delaySeconds": 604800,
+        "authority": {
+          "kind": "owner",
+          "owner": "0x9c1e57a2d0b34f86e7a15c9d2b4f60e38a7d4b70",
+          "ownedByMarket": false,
+          "requiredRole": "owner",
+          "label": "price oracle owner 0x9c1e...4b70"
+        }
+      }
     }
   }
 }

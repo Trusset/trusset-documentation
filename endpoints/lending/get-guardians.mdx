@@ -1,0 +1,125 @@
+---
+title: 'Get Guardians'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/guardians'
+description: 'List the wallets that hold GUARDIAN_ROLE on a market, or check one address'
+---
+
+Returns every wallet that holds `GUARDIAN_ROLE` on the market, and whether the market's implementation carries the role at all. Pass `address` to ask about one wallet. [Guardian and brakes](/endpoints/lending/introduction#guardian-and-brakes) says what the role can and cannot do.
+
+The list is built from the lending index's record of `grantRole` and `revokeRole` on the market, then checked against the chain. Every listed wallet is read with `hasRole`, and a wallet the index no longer shows but the chain confirms is added without its grant details. A market whose implementation predates the role answers `supported: false` and an empty list, because nothing on it can hold the role until its admin upgrades it.
+
+The market admin names a guardian after adoption, with [Set Access Role](/endpoints/operators/set-access-role) as `MARKET_GUARDIAN`. Trusset and the factory never hold the role, and no market has a guardian by default. The oracle reads the role off the market, so this list also says who may halt its prices with [Halt Prices](/endpoints/lending/halt-prices).
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
+
+## Query Parameters
+
+<ParamField query="address" type="string">
+  A wallet to check, as a 0x-prefixed 40-character hex address. The response then carries `address` and `isGuardian` beside the list, and the wallet is read from the chain whether or not the index lists it. The zero address is ignored, as if none were sent.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="supported" type="boolean">Whether the market's implementation carries `GUARDIAN_ROLE`. `false` on an earlier implementation, `null` when it could not be read.</ResponseField>
+    <ResponseField name="marketAddress" type="string">The market, lowercased.</ResponseField>
+    <ResponseField name="role" type="string">`GUARDIAN_ROLE`.</ResponseField>
+    <ResponseField name="roleHash" type="string">`keccak256("GUARDIAN_ROLE")`, the identifier the contract uses for the role.</ResponseField>
+    <ResponseField name="guardians" type="array">
+      The wallets holding the role, lowercased. Empty when nobody holds it, when `supported` is `false`, or when neither the index nor the chain answered.
+      <Expandable>
+        <ResponseField name="address" type="string">The guardian wallet.</ResponseField>
+        <ResponseField name="grantedAt" type="string">When the index recorded the grant, ISO 8601. `null` when the chain confirms the role but the index does not show the grant.</ResponseField>
+        <ResponseField name="grantedBy" type="string">The admin wallet that signed the grant, or `null`.</ResponseField>
+        <ResponseField name="txHash" type="string">The grant transaction, or `null`.</ResponseField>
+        <ResponseField name="confirmed" type="boolean">`true` when the chain confirms the role. `null` when the chain read failed and the entry rests on the index alone.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="indexed" type="boolean">Whether the list is complete: the lending index answered, or the market runs an earlier implementation where no guardian can exist. When `false`, the list holds at most the wallet `address` asked about.</ResponseField>
+    <ResponseField name="address" type="string">Present with the `address` query: the wallet asked about, lowercased.</ResponseField>
+    <ResponseField name="isGuardian" type="boolean">Present with the `address` query. Whether that wallet holds the role on chain. `false` when the market cannot carry the role, `null` when the read failed.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  A wallet the index shows but the chain no longer confirms is dropped from the list. One whose chain read failed stays listed with `confirmed: null`. Treat that as unknown, not as a held role, and read again before relying on it.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/guardians?address=0x7d3c2b91e04a58f6c1d9a72b3c8f40e6d15a9c27" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/guardians?address=${walletAddress}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+if (data.supported === false) {
+  console.warn('This market cannot carry a guardian until its admin upgrades it');
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "supported": true,
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "role": "GUARDIAN_ROLE",
+    "roleHash": "0x55435dd261a4b9b3364963f7738a7a662ad9c84396d64be3365284bb7f0a5041",
+    "guardians": [
+      {
+        "address": "0x7d3c2b91e04a58f6c1d9a72b3c8f40e6d15a9c27",
+        "grantedAt": "2026-11-06T09:14:48.000Z",
+        "grantedBy": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "txHash": "0x2d8f4b1a6c9e03758b1d4f7a2c6e9b0d3f5a8c1e4b7d0a3f6c9e2b5d8a1f4c70",
+        "confirmed": true
+      }
+    ],
+    "indexed": true,
+    "address": "0x7d3c2b91e04a58f6c1d9a72b3c8f40e6d15a9c27",
+    "isGuardian": true
+  }
+}
+```
+```json Response - Earlier Implementation
+{
+  "success": true,
+  "data": {
+    "supported": false,
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "role": "GUARDIAN_ROLE",
+    "roleHash": "0x55435dd261a4b9b3364963f7738a7a662ad9c84396d64be3365284bb7f0a5041",
+    "guardians": [],
+    "indexed": true
+  }
+}
+```
+```json Error - Invalid Address
+{
+  "success": false,
+  "error": {
+    "code": "INVALID_ADDRESS",
+    "message": "Invalid address"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `INVALID_ADDRESS` | `400` | `address` is not a 0x-prefixed 40-character hex address |
+| `GUARDIANS_READ_FAILED` | `500` | The list could not be read for a reason no other code covers |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read just now. Retry shortly |

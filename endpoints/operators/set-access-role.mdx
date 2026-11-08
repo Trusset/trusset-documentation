@@ -4,24 +4,29 @@ api: 'POST /lending-external-securities-v2/api/markets/{marketId}/access-role'
 description: 'Grant or revoke a role on the market, its liquidation router or its price oracle'
 ---
 
-Builds the transaction that grants or revokes one of six roles across the market's three contracts: the market itself, its liquidation router and its price oracle. The endpoint never submits it. The wallet that administers the role signs, and the same POST with `txHash` verifies the mined transaction.
+Builds the transaction that grants or revokes one of seven roles across the market's three contracts: the market itself, its liquidation router and its price oracle. The endpoint never submits it. The wallet that administers the role signs, and the same POST with `txHash` verifies the mined transaction.
 
 <Warning>
-  Revoking `MARKET_ADMIN` or `ROUTER_ADMIN` from its last holder leaves that contract with no admin, and neither the contracts nor this endpoint stop it. Nobody could then grant its roles or upgrade it. On the market, nobody could pause it or write off a timed-out liquidation either.
+  On the current market and router implementations the contracts refuse an admin that revokes or renounces its own `DEFAULT_ADMIN_ROLE`, with `SelfRemovalDisabled`, and this endpoint refuses the build with `SELF_REMOVAL_DISABLED` when `signerAddress` names the address being revoked. A handover is therefore grant, then revoke by the successor. [Admin Handover](/endpoints/lending/admin-handover) returns the steps in that order. The guard covers the caller's own address only: an admin can still revoke another admin, so a market with two admins can be left with one.
+
+  On a market or router from an earlier implementation nothing has changed. Revoking `MARKET_ADMIN` or `ROUTER_ADMIN` from its last holder leaves that contract with no admin, and neither the contracts nor this endpoint stop it. Nobody could then grant its roles or upgrade it. On the market, nobody could pause it or write off a timed-out liquidation either.
 </Warning>
 
 ## Roles
 
 | `role` | Contract | On-chain role | Signed by | What the role controls |
 |---|---|---|---|---|
-| `MARKET_ADMIN` | Market | `DEFAULT_ADMIN_ROLE` | Market admin | Market roles, pause, identity registers, vault registration, timeout write-offs, upgrades |
+| `MARKET_ADMIN` | Market | `DEFAULT_ADMIN_ROLE` | Market admin | Market roles including the guardian, pause and resume, identity registers, vault registration, timeout write-offs, the upgrade notices of the market and of the interest rate model |
 | `MARKET_ISSUER` | Market | `ISSUER_ROLE` | Market admin | Risk configuration, loan terms, reserve ratio, extension proposals |
 | `MARKET_LIQUIDATOR` | Market | `LIQUIDATOR_ROLE` | Market admin | `liquidate`, and settling an expired auction while the market is paused |
+| `MARKET_GUARDIAN` | Market | `GUARDIAN_ROLE` | Market admin | Pausing the market, which only the admin resumes; halting the oracle's prices for at most 24 hours; removing an authorized price signer on the oracle, never adding one |
 | `ROUTER_ADMIN` | Liquidation router | `DEFAULT_ADMIN_ROLE` | Router admin | Router roles, market authorization, write-off and reopen, returning collateral to the recorded borrower, upgrades |
 | `ROUTER_OPERATOR` | Liquidation router | `OPERATOR_ROLE` | Router admin | Withdrawing seized collateral to the recorded sale recipient, reporting sales, settling liquidations |
 | `ORACLE_SIGNER` | Price oracle | Authorized signer | Oracle owner | Pushing prices and signing EIP-712 price quotes |
 
 An authorized price signer can move the price every loan in the market is valued at, within the oracle's deviation bound. The oracle owner can sign prices without a grant, so revoking `ORACLE_SIGNER` from the owner is refused with `ORACLE_OWNER_SIGNS`; transferring oracle ownership is the only way to remove that authority. On an `ORACLE`-priced market the oracle reads an external feed and refuses every attested price, so a signer grant changes nothing there.
+
+A guardian holds emergency brakes, not a management role: nothing in the configuration, the other roles or the upgrades is reachable from it. The oracle reads the role off the market, so a revoke here ends the guardian's standing on the oracle in the same transaction. A market whose implementation predates the role refuses the grant with `GUARDIAN_UNSUPPORTED` until its admin upgrades it with [Upgrade Market](/endpoints/lending/upgrade-market). [Get Guardians](/endpoints/lending/get-guardians) lists the holders, [Halt Prices](/endpoints/lending/halt-prices) builds the halt, and [Guardian and brakes](/endpoints/lending/introduction#guardian-and-brakes) says what each brake stops. A guardian can halt again a day after its last halt ended, so revoke one that halts without cause.
 
 <Note>
   When the address is already in the requested state, the response returns `unchanged: true` and no calldata. For `ORACLE_SIGNER`, the oracle owner counts as already granted. A role the chain read cannot answer counts as a change, so the calldata comes back.
@@ -34,7 +39,7 @@ An authorized price signer can move the price every loan in the market is valued
 ## Body Parameters
 
 <ParamField body="role" type="string" required>
-  One of `MARKET_ADMIN`, `MARKET_ISSUER`, `MARKET_LIQUIDATOR`, `ROUTER_ADMIN`, `ROUTER_OPERATOR` or `ORACLE_SIGNER`.
+  One of `MARKET_ADMIN`, `MARKET_ISSUER`, `MARKET_LIQUIDATOR`, `MARKET_GUARDIAN`, `ROUTER_ADMIN`, `ROUTER_OPERATOR` or `ORACLE_SIGNER`.
 </ParamField>
 
 <ParamField body="address" type="string" required>
@@ -43,6 +48,10 @@ An authorized price signer can move the price every loan in the market is valued
 
 <ParamField body="action" type="string" required>
   `grant` or `revoke`.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The wallet that will sign, as a 0x-prefixed 40-character hex address. On a revoke of `MARKET_ADMIN` or `ROUTER_ADMIN` it is compared with `address`: when the two match and the contract refuses self-removal, the build is refused with `SELF_REMOVAL_DISABLED` instead of handing back calldata that reverts. Omit it and no such check runs. Not used when confirming with `txHash`.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -57,7 +66,7 @@ An authorized price signer can move the price every loan in the market is valued
     <ResponseField name="action" type="string">The action requested, echoed back.</ResponseField>
     <ResponseField name="address" type="string">The address affected, echoed back.</ResponseField>
     <ResponseField name="role" type="string">The role key requested, echoed back.</ResponseField>
-    <ResponseField name="roleName" type="string">The on-chain role: `DEFAULT_ADMIN_ROLE`, `ISSUER_ROLE`, `LIQUIDATOR_ROLE`, `OPERATOR_ROLE`, or `Price signing` for `ORACLE_SIGNER`.</ResponseField>
+    <ResponseField name="roleName" type="string">The on-chain role: `DEFAULT_ADMIN_ROLE`, `ISSUER_ROLE`, `LIQUIDATOR_ROLE`, `GUARDIAN_ROLE`, `OPERATOR_ROLE`, or `Price signing` for `ORACLE_SIGNER`.</ResponseField>
     <ResponseField name="contract" type="string">The contract the role lives on: the market, its liquidation router or its oracle.</ResponseField>
     <ResponseField name="configurationCalldata" type="object">Present only alongside `requiresUserAction`. Carries `accessRole`, the unsigned transaction `{ to, data, description, chainId, value }`. For `MARKET_LIQUIDATOR` the same transaction is repeated as `liquidatorRole`.</ResponseField>
     <ResponseField name="message" type="string">Present only alongside `requiresUserAction`. Names the wallet that must sign, for example `The role change must be executed from the oracle owner wallet`.</ResponseField>
@@ -144,6 +153,20 @@ if (data.requiresUserAction) {
   }
 }
 ```
+```json Error - Self Removal
+{
+  "success": false,
+  "error": {
+    "code": "SELF_REMOVAL_DISABLED",
+    "message": "An admin cannot revoke or renounce its own DEFAULT_ADMIN_ROLE. Hand the market over by granting the successor first; the successor then revokes the predecessor.",
+    "details": {
+      "contract": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "roleKey": "MARKET_ADMIN",
+      "address": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"
+    }
+  }
+}
+```
 ```json Error - Pending Lender of Record
 {
   "success": false,
@@ -159,16 +182,18 @@ if (data.requiresUserAction) {
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | `role` is not one of the six keys, `address` is malformed, `action` is not `grant` or `revoke`, or `txHash` is malformed |
+| `VALIDATION_ERROR` | `400` | `role` is not one of the seven keys, `address` or `signerAddress` is malformed, `action` is not `grant` or `revoke`, or `txHash` is malformed |
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
 | `INVALID_ADDRESS` | `400` | `address` is the zero address |
 | `NO_ROUTER` | `400` | A router role was requested and no liquidation router address could be resolved for the market |
 | `NO_ORACLE` | `400` | `ORACLE_SIGNER` was requested and the market records no oracle |
 | `ORACLE_OWNER_SIGNS` | `400` | A revoke of `ORACLE_SIGNER` names the oracle owner, who signs without a grant |
+| `GUARDIAN_UNSUPPORTED` | `409` | `MARKET_GUARDIAN` on a market whose implementation predates the role. The market admin upgrades the market first. `MARKET_STATE_UNAVAILABLE`, also `400` here, when whether it carries the role could not be read; retry |
 | `TX_NOT_VERIFIED` | `400` | The confirmed transaction changes a different role or signer, or names a different address |
 | `ACCESS_ROLE_UPDATE_FAILED` | `400` | The change could not be prepared or confirmed and no more specific code applied |
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 | `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds the admin role or oracle ownership this change requires. Skipped when confirming with `txHash` |
+| `SELF_REMOVAL_DISABLED` | `409` | A revoke of `MARKET_ADMIN` or `ROUTER_ADMIN` where `signerAddress` is the address revoked, on a contract that refuses self-removal. `details` carries `contract`, `roleKey` and `address`. Grant the successor first; the successor then revokes the predecessor. Skipped when confirming with `txHash` |
 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction). On this endpoint every one of them answers `400`, including `TX_NOT_FOUND`.

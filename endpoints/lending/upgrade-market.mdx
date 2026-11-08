@@ -1,13 +1,13 @@
 ---
 title: 'Upgrade Market'
 api: 'POST /lending-external-securities-v2/api/markets/{marketId}/upgrade'
-description: 'Build the upgrade of a market, its rate model, router or insurance fund to the factory implementation'
+description: 'Announce, cancel or execute the upgrade of a market, its rate model, router, oracle or insurance fund to the factory implementation'
 ---
 
-Builds the unsigned transaction that moves one of the market's proxies onto the implementation the factory serves today, then confirms it once mined. `target` picks the proxy: the market itself, its interest rate model, its liquidation router or its insurance fund. Each has its own administrator, and the response names who must sign.
+Builds the unsigned transactions that move one of the market's proxies onto the implementation the factory serves today, then confirms each once mined. `target` picks the proxy: the market itself, its interest rate model, its liquidation router, its price oracle or its insurance fund. `action` picks the step. On the current implementations an upgrade is announced with `propose`, may be withdrawn with `cancel`, and runs with `execute` no earlier than 7 days after the announcement. Each proxy has its own authority, and the response names who must sign.
 
 <Warning>
-  An upgrade that moves the market onto the fixed fee shares changes what liquidity providers earn from the moment it mines. Repaid interest then pays the fixed 8 percent operator share and 5 percent distributor share out of what is left after the 15 percent infrastructure fee. Interest that open loans accrued before the upgrade is split at the new rates when it is repaid. Third parties that provided directly keep their positions but can add liquidity afterwards only through a vault. While providers hold shares or loans are open, the build is refused with `FEE_MODEL_IMPACT_UNACKNOWLEDGED`. Tell the providers, then send the request again with `acknowledgeFeeModelImpact` set to true.
+  An upgrade that moves the market onto the fixed fee shares changes what liquidity providers earn from the moment it mines. Repaid interest then pays the fixed 8 percent operator share and 5 percent distributor share out of what is left after the 20 percent infrastructure fee. The fee rate itself arrives with this upgrade: a market on an earlier implementation charges 15 percent, and 20 percent applies from the moment the upgrade mines. Interest that open loans accrued before the upgrade is split at the new rates, the fee included, when it is repaid. Third parties that provided directly keep their positions but can add liquidity afterwards only through a vault. While providers hold shares or loans are open, the build is refused with `FEE_MODEL_IMPACT_UNACKNOWLEDGED`. Tell the providers, then send the request again with `acknowledgeFeeModelImpact` set to true.
 
   A pool open to third parties without a register refuses their deposits after the upgrade. That lasts until the admin installs a provider register, and `perimeter.note` says whether it applies.
 </Warning>
@@ -21,7 +21,11 @@ The target implementation is always read from the factory and cannot be named in
 ## Body Parameters
 
 <ParamField body="target" type="string" default="market">
-  The proxy to upgrade: `market`, `rateModel`, `router` or `insuranceFund`.
+  The proxy to upgrade: `market`, `rateModel`, `router`, `insuranceFund` or `oracle`.
+</ParamField>
+
+<ParamField body="action" type="string" default="execute">
+  `propose`, `cancel` or `execute`. On a proxy whose implementation carries the upgrade notice, `execute` is accepted only for an implementation announced with `propose` at least 7 days earlier. On a proxy still on an implementation from before the notice, `execute` builds its one instant upgrade and the other two are refused. See [Announce, then execute](#announce-then-execute).
 </ParamField>
 
 <ParamField body="acknowledgeFeeModelImpact" type="boolean">
@@ -29,7 +33,7 @@ The target implementation is always read from the factory and cannot be named in
 </ParamField>
 
 <ParamField body="txHash" type="string">
-  Hash of the mined upgrade transaction. Send it with the same `target` to confirm the upgrade. Omit it to receive the calldata.
+  Hash of the mined transaction. Send it with the same `target` and `action` to confirm it. Omit it to receive the calldata.
 </ParamField>
 
 ## Who Signs
@@ -38,10 +42,25 @@ The target implementation is always read from the factory and cannot be named in
 |---|---|---|
 | `market` | The market admin (`DEFAULT_ADMIN_ROLE`) | |
 | `router` | The router admin | |
-| `rateModel` | The interest rate model's owner | The market or the factory still owns the model: `RATE_MODEL_OWNER_PENDING` |
+| `rateModel` | The market admin (`DEFAULT_ADMIN_ROLE` on the market) on the current model implementation. The model's owner on an earlier one, for its one instant upgrade | The market or the factory still owns the model: `RATE_MODEL_OWNER_PENDING` |
+| `oracle` | The price oracle's owner | The market or the factory still owns the oracle: `ORACLE_OWNER_PENDING` |
 | `insuranceFund` | The insurance fund's owner | The market or the factory still owns the fund: `INSURANCE_FUND_OWNER_PENDING` |
 
-Every target is refused with `MARKET_PENDING_CURATOR` while the market has no lender of record. The model and the fund pass to the owners the lender of record named only when each nominee accepts ownership. [Get Handover](/endpoints/operators/get-handover) returns those acceptance transactions.
+Every target is refused with `MARKET_PENDING_CURATOR` while the market has no lender of record. The oracle, the model and the fund pass to the owners the lender of record named only when each nominee accepts ownership. [Get Handover](/endpoints/operators/get-handover) returns those acceptance transactions.
+
+The rate model is the one proxy whose code and whose parameters answer to different parties. The market admin announces and executes its upgrades. Its owner keeps the curve parameters, the rate mode and the fixed-rate ceiling, and cannot announce or execute an upgrade of the model's code.
+
+## Announce, then execute
+
+On a proxy whose implementation carries the notice, the three actions build the following, and the notice runs 7 days from the announcement.
+
+| `action` | Function | Refused with |
+|---|---|---|
+| `propose` | `proposeUpgrade(implementation)`, with the implementation the factory serves | `ALREADY_UPGRADED` when the proxy already runs it, `UPGRADE_ALREADY_PROPOSED` when it is already announced, `INVALID_IMPLEMENTATION` when the factory's address holds no code |
+| `cancel` | `cancelUpgradeProposal()` | `NO_UPGRADE_PROPOSAL` when nothing is announced |
+| `execute` | `upgradeToAndCall(implementation, "0x")` | `UPGRADE_NOT_READY` without a proposal, for an implementation other than the announced one, or before `notice.activatesAt` |
+
+A later `propose` replaces an earlier one and restarts the week. A proxy still on an implementation from before the notice takes one instant upgrade: `execute` builds it at once, the response marks it `instant: true`, and `propose` or `cancel` on it is refused with `UPGRADE_NOTICE_UNSUPPORTED`. That is the only upgrade the new implementations accept without notice, and live contracts moved onto this version that way. Every later upgrade is announced. [Get Upgrade Status](/endpoints/lending/get-upgrade-status) reports each proxy's `notice`, with `ready` and `secondsUntilReady`, so an integration can schedule the execution.
 
 ## Calldata Response
 
@@ -49,41 +68,49 @@ Every target is refused with `MARKET_PENDING_CURATOR` while the market has no le
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
     <ResponseField name="target" type="string">The proxy being upgraded.</ResponseField>
-    <ResponseField name="transaction" type="object">`to` and `data` of the upgrade call, `upgradeToAndCall` on the proxy.</ResponseField>
+    <ResponseField name="upgradeAction" type="string">`propose`, `cancel` or `execute`: the step this transaction performs.</ResponseField>
+    <ResponseField name="instant" type="boolean">Present and `true` on the one instant upgrade of a proxy still on an implementation from before the notice. Absent on a notice step.</ResponseField>
+    <ResponseField name="transaction" type="object">`to` and `data` of the call on the proxy: `proposeUpgrade`, `cancelUpgradeProposal` or `upgradeToAndCall`.</ResponseField>
     <ResponseField name="to" type="string">The same `to`, repeated at the top level.</ResponseField>
     <ResponseField name="data" type="string">The same `data`, repeated at the top level.</ResponseField>
     <ResponseField name="chainId" type="integer">The chain your instance resolves to. It is set on the top level of this response, not inside `transaction`.</ResponseField>
     <ResponseField name="value" type="string">Always `"0"`, set beside `chainId`.</ResponseField>
-    <ResponseField name="functionName" type="string">`upgradeToAndCall`.</ResponseField>
-    <ResponseField name="requiredRole" type="string">`DEFAULT_ADMIN_ROLE` on `market` and `router`, `owner` on `rateModel` and `insuranceFund`.</ResponseField>
-    <ResponseField name="description" type="string">What the upgrade changes and who must sign it, in words. On `market` and `router` it names only what the target implementation adds over the one the proxy runs.</ResponseField>
-    <ResponseField name="implementation" type="string">The implementation the proxy moves to.</ResponseField>
+    <ResponseField name="functionName" type="string">`proposeUpgrade`, `cancelUpgradeProposal` or `upgradeToAndCall`.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`DEFAULT_ADMIN_ROLE` on `market`, `router` and, on the current model implementation, `rateModel`. `owner` on `oracle`, `insuranceFund` and an earlier `rateModel`.</ResponseField>
+    <ResponseField name="authority" type="object">Notice steps only. Who signs: `kind` is `role` with `role`, `contract` and `requiredRole`, or `owner` with `owner`, `ownedByMarket` and `requiredRole`, plus a `label` in words. On the rate model a `note` says the owner keeps the parameters.</ResponseField>
+    <ResponseField name="description" type="string">What the step does and who must sign it, in words. On an instant upgrade of `market` and `router` it names only what the target implementation adds over the one the proxy runs.</ResponseField>
+    <ResponseField name="implementation" type="string">The implementation the proxy moves to. On `cancel`, the one the factory serves, while the announced one is in `notice.pendingImplementation`.</ResponseField>
     <ResponseField name="previousImplementation" type="string">The implementation it runs now.</ResponseField>
-    <ResponseField name="routerAddress" type="string">`router` only. The router being upgraded.</ResponseField>
-    <ResponseField name="modelAddress" type="string">`rateModel` only. The model being upgraded, with its `owner`.</ResponseField>
-    <ResponseField name="fundAddress" type="string">`insuranceFund` only. The fund being upgraded, with its `owner`.</ResponseField>
-    <ResponseField name="pokeSnapshot" type="object">`market` only. A second transaction, `{ to, data, description }`, that seeds the market's history series with one snapshot after the upgrade.</ResponseField>
-    <ResponseField name="perimeter" type="object">`market` only, when the upgrade brings in a separate provider register on an open pool. `{ borrowerRegistry, providerRegistry, carried, note }`, as on [Get Upgrade Status](/endpoints/lending/get-upgrade-status).</ResponseField>
-    <ResponseField name="feeModel" type="object">`market` only, when the upgrade moves the market onto the fixed fee shares. `{ openPool, registeredVaults, impact }`, plus `vaultWarnings` where a registered vault predates distributor attribution.</ResponseField>
-    <ResponseField name="followUps" type="object">`market` only, when the market has registered vaults that must be registered again after the upgrade. `{ reason, requiredRole, steps }`, plus `warnings` where such a vault predates distributor attribution. The steps deregister each vault, in reverse order, then register them again, so the draw order is kept and positions stay untouched.</ResponseField>
+    <ResponseField name="notice" type="object">Notice steps only. The proxy's notice before this transaction, with `supported`, `pendingImplementation`, `activatesAt`, `activatesAtIso`, `ready`, `secondsUntilReady` and `delaySeconds`, as on [Get Upgrade Status](/endpoints/lending/get-upgrade-status).</ResponseField>
+    <ResponseField name="activatesAt" type="integer">`propose` only. Unix seconds from which the announced upgrade can execute, counted from the chain time the calldata was built. `activatesAtIso` is the same as ISO 8601. The contract counts from the block the announcement lands in.</ResponseField>
+    <ResponseField name="routerAddress" type="string">Instant `router` upgrade only. The router being upgraded.</ResponseField>
+    <ResponseField name="modelAddress" type="string">Instant `rateModel` upgrade only. The model being upgraded, with its `owner`.</ResponseField>
+    <ResponseField name="fundAddress" type="string">Instant `insuranceFund` upgrade only. The fund being upgraded, with its `owner`.</ResponseField>
+    <ResponseField name="oracleAddress" type="string">Instant `oracle` upgrade only. The oracle being upgraded, with its `owner`.</ResponseField>
+    <ResponseField name="pokeSnapshot" type="object">Instant `market` upgrade only. A second transaction, `{ to, data, description }`, that seeds the market's history series with one snapshot after the upgrade.</ResponseField>
+    <ResponseField name="perimeter" type="object">Instant `market` upgrade only, when the upgrade brings in a separate provider register on an open pool. `{ borrowerRegistry, providerRegistry, carried, note }`, as on [Get Upgrade Status](/endpoints/lending/get-upgrade-status).</ResponseField>
+    <ResponseField name="feeModel" type="object">Instant `market` upgrade only, when the upgrade moves the market onto the fixed fee shares. `{ openPool, registeredVaults, impact }`, plus `vaultWarnings` where a registered vault predates distributor attribution.</ResponseField>
+    <ResponseField name="followUps" type="object">Instant `market` upgrade only, when the market has registered vaults that must be registered again after the upgrade. `{ reason, requiredRole, steps }`, plus `warnings` where such a vault predates distributor attribution. The steps deregister each vault, in reverse order, then register them again, so the draw order is kept and positions stay untouched.</ResponseField>
     <ResponseField name="acknowledgedFeeModelImpact" type="boolean">Present and `true` when you acknowledged a fee model change.</ResponseField>
-    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: this endpoint, with `body` carrying `txHash: null` and the `target`.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: this endpoint, with `body` carrying `txHash: null`, the `target` and the `action`.</ResponseField>
   </Expandable>
 </ResponseField>
 
-Broadcast `transaction` first, then `pokeSnapshot` and any `followUps.steps` in order, all from the market admin. They carry no `chainId` of their own, so send them on the chain the top-level `chainId` names.
+On an instant market upgrade, broadcast `transaction` first, then `pokeSnapshot` and any `followUps.steps` in order, all from the market admin. They carry no `chainId` of their own, so send them on the chain the top-level `chainId` names.
 
 ## Confirmed Response
 
-The confirm call verifies that the transaction targeted the proxy for `target`, called `upgradeToAndCall` or `upgradeTo`, and emitted `Upgraded` on that proxy. It then reads the new implementation from the receipt.
+On `execute`, the confirm call verifies that the transaction targeted the proxy for `target`, called `upgradeToAndCall` or `upgradeTo`, and emitted `Upgraded` on that proxy. It then reads the new implementation from the receipt. On `propose` and `cancel` it verifies that the transaction targeted the proxy, called `proposeUpgrade` or `cancelUpgradeProposal`, and emitted `UpgradeProposed` or `UpgradeProposalCancelled` on it. The audit log records `LENDING_MARKET_UPGRADE_PROPOSED`, `LENDING_MARKET_UPGRADE_PROPOSAL_CANCELLED` or `LENDING_MARKET_UPGRADED`.
 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="confirmed" type="boolean">Always `true`.</ResponseField>
-    <ResponseField name="target" type="string">The proxy that was upgraded.</ResponseField>
+    <ResponseField name="target" type="string">The proxy the transaction acted on.</ResponseField>
+    <ResponseField name="action" type="string">`propose` or `cancel`. Absent on a confirmed `execute`.</ResponseField>
     <ResponseField name="proxy" type="string">Its address, lowercased.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
-    <ResponseField name="implementation" type="string">The implementation the `Upgraded` event names, lowercased.</ResponseField>
+    <ResponseField name="implementation" type="string">The implementation the event names, lowercased: the one now running after `execute`, the one announced after `propose`, the one withdrawn after `cancel`.</ResponseField>
+    <ResponseField name="activatesAt" type="integer">`propose` only. When the announced upgrade can execute, from the `UpgradeProposed` event. `activatesAtIso` is the same as ISO 8601. `null` on `cancel`.</ResponseField>
     <ResponseField name="signer" type="string">The address that sent the transaction, lowercased.</ResponseField>
   </Expandable>
 </ResponseField>
@@ -93,7 +120,7 @@ The confirm call verifies that the transaction targeted the proxy for `target`, 
 curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/upgrade" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{ "target": "market", "acknowledgeFeeModelImpact": true }'
+  -d '{ "target": "market", "action": "propose" }'
 ```
 ```typescript TypeScript
 const build = await fetch(
@@ -101,7 +128,7 @@ const build = await fetch(
   {
     method: 'POST',
     headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ target: 'market' })
+    body: JSON.stringify({ target: 'market', action: 'propose' })
   }
 );
 const { success, data, error } = await build.json();
@@ -113,13 +140,63 @@ await sent.wait();
 await fetch(`https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/upgrade`, {
   method: 'POST',
   headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
-  body: JSON.stringify({ target: 'market', txHash: sent.hash })
+  body: JSON.stringify({ target: 'market', action: 'propose', txHash: sent.hash })
 });
+
+console.log(`Execute the upgrade with action "execute" from ${data.activatesAtIso}`);
 ```
 </RequestExample>
 
 <ResponseExample>
-```json Calldata Response
+```json Calldata Response - Propose
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "target": "market",
+    "upgradeAction": "propose",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x..."
+    },
+    "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "data": "0x...",
+    "functionName": "proposeUpgrade",
+    "requiredRole": "DEFAULT_ADMIN_ROLE",
+    "authority": {
+      "kind": "role",
+      "role": "DEFAULT_ADMIN_ROLE",
+      "contract": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "requiredRole": "DEFAULT_ADMIN_ROLE",
+      "label": "market DEFAULT_ADMIN_ROLE"
+    },
+    "description": "Announce the upgrade of the market to implementation 0x2a9c...7f31; it can execute seven days after the announcement and only for this implementation (requires market DEFAULT_ADMIN_ROLE)",
+    "implementation": "0x2a9c4e7b1d3f5a8c0e2b4d6f8a1c3e5b7d9f1a7f31",
+    "previousImplementation": "0x1d5e7b9a3c0f2e4d6b8a0c2e4f6a8b0d2e4f6a81",
+    "notice": {
+      "address": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "supported": true,
+      "readable": true,
+      "pendingImplementation": null,
+      "activatesAt": null,
+      "activatesAtIso": null,
+      "ready": false,
+      "secondsUntilReady": 0,
+      "delaySeconds": 604800
+    },
+    "activatesAt": 1794700800,
+    "activatesAtIso": "2026-11-14T07:20:00.000Z",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/cmssh7p1k0001cghxq2m4v8rz/upgrade",
+      "field": "txHash",
+      "body": { "txHash": null, "target": "market", "action": "propose" }
+    },
+    "chainId": 11155111,
+    "value": "0"
+  }
+}
+```
+```json Calldata Response - Instant Execute
 {
   "success": true,
   "data": {
@@ -141,17 +218,19 @@ await fetch(`https://api.trusset.org/lending-external-securities-v2/api/markets/
       "data": "0xcfd5afeb",
       "description": "Seed the market history series with one snapshot after the upgrade"
     },
+    "upgradeAction": "execute",
+    "instant": true,
     "confirmWith": {
       "endpoint": "POST /lending-external-securities-v2/api/markets/cmssh7p1k0001cghxq2m4v8rz/upgrade",
       "field": "txHash",
-      "body": { "txHash": null, "target": "market" }
+      "body": { "txHash": null, "target": "market", "action": "execute" }
     },
     "chainId": 11155111,
     "value": "0"
   }
 }
 ```
-```json Confirmed Response
+```json Confirmed Response - Execute
 {
   "success": true,
   "data": {
@@ -161,6 +240,39 @@ await fetch(`https://api.trusset.org/lending-external-securities-v2/api/markets/
     "txHash": "0x7c2e9a4f1b8d3065e2c7a9f4b1d8e3c6a5f2b9d7e4c1a8f5b2e9d6c3a0f7b4e1",
     "implementation": "0x1d5e7b9a3c0f2e4d6b8a0c2e4f6a8b0d2e4f6a81",
     "signer": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"
+  }
+}
+```
+```json Confirmed Response - Propose
+{
+  "success": true,
+  "data": {
+    "confirmed": true,
+    "target": "market",
+    "action": "propose",
+    "proxy": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "txHash": "0x3e8a1c5f7b2d9046e1a4c7f0b3d6e9a2c5f8b1d4e7a0c3f6b9d2e5a8c1f4b7d0",
+    "implementation": "0x2a9c4e7b1d3f5a8c0e2b4d6f8a1c3e5b7d9f1a7f31",
+    "activatesAt": 1794700812,
+    "activatesAtIso": "2026-11-14T07:20:12.000Z",
+    "signer": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93"
+  }
+}
+```
+```json Error - Not Ready
+{
+  "success": false,
+  "error": {
+    "code": "UPGRADE_NOT_READY",
+    "message": "The upgrade is not ready: an implementation change must be announced with proposeUpgrade and executes only once the seven-day notice has passed, and only for the announced implementation.",
+    "details": {
+      "target": "market",
+      "address": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "reason": "NOTICE_RUNNING",
+      "activatesAt": 1794700812,
+      "activatesAtIso": "2026-11-14T07:20:12.000Z",
+      "secondsUntilReady": 432000
+    }
   }
 }
 ```
@@ -180,14 +292,23 @@ await fetch(`https://api.trusset.org/lending-external-securities-v2/api/markets/
 | Code | HTTP | Cause |
 |---|---|---|
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
-| `VALIDATION_ERROR` | `400` | `target` is not one of the four values, `txHash` is not a transaction hash, or `acknowledgeFeeModelImpact` is not a boolean |
+| `VALIDATION_ERROR` | `400` | `target` is not one of the five values, `action` is not `propose`, `cancel` or `execute`, `txHash` is not a transaction hash, or `acknowledgeFeeModelImpact` is not a boolean |
 | `MARKET_PENDING_CURATOR` | `409` | No lender of record has taken the market, so no admin can sign an upgrade. Not checked on the confirm call |
-| `ALREADY_UPGRADED` | `409` | The proxy already runs the factory's implementation |
-| `MARKET_NOT_IN_FACTORY` | `409` | The factory did not deploy this market, so its implementations are not upgrades for it |
+| `ALREADY_UPGRADED` | `409` | The proxy already runs the factory's implementation. On `execute` with a notice, only while nothing is announced |
+| `UPGRADE_NOT_READY` | `409` | `execute` on a proxy with the notice: nothing is announced (`details.reason` `NO_PROPOSAL`), the announced implementation is not the one the factory serves (`PROPOSAL_DIFFERS`, with both), or the notice has not passed (`NOTICE_RUNNING`, with `activatesAt` and `secondsUntilReady`) |
+| `UPGRADE_ALREADY_PROPOSED` | `409` | `propose` for an implementation already announced. `details.notice` says when it executes. Announcing again would restart the week |
+| `NO_UPGRADE_PROPOSAL` | `409` | `cancel` while no upgrade of that proxy is announced |
+| `UPGRADE_NOTICE_UNSUPPORTED` | `409` | `propose` or `cancel` on a proxy still on an implementation without the notice. `details` names the `target` and `address`. Its one instant upgrade is built with `execute` |
+| `INVALID_IMPLEMENTATION` | `400` | `propose` or `execute`: the implementation the factory serves holds no code, so the call would revert |
+| `TARGET_IMPL_WITHOUT_NOTICE` | `409` | `propose` or `execute`: the implementation the factory serves does not carry the upgrade notice, or the target's role-model function (`GUARDIAN_ROLE()` on the market, `priceHaltedUntil()` on the oracle, `withdrawalActivatesAt()` on the fund). Moving onto it would take the proxy off the notice, so nothing is built. `details.missing` names what it lacks |
+| `MARKET_NOT_IN_FACTORY` | `409` | The factory did not deploy this market, so its implementations are not upgrades for it. Applies to the instant upgrade and to `propose` and `execute` on a notice; `cancel` stays open |
 | `FACTORY_UNREADABLE` | `503` | The factory record of the market could not be read. Retry |
+| `CHAIN_UNAVAILABLE` | `503` | A notice step could not read the chain just now. Retry shortly |
 | `FEE_MODEL_IMPACT_UNACKNOWLEDGED` | `409` | `market`: the upgrade moves the market onto the fixed fee shares while providers hold shares or loans are open. The message states the impact and `details.feeModel` carries it |
-| `RATE_MODEL_OWNER_PENDING` | `409` | `rateModel`: the market or the factory still owns the model. The error carries `owner` and, once nominated, `pendingOwner` |
-| `INSURANCE_FUND_OWNER_PENDING` | `409` | `insuranceFund`: the market or the factory still owns the fund. The error carries `owner` and `pendingOwner` |
+| `RATE_MODEL_OWNER_PENDING` | `409` | `rateModel`: the market or the factory still owns the model. On the instant upgrade the error carries `owner` and, once nominated, `pendingOwner`; on a notice step `details` carries `target`, `address` and `owner` |
+| `INSURANCE_FUND_OWNER_PENDING` | `409` | `insuranceFund`: the market or the factory still owns the fund. On the instant upgrade the error carries `owner` and `pendingOwner`; on a notice step `details` carries `target`, `address` and `owner` |
+| `ORACLE_OWNER_PENDING` | `409` | `oracle`: the market or the factory still owns the oracle. On the instant upgrade the error carries `owner` and `pendingOwner`; on a notice step `details` carries `target`, `address` and `owner` |
+| `NO_ORACLE` | `400` | `oracle`: the market records no oracle and none could be read from the market contract |
 | `NO_TARGET_IMPL` | `400` | The factory serves no implementation for that proxy |
 | `TARGET_IMPL_NO_CODE` | `400` | The factory's implementation address holds no code |
 | `TARGET_IMPL_NOT_INSTRUMENTED` | `400` | `market`: the factory implementation lacks the snapshot function |
@@ -195,15 +316,17 @@ await fetch(`https://api.trusset.org/lending-external-securities-v2/api/markets/
 | `TARGET_IMPL_NOT_CEILINGED` | `400` | `rateModel`: the factory implementation lacks the fixed-rate ceiling |
 | `TARGET_IMPL_NOT_TOPPABLE` | `400` | `insuranceFund`: the factory implementation lacks the permissionless top-up |
 | `TARGET_IMPL_NOT_ROTATABLE` | `400` | `router`: the factory implementation lacks the sale-recipient rotation flow |
-| `MARKET_STATE_UNAVAILABLE` | `503` | `market`: the implementation, register, liquidity access or positions could not be read. Retry |
+| `TARGET_IMPL_NOT_HALTABLE` | `400` | `oracle`: the factory implementation lacks the guardian halt |
+| `MARKET_STATE_UNAVAILABLE` | `503` | `market`: the implementation, register, liquidity access or positions could not be read. Any target: whether the proxy carries the notice, or the notice itself, could not be read. Retry |
 | `MODEL_UNRESOLVED` | `503` | `rateModel`: the model could not be resolved. On the confirm call, `409` when the market has none |
 | `MODEL_STATE_UNAVAILABLE` | `503` | `rateModel`: the model's implementation could not be read |
 | `FUND_UNRESOLVED` | `503` | `insuranceFund`: the fund could not be resolved |
 | `FUND_STATE_UNAVAILABLE` | `503` | `insuranceFund`: the fund's implementation could not be read |
+| `ORACLE_STATE_UNAVAILABLE` | `503` | `oracle`: the oracle's implementation could not be read |
 | `NO_INSURANCE_FUND` | `409` | Confirm call, `insuranceFund`: the market has no insurance fund |
 | `ROUTER_UNRESOLVED` | `400` or `503` | `router`: the record carries no router address and the market's router could not be read. `400` when building, `503` when confirming |
-| `TX_NOT_VERIFIED` | `400` | Confirm call: the transaction emitted no `Upgraded` event on that proxy |
-| `MARKET_UPGRADE_FAILED` | `400` | `market`: the upgrade could not be prepared. `MODEL_UPGRADE_FAILED`, `FUND_UPGRADE_FAILED` and `ROUTER_UPGRADE_FAILED` are the same for the other targets |
+| `TX_NOT_VERIFIED` | `400` | Confirm call: the transaction emitted no `Upgraded`, `UpgradeProposed` or `UpgradeProposalCancelled` event, as `action` requires, on that proxy |
+| `MARKET_UPGRADE_FAILED` | `400` | `market`: the instant upgrade could not be prepared. `MODEL_UPGRADE_FAILED`, `FUND_UPGRADE_FAILED`, `ROUTER_UPGRADE_FAILED` and `ORACLE_UPGRADE_FAILED` are the same for the other targets. `UPGRADE_FAILED` (`500`) when a notice step failed for a reason no other code covers |
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 

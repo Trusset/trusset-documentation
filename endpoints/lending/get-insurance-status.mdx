@@ -22,7 +22,7 @@ Which events draw on the reserve depends on the market implementation, reported 
 
 A later recovery on a record the reserve advanced against is shared differently too. With `true`, the recovery makes the pool whole on the record's claim first, and only what is left above the claim repays the reserve. With `false`, the recovery repays the reserve before anything becomes pool income. `disclosure` states all of this in words, chosen for this market.
 
-The reserve is funded two ways. [Sweep Protocol Fees](/endpoints/lending/sweep-protocol-fees) deposits the insurance-fund rate's share of interest, and [Top Up Insurance Fund](/endpoints/lending/top-up-insurance) lets any wallet add capital. Apart from coverage paid to an authorized market, only the fund owner can take money out, through [Withdraw from Insurance Fund](/endpoints/lending/withdraw-insurance).
+The reserve is funded two ways. [Sweep Protocol Fees](/endpoints/lending/sweep-protocol-fees) deposits the insurance-fund rate's share of interest, and [Top Up Insurance Fund](/endpoints/lending/top-up-insurance) lets any wallet add capital. Apart from coverage paid to an authorized market, only the fund owner can take money out, through [Withdraw from Insurance Fund](/endpoints/lending/withdraw-insurance). On the current fund implementation that withdrawal is announced 7 days ahead and executes within the following 7 days, for the announced amount and destination only, so every provider can see the first-loss buffer leaving before it does. `withdrawalNotice` reports what is announced, and `generation.withdrawalNotice` whether the fund runs the notice at all.
 
 ## Path Parameters
 
@@ -45,7 +45,26 @@ The reserve is funded two ways. [Sweep Protocol Fees](/endpoints/lending/sweep-p
         <ResponseField name="currentBalance" type="string">The fund's balance of the borrow asset, which is what it can pay today.</ResponseField>
       </Expandable>
     </ResponseField>
-    <ResponseField name="generation" type="object">`settlementDrawsReserve`, described above, and `topUpBooked`. `topUpBooked` is `true` when the fund books a top-up as a deposit and `null` when unreadable. It is `false` on the earlier fund implementation, which only accepts a plain transfer it does not book.</ResponseField>
+    <ResponseField name="generation" type="object">`settlementDrawsReserve`, described above, `topUpBooked` and `withdrawalNotice`. `topUpBooked` is `true` when the fund books a top-up as a deposit and `null` when unreadable. It is `false` on the earlier fund implementation, which only accepts a plain transfer it does not book. `withdrawalNotice` is `true` when the fund announces withdrawals 7 days ahead, `false` on an implementation that withdraws in one step, `null` when unreadable.</ResponseField>
+    <ResponseField name="withdrawalNotice" type="object">
+      The fund's withdrawal notice. `null` when it could not be read at all.
+      <Expandable>
+        <ResponseField name="fundAddress" type="string">The fund, lowercased.</ResponseField>
+        <ResponseField name="supported" type="boolean">Whether the fund's implementation runs the notice. `false` on an earlier implementation, where the fields below stay `null` and `false` and `readable`, `pending`, `secondsUntilReady` and `owner` are absent. `null` when unreadable.</ResponseField>
+        <ResponseField name="readable" type="boolean">Present when `supported` is `true`. `false` when the announced values could not be read.</ResponseField>
+        <ResponseField name="pending" type="boolean">Whether a withdrawal is announced. Present only when `readable` is `true`.</ResponseField>
+        <ResponseField name="pendingAmount" type="string">The announced amount as a decimal string, or `null`. `pendingAmountRaw` is the same in the borrow asset's smallest unit.</ResponseField>
+        <ResponseField name="pendingRecipient" type="string">The announced destination, lowercased, or `null`.</ResponseField>
+        <ResponseField name="activatesAt" type="integer">Unix seconds from which the announced withdrawal can execute, or `null`. `activatesAtIso` is the same as ISO 8601.</ResponseField>
+        <ResponseField name="lapsesAt" type="integer">Unix seconds after which it can no longer execute, 7 days after `activatesAt`, or `null`. `lapsesAtIso` is the same as ISO 8601.</ResponseField>
+        <ResponseField name="ready" type="boolean">`true` while the announced withdrawal can execute now.</ResponseField>
+        <ResponseField name="lapsed" type="boolean">`true` when the announcement was not executed in time and must be made again.</ResponseField>
+        <ResponseField name="secondsUntilReady" type="integer">Seconds until `activatesAt`, or `0`. Present only when `readable` is `true`.</ResponseField>
+        <ResponseField name="delaySeconds" type="integer">`604800`, the notice.</ResponseField>
+        <ResponseField name="executionWindowSeconds" type="integer">`604800`, how long the announcement stays executable once ready.</ResponseField>
+        <ResponseField name="owner" type="string">The fund owner, who announces, cancels and executes. Present only when `readable` is `true`, and `null` when the owner itself could not be read.</ResponseField>
+      </Expandable>
+    </ResponseField>
     <ResponseField name="earmarkedProtocolFees" type="string">Protocol fee the market has booked for the fund and not yet swept. The fund does not hold it until [Sweep Protocol Fees](/endpoints/lending/sweep-protocol-fees) runs, so an empty fund can still have money waiting. `null` when unreadable.</ResponseField>
     <ResponseField name="earmarkedProtocolFeesRaw" type="string">The same in the borrow asset's smallest unit.</ResponseField>
     <ResponseField name="earmarkedProtocolFeesSweepable" type="boolean">`true` when something is booked and the market names a fund. It does not check `marketAuthorized`.</ResponseField>
@@ -124,7 +143,27 @@ console.log(`Reserve balance ${data.stats.currentBalance} ${data.borrowAssetSymb
     },
     "generation": {
       "settlementDrawsReserve": true,
-      "topUpBooked": true
+      "topUpBooked": true,
+      "withdrawalNotice": true
+    },
+    "withdrawalNotice": {
+      "fundAddress": "0x8f1a6b30c7d24e95f0a3b81d6c47e2905fa3b9c2",
+      "supported": true,
+      "readable": true,
+      "pending": true,
+      "pendingAmount": "500.0",
+      "pendingAmountRaw": "500000000",
+      "pendingRecipient": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
+      "activatesAt": 1794700800,
+      "activatesAtIso": "2026-11-14T07:20:00.000Z",
+      "lapsesAt": 1795305600,
+      "lapsesAtIso": "2026-11-21T07:20:00.000Z",
+      "ready": false,
+      "lapsed": false,
+      "secondsUntilReady": 432000,
+      "delaySeconds": 604800,
+      "executionWindowSeconds": 604800,
+      "owner": "0x3f9c1e7a2b5d48e06c1a9f3b7d2e5a8c0f4b6d13"
     },
     "implementation": {
       "current": "0x2b7e4c19a05d3f86e1c9b0a7d4f2e5c8a1b3d6f0",
@@ -153,7 +192,8 @@ console.log(`Reserve balance ${data.stats.currentBalance} ${data.borrowAssetSymb
       "repayment": "Recovery on a record the reserve advanced against makes the pool whole on the record's claim first; only what it leaves above the claim repays the reserve, ahead of the penalty becoming pool income and ahead of recovery on debt the position still carries.",
       "topUp": "A top-up pulls the settlement asset through topUp(amount) and the fund books it as a deposit with the source recorded, so Lifetime Deposits counts protocol-fee sweeps and top-ups alike, and the balance is what it can pay.",
       "settlementDrawsReserve": true,
-      "topUpBooked": true
+      "topUpBooked": true,
+      "withdrawalNotice": true
     },
     "fundImplementation": {
       "current": "0x2b7e4c19a05d3f86e1c9b0a7d4f2e5c8a1b3d6f0",

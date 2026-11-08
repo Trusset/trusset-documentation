@@ -6,7 +6,7 @@ description: 'Repay loan debt, interest first then principal'
 
 Repays part or all of a loan's outstanding debt. Accrued interest is settled before principal. A repayment that clears the whole debt closes the loan in the same transaction and releases the collateral to the borrower, so no [Close Loan](/endpoints/lending/close-loan) call follows it.
 
-Any wallet can repay any loan, so a third party can rescue a position approaching liquidation or an omnibus wallet can pay for its customer. The collateral always returns to the borrower, never to the payer. Name the paying wallet in `payer`: the allowance, the token's approval rule and the repayment are then checked from that wallet before you sign. A repayment sent without a `signedPrice` reads no price, so neither a stale price nor a paused market blocks it.
+Any wallet can repay any loan, so a third party can rescue a position approaching liquidation or an omnibus wallet can pay for its customer. The collateral always returns to the borrower, never to the payer. Name the paying wallet in `payer`: the allowance, the token's approval rule and the repayment are then checked from that wallet before you sign. A repayment sent without a `signedPrice` reads no price, so neither a stale price, a guardian halt nor a paused market blocks it.
 
 <Warning>
   To close a loan, repay with `all: true`. A payment of exactly the debt quoted earlier leaves the interest accrued since then outstanding. On a market with a repayment fee it also leaves a fee-sized remainder open. The loan then stays active and keeps accruing.
@@ -39,7 +39,7 @@ Any wallet can repay any loan, so a third party can rescue a position approachin
 </ParamField>
 
 <ParamField body="signedPrice" type="object">
-  EIP-712 signed price from [Sign Price](/endpoints/lending/sign-price), carried on-chain by the repayment. A repayment is the most frequent transaction a market sees, so carrying a price here keeps the oracle fresh without a separate write. Omit it and the repayment stays on the entry point that no price can block, which is the path a borrower must always have. It is not carried on the permit path. A market that prices from an external feed refuses a signed price with `EXTERNAL_FEED_ACTIVE`, and a market with a fixed price with `FIXED_PRICE_ACTIVE`, because neither oracle takes one. Leave it out there.
+  EIP-712 signed price from [Sign Price](/endpoints/lending/sign-price), carried on-chain by the repayment. A repayment is the most frequent transaction a market sees, so carrying a price here keeps the oracle fresh without a separate write. Omit it and the repayment stays on the entry point that no price can block, which is the path a borrower must always have. It is not carried on the permit path. A market that prices from an external feed refuses a signed price with `EXTERNAL_FEED_ACTIVE`, and a market with a fixed price with `FIXED_PRICE_ACTIVE`, because neither oracle takes one. Leave it out there. During a guardian halt the quote is not refused but dropped: the attested repay entry would revert `PriceHalted`, so the builder uses the two-argument `repay`, answers `priceHalted: true` and says so in `warning`.
   <Expandable>
     <ParamField body="price" type="string">Price in base units.</ParamField>
     <ParamField body="timestamp" type="integer">Signing timestamp.</ParamField>
@@ -194,6 +194,7 @@ The chart traces the three repay entries on the market contract. None of them ch
     </ResponseField>
     <ResponseField name="warnings" type="array">Present when the plan carries a warning entry, each `{ code, message }`. `PAYER_NOT_CHECKED` also carries `failedStep` (`approveZeroFirst`, `approve` or `repay`) and, when it could be decoded, `revert`.</ResponseField>
     <ResponseField name="fullRepayment" type="boolean">Whether the plan settles the loan in full: `all: true`, or an `amount` that covers the current debt plus the repayment fee.</ResponseField>
+    <ResponseField name="priceHalted" type="boolean">Present and `true` when a `signedPrice` was sent while a guardian halt runs on the oracle. The quote was dropped and the repay step calls the two-argument `repay`, which reads no price. Absent otherwise.</ResponseField>
     <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: this route, `txHash` as the field, and a `body` carrying `loanId` with `txHash: null`.</ResponseField>
     <ResponseField name="permitSupported" type="boolean">Whether the settlement asset implements EIP-2612, so `mode: permit` is possible.</ResponseField>
     <ResponseField name="permitUsed" type="boolean">`true` on the permit path, with `permitDeadline`. Absent otherwise.</ResponseField>
@@ -202,7 +203,7 @@ The chart traces the three repay entries on the market contract. None of them ch
     <ResponseField name="transactionFee" type="object">The repayment fee, present only when it is not zero. Carries `kind: "REPAY"`, `fee`, `feeRaw` and `message`, plus `debtReduction` on a partial repayment. On a full repayment `fee` is computed on the debt at build time.</ResponseField>
     <ResponseField name="collateralRelease" type="object">Present on a full repayment of a `CUSTODY` loan when the collateral token would refuse to return the collateral to the borrower, or when its verdict cannot be read. The repayment still succeeds, and the adapter escrows the collateral instead of delivering it.</ResponseField>
     <ResponseField name="requestedAmount" type="string">Only when the `amount` sent was more than closing the loan can need: that amount. `repayAmount` and the approval carry the forecast instead.</ResponseField>
-    <ResponseField name="warning" type="string">One string joining whichever apply: the note on an `amount` sized down to the forecast, the permit headroom warning, the fee message and the collateral release message.</ResponseField>
+    <ResponseField name="warning" type="string">One string joining whichever apply: the note on an `amount` sized down to the forecast, the permit headroom warning, the fee message, the collateral release message and the note on a signed price dropped during a guardian halt.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming.</ResponseField>
     <ResponseField name="loanId" type="string">Loan ID, echoed back as a string. Returned when confirming.</ResponseField>
     <ResponseField name="repaidAmount" type="string">Principal plus interest the payment settled, read from the `LoanRepaid` event rather than from the calldata. It excludes the repayment fee. On a full repayment it is lower than `repayAmount`, because the contract pulls only what closes the loan. Returned when confirming.</ResponseField>

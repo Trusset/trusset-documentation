@@ -1,0 +1,242 @@
+---
+title: 'Admin Handover'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/admin-handover'
+description: 'Build the ordered steps that move DEFAULT_ADMIN_ROLE on the market and its router to a successor'
+---
+
+Builds the transactions that hand the market's administration, and its liquidation router's, to a successor wallet. The endpoint never submits them. The steps come back in the order the contracts require, each naming the wallet that signs it, and each is confirmed through [Set Access Role](/endpoints/operators/set-access-role).
+
+<Warning>
+  On the current market and router implementations the contracts refuse an admin that revokes or renounces its own `DEFAULT_ADMIN_ROLE`, with `SelfRemovalDisabled`. The order is therefore fixed: the current admin grants the successor, then the successor revokes the predecessor. Broadcast the revoke only after the grant is mined, and only from the successor. A market or router from an earlier implementation still lets its last admin remove itself, and nothing stops it. The same steps are offered there; keep the order all the same.
+</Warning>
+
+The interest rate model follows the market's admin by itself. Its upgrade authority is whoever holds `DEFAULT_ADMIN_ROLE` on the market, so a handover on the market carries the model with it. The oracle and the insurance fund are owned rather than role-gated and are not part of a handover.
+
+For each contract in `scope` the endpoint reads whether the successor already holds the role and which wallet is the predecessor: `signerAddress` when sent, otherwise the first verified wallet of your instance that holds the role. The grant step is left out when the successor already holds the role. The revoke step is left out when no predecessor could be named.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
+
+## Body Parameters
+
+<ParamField body="successor" type="string" required>
+  The wallet that takes over, as a 0x-prefixed 40-character hex address other than the zero address. It must differ from the current admin.
+</ParamField>
+
+<ParamField body="scope" type="string" default="both">
+  `market`, `router` or `both`.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The current admin that will sign the grant. Omit it and the predecessor is the first verified wallet of your instance, other than the successor, that holds the role on each contract; when none does, the call is refused with `PREDECESSOR_UNKNOWN` and you name the admin here. The wallet named here is checked on the chain, and one that does not hold the role is refused with `NOT_ADMIN`.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
+    <ResponseField name="successor" type="string">The successor, lowercased.</ResponseField>
+    <ResponseField name="scope" type="string">The scope requested.</ResponseField>
+    <ResponseField name="contracts" type="array">
+      One entry per contract in scope.
+      <Expandable>
+        <ResponseField name="contract" type="string">`market` or `router`.</ResponseField>
+        <ResponseField name="address" type="string">Its address, lowercased.</ResponseField>
+        <ResponseField name="successorHolds" type="boolean">Whether the successor already holds `DEFAULT_ADMIN_ROLE` there. `null` when it could not be read, and the grant is then offered.</ResponseField>
+        <ResponseField name="predecessor" type="string">The admin the revoke step removes, or `null` when none could be named.</ResponseField>
+        <ResponseField name="selfRemovalGuarded" type="boolean">`true` when the contract refuses an admin's self-removal, `false` on an earlier implementation, `null` when it could not be read.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="steps" type="array">
+      The transactions, in order.
+      <Expandable>
+        <ResponseField name="order" type="integer">Position, from 1. Broadcast in this order, each after the previous one is mined.</ResponseField>
+        <ResponseField name="contract" type="string">`market` or `router`.</ResponseField>
+        <ResponseField name="to" type="string">The contract the call targets.</ResponseField>
+        <ResponseField name="data" type="string">The calldata of `grantRole` or `revokeRole`.</ResponseField>
+        <ResponseField name="chainId" type="integer">The chain your instance resolves to, set on every step beside `value`, which is always `"0"`.</ResponseField>
+        <ResponseField name="functionName" type="string">`grantRole` or `revokeRole`.</ResponseField>
+        <ResponseField name="role" type="string">`DEFAULT_ADMIN_ROLE`.</ResponseField>
+        <ResponseField name="account" type="string">The wallet granted or revoked.</ResponseField>
+        <ResponseField name="signer" type="string">`predecessor` on the grant, `successor` on the revoke.</ResponseField>
+        <ResponseField name="signerAddress" type="string">That wallet's address, or `null` when the predecessor could not be named.</ResponseField>
+        <ResponseField name="requiredRole" type="string">`DEFAULT_ADMIN_ROLE`, which the signer must hold on the contract when the step mines.</ResponseField>
+        <ResponseField name="description" type="string">The step in words.</ResponseField>
+        <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: [Set Access Role](/endpoints/operators/set-access-role), `txHash` as the field, and a `body` carrying the `role` (`MARKET_ADMIN` or `ROUTER_ADMIN`), the `address` and the `action` to send with the hash.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="note" type="string">The order rule in words.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/admin-handover" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"successor": "0xb27d0f6a91c458e307b2d4f8916ac05e73128b64", "scope": "both"}'
+```
+```typescript TypeScript
+const base = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(`${base}/admin-handover`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ successor: successorAddress, scope: 'both' })
+});
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+
+const wallets = { predecessor: currentAdminWallet, successor: successorWallet };
+for (const step of data.steps) {
+  const tx = await wallets[step.signer].sendTransaction({ to: step.to, data: step.data, value: 0, chainId: step.chainId });
+  await tx.wait();
+  await fetch(`${base}/access-role`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...step.confirmWith.body, txHash: tx.hash })
+  });
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTIONS",
+    "successor": "0xb27d0f6a91c458e307b2d4f8916ac05e73128b64",
+    "scope": "both",
+    "contracts": [
+      {
+        "contract": "market",
+        "address": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "successorHolds": false,
+        "predecessor": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "selfRemovalGuarded": true
+      },
+      {
+        "contract": "router",
+        "address": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+        "successorHolds": false,
+        "predecessor": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "selfRemovalGuarded": true
+      }
+    ],
+    "steps": [
+      {
+        "order": 1,
+        "contract": "market",
+        "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "data": "0x2f2ff15d...",
+        "functionName": "grantRole",
+        "role": "DEFAULT_ADMIN_ROLE",
+        "account": "0xb27d0f6a91c458e307b2d4f8916ac05e73128b64",
+        "signer": "predecessor",
+        "signerAddress": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "requiredRole": "DEFAULT_ADMIN_ROLE",
+        "chainId": 11155111,
+        "value": "0",
+        "description": "Grant DEFAULT_ADMIN_ROLE on the market to the successor 0xb27d...8b64 (signed by the current admin)",
+        "confirmWith": {
+          "endpoint": "POST /lending-external-securities-v2/api/markets/cmssh7p1k0001cghxq2m4v8rz/access-role",
+          "field": "txHash",
+          "body": { "role": "MARKET_ADMIN", "address": "0xb27d0f6a91c458e307b2d4f8916ac05e73128b64", "action": "grant", "txHash": null }
+        }
+      },
+      {
+        "order": 2,
+        "contract": "market",
+        "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+        "data": "0xd547741f...",
+        "functionName": "revokeRole",
+        "role": "DEFAULT_ADMIN_ROLE",
+        "account": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "signer": "successor",
+        "signerAddress": "0xb27d0f6a91c458e307b2d4f8916ac05e73128b64",
+        "requiredRole": "DEFAULT_ADMIN_ROLE",
+        "chainId": 11155111,
+        "value": "0",
+        "description": "Revoke DEFAULT_ADMIN_ROLE on the market from the predecessor 0x4e91...4e93 (signed by the successor after the grant is mined)",
+        "confirmWith": {
+          "endpoint": "POST /lending-external-securities-v2/api/markets/cmssh7p1k0001cghxq2m4v8rz/access-role",
+          "field": "txHash",
+          "body": { "role": "MARKET_ADMIN", "address": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93", "action": "revoke", "txHash": null }
+        }
+      },
+      {
+        "order": 3,
+        "contract": "router",
+        "to": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+        "data": "0x2f2ff15d...",
+        "functionName": "grantRole",
+        "role": "DEFAULT_ADMIN_ROLE",
+        "account": "0xb27d0f6a91c458e307b2d4f8916ac05e73128b64",
+        "signer": "predecessor",
+        "signerAddress": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "requiredRole": "DEFAULT_ADMIN_ROLE",
+        "chainId": 11155111,
+        "value": "0",
+        "description": "Grant DEFAULT_ADMIN_ROLE on the liquidation router to the successor 0xb27d...8b64 (signed by the current admin)",
+        "confirmWith": {
+          "endpoint": "POST /lending-external-securities-v2/api/markets/cmssh7p1k0001cghxq2m4v8rz/access-role",
+          "field": "txHash",
+          "body": { "role": "ROUTER_ADMIN", "address": "0xb27d0f6a91c458e307b2d4f8916ac05e73128b64", "action": "grant", "txHash": null }
+        }
+      },
+      {
+        "order": 4,
+        "contract": "router",
+        "to": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
+        "data": "0xd547741f...",
+        "functionName": "revokeRole",
+        "role": "DEFAULT_ADMIN_ROLE",
+        "account": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+        "signer": "successor",
+        "signerAddress": "0xb27d0f6a91c458e307b2d4f8916ac05e73128b64",
+        "requiredRole": "DEFAULT_ADMIN_ROLE",
+        "chainId": 11155111,
+        "value": "0",
+        "description": "Revoke DEFAULT_ADMIN_ROLE on the liquidation router from the predecessor 0x4e91...4e93 (signed by the successor after the grant is mined)",
+        "confirmWith": {
+          "endpoint": "POST /lending-external-securities-v2/api/markets/cmssh7p1k0001cghxq2m4v8rz/access-role",
+          "field": "txHash",
+          "body": { "role": "ROUTER_ADMIN", "address": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93", "action": "revoke", "txHash": null }
+        }
+      }
+    ],
+    "note": "A guarded market or router refuses an admin that revokes or renounces its own role (SelfRemovalDisabled). The order is fixed: the current admin grants the successor, then the successor revokes the predecessor. The interest rate model follows the market admin by itself."
+  }
+}
+```
+```json Error - Not Admin
+{
+  "success": false,
+  "error": {
+    "code": "NOT_ADMIN",
+    "message": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab does not hold DEFAULT_ADMIN_ROLE on the market; the handover is signed by the current admin (0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93)"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `successor` or `signerAddress` is malformed, or `scope` is not `market`, `router` or `both` |
+| `INVALID_ADDRESS` | `400` | `successor` is the zero address, or is the current admin itself |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `ADMIN_HANDOVER_FAILED` | `500` | The steps could not be built for a reason no other code covers |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `NOT_ADMIN` | `403` | The predecessor does not hold `DEFAULT_ADMIN_ROLE` on a contract in scope. The message names the verified wallets of your instance that do, if any |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds the admin role to hand over |
+| `PREDECESSOR_UNKNOWN` | `409` | `signerAddress` was omitted and no verified wallet of your instance other than the successor holds `DEFAULT_ADMIN_ROLE` on a contract in scope. Send `signerAddress`, the current admin |
+| `MARKET_STATE_UNAVAILABLE` | `503` | Who holds `DEFAULT_ADMIN_ROLE`, or which router the market uses, could not be read. Nothing was planned. Retry shortly |
+| `SERVICE_UNAVAILABLE` | `503` | The verified wallets of your instance could not be read. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read just now. Retry shortly |

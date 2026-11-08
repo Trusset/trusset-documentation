@@ -12,6 +12,8 @@ The market brings its interest accrual up to date under the old values before th
 
 <Warning>
   Changing `liquidationThreshold` moves the point at which existing loans become liquidatable. Lowering it immediately puts loans at risk that were healthy a moment earlier. While the market has an open loan or an open liquidation, the contract caps each change at 10 percentage points per call. From `8500`, one call then reaches anywhere from `7500` to `9500`. With no loan and no liquidation open, no loan can be put at risk. A market on the current implementation then takes any threshold within the bounds in one call, for example `8500` to `6000`. A market on an earlier implementation keeps the cap until its admin upgrades it. `thresholdStep` on [Get Market Config](/endpoints/lending/get-config) says which applies.
+
+  On the current implementation a second threshold move inside 24 hours of the previous one is refused with `CONFIG_CHANGE_TOO_SOON` while debt is outstanding. A write that leaves the threshold where it is never counts, and a debt-free market is not held to the cooldown, but the move it makes starts the clock. [Get Threshold Cooldown](/endpoints/lending/get-threshold-cooldown) says when the next move is allowed. One move per day is the ceiling, not the target.
 </Warning>
 
 ## Path Parameters
@@ -23,9 +25,9 @@ The market brings its interest accrual up to date under the old values before th
 <ParamField body="config" type="object" required>
   <Expandable>
     <ParamField body="collateralFactor" type="integer" required>Maximum loan to value for new borrowing, in basis points. The schema accepts 1000 to 9500, but anything above 9000 is refused with `INVALID_CONFIG`, because the contract caps it at 90 percent.</ParamField>
-    <ParamField body="liquidationThreshold" type="integer" required>Loan to value at which a loan becomes liquidatable, in basis points. The schema accepts 1000 to 9800, but anything above 9500 is refused with `INVALID_CONFIG`. Must exceed `collateralFactor` to leave borrowers any buffer. While a loan or liquidation is open, or on an earlier market implementation, it may move at most 1000 from its current value in one call.</ParamField>
+    <ParamField body="liquidationThreshold" type="integer" required>Loan to value at which a loan becomes liquidatable, in basis points. The schema accepts 1000 to 9800, but anything above 9500 is refused with `INVALID_CONFIG`. Must exceed `collateralFactor` to leave borrowers any buffer. While a loan or liquidation is open, or on an earlier market implementation, it may move at most 1000 from its current value in one call. On the current implementation it also moves at most once every 24 hours while debt is outstanding.</ParamField>
     <ParamField body="liquidationPenalty" type="integer" required>Penalty on liquidated debt in basis points. 0 to 5000. It cannot drop below the market's term penalty, set with [Set Term Config](/endpoints/lending/set-term-config).</ParamField>
-    <ParamField body="protocolFeeRate" type="integer" required>The insurance-fund rate, in basis points. 0 to 10000, and 0 on a new market. Repaid interest first loses Trusset's 15 percent infrastructure fee, then the fixed 8 percent operator and 5 percent distributor shares of the remainder. This rate of what is left goes to the market's insurance fund, and the rest to liquidity providers.</ParamField>
+    <ParamField body="protocolFeeRate" type="integer" required>The insurance-fund rate, in basis points. 0 to 10000, and 0 on a new market. Repaid interest first loses Trusset's 20 percent infrastructure fee, then the fixed 8 percent operator and 5 percent distributor shares of the remainder. This rate of what is left goes to the market's insurance fund, and the rest to liquidity providers.</ParamField>
     <ParamField body="minBorrowAmount" type="string" required>Minimum borrow per loan, as a decimal string in borrow asset units.</ParamField>
     <ParamField body="closeFactor" type="integer" required>Maximum fraction of a loan's debt repayable in one liquidation, in basis points. 1000 to 5000.</ParamField>
     <ParamField body="maxTotalCollateral" type="string" required>Global collateral cap as a decimal string in collateral token units. `"0"` means uncapped.</ParamField>
@@ -57,6 +59,7 @@ The per-field ranges above are what the request schema accepts. Before building 
 | `auctionStartPremium` strictly greater than `auctionMinPremium`, when auctions are on | `INVALID_CONFIG` |
 | `liquidationPenalty` not below the market's term penalty | `INVALID_CONFIG` |
 | `liquidationThreshold` within 1000 of its current value, while a loan or liquidation is open or the market runs an earlier implementation | `CONFIG_CHANGE_TOO_LARGE` |
+| `liquidationThreshold` not moved again within 24 hours of its last move, while debt is outstanding on the current implementation | `CONFIG_CHANGE_TOO_SOON` |
 | An auction venue is wired before `useDutchAuction` turns on | `AUCTION_MODULE_NOT_SET` |
 | That venue is admitted on the collateral token | `AUCTION_VENUE_NOT_ADMITTED` |
 
@@ -187,6 +190,35 @@ const { data } = await confirm.json();
   }
 }
 ```
+```json Error - Threshold Moved Too Soon
+{
+  "success": false,
+  "error": {
+    "code": "CONFIG_CHANGE_TOO_SOON",
+    "message": "While this market has debt outstanding, the liquidation threshold moves at most once every 24 hours; the previous move landed at 2026-11-07T07:20:00.000Z and the next is allowed from 2026-11-08T07:20:00.000Z. Wait for the cooldown, or leave the threshold at 80% and change the other parameters.",
+    "details": {
+      "thresholdCooldown": {
+        "supported": true,
+        "cooldownSeconds": 86400,
+        "debtOutstanding": true,
+        "stampRead": true,
+        "indexed": true,
+        "lastMovedAt": 1794096000,
+        "lastMovedAtIso": "2026-11-07T07:20:00.000Z",
+        "lastMovedTxHash": "0x9a3c6e1f4b7d02a58c1e4f7b9d2a6c0e3f5b8d1a4c7e0f3b6d9a2c5e8b1d4f72",
+        "lastThresholdBps": 8000,
+        "nextAllowedAt": 1794182400,
+        "nextAllowedAtIso": "2026-11-08T07:20:00.000Z",
+        "cooldownRunning": true,
+        "canMoveNow": false,
+        "secondsUntilAllowed": 50400,
+        "note": "While debt is outstanding the liquidation threshold moves at most once every 24 hours, still within ten points per update; a configuration write that leaves the threshold unchanged never counts."
+      },
+      "currentLiquidationThresholdBps": 8000
+    }
+  }
+}
+```
 ```json Error - Validation
 {
   "success": false,
@@ -216,6 +248,7 @@ const { data } = await confirm.json();
 | `AUCTION_MODULE_NOT_SET` | `409` | `useDutchAuction` is `true` and no auction venue is wired to the market. Wire one with [Wire Auction Module](/endpoints/lending/wire-auction-module) first |
 | `AUCTION_VENUE_NOT_ADMITTED` | `409` | The wired auction venue is not admitted on the collateral token, so every realization delivering to it would revert |
 | `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds the `ISSUER_ROLE` this change requires. Skipped when confirming with `txHash` |
+| `CONFIG_CHANGE_TOO_SOON` | `409` | `liquidationThreshold` would move while debt is outstanding and the previous move is less than 24 hours old. `details.thresholdCooldown` is the state [Get Threshold Cooldown](/endpoints/lending/get-threshold-cooldown) reports, with `nextAllowedAt`. Wait, or send the current threshold and change the other parameters |
 | `THRESHOLD_STEP_UNREAD` | `503` | The move exceeds 1000 and whether the cap applies could not be read: the market's open loans or its implementation did not answer. Nothing was built. Retry shortly |
 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction). On this endpoint every one of them answers `400`, including `TX_NOT_FOUND`.
