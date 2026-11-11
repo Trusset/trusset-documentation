@@ -1,0 +1,147 @@
+---
+title: 'Pause Market'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/pause-state'
+description: 'Build the pause of a market for its guardian or admin, or the unpause for its admin, and confirm it'
+---
+
+Builds `pause` or `unpause` on the market and confirms either once mined. `paused` picks which. The endpoint never submits the transaction.
+
+<Warning>
+  A pause stops new business on the market: no loan opens, no additional borrow, no deposit and no auction bid. Repayment, collateral release and liquidity withdrawals stay open, so a pause never traps a borrower or a liquidity provider. Only the market admin unpauses; a guardian can pause but cannot undo it.
+</Warning>
+
+On the current market implementation a wallet holding `GUARDIAN_ROLE` may pause, as may the market admin (`DEFAULT_ADMIN_ROLE`). On an earlier implementation only the admin may. The guardian is named with [Set Access Role](/endpoints/operators/set-access-role) as `MARKET_GUARDIAN`. A guardian that monitors the market from your servers uses this endpoint and [Halt Prices](/endpoints/lending/halt-prices), its two brakes.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. See [Market IDs](/endpoints/lending/list-markets#market-ids).</ParamField>
+
+## Body Parameters
+
+<ParamField body="paused" type="boolean" required>
+  `true` to pause, `false` to unpause. Required on the confirm call too, where it selects the function the receipt must carry.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The wallet that will sign. When sent, the market is asked whether it holds the role the action needs: a pause is refused with `NOT_GUARDIAN` when the wallet holds neither `DEFAULT_ADMIN_ROLE` nor `GUARDIAN_ROLE`, and an unpause with `NOT_ADMIN` when it does not hold `DEFAULT_ADMIN_ROLE`, a guardian included. Omit it and the response names the admin wallet of your instance; a wallet without the role has its transaction reverted on chain.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the mined transaction. Send it with the same `paused` to confirm. Omit it to receive the calldata.
+</ParamField>
+
+## Calldata Response
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">The call on the market, `{ to, data, chainId, value }`. `chainId` is the chain your instance resolves to and `value` is always `"0"`.</ResponseField>
+    <ResponseField name="functionName" type="string">`pause` or `unpause`.</ResponseField>
+    <ResponseField name="description" type="string">What the transaction does and who may sign it, in words.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`DEFAULT_ADMIN_ROLE or GUARDIAN_ROLE` on a pause of a current market, `DEFAULT_ADMIN_ROLE` otherwise.</ResponseField>
+    <ResponseField name="guardianMayPause" type="boolean">`true` when the market carries the guardian role, `false` on an earlier implementation, `null` when it could not be read.</ResponseField>
+    <ResponseField name="requiredSigner" type="object">With `signerAddress`: `{ authority, wallet, role }`, where `authority` is `market admin` or `market guardian`. Without it: the admin wallet of your instance, with `heldByThisInstance`.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: this endpoint, with `body` carrying `paused` and `txHash: null`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Confirmed Response
+
+The confirm call verifies that the transaction targeted the market and called the function `paused` names, reads the pause flag back from the chain, records the change in the market ledger and writes the audit log entry `LENDING_MARKET_PAUSED` or `LENDING_MARKET_UNPAUSED`.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="txHash" type="string">Transaction hash.</ResponseField>
+    <ResponseField name="paused" type="boolean">The pause flag read after the transaction, or `null` when it could not be read.</ResponseField>
+    <ResponseField name="signedBy" type="string">The address that sent the transaction.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/{marketId}/pause-state" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"paused": true, "signerAddress": "0x7d3c2b91e04a58f6c1d9a72b3c8f40e6d15a9c27"}'
+```
+```typescript TypeScript
+const url = `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketId}/pause-state`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+const signerAddress = await guardianWallet.getAddress();
+
+const built = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ paused: true, signerAddress }) });
+const { success, data, error } = await built.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+
+const tx = await guardianWallet.sendTransaction(data.transaction);
+await tx.wait();
+await fetch(url, { method: 'POST', headers, body: JSON.stringify({ paused: true, txHash: tx.hash }) });
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "data": "0x8456cb59",
+      "chainId": 11155111,
+      "value": "0"
+    },
+    "functionName": "pause",
+    "description": "Pause the market: blocks new loans, deposits, additional borrows and auction bids. Repayments, collateral release and LP withdrawals stay open (requires DEFAULT_ADMIN_ROLE or GUARDIAN_ROLE)",
+    "requiredRole": "DEFAULT_ADMIN_ROLE or GUARDIAN_ROLE",
+    "guardianMayPause": true,
+    "requiredSigner": {
+      "authority": "market guardian",
+      "wallet": "0x7d3c2b91e04a58f6c1d9a72b3c8f40e6d15a9c27",
+      "role": "GUARDIAN_ROLE"
+    },
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/cmssh7p1k0001cghxq2m4v8rz/pause-state",
+      "field": "txHash",
+      "body": { "paused": true, "txHash": null }
+    }
+  }
+}
+```
+```json Confirmed Response
+{
+  "success": true,
+  "data": {
+    "txHash": "0x613e720e974bb464e25d3c1663aaae0bc6f8acf0f29a19203fb0553a490eea99",
+    "paused": true,
+    "signedBy": "0x7d3c2b91e04a58f6c1d9a72b3c8f40e6d15a9c27"
+  }
+}
+```
+```json Error - Guardian Unpause
+{
+  "success": false,
+  "error": {
+    "code": "NOT_ADMIN",
+    "message": "Only the market admin unpauses; 0x7d3c2b91e04a58f6c1d9a72b3c8f40e6d15a9c27 is a guardian, which can pause the market but not unpause it."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `paused` is missing or not a boolean, or `signerAddress` or `txHash` is malformed |
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
+| `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `TX_WRONG_TARGET` | `400` | The confirmed transaction did not call `pause` or `unpause` on this market |
+| `TX_REVERTED` | `400` | The confirmed transaction reverted |
+| `NOT_GUARDIAN` | `403` | `signerAddress` holds neither `DEFAULT_ADMIN_ROLE` nor `GUARDIAN_ROLE` on the market, so `pause` would revert |
+| `NOT_ADMIN` | `403` | `signerAddress` does not hold `DEFAULT_ADMIN_ROLE`, so `unpause` would revert. A guardian is refused here too |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `TX_NOT_FOUND` | `404` | The transaction is not mined yet. Retry the confirm shortly |
+| `MARKET_PENDING_CURATOR` | `409` | The market has no lender of record yet, so nobody holds the role to pause or unpause it |
+| `PAUSE_STATE_FAILED` | `500` | The transaction could not be built for a reason no other code covers |
+| `MARKET_STATE_UNAVAILABLE` | `503` | Who may pause the market could not be read. Nothing was prepared. Retry shortly |
