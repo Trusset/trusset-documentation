@@ -1,0 +1,101 @@
+---
+title: 'Stage Loan Document'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/legal-documents/stage'
+description: 'Submit a loan document for the market admin to record'
+---
+
+A borrower that is not the market admin cannot write to the document registry. Stage its loan document here instead: the server stores the name, the SHA-256, the loan and the borrower wallet. A loan document names the borrower and the parties, so it is always private: the file never reaches Trusset and nothing but its hash goes to the registry. The market admin sees the staged document in [Get Documents](/endpoints/lending/get-legal-documents) and records it with one signature through [Record Staged Document](/endpoints/lending/record-staged-document), or dismisses it.
+
+Stage after the loan has opened and been confirmed. A document never blocks, delays or undoes the loan: a failed stage leaves the loan exactly as it is, and the same request can be sent again. When the borrower is the market admin itself, skip the stage and record the document directly with [Record Document](/endpoints/lending/record-legal-document).
+
+Staging is idempotent per loan and name. Repeating the same document while it waits returns the existing entry with `created: false` and HTTP `200`. A different hash under the same name replaces the entry. Staging the same document again after the admin dismissed it, or after a recorded version was removed from the registry, opens it again for the admin (`reopened: true`). A document already on the registry under the same name and hash is returned as `RECORDED`. An instance can keep at most 20 documents waiting per loan.
+
+## Who can stage
+
+An API key of an instance that holds the market. `submittedBy` must be the wallet that opened the loan, as the market records it; any other wallet is refused with `NOT_LOAN_BORROWER`. The check ties the entry to the borrower's loan; it does not prove who sent it. The admin compares the file the parties hand over with its SHA-256 before recording it.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>
+  The market's record ID on your instance.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="loanId" type="string" required>
+  The loan, 1 or higher. Market documents are recorded by the market admin, never staged.
+</ParamField>
+
+<ParamField body="name" type="string" required>
+  1 to 31 lowercase letters, digits or hyphens. Usually `loan-agreement` or `pledge-agreement`.
+</ParamField>
+
+<ParamField body="contentHash" type="string" required>
+  The SHA-256 of the exact file bytes, 64 hex characters, with or without `0x`.
+</ParamField>
+
+<ParamField body="visibility" type="string" required>
+  `private`. `public` is refused with `LOAN_DOCUMENT_MUST_BE_PRIVATE`: a loan document names the borrower and the parties.
+</ParamField>
+
+<ParamField body="submittedBy" type="string" required>
+  The wallet that opened the loan.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="stage" type="object">`{ id, marketAddress, loanId, name, contentHash, documentHash, visibility, uri, submittedBy, status, recordedTxHash, recordedAt, createdAt, recordedOnChain, ownInstance }`. `status` is `STAGED`, `RECORDED` or `DISMISSED`.</ResponseField>
+    <ResponseField name="created" type="boolean">`false` when an entry under this loan and name already existed.</ResponseField>
+    <ResponseField name="reopened" type="boolean">`true` when a dismissed entry, or one whose recorded version was removed, waits for the admin again.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseExample>
+```json 201 Staged
+{
+  "success": true,
+  "data": {
+    "stage": {
+      "id": "cmwbbasxd000ljww9xagyc7hp",
+      "marketAddress": "0xda9ab1a80e8cf038d76a18e61567883d4881bf98",
+      "loanId": "1",
+      "name": "loan-agreement",
+      "contentHash": "b103254c3de519c638291949f8e98a0a78671ebca1adf7357c0f1d0b8a86da91",
+      "documentHash": "0xb103254c3de519c638291949f8e98a0a78671ebca1adf7357c0f1d0b8a86da91",
+      "visibility": "private",
+      "uri": null,
+      "submittedBy": "0xe76e92a69720cb7ddac8e4c062b75998f22cf1a9",
+      "status": "STAGED",
+      "recordedTxHash": null,
+      "recordedAt": null,
+      "createdAt": "2026-11-10T23:19:12.000Z",
+      "recordedOnChain": false,
+      "ownInstance": true
+    },
+    "created": true,
+    "reopened": false,
+    "marketId": "cmwbb5kji000bjww94goqt9km"
+  },
+  "error": null
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A required field is missing, or `submittedBy` is not an address |
+| `VISIBILITY_REQUIRED` | `400` | `visibility` is missing or neither `public` nor `private` |
+| `INVALID_LOAN_ID` | `400` | `loanId` is not a whole number of 1 or higher |
+| `INVALID_DOCUMENT_NAME`, `INVALID_CONTENT_HASH`, `INVALID_DOCUMENT_URI` | `400` | As on [Record Document](/endpoints/lending/record-legal-document#error-codes) |
+| `DOCUMENT_CONTENT_REFUSED` | `400` | The body carries file content |
+| `NOT_LOAN_BORROWER` | `403` | `submittedBy` is not the wallet that opened the loan. `details.borrower` names it |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `UNKNOWN_LOAN` | `404` | The market has not opened a loan with that id |
+| `STAGE_LIMIT_REACHED` | `409` | This instance already has 20 documents waiting for this loan |
+| `LOAN_DOCUMENT_MUST_BE_PRIVATE` | `422` | `visibility` is `public`. Send `private` and no `uri` |
+| `DOCUMENT_REGISTRY_NOT_CONFIGURED` | `501` | The document registry is not deployed on this network |
+| `CHAIN_UNAVAILABLE`, `SERVICE_UNAVAILABLE` | `503` | The market or this instance's wallets could not be read. Nothing was stored. Retry shortly |

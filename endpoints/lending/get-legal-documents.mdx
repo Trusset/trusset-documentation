@@ -1,0 +1,112 @@
+---
+title: 'Get Documents'
+api: 'GET /lending-external-securities-v2/api/markets/{marketId}/legal-documents'
+description: 'Read the documents of a market or one of its loans: asset data, registry and staged'
+---
+
+Returns every document attached to a market, or to one of its loans, in one answer:
+
+- `bundle`: the documents in the market's asset data, which the issuer's wallet attested on the factory. A lender of record that adopts the market acknowledges the exact version standing at that moment. Read only here. Returned for the market itself (`loanId` 0).
+- `documents`: what the market admin recorded on the document registry for the market or the loan, read from the chain.
+- `staged`: loan documents staged for a loan's borrower that wait for the market admin's record. `submittedBy` names the loan's borrower, which the server checks against the market; it does not prove who sent the entry, so compare the file with its SHA-256 before recording it.
+- `history`: every record and removal for this market and loan, from the index.
+
+Reads happen on request and are not polled. The registry is one contract per network, ownerless and non-upgradeable; its address is in `registry.address`.
+
+## Who can call it
+
+An API key of an instance that holds the market. A market of another instance answers `MARKET_NOT_FOUND`. Staged documents are listed for the instance that submitted them and, in full, for an instance one of whose verified wallets holds `DEFAULT_ADMIN_ROLE` on the market, because that wallet records them.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>
+  The market's record ID on your instance. See [Market IDs](/endpoints/lending/list-markets#market-ids).
+</ParamField>
+
+## Query Parameters
+
+<ParamField query="loanId" type="string" default="0">
+  `0` for the market itself, or the id of a loan the market opened. A loan the market never opened answers `UNKNOWN_LOAN`.
+</ParamField>
+
+## Visibility
+
+A registry record with an `ipfs://` or https locator is `public`; a record with no locator is `private` and carries the hash alone. A private document's file never reaches Trusset or the chain. Ask the party that holds it for a copy, then compute its SHA-256 and compare it with `contentHash`: equal values prove it is the recorded file. The Issuer Portal does this in the browser with **Verify a file**.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="marketAddress" type="string">The market contract, lowercased.</ResponseField>
+    <ResponseField name="loanId" type="string">The loan the registry part answers for, `0` for the market.</ResponseField>
+    <ResponseField name="registry" type="object">`{ configured, address }`. `configured: false` on a network without the registry.</ResponseField>
+    <ResponseField name="bundle" type="object">For `loanId` 0: `{ available, status, attested, acknowledged, version, attestedAt, acknowledgedAt, diverged, schemaVersion, bundleAvailable, documents }`. `available: false` means the asset data record could not be read just now: its `documents` are then empty and say nothing about the market. `bundleAvailable: false` means the bytes of the standing version are not on record here. Each document is `{ name, documentType, documentDate, visibility, contentHash, uri? }`. `null` for a loan.</ResponseField>
+    <ResponseField name="documents" type="array">The registry records, each `{ name, nameValid, nameBytes32, uri, documentHash, contentHash, visibility, locator, cid?, lastModified }`. `locator` is `NONE`, `IPFS`, `HTTPS` or `OTHER`. A name written outside the naming rule is shown as its bytes32 hex with `nameValid: false`.</ResponseField>
+    <ResponseField name="documentsTotal" type="integer">Names on record. At most 100 are read; `documentsTruncated` says when more exist.</ResponseField>
+    <ResponseField name="staged" type="array">Staged loan documents awaiting a record, each `{ id, loanId, name, contentHash, documentHash, visibility, uri, submittedBy, status, createdAt, recordedOnChain, ownInstance }`.</ResponseField>
+    <ResponseField name="history" type="object">`{ indexed, events }`. Each event is `{ kind, name, uri, documentHash, by, timestamp, txHash }`, newest first. `indexed: false` when the index cannot answer.</ResponseField>
+    <ResponseField name="viewer" type="object">`{ wallets, adminWallets, canWrite, seesAllStaged }`. `adminWallets` are this instance's verified wallets that hold `DEFAULT_ADMIN_ROLE` on the market.</ResponseField>
+    <ResponseField name="suggestedNames" type="object">`{ market, loan }`: the names the Issuer Portal offers.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/lending-external-securities-v2/api/markets/cmwbb5kji000bjww94goqt9km/legal-documents?loanId=1" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "marketAddress": "0xda9ab1a80e8cf038d76a18e61567883d4881bf98",
+    "loanId": "1",
+    "registry": { "configured": true, "address": "0x59723fe380b1a795ba392129a04643fc5ca14653" },
+    "bundle": null,
+    "documents": [
+      {
+        "name": "loan-agreement",
+        "nameValid": true,
+        "nameBytes32": "0x6c6f616e2d61677265656d656e74000000000000000000000000000000000000",
+        "uri": null,
+        "documentHash": "0xb103254c3de519c638291949f8e98a0a78671ebca1adf7357c0f1d0b8a86da91",
+        "contentHash": "b103254c3de519c638291949f8e98a0a78671ebca1adf7357c0f1d0b8a86da91",
+        "visibility": "private",
+        "locator": "NONE",
+        "lastModified": "2026-11-10T23:20:00.000Z"
+      }
+    ],
+    "documentsTotal": 1,
+    "documentsTruncated": false,
+    "staged": [],
+    "history": { "indexed": true, "events": [] },
+    "viewer": {
+      "wallets": ["0x5a0c2e5768bc6cf83bf0774ef31e2d151b37049f"],
+      "adminWallets": ["0x5a0c2e5768bc6cf83bf0774ef31e2d151b37049f"],
+      "canWrite": true,
+      "seesAllStaged": true
+    },
+    "suggestedNames": {
+      "market": ["issuer-commitment", "register-extract", "board-resolution", "shareholder-authorisation", "issuance-terms", "licence-position", "legal-opinion", "valuer-acceptance"],
+      "loan": ["loan-agreement", "pledge-agreement"]
+    },
+    "marketId": "cmwbb5kji000bjww94goqt9km"
+  },
+  "error": null
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `NO_MARKET_ADDRESS` | `400` | The market has no contract address yet |
+| `INVALID_LOAN_ID` | `400` | `loanId` is not a whole number |
+| `DOCUMENT_REGISTRY_NOT_CONFIGURED` | `501` | Not returned here: on a network without the registry, `registry.configured` is `false` and only the asset data documents are listed |
+| `UNKNOWN_LOAN` | `404` | The market has not opened a loan with that id |
+| `CHAIN_UNAVAILABLE`, `SERVICE_UNAVAILABLE` | `503` | The registry, the market or this instance's wallets could not be read. Nothing was decided. Retry shortly |

@@ -1,0 +1,130 @@
+---
+title: 'Upload Public Document'
+api: 'POST /lending-external-securities-v2/api/markets/legal-documents/upload'
+description: 'Pin a public PDF to IPFS after the server recomputes its SHA-256'
+---
+
+Pins a public document to IPFS and returns the `ipfs://` address to record with it. Use it for every market document you mark public, whether it goes into a market's asset data at creation ([Deploy Market](/endpoints/lending/deploy-market), [Attest Asset Data](/endpoints/lending/attest-asset-data)) or onto the document registry for the market itself ([Record Document](/endpoints/lending/record-legal-document) with `loanId` `0`). Loan documents are always private, so they never pass through this endpoint.
+
+<Warning>
+  A public file stays on IPFS for good. Nobody can withdraw it later, Trusset included. It must contain no personal data, such as the names of signatories or private addresses. A document that names a person is recorded as private instead: only its hash is recorded and the file never reaches Trusset. Every upload must confirm this with `noPersonalData` set to `true`.
+</Warning>
+
+Send the file as `multipart/form-data` with the SHA-256 you computed over the exact file bytes. The server computes the SHA-256 over the bytes it received and refuses the upload with `CONTENT_HASH_MISMATCH` before anything is pinned when the two differ. It accepts PDF only, judged by the file's own bytes and not by its name or declared type: the file must start with the PDF signature, end with its end marker, and carry no active content. The check reads the file's names with their escapes resolved and the content of its compressed streams, and refuses JavaScript, launch and remote go-to actions, embedded files, rich media, form submission and XFA forms. The pinned file is served from the IPFS gateway, never from a Trusset domain.
+
+A file this instance already pinned under the same SHA-256 is not pinned again: the answer carries the existing address with `reused: true` and HTTP `200`, so a retry never creates a second record.
+
+## Who can call it
+
+Any API key of the instance. The pin belongs to the instance: the record routes accept a public document only when its address is one this instance pinned under the same SHA-256. Uploads are limited to 10 per minute per instance, on top of the API's general rate limit.
+
+## Form Fields
+
+<ParamField body="file" type="file" required>
+  The PDF, at most 1,046,528 bytes (1022 KB). The storage provider caps a request at 1 MiB. A larger document is recorded as private.
+</ParamField>
+
+<ParamField body="contentHash" type="string" required>
+  The SHA-256 of the exact file bytes, as 64 hex characters, with or without `0x`.
+</ParamField>
+
+<ParamField body="noPersonalData" type="string" required>
+  `true`: you confirm the file holds no personal data, such as the names of signatories or other natural persons, private addresses or personal identifiers. Any other value refuses the upload with `PERSONAL_DATA_CONFIRMATION_REQUIRED` and nothing is pinned.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="contentHash" type="string">The SHA-256 the server computed, 64 lower-case hex characters.</ResponseField>
+    <ResponseField name="documentHash" type="string">The same digest as the registry stores it: `0x` followed by the 64 characters.</ResponseField>
+    <ResponseField name="uri" type="string">`ipfs://` followed by the content identifier. Record exactly this value.</ResponseField>
+    <ResponseField name="cid" type="string">The content identifier alone.</ResponseField>
+    <ResponseField name="bytes" type="integer">The pinned size.</ResponseField>
+    <ResponseField name="contentType" type="string">`application/pdf`.</ResponseField>
+    <ResponseField name="visibility" type="string">`public`.</ResponseField>
+    <ResponseField name="reused" type="boolean">`true` when the instance had already pinned this file.</ResponseField>
+    <ResponseField name="limitBytes" type="integer">The size limit, 1046528.</ResponseField>
+    <ResponseField name="notice" type="string">A reminder that the file is public for good.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+HASH=$(shasum -a 256 commitment.pdf | cut -d' ' -f1)
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/legal-documents/upload" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -F "contentHash=$HASH" \
+  -F "noPersonalData=true" \
+  -F "file=@commitment.pdf;type=application/pdf"
+```
+```typescript TypeScript
+const bytes = await fs.promises.readFile('commitment.pdf');
+const contentHash = crypto.createHash('sha256').update(bytes).digest('hex');
+const form = new FormData();
+form.append('contentHash', contentHash);
+form.append('noPersonalData', 'true');
+form.append('file', new Blob([bytes], { type: 'application/pdf' }), 'commitment.pdf');
+const res = await fetch('https://api.trusset.org/lending-external-securities-v2/api/markets/legal-documents/upload', {
+  method: 'POST',
+  headers: { 'X-API-Key': 'trusset_your_key_here' },
+  body: form
+});
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+console.log(data.uri);
+```
+</RequestExample>
+
+<ResponseExample>
+```json 201 Pinned
+{
+  "success": true,
+  "data": {
+    "contentHash": "ce5f9697c25f5a66cddf80afe97dc1bdd6451994005c3f2764563b71c6997ce2",
+    "documentHash": "0xce5f9697c25f5a66cddf80afe97dc1bdd6451994005c3f2764563b71c6997ce2",
+    "uri": "ipfs://QmQKKCdLxy3qWkQcSYSjG5vjdyWnzif3gC59poTy1VbzXw",
+    "cid": "QmQKKCdLxy3qWkQcSYSjG5vjdyWnzif3gC59poTy1VbzXw",
+    "bytes": 100211,
+    "contentType": "application/pdf",
+    "visibility": "public",
+    "reused": false,
+    "limitBytes": 1046528,
+    "notice": "This file is now public on IPFS for good and cannot be withdrawn. It must contain no personal data."
+  },
+  "error": null
+}
+```
+```json 422 Hash mismatch
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "CONTENT_HASH_MISMATCH",
+    "message": "The SHA-256 of the received bytes differs from the declared contentHash, so nothing was pinned. Hash the exact file again and retry.",
+    "details": {
+      "declared": "8c1f0e4b2a7d...",
+      "received": "ce5f9697c25f..."
+    }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_FILE` | `400` | No `file` field in the form |
+| `INVALID_UPLOAD` | `400` | The form could not be read, or it carries more than one file |
+| `VALIDATION_ERROR` | `400` | `contentHash` is missing |
+| `INVALID_CONTENT_HASH` | `400` | `contentHash` is not 64 hex characters, or is zero |
+| `PERSONAL_DATA_CONFIRMATION_REQUIRED` | `400` | `noPersonalData` is not `true`. Nothing was pinned |
+| `EMPTY_FILE` | `400` | The file is empty |
+| `FILE_TOO_LARGE` | `413` | The file is larger than 1,046,528 bytes. Record it as private |
+| `UNSUPPORTED_FILE_TYPE` | `415` | The bytes are not a complete PDF: no PDF signature at the start, or no end marker at the end |
+| `CONTENT_HASH_MISMATCH` | `422` | The SHA-256 of the received bytes differs from `contentHash`. `details` carries both values. Nothing was pinned |
+| `PDF_ACTIVE_CONTENT` | `422` | The PDF carries JavaScript, a launch or remote go-to action, an embedded file, an XFA form or another active element. Export it again as a plain PDF, for example PDF/A |
+| `PDF_UNCHECKABLE` | `422` | The PDF holds more compressed data than the check reads before publishing. Export it again as a plain PDF or PDF/A, or record it as private |
+| `RATE_LIMITED` | `429` | More than 10 uploads in a minute from this instance |
+| `IPFS_NOT_CONFIGURED`, `IPFS_UNAVAILABLE`, `IPFS_UPLOAD_FAILED` | `503` | The storage provider could not be reached or refused the pin. Retry; a retry of the same file never creates a second record |

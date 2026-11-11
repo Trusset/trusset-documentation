@@ -1,0 +1,148 @@
+---
+title: 'Record Document'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/legal-documents'
+description: 'Build the transaction that records, replaces or removes a market or loan document on the registry'
+---
+
+Returns the unsigned `setDocument` or `removeDocument` transaction for the document registry. The market admin's wallet signs it in your environment, then you confirm it with [Confirm Document](/endpoints/lending/confirm-legal-document). Trusset signs nothing and holds no key.
+
+The registry stores, per market and loan, a name, a locator and the document's SHA-256, with the time it was last changed. Field names follow ERC-1643, the document standard of the security-token family. `loanId` 0 is the market itself; any other value must be a loan the market opened, open or closed. Recording a name that is already on record replaces it: the registry keeps one entry per name, and the event log keeps every earlier version provable.
+
+## Who can record
+
+Only the wallet holding `DEFAULT_ADMIN_ROLE` on the market. The registry refuses everyone else with `NotMarketAdmin`, Trusset, the factory and the issuer included, and the right follows every admin handover. A market still seeking a lender of record has no admin, so nobody can record registry documents for it; its documents belong in its asset data, which the deploying wallet re-attests with [Attest Asset Data](/endpoints/lending/attest-asset-data).
+
+The signer must be one of your instance's verified wallets. Name it with `signerAddress`, or leave it out and the first verified wallet holding the role signs. The builder checks the role and the loan on chain and simulates the call before it answers, so a write the registry would refuse is refused here before anyone signs.
+
+## Public and private
+
+Choose one for every document. There is no default.
+
+- `public`: upload the file first with [Upload Public Document](/endpoints/lending/upload-legal-document) and pass the `uri` it returned. The record must name a file this instance pinned under the same hash, so a locator the server cannot check against its hash is refused, an https address included.
+- `private`: pass the hash alone, with no `uri`. The file stays with the parties.
+
+A loan document (`loanId` 1 or higher) names the borrower and the parties, so it is always private: `public` is refused with `LOAN_DOCUMENT_MUST_BE_PRIVATE`. Public is available for market documents (`loanId` `0`) only.
+
+No body field may carry file content: a body with `file`, `content`, `base64` or a similar field is refused with `DOCUMENT_CONTENT_REFUSED`.
+
+## Body Parameters
+
+<ParamField body="action" type="string" required>
+  `set` to record or replace, `remove` to take a name off the record.
+</ParamField>
+
+<ParamField body="loanId" type="string" required>
+  `0` for the market, or the id of a loan the market opened.
+</ParamField>
+
+<ParamField body="name" type="string" required>
+  1 to 31 lowercase letters, digits or hyphens, starting with a letter or digit. It is stored as `bytes32`. Suggested names: `issuer-commitment`, `register-extract`, `board-resolution`, `shareholder-authorisation`, `issuance-terms`, `licence-position`, `legal-opinion`, `valuer-acceptance`, `loan-agreement`, `pledge-agreement`.
+</ParamField>
+
+<ParamField body="contentHash" type="string">
+  Required with `set`: the SHA-256 of the exact file bytes, 64 hex characters, with or without `0x`. The registry stores it as `0x` followed by the 64 characters.
+</ParamField>
+
+<ParamField body="visibility" type="string">
+  Required with `set`: `public` or `private`. Loan documents take `private` only.
+</ParamField>
+
+<ParamField body="uri" type="string">
+  With `public` only: the `ipfs://` address the upload returned. At most 512 characters, no whitespace.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The admin wallet that will sign, when your instance has more than one.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the registry.</ResponseField>
+    <ResponseField name="functionName" type="string">`setDocument` or `removeDocument`.</ResponseField>
+    <ResponseField name="signer" type="string">The admin wallet that must sign.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`DEFAULT_ADMIN_ROLE`.</ResponseField>
+    <ResponseField name="marketAddress" type="string">The market contract.</ResponseField>
+    <ResponseField name="loanId" type="string">The loan, `0` for the market.</ResponseField>
+    <ResponseField name="document" type="object">With `set`: `{ name, nameBytes32, contentHash, documentHash, visibility, uri }`.</ResponseField>
+    <ResponseField name="replaces" type="object">With `set`: the record this replaces, or `null`.</ResponseField>
+    <ResponseField name="removes" type="object">With `remove`: the record this removes.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field }` naming [Confirm Document](/endpoints/lending/confirm-legal-document).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/markets/cmwbb5kji000bjww94goqt9km/legal-documents" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "set",
+    "loanId": "0",
+    "name": "licence-position",
+    "contentHash": "7b07f820b06405c134ed2e3a6ff722c4c7f7822c9ed18e4ba5140f9d0a9a4a1f",
+    "visibility": "private"
+  }'
+```
+</RequestExample>
+
+<ResponseExample>
+```json Calldata Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x59723fe380b1a795ba392129a04643fc5ca14653",
+      "data": "0x1e7b4dac000000000000000000000000da9ab1a80e8cf038d76a18e61567883d4881bf98...",
+      "value": "0",
+      "chainId": 11155111
+    },
+    "functionName": "setDocument",
+    "signer": "0x5a0c2e5768bc6cf83bf0774ef31e2d151b37049f",
+    "requiredRole": "DEFAULT_ADMIN_ROLE",
+    "marketAddress": "0xda9ab1a80e8cf038d76a18e61567883d4881bf98",
+    "loanId": "0",
+    "document": {
+      "name": "licence-position",
+      "nameBytes32": "0x6c6963656e63652d706f736974696f6e00000000000000000000000000000000",
+      "contentHash": "7b07f820b06405c134ed2e3a6ff722c4c7f7822c9ed18e4ba5140f9d0a9a4a1f",
+      "documentHash": "0x7b07f820b06405c134ed2e3a6ff722c4c7f7822c9ed18e4ba5140f9d0a9a4a1f",
+      "visibility": "private",
+      "uri": null
+    },
+    "replaces": null,
+    "confirmWith": { "endpoint": "POST /lending-external-securities-v2/api/markets/cmwbb5kji000bjww94goqt9km/legal-documents/confirm", "field": "txHash" },
+    "marketId": "cmwbb5kji000bjww94goqt9km"
+  },
+  "error": null
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A required field is missing, `signerAddress` is not an address, or `action` is neither `set` nor `remove` |
+| `VISIBILITY_REQUIRED` | `400` | `set` without `visibility`, or with a value other than `public` or `private` |
+| `INVALID_DOCUMENT_NAME` | `400` | `name` breaks the naming rule |
+| `INVALID_CONTENT_HASH` | `400` | `contentHash` is not 64 hex characters, or it is zero |
+| `INVALID_DOCUMENT_URI` | `400` | A private document carries a `uri`, or a public one carries an address that is not `ipfs://` or https |
+| `INVALID_LOAN_ID` | `400` | `loanId` is not a whole number |
+| `DOCUMENT_CONTENT_REFUSED` | `400` | The body carries file content |
+| `NOT_MARKET_ADMIN` | `403` | No verified wallet of your instance holds `DEFAULT_ADMIN_ROLE` on the market, or `signerAddress` does not. The registry would refuse the write with `NotMarketAdmin` |
+| `SIGNER_NOT_INSTANCE_WALLET` | `403` | `signerAddress` is not a verified wallet of your instance |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `UNKNOWN_LOAN` | `404` | The market has not opened a loan with that id. The registry refuses it with `UnknownLoan` |
+| `DOCUMENT_NOT_FOUND` | `404` | `remove` for a name not on record. The registry refuses it with `DocumentNotFound` |
+| `MARKET_PENDING_CURATOR` | `409` | The market is still seeking a lender of record and has no admin. Put the document in its asset data instead |
+| `DOCUMENT_CURRENT` | `409` | The same hash and locator are already on record under this name. Nothing to sign |
+| `DOCUMENT_WRITE_WOULD_REVERT` | `409` | The simulation failed for a reason the registry did not name. Read the documents again and retry |
+| `WALLET_NOT_CONFIGURED` | `412` | Your instance has no verified wallet |
+| `PUBLIC_DOCUMENT_NOT_PINNED` | `422` | A public document whose address this instance did not pin under the same hash. Upload it with [Upload Public Document](/endpoints/lending/upload-legal-document) first |
+| `LOAN_DOCUMENT_MUST_BE_PRIVATE` | `422` | `set` with `public` for a loan. Record it as `private` |
+| `DOCUMENT_REGISTRY_NOT_CONFIGURED` | `501` | The document registry is not deployed on this network yet |
+| `CHAIN_UNAVAILABLE`, `SERVICE_UNAVAILABLE` | `503` | The chain or this instance's wallets could not be read. Nothing was built. Retry shortly |

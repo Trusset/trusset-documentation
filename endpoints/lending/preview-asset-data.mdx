@@ -10,7 +10,7 @@ A market deployed through [Deploy Market](/endpoints/lending/deploy-market) is b
 
 No market exists yet, so there is no market access check. The token must be one this instance imported and holds as active, with a published profile. Otherwise the call is refused with `TOKEN_PROFILE_REQUIRED`, the same refusal a deployment gets. Import the token with [Import Token](/endpoints/tokenization/import-token) and fill its profile with [Update Profile](/endpoints/tokenization/update-profile).
 
-The preview stores nothing. Pass the same `mode`, `priceSource` and `borrowAssetAddress` the deployment will use, because each of them is part of the bundle. On a `FIXED` deployment pass the same `initialPrice` too: the bundle commits to the fixed price itself. The deployment response carries its own `assetData.contentHash`, so compare the two before the issuer signs.
+The preview stores nothing. Pass the same `mode`, `priceSource` and `borrowAssetAddress` the deployment will use, because each of them is part of the bundle. When the market will carry documents, send the same parameters as a JSON body to `POST /lending-external-securities-v2/api/markets/asset-data/preview` with the same `documents` array the deployment will carry: the documents are part of the bundle too. On a `FIXED` deployment pass the same `initialPrice` too: the bundle commits to the fixed price itself. The deployment response carries its own `assetData.contentHash`, so compare the two before the issuer signs.
 
 ## Query Parameters
 
@@ -34,9 +34,13 @@ The preview stores nothing. Pass the same `mode`, `priceSource` and `borrowAsset
   Settlement token (stablecoin) of the planned market. Omit it to use the USDC address configured for this instance's network, which is also the deployment's default. When given, it must be a deployed ERC-20 contract with 6 to 18 decimals.
 </ParamField>
 
+<ParamField body="documents" type="array">
+  `POST` only. The documents the deployment will attach, as described on [Deploy Market](/endpoints/lending/deploy-market#documents). Each public document must have been uploaded by this instance first.
+</ParamField>
+
 ## What the bundle contains
 
-A bundle this API builds follows schema `1.1.0` and has up to five members. A bundle stored under schema `1.0.0` has no `instrument` member. The rules are fixed per schema version, so a stored bundle re-hashes to the same value for as long as it is kept.
+A bundle this API builds follows schema `1.1.0` and has up to five members, or schema `1.2.0` with a sixth member, `documents`, when the market carries documents. A bundle stored under schema `1.0.0` has no `instrument` member. A bundle without documents is built under `1.1.0` exactly as before, so its hash does not change. The rules are fixed per schema version, so a stored bundle re-hashes to the same value for as long as it is kept.
 
 | Member | Contents |
 |---|---|
@@ -44,6 +48,7 @@ A bundle this API builds follows schema `1.1.0` and has up to five members. A bu
 | `market` | What the deployment fixes: `chainId`, `factory`, `family` (always `FUNGIBLE` on this surface), `borrowAsset`, `collateralMode` and `priceSource`. A `FIXED` deployment adds `fixedPrice`, the price in the settlement token's smallest unit, so the lender of record acknowledges the value itself at adoption |
 | `token` | The facts recorded when the token was imported: `tokenAddress`, `name`, `symbol`, `decimals`, `framework`, `assetType`, `totalSupply` |
 | `profile` | The issuer's published profile, limited to `issuerName`, `jurisdiction`, `sector`, `description`, `isin`, `lei`, `website`, `ammAddress`, `reserveURI`, `prospectusURI` and `documents`, each document reduced to `name` and `uri` |
+| `documents` | Schema `1.2.0` only. The market's documents, sorted by name, each `{ name, documentType, documentDate, visibility, contentHash, uri }`: `contentHash` is the SHA-256 of the file as 64 lower-case hex characters, `uri` is present for a public document only. Private files never enter the bundle, only their hash |
 | `instrument` | The token's [instrument record](/endpoints/tokenization/get-instrument) on this network: its string and true-or-false fields, dates as `YYYY-MM-DD`, its call and put schedules as dated entries, and its documents reduced to `docType`, `uri`, `contentHash`, `language`, `version` and `issuedAt`. Left out when the token has no record |
 
 The market's own address is not a member. The first attestation travels inside the transaction that creates that address, and the factory's own record binds the hash to the market.
@@ -55,9 +60,10 @@ The market's own address is not a member. The first attestation travels inside t
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="contentHash" type="string">keccak256 over the UTF-8 bytes of `canonicalJson`. The value the deployment writes as its first attestation.</ResponseField>
-    <ResponseField name="schemaVersion" type="string">`1.1.0`.</ResponseField>
+    <ResponseField name="schemaVersion" type="string">`1.1.0`, or `1.2.0` when the bundle carries documents.</ResponseField>
     <ResponseField name="canonicalJson" type="string">The exact bytes the hash commits to.</ResponseField>
     <ResponseField name="bundle" type="object">The same bundle as an object, for display.</ResponseField>
+    <ResponseField name="documents" type="array">The documents in the bundle, empty when none.</ResponseField>
     <ResponseField name="token" type="object">`address`, `name` and `symbol` of the imported token.</ResponseField>
     <ResponseField name="factorySupport" type="boolean">`true` when the lending factory records asset data attestations. `false` when its implementation predates them, in which case a deployment is refused with `FACTORY_UPGRADE_REQUIRED` until the factory is upgraded. `null` when the factory could not be read.</ResponseField>
     <ResponseField name="fixedPrice" type="object">`FIXED` only. The price the bundle commits to: `priceWei`, `price`, `settlementSymbol`, `settlementDecimals`, and `perWholeToken`, `neverStale` and `markDownOnly`, each `true`, with a `note`.</ResponseField>
@@ -179,4 +185,8 @@ The asset data routes report a validation failure with the first failing rule as
 | `INVALID_INITIAL_PRICE` | `400` | `priceSource` is `FIXED` and `initialPrice` is missing, or carries more decimal places than the settlement token |
 | `TOKEN_PROFILE_REQUIRED` | `422` | The token is not imported and active on this instance, or its profile is empty. `details.imported` and `details.nextStep` (`IMPORT_TOKEN` or `FILL_PROFILE`) say which, and `details.apiPaths` names the routes to fix it with an API key |
 | `ASSET_DATA_PREVIEW_FAILED` | `500` | The preview could not be computed for a reason the service did not classify |
+| `VISIBILITY_REQUIRED` | `400` | A document entry chose neither `public` nor `private` |
+| `INVALID_MARKET_DOCUMENTS` | `400` | `documents` is not an array, holds more than 20 entries, repeats a name, or an entry carries a field other than `name`, `documentType`, `documentDate`, `visibility`, `contentHash` and `uri` |
+| `INVALID_DOCUMENT_NAME`, `INVALID_DOCUMENT_TYPE`, `INVALID_DOCUMENT_DATE`, `INVALID_CONTENT_HASH`, `INVALID_DOCUMENT_URI` | `400` | A document field breaks its rule. `details.field` names it |
+| `PUBLIC_DOCUMENT_NOT_PINNED` | `422` | A public document whose `ipfs://` address this instance did not pin under the same SHA-256 |
 | `INSTRUMENT_UNREADABLE` | `503` | The token's instrument record could not be read, so the bundle could not be built. Retry shortly |

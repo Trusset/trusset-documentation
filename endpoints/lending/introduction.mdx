@@ -351,9 +351,46 @@ On the current market and router implementations an admin can no longer revoke o
 
 While debt is outstanding the liquidation threshold moves at most once every 24 hours, still within 10 percentage points per update. A configuration write that leaves the threshold where it is never counts, and a debt-free market is not held to the cooldown, but the move it makes starts the clock. [Update Market Config](/endpoints/lending/update-config) refuses a second move inside the day with `CONFIG_CHANGE_TOO_SOON`, and [Get Threshold Cooldown](/endpoints/lending/get-threshold-cooldown) says when the next move is allowed. One move per day is the ceiling, not the target: every threshold move changes the liquidation point of every open loan.
 
+## Documents
+
+Legal documents attach to a market in two places, and to each of its loans in one.
+
+**At creation, in the asset data.** The issuer may add documents when it deploys a market: the issuer commitment, a register extract, a board resolution and the other documents its commitment lists. Each enters the market's asset data bundle as its name, the issuer's declared document type and date, Public or Private, the SHA-256 of the file and, for a public file, its IPFS address. A bundle with documents follows schema `1.2.0`; a bundle without stays `1.1.0`, exactly as before. The issuer's own wallet attests the bundle inside the deployment signature, and the lender of record names the hash it read when it adopts the market. If the issuer changes any document after the lender read it, the factory refuses the whole adoption (`AssetDataMismatch`) and the lender reads the new version first. While the market seeks a lender of record, the deploying wallet changes the documents by re-attesting with [Attest Asset Data](/endpoints/lending/attest-asset-data); after adoption the issuer the lender named does, and the market reads `DIVERGED` until the lender acknowledges the new version. Pass the documents to [Preview Asset Data](/endpoints/lending/preview-asset-data) and [Deploy Market](/endpoints/lending/deploy-market).
+
+**After adoption, on the document registry.** One registry per network, the `SecurityDocumentRegistry` contract: ownerless, not upgradeable, holding no value. It records documents for the market (`loanId` 0) and for each loan the market opened, open or closed, each as a name, a locator and the document's SHA-256, with the time it last changed. Field names follow ERC-1643, the document standard of the security-token family. Only the wallet holding `DEFAULT_ADMIN_ROLE` on the market writes, so the right follows every admin handover; a market still seeking a lender of record has no admin and no registry writer, and neither the factory nor Trusset can write for any market. Replacing a name keeps one entry, and every earlier version stays provable from the registry events. [Get Documents](/endpoints/lending/get-legal-documents) reads both places at once; [Record Document](/endpoints/lending/record-legal-document) builds the record, the replacement or the removal for the admin's wallet to sign. The registry needs no market upgrade: every live market uses it from the block it was deployed.
+
+**Loan documents of a borrower that is not the admin.** That borrower cannot write to the registry. Its document is staged with [Stage Loan Document](/endpoints/lending/stage-loan-document): the name, the SHA-256, the loan and the borrower wallet, never the file. The market admin records it with one signature through [Record Staged Document](/endpoints/lending/record-staged-document), or dismisses it. When the borrower is the admin, it records the document right after the loan opens. A document never blocks, delays or undoes a loan: it is handled only after the loan is confirmed.
+
+### Public and private
+
+Every market document is either public or private. There is no default; the choice is made for each document. Loan documents name the borrower and the parties, so they are always private.
+
+- **Public**: the file is uploaded with [Upload Public Document](/endpoints/lending/upload-legal-document), which recomputes its SHA-256 over the received bytes, refuses a mismatch and pins it to IPFS. The file is public for good and cannot be withdrawn. It must contain no personal data, such as the names of signatories or private addresses, and every upload confirms this with `noPersonalData`.
+- **Private**: the file never leaves the party that holds it. Only its SHA-256, its name and its visibility reach the platform and the chain. No route accepts private document content.
+
+Documents are PDF files. A public file is at most 1,046,528 bytes; a larger document is recorded as private.
+
+### The hash and how to verify a file
+
+The hash of a document is SHA-256 over the exact file bytes, written as 64 lower-case hex characters. The registry stores the same digest as `bytes32`: `0x` followed by the 64 characters. To verify a file you received, compute its SHA-256 and compare it with the recorded value; equal values prove it is the recorded file, a different value proves it is not. On a Mac or Linux:
+
+```bash
+shasum -a 256 issuer-commitment.pdf
+```
+
+The Issuer Portal offers **Verify a file** beside every document. It hashes the file in the browser and uploads nothing.
+
+### Document names
+
+A name is 1 to 31 lowercase letters, digits or hyphens, starting with a letter or digit, stored as `bytes32`. The Issuer Portal suggests `issuer-commitment`, `register-extract`, `board-resolution`, `shareholder-authorisation`, `issuance-terms`, `licence-position`, `legal-opinion` and `valuer-acceptance` for a market, and `loan-agreement` and `pledge-agreement` for a loan. Any other name within the rule is accepted.
+
+### Issuer commitment template
+
+The Issuer Redemption or Purchase Commitment is a fillable form. The issuer fills in Part A, ticks one route, signs it and adds it to the market with the documents listed in its A9. Each bank that joins sends the Accession Notice in Annex 2, which asks for the commitment's document hash: the SHA-256 recorded for the document. Trusset is not a party to the commitment. The template, version 1.0 of 8 November 2026 and still a draft for counsel review, is offered for download in the Documents step of the Issuer Portal's market creation, with its SHA-256 `ce5f9697c25f5a66cddf80afe97dc1bdd6451994005c3f2764563b71c6997ce2` beside it.
+
 ## Error codes
 
-The endpoint pages list the codes each route returns, with the HTTP status and what to do. This table collects the codes of whitelists, fixed prices, pay-to addresses, the atomic sale, vault groups, the client of record, the previous Trusset ID Register, the guardian and its brakes, the upgrade and withdrawal notices, the admin guard and the threshold cooldown, and names the pages that return them. A row marked Warning arrives in a successful answer as a `{ code, message }` entry of `warnings` and does not stop the call. The row marked Step code is an entry of `accessListSteps`. A row marked Issuer Portal is answered only by the Issuer Portal, never to an API key.
+The endpoint pages list the codes each route returns, with the HTTP status and what to do. This table collects the codes of whitelists, fixed prices, pay-to addresses, the atomic sale, vault groups, the client of record, the previous Trusset ID Register, the guardian and its brakes, the upgrade and withdrawal notices, the admin guard, the threshold cooldown and documents, and names the pages that return them. A row marked Warning arrives in a successful answer as a `{ code, message }` entry of `warnings` and does not stop the call. The row marked Step code is an entry of `accessListSteps`. A row marked Issuer Portal is answered only by the Issuer Portal, never to an API key.
 
 | Code | HTTP | Returned by | Cause and remedy |
 |---|---|---|---|
@@ -462,6 +499,26 @@ The endpoint pages list the codes each route returns, with the HTTP status and w
 | `NO_WITHDRAWAL_PROPOSAL` | `409` | [Withdraw from Insurance Fund](/endpoints/lending/withdraw-insurance) | `cancel` while nothing is announced. Nothing to sign |
 | `WITHDRAWAL_NOTICE_UNSUPPORTED` | `409` | [Withdraw from Insurance Fund](/endpoints/lending/withdraw-insurance) | `propose` or `cancel` on a fund still on an implementation without the notice. That fund withdraws in one step with `execute`; its owner upgrades it with Upgrade Market, target `insuranceFund` |
 | `SALE_BASIS_UNAVAILABLE` | `409` | The on-chain revert `SaleBasisUnavailable` of a current router, on `sellPending` and on the atomic intake of a liquidation | The router sells to a standing bid only on a market priced from a live market price; on a `NAV`, `ORACLE` or `FIXED` market the liquidation runs two-step. [Sell Pending Liquidation](/endpoints/lending/sell-pending-liquidation) and [Liquidate Loan](/endpoints/lending/liquidate#atomic-sale) refuse the same case before building with `ATOMIC_SALE_UNAVAILABLE`, so this code reaches a client only through a transaction built elsewhere. Realize the record two-step |
+| `NOT_MARKET_ADMIN` | `403` | [Record Document](/endpoints/lending/record-legal-document), [Record Staged Document](/endpoints/lending/record-staged-document) | No verified wallet of your instance holds `DEFAULT_ADMIN_ROLE` on the market, so the registry would refuse the write (`NotMarketAdmin`). Only the market admin records documents |
+| `UNKNOWN_LOAN` | `404` | [Get Documents](/endpoints/lending/get-legal-documents), [Record Document](/endpoints/lending/record-legal-document), [Stage Loan Document](/endpoints/lending/stage-loan-document) | The market has not opened a loan with that id (`UnknownLoan`). Use `0` for the market itself |
+| `INVALID_CONTENT_HASH` | `400` | The document routes | The SHA-256 is not 64 hex characters, or it is zero. The registry refuses a zero name or hash with `InvalidDocument` |
+| `DOCUMENT_NOT_FOUND` | `404` | [Record Document](/endpoints/lending/record-legal-document) with `remove` | No document with that name is on record for the market or loan (`DocumentNotFound`) |
+| `ASSET_DATA_STALE` | `409` | [Accept Lender Role](/endpoints/operators/accept-lender-role), [Acknowledge Asset Data](/endpoints/lending/acknowledge-asset-data) | The asset data, documents included, changed since the version you reviewed. Read the bundle again and approve the standing version; the factory refuses a stale adoption with `AssetDataMismatch` |
+| `PUBLIC_DOCUMENT_NOT_PINNED` | `422` | The document routes, [Preview Asset Data](/endpoints/lending/preview-asset-data), [Deploy Market](/endpoints/lending/deploy-market), [Attest Asset Data](/endpoints/lending/attest-asset-data) | A public document whose address this instance did not pin under the same SHA-256. Upload it with [Upload Public Document](/endpoints/lending/upload-legal-document) first |
+| `VISIBILITY_REQUIRED` | `400` | [Preview Asset Data](/endpoints/lending/preview-asset-data), [Deploy Market](/endpoints/lending/deploy-market), [Attest Asset Data](/endpoints/lending/attest-asset-data) | A document entry chose neither `public` nor `private` |
+| `INVALID_MARKET_DOCUMENTS` | `400` | The same routes | A document entry is malformed, repeats a name, carries a field other than its name, type, date, visibility, hash and address, or the list holds more than 20 |
+| `CONTENT_HASH_MISMATCH` | `422` | [Upload Public Document](/endpoints/lending/upload-legal-document) | The SHA-256 of the received bytes differs from the declared one. Nothing was pinned |
+| `PDF_ACTIVE_CONTENT` | `422` | [Upload Public Document](/endpoints/lending/upload-legal-document) | The PDF carries JavaScript, a launch or remote go-to action, an embedded file, an XFA form or another active element. Export it again as a plain PDF, for example PDF/A |
+| `PDF_UNCHECKABLE` | `422` | [Upload Public Document](/endpoints/lending/upload-legal-document) | The PDF holds more compressed data than the check reads before publishing. Export it again as a plain PDF or PDF/A, or record it as private |
+| `PERSONAL_DATA_CONFIRMATION_REQUIRED` | `400` | [Upload Public Document](/endpoints/lending/upload-legal-document) | `noPersonalData` is not `true`. A file with personal data is recorded as private |
+| `LOAN_DOCUMENT_MUST_BE_PRIVATE` | `422` | [Record Document](/endpoints/lending/record-legal-document), [Stage Loan Document](/endpoints/lending/stage-loan-document), [Record Staged Document](/endpoints/lending/record-staged-document) | A loan document was sent as public. Loan documents are private |
+| `STAGE_LIMIT_REACHED` | `409` | [Stage Loan Document](/endpoints/lending/stage-loan-document) | 20 documents of this instance already wait for the loan's admin |
+| `ASSET_DATA_BUNDLE_UNKNOWN` | `409` | [Attest Asset Data](/endpoints/lending/attest-asset-data) | The standing version's bytes are not on record, so its documents cannot be carried over. Send the complete `documents` list |
+| `ASSET_DATA_UNAVAILABLE` | `503` | [Attest Asset Data](/endpoints/lending/attest-asset-data) | The standing version's bytes could not be read just now. Retry |
+| `DOCUMENT_CONTENT_REFUSED` | `400` | The document routes | The body carries file content. A private file stays with you; a public one goes through the upload |
+| `NOT_LOAN_BORROWER` | `403` | [Stage Loan Document](/endpoints/lending/stage-loan-document) | `submittedBy` is not the wallet that opened the loan |
+| `STAGE_NOT_PENDING` | `409` | [Record Staged Document](/endpoints/lending/record-staged-document), [Dismiss Staged Document](/endpoints/lending/dismiss-staged-document) | The staged document is already recorded or dismissed |
+| `DOCUMENT_REGISTRY_NOT_CONFIGURED` | `501` | The document routes | The document registry is not deployed on this network yet |
 
 ## Rate limits
 
