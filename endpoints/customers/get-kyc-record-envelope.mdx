@@ -1,0 +1,102 @@
+---
+title: 'Download Envelope'
+api: 'GET /customers/api/kyc-records/{recordId}/envelope'
+description: 'The sealed envelope of a record that is waiting to be opened'
+---
+
+Returns the sealed envelope of one record: the header, the encapsulated key, the ciphertext and the source's signature, exactly as the source delivered them. Your [local tool](/tools/kyc-courier/overview) calls this from `trusset-kyc open`, verifies the envelope and decrypts it on your machine. You call it yourself only when you open envelopes with your own implementation of the [envelope format](/endpoints/kyc-inbox/introduction#envelope-format).
+
+The envelope is available only while the record is `RECEIVED`. Once the record is opened, rejected, revoked, expired or unclaimed, Trusset has deleted the ciphertext and this call answers `409`.
+
+<Warning>
+  `source.signingKey` is the key stored on Trusset for the source. Treat it as a hint. Verify both signatures against the signing key you confirmed with the verifier and pinned yourself, as `trusset-kyc` does. Otherwise you trust Trusset for the authenticity of the record.
+</Warning>
+
+Downloading does not change the record. It becomes `OPENED` only when [Open KYC Record](/endpoints/customers/open-kyc-record) receives the proof that it was decrypted. The response is sent with `Cache-Control: no-store`.
+
+## Path Parameters
+
+<ParamField path="recordId" type="string" required>
+  The record `id` from [List KYC Records](/endpoints/customers/list-kyc-records).
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="recordId" type="string">The record ID.</ResponseField>
+    <ResponseField name="header" type="string">The envelope header: base64url, without padding, of its exact JSON bytes. Those bytes are the HPKE associated data and are covered by the signature.</ResponseField>
+    <ResponseField name="enc" type="string">The 32-byte HPKE encapsulated key, standard base64.</ResponseField>
+    <ResponseField name="ciphertext" type="string">The AES-256-GCM ciphertext with its 16-byte tag appended, standard base64. Up to 6 MiB before encoding.</ResponseField>
+    <ResponseField name="signature" type="string">The source's Ed25519 signature over the header and the sealed bytes, standard base64.</ResponseField>
+    <ResponseField name="source" type="object">`{ id, name, signingKey }` of the source as stored on Trusset.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/customers/api/kyc-records/cmhw3k9t20007l80c5q2x7m4d/envelope" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/customers/api/kyc-records/${recordId}/envelope`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { success, data, error } = await res.json();
+
+if (!success && error.code === 'ENVELOPE_GONE') {
+  // Already opened, rejected, revoked or never collected. Nothing to download.
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "recordId": "cmhw3k9t20007l80c5q2x7m4d",
+    "header": "eyJ2IjoxLCJ0eXBlIjoiUkVDT1JEIiwic3VpdGUiOiJIUEtFLVgyNTUxOS1TSEEyNTYtQUVTMjU2R0NNIiwi...",
+    "enc": "zmmB0b/QPdskHQWX0rf4X+sPCtZW6KbFXn1ttX+9t1U=",
+    "ciphertext": "jEosAzJ19wTCgoTi6N56mfm5kAi+2Qb7V0hU2C5wpAK/...",
+    "signature": "KsBvzVvHfFa0b2J8/4GNjIXLoYNO426GsaQGTIoczZY1L2yZ/ghQvk0rb7AazFq53Xd4jMuRioKjqCr5ZGDFCA==",
+    "source": {
+      "id": "cmhw2a6r10003l80c9d4h1n8v",
+      "name": "Hanse Haftungsdach GmbH",
+      "signingKey": "c201dc3ced8549ad4e07400a868d9fd043a8d316e7141989c33e8f2f5f844fd6"
+    }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T09:40:30.000Z"
+  }
+}
+```
+```json Error - Envelope Gone
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ENVELOPE_GONE",
+    "message": "The sealed envelope of this record is no longer held: it was opened, rejected, revoked or never collected.",
+    "details": { "status": "OPENED" }
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T09:41:12.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `RECORD_NOT_FOUND` | `404` | No KYC record with this ID belongs to your instance |
+| `RECORD_EXPIRED` | `409` | The record's `validUntil` has passed. Ask the source for a current record |
+| `ENVELOPE_GONE` | `409` | The record is no longer `RECEIVED`, so the ciphertext was deleted. `details.status` is the record's status |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 240 KYC record reads per minute |
+| `GET_KYC_ENVELOPE_FAILED` | `500` | The envelope could not be read |

@@ -1,0 +1,89 @@
+---
+title: "Keys and files"
+description: "What the KYC courier tool writes to disk on the bank side and the verifier side, how private keys are protected, which secrets are never stored, what to back up, and what to do when a key is lost or exposed."
+icon: "key"
+---
+
+This page is for the operator who runs the tool and for the security reviewer assessing it. After reading it you will know every file the tool writes, which of them are secret, and what to back up.
+
+## The keystore
+
+The keystore is one directory, `./.trusset-kyc` by default. `--home` or `TRUSSET_KYC_HOME` moves it.
+
+```text
+.trusset-kyc/
+├── recipient-keys/<keyId>.json    bank: one file per record key, private key included
+├── sources.json                   bank: the pinned signing key of each source
+├── signing-key.json               verifier: the signing key, private key included
+└── invites/<sourceId>.json        verifier: one stored invite per source, token included
+```
+
+| Path | Side | Secret | Contents |
+|---|---|---|---|
+| `recipient-keys/<keyId>.json` | Bank | Yes | An X25519 record key pair. Whoever holds the private key can read every record sealed to it |
+| `sources.json` | Bank | No, but trusted | Source ID, name and pinned signing key of each source. Anyone who can write this file decides which keys your tool trusts |
+| `signing-key.json` | Verifier | Yes | The Ed25519 signing key pair. Whoever holds the private key can sign records as you |
+| `invites/<sourceId>.json` | Verifier | Yes | The invite with the inbox token and the bank's pinned key |
+
+The keystore directory has mode 0700 and every file in it has mode 0600. The tool refuses to use a keystore that other users can read, and tells you the `chmod` that fixes it. File modes are not enforced on Windows.
+
+## How private keys are protected
+
+Set `TRUSSET_KYC_PASSPHRASE` before `keygen` and `source-keygen`. The private key is then stored encrypted with a key derived by scrypt (N=32768, r=8, p=1) and AES-256-GCM, and the passphrase is required every time the key is used. The passphrase is never stored.
+
+<Warning>
+  Without `TRUSSET_KYC_PASSPHRASE` the private key is stored unencrypted, protected by the file mode only. The tool prints a warning when it does this.
+</Warning>
+
+Two secrets are never written by the tool:
+
+- **The bank's API key.** It is read from `TRUSSET_API_KEY` only and is never printed.
+- **The passphrase.**
+
+The verifier's inbox token exists only inside the stored invite file and is never printed. `invite list` leaves it out.
+
+## A filed record
+
+`trusset-kyc open` writes each record to `<out>/<walletAddress>/<envelopeId>/`, with the wallet address in lowercase:
+
+| File | Content |
+|---|---|
+| `record.json` | The exact signed bytes of the record document: the verifier's `record` object, the header fields repeated, and the attachments in base64 |
+| `record.sig` | The signature inside the record, base64 |
+| `header.json` | The exact header bytes |
+| `envelope.sig` | The signature over the header and the sealed bytes, base64 |
+| `source.json` | `sourceId`, `name`, `signingKey` and `fingerprint` from your local pin |
+| `attachments/<name>` | The decoded attachment files. Present when the record has attachments |
+| `receipt.json` | `recordId`, `recordDigest`, `sealedDigest`, `openedAt` from the local clock, and `toolVersion` |
+
+The directory is created with mode 0700 and its files with mode 0600. The files are written first and moved into place together, so a directory that exists is complete. These files are enough to verify the record again without Trusset: see [Verify a filed record offline](/tools/kyc-courier/bank-walkthrough#verify-a-filed-record-offline).
+
+<Warning>
+  This directory holds the KYC files in clear. It is the only copy on your side, and Trusset deleted the ciphertext when the record was opened. Protect it and back it up as you would any other store of personal data. How long you keep it is your decision under your own retention rules.
+</Warning>
+
+## Envelope files
+
+`trusset-kyc seal` writes `<envelopeId>.envelope.json` with mode 0600. It holds the delivery body and nothing secret: the header in clear, which names the wallet, and the ciphertext. Delete it once the delivery is confirmed.
+
+## What to back up
+
+| What | Why |
+|---|---|
+| Bank: `recipient-keys/` and the passphrase | Without the private key, records that are still waiting cannot be opened |
+| Bank: `sources.json` | To restore the pins without comparing every fingerprint again |
+| Bank: the output directory | It is your copy of every opened record |
+| Verifier: `signing-key.json` and the passphrase | Without it you cannot sign new records or revoke delivered ones |
+| Verifier: `invites/` | Otherwise the bank must issue a new invite |
+
+Never commit the keystore, the output directory or envelope files to version control. The tool's own `.gitignore` excludes `.trusset-kyc/`, `records/` and `*.envelope.json`.
+
+## When a key is lost or exposed
+
+**The bank's record key is lost.** Records already opened are unaffected, because they are filed in clear. Records still waiting cannot be opened. Create a new key with `keygen`, register it with [Set Record Key](/endpoints/customers/set-kyc-record-key), issue a new invite for every source, and ask the sources to seal and send the waiting records again.
+
+**The bank's record key is exposed.** Open the records that are waiting first, so that Trusset deletes their ciphertext, then replace the key the same way. A record sealed to the exposed key can be read by anyone who holds that key and obtains its envelope.
+
+**The verifier's signing key is lost or exposed.** Create a new signing key and send the public key to every bank you deliver to. Each bank confirms the new fingerprint with you, registers the key with [Update KYC Source](/endpoints/customers/update-kyc-source) and replaces its local pin. Until then the bank's tool keeps accepting records signed with the old key.
+
+**The invite is exposed.** Ask the bank for a new one. [Reissue Source Invite](/endpoints/customers/reissue-kyc-source-invite) ends the old token at once. With the token alone someone can read your inbox description, and the status of a delivery whose envelope ID they know. They cannot deliver or revoke a record, because both must be signed with your signing key.

@@ -1,0 +1,204 @@
+---
+title: 'Build Record Removal'
+api: 'POST /customers/api/kyc-records/{recordId}/removal'
+description: 'The transactions that take a wallet off its whitelists after a revocation or expiry'
+---
+
+Returns one unsigned `setListed` transaction for each whitelist that still lists the wallet of a revoked or expired record. The owner or a manager of the whitelist signs and broadcasts each one, then [Confirm Record Removal](/endpoints/customers/confirm-kyc-record-removal) records the result.
+
+A revocation or an expiry changes nothing on chain by itself. The wallet stays listed, and keeps passing every gate the list serves, until this transaction is signed and mined. A record whose `action` is `REMOVE` is waiting for it.
+
+## Which lists get a transaction
+
+Each whitelist bound to the record's source is looked at on its own:
+
+| Situation | Entry |
+|---|---|
+| The wallet is listed and no other record covers it | `plan` holds the removal transaction |
+| The wallet is listed and another approved, valid record covers it on this list | `coveredByAnotherRecord: true`, `plan: null`. The other record comes from this source or from another source bound to the list, so the wallet stays |
+| The wallet is not listed | `alreadyRemoved: true`, `plan: null` |
+
+Only a record that is `REVOKED` or `EXPIRED` can be built for. To take a wallet off a whitelist for any other reason, use [Set Whitelist Members](/endpoints/lending/set-access-list-members) with `listed: false`.
+
+<Warning>
+  Removing a wallet from a whitelist that gates a market's borrowers stops that wallet's next draw there. `plan.warnings` names the open loans the removal reaches (`AFFECTS_OPEN_LOANS`) and the markets and vaults the list gates (`LIST_SCOPE`). Read them before you sign. See [Set Whitelist Members](/endpoints/lending/set-access-list-members#warnings).
+</Warning>
+
+## Path Parameters
+
+<ParamField path="recordId" type="string" required>
+  The record `id` from [List KYC Records](/endpoints/customers/list-kyc-records).
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="signerAddress" type="string">
+  The wallet that will sign: the owner or a manager of the bound whitelists. Omitted, the first verified wallet of your instance that is the owner or a manager of the list is used.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="record" type="object">The record, as on [List KYC Records](/endpoints/customers/list-kyc-records#response-fields).</ResponseField>
+    <ResponseField name="removals" type="array">
+      One entry per whitelist bound to the record's source. Empty when none is bound.
+      <Expandable>
+        <ResponseField name="listId" type="string">The whitelist ID. Send it to [Confirm Record Removal](/endpoints/customers/confirm-kyc-record-removal).</ResponseField>
+        <ResponseField name="listName" type="string">The whitelist's name.</ResponseField>
+        <ResponseField name="listAddress" type="string">The list contract, checksummed.</ResponseField>
+        <ResponseField name="alreadyRemoved" type="boolean">`true` when the whitelist's record does not hold the wallet as listed.</ResponseField>
+        <ResponseField name="coveredByAnotherRecord" type="boolean">`true` when the wallet is listed and another approved, valid record keeps it there.</ResponseField>
+        <ResponseField name="plan" type="object">The removal build for this list, with the fields of [Set Whitelist Members](/endpoints/lending/set-access-list-members#response-fields) for one wallet and `listed: false`: `action`, `transaction` (`{ to, data, chainId, value }`), `functionName`, `description`, `signer`, `signerRole` and `warnings`. `null` when nothing is to be signed for this list.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/kyc-records/cmhw3k9t20007l80c5q2x7m4d/removal" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "signerAddress": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52" }'
+```
+```typescript TypeScript
+const base = `https://api.trusset.org/customers/api/kyc-records/${recordId}`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(`${base}/removal`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ signerAddress: await listManager.getAddress() })
+});
+const { data } = await res.json();
+
+for (const removal of data.removals) {
+  if (!removal.plan) continue;
+  for (const warning of removal.plan.warnings) console.warn(warning.code, warning.message);
+  const tx = await listManager.sendTransaction(removal.plan.transaction);
+  await tx.wait();
+  await fetch(`${base}/removal/confirm`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ listId: removal.listId, txHash: tx.hash })
+  });
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "record": {
+      "id": "cmhw3k9t20007l80c5q2x7m4d",
+      "envelopeId": "75aa6ca04ca5ab4223136c3bea128de0",
+      "sourceId": "cmhw2a6r10003l80c9d4h1n8v",
+      "sourceName": "Hanse Haftungsdach GmbH",
+      "walletAddress": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+      "profileKey": "PROFESSIONAL",
+      "status": "REVOKED",
+      "recordDigest": "565dd632e69c3630319efbd08052d5fd1dfbdd5b1123b31e227502261fae5b9d",
+      "recipientKeyId": "b9619d9be69ed903",
+      "verifiedAt": "2026-11-10T00:00:00.000Z",
+      "validUntil": "2027-11-10T23:59:59.999Z",
+      "issuedAt": "2026-11-12T09:14:07.512Z",
+      "receivedAt": "2026-11-12T09:14:09.204Z",
+      "openedAt": "2026-11-12T09:40:31.870Z",
+      "approvedAt": "2026-11-12T10:15:02.336Z",
+      "rejectedAt": null,
+      "rejectReason": null,
+      "revokedAt": "2027-02-03T08:40:13.027Z",
+      "revokeReason": "WITHDRAWN",
+      "expiredAt": null,
+      "customerId": "cmhw3m2p40009l80c1r6t8y3b",
+      "sealedBytes": 240964,
+      "held": false,
+      "lists": [
+        {
+          "listId": "cmv2k8q1d0004l70a3n6p2w9e",
+          "name": "Depositors Q4",
+          "address": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+          "listed": true
+        }
+      ],
+      "action": "REMOVE"
+    },
+    "removals": [
+      {
+        "listId": "cmv2k8q1d0004l70a3n6p2w9e",
+        "listName": "Depositors Q4",
+        "listAddress": "0x7D31e6b09a4c25F8E1b73d0a6C94e2f58B1A0C37",
+        "alreadyRemoved": false,
+        "coveredByAnotherRecord": false,
+        "plan": {
+          "action": "SIGN_TRANSACTION",
+          "transaction": {
+            "to": "0x7D31e6b09a4c25F8E1b73d0a6C94e2f58B1A0C37",
+            "data": "0x...",
+            "chainId": 11155111,
+            "value": "0"
+          },
+          "functionName": "setListed",
+          "description": "Remove 1 wallet from the whitelist (transaction 1 of 1)",
+          "listId": "cmv2k8q1d0004l70a3n6p2w9e",
+          "listAddress": "0x7D31e6b09a4c25F8E1b73d0a6C94e2f58B1A0C37",
+          "listed": false,
+          "accounts": 1,
+          "signer": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
+          "signerRole": "OWNER",
+          "maxBatch": 200,
+          "warnings": [
+            {
+              "code": "REMOVAL_TAKES_EFFECT_WHEN_SIGNED",
+              "message": "A removal takes effect on chain only once its transaction is signed and mined; until then the wallet stays listed and keeps passing the gate."
+            }
+          ],
+          "confirmWith": { "endpoint": "kyc-records/cmhw3k9t20007l80c5q2x7m4d/removal/confirm", "listId": "cmv2k8q1d0004l70a3n6p2w9e", "txHash": true }
+        }
+      }
+    ]
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2027-02-03T09:02:41.118Z"
+  }
+}
+```
+```json Error - Record Still Valid
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "RECORD_STILL_VALID",
+    "message": "A whitelist removal is built here only for a revoked or expired record. To remove a wallet for another reason, use the whitelist itself.",
+    "details": { "status": "APPROVED" }
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-12-01T11:30:00.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `signerAddress` is not a valid address |
+| `NOT_ACCESS_LIST_MANAGER` | `403` | The signer is neither the owner nor a manager of a bound whitelist. `details` names the signer and the owner |
+| `RECORD_NOT_FOUND` | `404` | No KYC record with this ID belongs to your instance |
+| `INSTANCE_NOT_FOUND` | `404` | The instance behind your key is archived or no longer exists |
+| `ACCESS_LIST_NOT_FOUND` | `404` | A bound whitelist is no longer kept or managed by your instance on this network |
+| `RECORD_STILL_VALID` | `409` | The record is not `REVOKED` or `EXPIRED`. `details.status` is its status |
+| `TX_WOULD_REVERT` | `409` | The simulated `setListed` transaction reverts. Nothing was returned to sign |
+| `WALLET_NOT_CONFIGURED` | `412` | Your instance has no verified wallet to sign |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 KYC record writes per minute |
+| `BUILD_KYC_REMOVAL_FAILED` | `500` | The removal could not be built |
+| `ACCESS_LISTS_NOT_CONFIGURED` | `501` | The whitelist factory is not deployed on your instance's network |
+| `ACCESS_LIST_UNREADABLE` | `503` | The list's owner and managers could not be read, so the signer could not be checked. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read to simulate the transaction. Retry shortly |

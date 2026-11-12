@@ -1,0 +1,308 @@
+---
+title: 'KYC Inbox'
+description: 'Deliver sealed KYC records to a bank as its designated verifier'
+icon: 'inbox'
+---
+
+This API is for a KYC verifier that a bank on Trusset designated as one of its KYC sources. You seal the KYC file of an investor so that only the bank can read it, sign it, and post it to the bank's inbox. Trusset stores the sealed envelope and relays it. It holds no key that opens it.
+
+The bank's side of the same flow, including approving a record and listing the wallet, is under [Customers](/endpoints/customers/introduction#sealed-kyc-records).
+
+There are two ways to use the inbox:
+
+- **The command line tool.** `trusset-kyc` seals, signs, sends and revokes for you. See the [verifier walkthrough](/tools/kyc-courier/verifier-walkthrough).
+- **Your own implementation.** The envelope uses HPKE as standardised in RFC 9180 and Ed25519 signatures. This page specifies the format completely, so a stock HPKE library is enough.
+
+## Base Path
+
+```
+https://api.trusset.org/kyc-inbox/{sourceId}
+```
+
+`sourceId` and the API address both come from the invite the bank gave you. Each source has its own inbox, and one inbox delivers to one bank instance.
+
+## Authentication
+
+Every request carries the token from the invite as a bearer token:
+
+```
+Authorization: Bearer tki_...
+```
+
+No API key is used here. The token identifies you to the inbox. It does not authenticate a record: every delivery and every revocation is also signed with your Ed25519 signing key, and the bank verifies those signatures itself.
+
+A missing, malformed or wrong token answers `401 UNAUTHORIZED`. So does an unknown `sourceId` and a source the bank removed, with the same message, so the answer does not reveal which of them applies. When the bank issues a new invite, the old token stops working at once.
+
+## The invite
+
+The bank creates your source and hands you one string:
+
+```
+trusset-kyc-invite:v1:<base64url of UTF-8 JSON, no padding>
+```
+
+```json
+{
+  "v": 1,
+  "api": "https://api.trusset.org",
+  "sourceId": "cmhw2a6r10003l80c9d4h1n8v",
+  "sourceName": "Hanse Haftungsdach GmbH",
+  "token": "tki_...",
+  "recipientKeyId": "b9619d9be69ed903",
+  "recipientKey": "d523432543eb506e3fbe5538bc2409ab97d016a8a8823ef0a7d416ac60967033",
+  "profileKey": "PROFESSIONAL",
+  "instanceType": "DEVELOPMENT"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `api` | The API address. The base path is `{api}/kyc-inbox/{sourceId}` |
+| `sourceId` | Your source ID at this bank. It goes into every header |
+| `sourceName` | The name the bank gave your source |
+| `token` | The bearer token: `tki_` followed by 43 base64url characters |
+| `recipientKeyId` | The first 16 hex characters of SHA-256 over the raw recipient key |
+| `recipientKey` | The bank's X25519 public key, 32 bytes as 64 lowercase hex characters. You seal every record to it |
+| `profileKey` | The verification profile you verify for at this bank. It goes into every header |
+| `instanceType` | `PRODUCTION` or `DEVELOPMENT` |
+
+<Warning>
+  Treat the invite as a secret. It holds your token.
+
+  Seal only to the `recipientKey` from the invite. The inbox reports the bank's current key as well, but that report passes through Trusset, so use it only as a check: when it differs from the key in your invite, send nothing and ask the bank for a new invite.
+
+  The invite itself is also issued through Trusset. Before your first delivery, compare the fingerprint of `recipientKey` with the bank over a separate channel, for example by phone. Give the bank the fingerprint of your signing key the same way.
+</Warning>
+
+## Keys
+
+| Key | Type | Written as |
+|---|---|---|
+| Recipient key (the bank's) | X25519 | The 32 raw public key bytes as 64 lowercase hex characters |
+| Signing key (yours) | Ed25519 | The 32 raw public key bytes as 64 lowercase hex characters |
+
+A key ID is the first 16 hex characters of SHA-256 over the raw public key bytes. A fingerprint is the first 32 hex characters of the same hash, in 8 groups of 4 separated by a space, for example `b961 9d9b e69e d903 c31c 6f1a f3c6 a7d2`.
+
+You send the bank your signing public key once. The bank registers it on your source and pins it in its own tool. Trusset never needs your private key, and no endpoint accepts one.
+
+## Envelope format
+
+An envelope has four parts: a clear header, the HPKE encapsulated key, the ciphertext and a signature. Build them in this order.
+
+### 1. The record document
+
+The record document is what the bank reads after decryption. It is a JSON object serialised to UTF-8 bytes, called `P` below:
+
+```json
+{
+  "v": 1,
+  "type": "trusset-kyc-record",
+  "envelopeId": "75aa6ca04ca5ab4223136c3bea128de0",
+  "sourceId": "cmhw2a6r10003l80c9d4h1n8v",
+  "walletAddress": "0x8ba1f109551bd432803012645ac136ddd64dba72",
+  "profileKey": "PROFESSIONAL",
+  "verifiedAt": "2026-11-10T00:00:00.000Z",
+  "validUntil": "2027-11-10T23:59:59.999Z",
+  "openProof": "2482d01e472949dc837fa2f501969c984d170bf13c7879439aaf98d7d1018413",
+  "nonce": "dc177c1f345b38e2babec0ed808434468e75786886394d6bd1ab80c0b5561271",
+  "record": {
+    "firstName": "Ada",
+    "lastName": "Lovelace",
+    "dateOfBirth": "1990-12-10",
+    "verificationMethod": "VIDEO_IDENT",
+    "verificationReference": "HH-2026-000123"
+  },
+  "attachments": [
+    {
+      "name": "id-front.jpg",
+      "mediaType": "image/jpeg",
+      "sha256": "f94b3616a6dd2c9a331b1c42356abfcc17b023747357c1eb5c2cc215ad040f87",
+      "data": "/9j/4AAQSkZJRgABAQ..."
+    }
+  ]
+}
+```
+
+| Field | Rule |
+|---|---|
+| `v`, `type` | `1` and `trusset-kyc-record` |
+| `envelopeId` | 16 random bytes as 32 lowercase hex characters. New for every envelope |
+| `sourceId`, `profileKey` | From the invite |
+| `walletAddress` | The investor's wallet, `0x` followed by 40 lowercase hex characters |
+| `verifiedAt`, `validUntil` | When you verified the investor, and until when you vouch for the record. See [Timestamps](#timestamps) |
+| `openProof` | 32 random bytes as 64 lowercase hex characters. The bank returns it to Trusset to prove it decrypted the record |
+| `nonce` | 32 random bytes as 64 lowercase hex characters |
+| `record` | A JSON object. Its content is agreed between you and the bank. Trusset never sees it |
+| `attachments` | A list, empty when there are none. Each entry has `name`, `mediaType`, `sha256` (SHA-256 of the raw file as hex) and `data` (the file as standard base64) |
+
+An attachment `name` is a plain file name of at most 120 characters: no path separator, no leading dot, unique within the record in any letter case. `mediaType` is a lowercase `type/subtype`.
+
+From `P` you derive three values:
+
+| Value | Definition |
+|---|---|
+| `innerSignature` | Ed25519 signature with your signing key over the UTF-8 bytes of `trusset-kyc-record-v1` followed by a line feed (`0x0A`), followed by `P`. 64 bytes |
+| `recordDigest` | SHA-256 of `P`, as 64 lowercase hex characters |
+| `openCommitment` | SHA-256 of the 32 raw bytes of `openProof`, as 64 lowercase hex characters |
+
+### 2. The header
+
+The header is the only part Trusset can read. It carries exactly these 13 keys and no other. Write them in this order:
+
+```json
+{"v":1,"type":"RECORD","suite":"HPKE-X25519-SHA256-AES256GCM","envelopeId":"75aa6ca04ca5ab4223136c3bea128de0","sourceId":"cmhw2a6r10003l80c9d4h1n8v","recipientKeyId":"b9619d9be69ed903","walletAddress":"0x8ba1f109551bd432803012645ac136ddd64dba72","profileKey":"PROFESSIONAL","recordDigest":"565dd632e69c3630319efbd08052d5fd1dfbdd5b1123b31e227502261fae5b9d","openCommitment":"fae3b90a5f12c2adf670368cc3981e23f67e8871a34d176d49e7f99aab331a79","verifiedAt":"2026-11-10T00:00:00.000Z","validUntil":"2027-11-10T23:59:59.999Z","issuedAt":"2026-11-12T09:14:07.512Z"}
+```
+
+| Key | Value |
+|---|---|
+| `v` | The number `1` |
+| `type` | `RECORD` |
+| `suite` | `HPKE-X25519-SHA256-AES256GCM` |
+| `envelopeId`, `sourceId`, `walletAddress`, `profileKey`, `verifiedAt`, `validUntil` | The same values as in the record document. The bank's tool refuses a record whose document and header disagree |
+| `recipientKeyId` | The key ID of the recipient key you sealed to |
+| `recordDigest`, `openCommitment` | As derived above |
+| `issuedAt` | When you sealed the envelope |
+
+Every value except `v` is a string, and each one has a fixed form. The header has no free-text key and none can be added. A header with a missing or an extra key is refused.
+
+**Compact JSON.** The header bytes are the UTF-8 bytes of the JSON with no whitespace and no duplicate keys. They must equal what JavaScript produces with `JSON.stringify(JSON.parse(text))`. Anything else is refused with `VALIDATION_ERROR`. In Python, `json.dumps(header, separators=(',', ':'), ensure_ascii=False)` produces this form. In Go, disable HTML escaping in the encoder.
+
+The header bytes are used three times, always the exact same bytes: as the HPKE associated data, inside the signature, and on the wire as base64url without padding. They are at most 2,048 bytes.
+
+### 3. Sealing
+
+Seal with HPKE, RFC 9180, base mode, single shot:
+
+| Parameter | Value |
+|---|---|
+| KEM | DHKEM(X25519, HKDF-SHA256), `0x0020` |
+| KDF | HKDF-SHA256, `0x0001` |
+| AEAD | AES-256-GCM, `0x0002` |
+| Recipient public key | `recipientKey` from the invite |
+| `info` | The UTF-8 bytes of `trusset-kyc-envelope-v1` |
+| `aad` | The header bytes |
+| Plaintext | `innerSignature` (64 bytes) followed by `P` |
+
+The result is `enc`, the 32-byte encapsulated key, and `ciphertext`, the AES-256-GCM output with its 16-byte tag appended. One message is sealed per context, so the sequence number is 0.
+
+### 4. The signature
+
+```
+signature = Ed25519(signing key,
+  UTF-8("trusset-kyc-envelope-v1" + line feed) || SHA-256(header bytes) || SHA-256(enc || ciphertext))
+```
+
+Both hashes enter as their 32 raw bytes. The signature is 64 bytes. It binds the header to the sealed bytes, so neither can be exchanged without breaking it.
+
+### The delivery body
+
+```json
+{
+  "header": "eyJ2IjoxLCJ0eXBlIjoiUkVDT1JEIiwic3VpdGUiOiJIUEtFLVgyNTUxOS1TSEEyNTYtQUVTMjU2R0NNIiwi...",
+  "enc": "zmmB0b/QPdskHQWX0rf4X+sPCtZW6KbFXn1ttX+9t1U=",
+  "ciphertext": "jEosAzJ19wTCgoTi6N56mfm5kAi+2Qb7V0hU2C5wpAK/...",
+  "signature": "KsBvzVvHfFa0b2J8/4GNjIXLoYNO426GsaQGTIoczZY1L2yZ/ghQvk0rb7AazFq53Xd4jMuRioKjqCr5ZGDFCA=="
+}
+```
+
+| Field | Encoding | Size before encoding |
+|---|---|---|
+| `header` | base64url without padding | At most 2,048 bytes |
+| `enc` | Standard base64 with padding | Exactly 32 bytes |
+| `ciphertext` | Standard base64 with padding | 82 to 6,291,456 bytes (6 MiB) |
+| `signature` | Standard base64 with padding | Exactly 64 bytes |
+
+The ciphertext limit covers the whole record document with its attachments. Attachments are base64 inside the document, so about 4.5 MiB of files fit in one record. [Describe Inbox](/endpoints/kyc-inbox/get-inbox) reports the limit as `limits.maxCiphertextBytes`.
+
+### Timestamps
+
+Every timestamp has exactly the form `YYYY-MM-DDTHH:mm:ss.sssZ`, in UTC with milliseconds, as JavaScript's `toISOString()` writes it. On delivery the header must satisfy all of these, measured against Trusset's clock, which [Describe Inbox](/endpoints/kyc-inbox/get-inbox) returns as `serverTime`:
+
+| Field | Rule |
+|---|---|
+| `issuedAt` | Not older than 24 hours and at most 10 minutes ahead. An envelope sealed more than 24 hours ago must be sealed again |
+| `verifiedAt` | At most 10 minutes ahead, and not older than 3,653 days (ten years) |
+| `validUntil` | After the current time, after `verifiedAt`, and at most 3,653 days ahead |
+
+## What Trusset checks
+
+On delivery Trusset checks the header's form and timing, the sizes, that `sourceId` names your inbox, that `profileKey` is the one the bank set for you, that `recipientKeyId` names the bank's current key, and the signature against the signing key the bank registered for your source.
+
+Trusset cannot check anything inside the ciphertext. The bank's tool does that after decryption: it verifies the signature on the envelope and `innerSignature` against the key the bank pinned, and compares the record document with `recordDigest`, `openCommitment`, the fields repeated in the header and every attachment hash. An envelope that fails there is rejected by the bank with `BAD_SIGNATURE`, `DIGEST_MISMATCH` or `UNDECRYPTABLE`, which you read from [Get Delivery Status](/endpoints/kyc-inbox/get-delivery-status).
+
+## Sending twice
+
+Posting the exact same envelope again is safe. It answers `200` with `replayed: true` and the record it already created, and stores nothing new. Two other cases are refused:
+
+| Case | Answer |
+|---|---|
+| A different envelope under an `envelopeId` you already used | `409 ENVELOPE_ID_REUSED` |
+| A new envelope whose `recordDigest` the bank already received | `409 RECORD_ALREADY_DELIVERED` |
+
+A record that has to be delivered again, for example after the bank rejected it, is sealed again with a new `envelopeId`, `openProof` and `nonce`. That also gives it a new `recordDigest`.
+
+## Revocations
+
+You revoke a record you delivered with a signed statement. Its header carries exactly these 8 keys, as compact JSON under the same rules:
+
+```json
+{"v":1,"type":"REVOCATION","revocationId":"81f9d62002bd68416238d651237f5cb8","sourceId":"cmhw2a6r10003l80c9d4h1n8v","walletAddress":"0x8ba1f109551bd432803012645ac136ddd64dba72","recordDigest":"565dd632e69c3630319efbd08052d5fd1dfbdd5b1123b31e227502261fae5b9d","reason":"WITHDRAWN","issuedAt":"2027-02-03T08:40:12.118Z"}
+```
+
+`revocationId` is 16 random bytes as 32 lowercase hex characters. `reason` is `EXPIRED`, `WITHDRAWN`, `SUPERSEDED`, `INVALID` or `OTHER`. `issuedAt` follows the same rule as on a delivery.
+
+```
+signature = Ed25519(signing key,
+  UTF-8("trusset-kyc-revocation-v1" + line feed) || SHA-256(header bytes))
+```
+
+The body is `{ "header": "<base64url>", "signature": "<base64>" }`. See [Revoke Record](/endpoints/kyc-inbox/revoke-record).
+
+## What happens to a record
+
+| Status | Meaning for you |
+|---|---|
+| `RECEIVED` | Trusset holds the sealed envelope. The bank has not opened it yet |
+| `OPENED` | The bank decrypted the record and proved it. Trusset deleted the ciphertext |
+| `APPROVED` | The bank accepted the record |
+| `REJECTED` | The bank or its tool refused the record. `rejectReason` says why |
+| `REVOKED` | You revoked it |
+| `EXPIRED` | `validUntil` passed |
+| `UNCLAIMED` | The bank did not open the record within 30 days. Trusset deleted the ciphertext |
+| `SUPERSEDED` | The bank approved a later record of yours for the same wallet |
+
+Trusset deletes the ciphertext when the bank opens or rejects the record, when you revoke it, when `validUntil` passes, and after 30 days uncollected. The header stays.
+
+## Response envelope
+
+```json
+{
+  "success": true,
+  "data": { },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T09:14:09.230Z"
+  }
+}
+```
+
+Every answer carries both `data` and `error`, with the unused one `null`. On failure, `error` carries `code` and `message`, and `details.field` where one field is at fault. Responses are sent with `Cache-Control: no-store`.
+
+## Errors every route can return
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `UNAUTHORIZED` | `401` | The token is missing, malformed or wrong, the `sourceId` is unknown, or the bank removed the source |
+| `RATE_LIMIT_EXCEEDED` | `429` | A rate limit below was exceeded. The answer carries a `Retry-After` header in seconds |
+| `KYC_INBOX_AUTH_FAILED` | `500` | The credentials could not be checked. Retry shortly |
+
+## Rate limits
+
+Requests without an API key count against the per-IP limit of 100 requests per minute described on [Rate Limits](/endpoints/rate-limits). The inbox adds two of its own: 240 requests per minute for each source, and 20 failed authentications per 10 minutes for each IP address, after which a further failed attempt answers `429` instead of `401`.
+
+A delivery is also refused with `429 INBOX_FULL` while too many of your records wait unopened at the bank. That is not a rate limit: retrying does not help until the bank opens records. See [Deliver Record](/endpoints/kyc-inbox/deliver-record).
+
+## What Trusset does not do
+
+Trusset relays and stores ciphertext. It does not verify an investor, does not read or assess a KYC file, and takes no part in the bank's decision to accept a record. Whether the bank may rely on your verification, and how personal data may pass between you, is governed by the agreements between you and the bank.

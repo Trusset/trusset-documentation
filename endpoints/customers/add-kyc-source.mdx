@@ -1,0 +1,153 @@
+---
+title: 'Add KYC Source'
+api: 'POST /customers/api/kyc-sources'
+description: 'Designate a verifier and get the invite that opens its inbox'
+---
+
+Adds a KYC source to your instance and returns its invite. The invite is one string that holds everything the verifier needs: the API address, the source ID, a token for the [inbox](/endpoints/kyc-inbox/introduction), your record key and the profile key. See [Sealed KYC records](/endpoints/customers/introduction#sealed-kyc-records).
+
+Your instance needs a record key first. Register it with [Set Record Key](/endpoints/customers/set-kyc-record-key).
+
+<Warning>
+  The invite is a secret, because it carries the source's token. It is returned by this call and by [Reissue Source Invite](/endpoints/customers/reissue-kyc-source-invite) only, and cannot be read back later. Hand it to the verifier over a confidential channel.
+
+  Trusset relays the invite, so do not rely on it alone for the keys. Before the first delivery, read your record key fingerprint to the verifier over a separate channel, for example by phone, and have the verifier read you the fingerprint of its signing key. Then pin that signing key in your tool with `trusset-kyc source add`. Your tool verifies every record against the key you pinned there. The key stored here is what Trusset checks deliveries against, and your tool shows it only as a hint.
+</Warning>
+
+## Binding whitelists
+
+`accessListIds` binds up to 10 [whitelists](/endpoints/lending/list-access-lists) to the source. Each must be a list your instance keeps, or one a verified wallet of your instance manages, on your instance's network. Binding has two effects:
+
+- [Approve KYC Record](/endpoints/customers/approve-kyc-record) returns the transaction that lists the record's wallet on each bound list.
+- [Set Whitelist Members](/endpoints/lending/set-access-list-members) refuses to list a wallet on a bound list unless the wallet has an approved, valid record from a source bound to that list (`409 KYC_RECORD_REQUIRED`).
+
+A source without a bound list still delivers records, and you can open, approve and reject them. Approving then returns no admissions.
+
+## Body Parameters
+
+<ParamField body="name" type="string" required>
+  A name for the source, 1 to 80 characters: letters, digits, spaces and `. , & ( ) ' _ -`, starting with a letter or a digit. It must be unique among the sources of your instance that are not removed, in any letter case.
+</ParamField>
+
+<ParamField body="signingKey" type="string" required>
+  The verifier's Ed25519 public key as 64 hex characters, with or without a `0x` prefix. `trusset-kyc source-keygen` prints it on the verifier's side. Each source of your instance signs with its own key.
+</ParamField>
+
+<ParamField body="profileKey" type="string" required>
+  The `key` of an enabled [verification profile](/endpoints/customers/list-verification-profiles) the source verifies for, such as `RETAIL`, `PROFESSIONAL` or a custom key. Every envelope the source delivers must carry this profile key.
+</ParamField>
+
+<ParamField body="accessListIds" type="string[]">
+  Up to 10 whitelist IDs to bind. Duplicates are dropped. Omit it to bind none.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="source" type="object">The new source, as on [List KYC Sources](/endpoints/customers/list-kyc-sources). Its `status` is `ACTIVE`.</ResponseField>
+    <ResponseField name="invite" type="string">`trusset-kyc-invite:v1:` followed by base64url JSON. See [The invite](/endpoints/kyc-inbox/introduction#the-invite) for its fields.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  The response is sent with `Cache-Control: no-store`. The new source is written to the customer audit log as `KYC_SOURCE_CREATED`, with the fingerprint of its signing key.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/kyc-sources" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Hanse Haftungsdach GmbH",
+    "signingKey": "c201dc3ced8549ad4e07400a868d9fd043a8d316e7141989c33e8f2f5f844fd6",
+    "profileKey": "PROFESSIONAL",
+    "accessListIds": ["cmv2k8q1d0004l70a3n6p2w9e"]
+  }'
+```
+```typescript TypeScript
+const res = await fetch('https://api.trusset.org/customers/api/kyc-sources', {
+  method: 'POST',
+  headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: 'Hanse Haftungsdach GmbH',
+    signingKey: 'c201dc3ced8549ad4e07400a868d9fd043a8d316e7141989c33e8f2f5f844fd6',
+    profileKey: 'PROFESSIONAL',
+    accessListIds: ['cmv2k8q1d0004l70a3n6p2w9e']
+  })
+});
+const { success, data, error } = await res.json();
+
+if (success) {
+  console.log(`Signing key fingerprint to confirm: ${data.source.signingKeyFingerprint}`);
+  deliverConfidentially(data.invite);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json 201 Response
+{
+  "success": true,
+  "data": {
+    "source": {
+      "id": "cmhw2a6r10003l80c9d4h1n8v",
+      "name": "Hanse Haftungsdach GmbH",
+      "signingKey": "c201dc3ced8549ad4e07400a868d9fd043a8d316e7141989c33e8f2f5f844fd6",
+      "signingKeyFingerprint": "4b37 6734 b088 268b 89d3 cf6d 1a88 0a1c",
+      "profileKey": "PROFESSIONAL",
+      "accessLists": [
+        {
+          "id": "cmv2k8q1d0004l70a3n6p2w9e",
+          "name": "Depositors Q4",
+          "address": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37"
+        }
+      ],
+      "status": "ACTIVE",
+      "tokenHint": "Qml8",
+      "tokenIssuedAt": "2026-11-09T08:31:02.118Z",
+      "lastDeliveryAt": null,
+      "createdAt": "2026-11-09T08:31:02.118Z",
+      "counts": { "received": 0, "opened": 0, "approved": 0 }
+    },
+    "invite": "trusset-kyc-invite:v1:eyJ2IjoxLCJhcGkiOiJodHRwczovL2FwaS50cnVzc2V0Lm9yZyIsInNvdXJjZUlkIjoi..."
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-09T08:31:02.140Z"
+  }
+}
+```
+```json Error - No Record Key
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "RECIPIENT_KEY_NOT_SET",
+    "message": "Register the record key of this instance first: a source seals every record to it."
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-09T08:30:41.007Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `name`, `signingKey` or `profileKey` is missing or malformed, or `accessListIds` is not a list of at most 10 whitelist IDs. `details.field` names the field |
+| `INVALID_INVESTOR_TYPE` | `400` | `profileKey` names no enabled verification profile of your instance |
+| `ACCESS_LIST_NOT_FOUND` | `404` | A whitelist in `accessListIds` is not kept or managed by your instance on this network. `details.accessListIds` names them |
+| `INSTANCE_NOT_FOUND` | `404` | The instance behind your key is archived or no longer exists |
+| `SEALED_KYC_NOT_ENABLED` | `409` | Your instance is a production instance and sealed KYC records are not enabled for your organisation. See [Availability](/endpoints/customers/introduction#availability) |
+| `RECIPIENT_KEY_NOT_SET` | `409` | Your instance has no record key |
+| `SOURCE_LIMIT_REACHED` | `409` | Your instance already has 25 sources that are not removed |
+| `SOURCE_NAME_TAKEN` | `409` | Another source of your instance uses this name |
+| `SOURCE_KEY_TAKEN` | `409` | Another source of your instance uses this signing key |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 20 KYC source writes per minute |
+| `CREATE_KYC_SOURCE_FAILED` | `500` | The source could not be created |

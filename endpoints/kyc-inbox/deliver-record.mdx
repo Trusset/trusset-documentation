@@ -1,0 +1,161 @@
+---
+title: 'Deliver Record'
+api: 'POST /kyc-inbox/{sourceId}/records'
+authMethod: 'bearer'
+description: 'Post a sealed KYC record to the bank'
+---
+
+Delivers one sealed envelope to the bank. The body is the envelope described under [Envelope format](/endpoints/kyc-inbox/introduction#envelope-format): the header, the encapsulated key, the ciphertext and your signature. Trusset checks what it can read, stores the envelope and tells the bank a record is waiting. It cannot decrypt it.
+
+A `201` means Trusset holds the envelope. It does not mean the bank accepted the record. Follow it with [Get Delivery Status](/endpoints/kyc-inbox/get-delivery-status).
+
+## Checks, in order
+
+The first check that fails refuses the delivery, and nothing is stored:
+
+1. Your source is `ACTIVE` (`SOURCE_PAUSED`).
+2. Sealed KYC records are enabled for the bank's instance (`SEALED_KYC_NOT_ENABLED`). This can fail on a production instance only.
+3. The body is well formed: the header is compact JSON with exactly the 13 keys, every value has its form, the timing rules hold, and `enc`, `ciphertext` and `signature` have their sizes (`VALIDATION_ERROR`, `PAYLOAD_TOO_LARGE`).
+4. `header.sourceId` is the `sourceId` in the path (`VALIDATION_ERROR`).
+5. The signature verifies against the signing key the bank registered for your source (`INVALID_SIGNATURE`).
+6. `header.profileKey` is the profile key the bank set for your source (`PROFILE_MISMATCH`).
+7. The bank has a recipient key, and `header.recipientKeyId` names it (`RECIPIENT_KEY_NOT_SET`, `RECIPIENT_KEY_MISMATCH`).
+8. The envelope is new, or an exact repeat (`ENVELOPE_ID_REUSED`, `RECORD_ALREADY_DELIVERED`).
+9. The inbox has room (`INBOX_FULL`).
+
+## Sending twice
+
+Posting the exact same envelope again answers `200` with `replayed: true` and the record it created the first time. Nothing is stored twice, so a retry after a timeout or a lost response is safe.
+
+## A full inbox
+
+A delivery is refused with `429 INBOX_FULL` while 1,000 records of your source wait unopened, or while the records waiting unopened at the bank's instance would exceed 512 MiB together. Room returns when the bank opens or rejects records, or when waiting records lapse. Tell the bank, and retry later.
+
+## Path Parameters
+
+<ParamField path="sourceId" type="string" required>
+  Your source ID, from the invite.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="header" type="string" required>
+  The header bytes as base64url without padding. At most 2,048 bytes before encoding.
+</ParamField>
+
+<ParamField body="enc" type="string" required>
+  The 32-byte HPKE encapsulated key, standard base64 with padding.
+</ParamField>
+
+<ParamField body="ciphertext" type="string" required>
+  The ciphertext with its 16-byte tag, standard base64 with padding. From 82 to 6,291,456 bytes before encoding.
+</ParamField>
+
+<ParamField body="signature" type="string" required>
+  Your 64-byte Ed25519 signature over the header and the sealed bytes, standard base64 with padding.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="recordId" type="string">The record's ID at the bank.</ResponseField>
+    <ResponseField name="envelopeId" type="string">The `envelopeId` from your header. [Get Delivery Status](/endpoints/kyc-inbox/get-delivery-status) takes it.</ResponseField>
+    <ResponseField name="status" type="string">`RECEIVED` for a new delivery. On a repeat, the record's status now.</ResponseField>
+    <ResponseField name="receivedAt" type="string">When Trusset first received the envelope, ISO 8601.</ResponseField>
+    <ResponseField name="replayed" type="boolean">`false` with `201`. `true` with `200`, when this exact envelope was delivered before.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/kyc-inbox/cmhw2a6r10003l80c9d4h1n8v/records" \
+  -H "Authorization: Bearer tki_your_token_here" \
+  -H "Content-Type: application/json" \
+  --data @75aa6ca04ca5ab4223136c3bea128de0.envelope.json
+```
+```typescript TypeScript
+const res = await fetch(`${invite.api}/kyc-inbox/${invite.sourceId}/records`, {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${invite.token}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ header, enc, ciphertext, signature })
+});
+const { success, data, error } = await res.json();
+
+if (success) {
+  console.log(data.replayed ? 'Already delivered' : 'Delivered', data.recordId);
+} else if (error.code === 'RECIPIENT_KEY_MISMATCH') {
+  // The bank replaced its key. Ask for a new invite and seal the record again.
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json 201 Response
+{
+  "success": true,
+  "data": {
+    "recordId": "cmhw3k9t20007l80c5q2x7m4d",
+    "envelopeId": "75aa6ca04ca5ab4223136c3bea128de0",
+    "status": "RECEIVED",
+    "receivedAt": "2026-11-12T09:14:09.204Z",
+    "replayed": false
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T09:14:09.230Z"
+  }
+}
+```
+```json 200 Response - Repeat
+{
+  "success": true,
+  "data": {
+    "recordId": "cmhw3k9t20007l80c5q2x7m4d",
+    "envelopeId": "75aa6ca04ca5ab4223136c3bea128de0",
+    "status": "OPENED",
+    "receivedAt": "2026-11-12T09:14:09.204Z",
+    "replayed": true
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T11:02:55.471Z"
+  }
+}
+```
+```json Error - Key Mismatch
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "RECIPIENT_KEY_MISMATCH",
+    "message": "This envelope is sealed to a key the bank no longer uses. Ask the bank for a new invite and seal the record again."
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T09:14:09.230Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | The body or the header is malformed, a timing rule fails, or `header.sourceId` is not this inbox. `details.field` names the field, such as `header.issuedAt` |
+| `PROFILE_MISMATCH` | `400` | `header.profileKey` is not the profile key the bank set for your source. The message names it |
+| `UNAUTHORIZED` | `401` | The token is missing, malformed or wrong, the `sourceId` is unknown, or the bank removed the source |
+| `INVALID_SIGNATURE` | `401` | The signature does not verify against the signing key the bank registered for your source |
+| `SOURCE_PAUSED` | `403` | The bank paused your source. No record is accepted until it resumes |
+| `SEALED_KYC_NOT_ENABLED` | `409` | The bank's instance is a production instance for which sealed KYC records are not enabled |
+| `RECIPIENT_KEY_NOT_SET` | `409` | The bank has no recipient key registered |
+| `RECIPIENT_KEY_MISMATCH` | `409` | `header.recipientKeyId` is not the bank's current key. Ask the bank for a new invite and seal the record again |
+| `ENVELOPE_ID_REUSED` | `409` | A different envelope was already delivered under this `envelopeId` |
+| `RECORD_ALREADY_DELIVERED` | `409` | A record with this `recordDigest` was already delivered to this bank |
+| `PAYLOAD_TOO_LARGE` | `413` | The ciphertext is larger than 6,291,456 bytes. `details.field` is `ciphertext` |
+| `INBOX_FULL` | `429` | Too many records wait unopened at the bank. See [A full inbox](#a-full-inbox) |
+| `RATE_LIMIT_EXCEEDED` | `429` | A rate limit was exceeded. See [Rate limits](/endpoints/kyc-inbox/introduction#rate-limits) |
+| `KYC_DELIVERY_FAILED` | `500` | The envelope could not be stored |

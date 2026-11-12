@@ -1,0 +1,155 @@
+---
+title: "Verifier walkthrough"
+description: "The verifier's path through the KYC courier tool: create the signing key, store the bank's invite and confirm its key, seal a record with attachments, send it, follow its status and revoke it."
+icon: "paper-plane"
+---
+
+This page is for the engineer at a KYC verifier that a bank designated as one of its KYC sources. After reading it you will have a signing key, a stored invite, and a first record sealed and delivered to the bank.
+
+The tool calls the bank's [KYC inbox](/endpoints/kyc-inbox/introduction) for you. To build the envelope in your own system instead, that page has the format.
+
+<Steps>
+  <Step title="Create the signing key">
+    ```bash
+    export TRUSSET_KYC_PASSPHRASE='a long passphrase'
+    trusset-kyc source-keygen
+    ```
+
+    ```
+    Signing key created.
+    Public key:  c201dc3ced8549ad4e07400a868d9fd043a8d316e7141989c33e8f2f5f844fd6
+    Fingerprint: 4b37 6734 b088 268b 89d3 cf6d 1a88 0a1c
+    Stored in:   /srv/kyc/.trusset-kyc/signing-key.json (encrypted with the passphrase)
+    Send the public key to the bank and confirm the fingerprint with them over a separate channel.
+    ```
+
+    Send the public key to the bank. A keystore holds one signing key, and the command refuses to overwrite it. Back up the key file and the passphrase.
+  </Step>
+
+  <Step title="Store the invite">
+    The bank registers your key and gives you an invite string over a confidential channel.
+
+    ```bash
+    trusset-kyc invite add 'trusset-kyc-invite:v1:eyJ2IjoxLCJhcGkiOiJodHRwczovL2FwaS50cnVzc2V0Lm9yZyIsInNvdXJjZUlkIjoi...'
+    ```
+
+    ```
+    Invite stored for source cmhw2a6r10003l80c9d4h1n8v (Hanse Haftungsdach GmbH).
+    Bank instance type:        DEVELOPMENT
+    Profile key:               PROFESSIONAL
+    API:                       https://api.trusset.org
+    Recipient key id:          b9619d9be69ed903
+    Recipient key fingerprint: b961 9d9b e69e d903 c31c 6f1a f3c6 a7d2
+    Trusset reports the same recipient key.
+    Compare the fingerprint with the bank over a separate channel before you send anything.
+    ```
+
+    The command stores the invite, asks the inbox for the bank's key and confirms that it equals the key in the invite. Then call the bank and compare the recipient key fingerprint. Read them the fingerprint of your signing key in the same call.
+
+    `invite list` shows stored invites without the token. A new invite for a source you already stored replaces the old one only with `--replace`.
+  </Step>
+
+  <Step title="Seal a record">
+    ```bash
+    trusset-kyc seal --source cmhw2a6r10003l80c9d4h1n8v \
+      --wallet 0x8ba1f109551bD432803012645Ac136ddd64DBA72 \
+      --record customer.json \
+      --attach id-front.jpg --attach proof-of-address.pdf \
+      --verified-at 2026-11-10 --valid-until 2027-11-10
+    ```
+
+    ```
+    Sealed for recipient key b9619d9be69ed903 (b961 9d9b e69e d903 c31c 6f1a f3c6 a7d2).
+    Envelope id:   75aa6ca04ca5ab4223136c3bea128de0
+    Record digest: 565dd632e69c3630319efbd08052d5fd1dfbdd5b1123b31e227502261fae5b9d
+    Sealed size:   240932 bytes
+    Written to:    /srv/kyc/75aa6ca04ca5ab4223136c3bea128de0.envelope.json
+    Send it within 24 hours with: trusset-kyc send /srv/kyc/75aa6ca04ca5ab4223136c3bea128de0.envelope.json
+    ```
+
+    Sealing works offline. It writes `<envelopeId>.envelope.json`, which holds the delivery body: the clear header, the encapsulated key, the ciphertext and your signature. It contains no key and no plaintext. `--out <file>` chooses another name, and an existing file is never overwritten.
+
+    Keep the record digest. A revocation names the record by it.
+  </Step>
+
+  <Step title="Send it">
+    ```bash
+    trusset-kyc send 75aa6ca04ca5ab4223136c3bea128de0.envelope.json
+    ```
+
+    ```
+    Delivered.
+    Record id:   cmhw3k9t20007l80c5q2x7m4d
+    Status:      RECEIVED
+    Received at: 2026-11-12T09:14:09.204Z
+    ```
+
+    Before it sends, the tool asks the inbox for the bank's key again. If that key differs from the key your invite pins, or the envelope is sealed to another key ID, it sends nothing and tells you the bank must issue a new invite. `seal --send` seals and sends in one step with the same check.
+
+    An envelope must be sent within 24 hours of sealing. Sending the same envelope twice is safe: the second call returns the same record and stores nothing new.
+  </Step>
+
+  <Step title="Follow the record">
+    ```bash
+    trusset-kyc status --source cmhw2a6r10003l80c9d4h1n8v 75aa6ca04ca5ab4223136c3bea128de0
+    ```
+
+    It prints the fields of [Get Delivery Status](/endpoints/kyc-inbox/get-delivery-status): the status, when the bank opened, approved or rejected the record, the reject reason, and whether the wallet is admitted.
+  </Step>
+</Steps>
+
+## The record file
+
+The file given to `--record` is a JSON object. Its content is free: the tool does not interpret it, and Trusset never sees it. Agree the fields with the bank. For example:
+
+```json
+{
+  "firstName": "Ada",
+  "lastName": "Lovelace",
+  "dateOfBirth": "1990-12-10",
+  "nationality": "GB",
+  "address": { "street": "12 Analytical Row", "postalCode": "N1 9GU", "city": "London", "country": "GB" },
+  "documentType": "PASSPORT",
+  "documentNumber": "X1234567",
+  "documentExpiry": "2031-05-01",
+  "verificationMethod": "VIDEO_IDENT",
+  "verificationReference": "HH-2026-000123",
+  "pepSanctionsResult": "CLEAR"
+}
+```
+
+Attachments are files of any type, added with one `--attach` each. A name must be a plain file name of at most 120 characters, without a path separator or a leading dot, and unique within the record in any letter case.
+
+The whole sealed record, attachments included, may be at most 6 MiB (6,291,456 bytes). Attachments are base64 encoded inside the record, so about 4.5 MiB of files fit. `seal` refuses a larger record and states its size.
+
+## Dates
+
+`--valid-until` is required. `--verified-at` defaults to the current time. Both take a full timestamp such as `2026-11-10T09:30:00.000Z` or a date. A date given as `YYYY-MM-DD` means the start of that day in UTC for `--verified-at` and the end of that day in UTC for `--valid-until`.
+
+`validUntil` is the date until which you vouch for the record. When it passes, the record expires at the bank and the bank is asked to remove the wallet from its whitelists.
+
+## Revoke a record
+
+```bash
+trusset-kyc revoke --source cmhw2a6r10003l80c9d4h1n8v \
+  --wallet 0x8ba1f109551bD432803012645Ac136ddd64DBA72 \
+  --digest 565dd632e69c3630319efbd08052d5fd1dfbdd5b1123b31e227502261fae5b9d \
+  --reason WITHDRAWN
+```
+
+```
+Revoked.
+Record id:  cmhw3k9t20007l80c5q2x7m4d
+Status:     REVOKED
+Revoked at: 2027-02-03T08:40:13.027Z
+```
+
+Reasons are `EXPIRED`, `WITHDRAWN`, `SUPERSEDED`, `INVALID` and `OTHER`. The tool signs the revocation with your signing key.
+
+<Warning>
+  A revocation changes the record at the bank and notifies the bank. It removes nothing on chain: a wallet the bank already listed stays listed until the bank's own wallet signs the removal. See [Revoke Record](/endpoints/kyc-inbox/revoke-record).
+</Warning>
+
+## When the bank replaces its key
+
+`send` then refuses with a message that the reported key differs from the pinned one. Ask the bank for a new invite, store it with `invite add --replace`, compare the new fingerprint with the bank, and seal the waiting records again. An envelope sealed to the old key cannot be delivered.

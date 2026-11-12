@@ -1,0 +1,133 @@
+---
+title: 'Update KYC Source'
+api: 'PATCH /customers/api/kyc-sources/{sourceId}'
+description: 'Rename a source, change its key, profile or whitelists, or pause it'
+---
+
+Changes a KYC source. Send any combination of the fields below. A field that is not sent stays as it is, and a call that changes nothing answers with the source unchanged.
+
+## What each change does
+
+| Field | Effect |
+|---|---|
+| `name` | Renames the source. The invite the verifier holds keeps working |
+| `signingKey` | Later deliveries and revocations are verified against the new key. Confirm the new fingerprint with the verifier, then replace the pin in your tool as well: `trusset-kyc source remove`, then `trusset-kyc source add` with the new key. Open the records still waiting under the old key first, because your tool verifies each record against the pinned key |
+| `profileKey` | Later deliveries must carry the new profile key. The invite names the profile key the verifier seals under, so issue a new one with [Reissue Source Invite](/endpoints/customers/reissue-kyc-source-invite) |
+| `accessListIds` | Replaces the bound whitelists. Send `[]` to unbind all |
+| `status` | `PAUSED` refuses deliveries with `403 SOURCE_PAUSED` until you set `ACTIVE` again. A paused source can still revoke records |
+
+<Warning>
+  Unbinding a whitelist lifts the record requirement on it. From then on [Set Whitelist Members](/endpoints/lending/set-access-list-members) lists any wallet on that list again, unless another source of your instance is still bound to it. Wallets already listed stay listed.
+</Warning>
+
+A removed source cannot be changed. Add a new source instead.
+
+## Path Parameters
+
+<ParamField path="sourceId" type="string" required>
+  The source `id` from [List KYC Sources](/endpoints/customers/list-kyc-sources).
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="name" type="string">
+  1 to 80 characters: letters, digits, spaces and `. , & ( ) ' _ -`, starting with a letter or a digit. Unique among the sources of your instance that are not removed.
+</ParamField>
+
+<ParamField body="signingKey" type="string">
+  The verifier's Ed25519 public key as 64 hex characters, with or without a `0x` prefix.
+</ParamField>
+
+<ParamField body="profileKey" type="string">
+  The `key` of an enabled [verification profile](/endpoints/customers/list-verification-profiles).
+</ParamField>
+
+<ParamField body="accessListIds" type="string[]">
+  Up to 10 whitelist IDs. The list replaces the bound whitelists as a whole.
+</ParamField>
+
+<ParamField body="status" type="string">
+  `ACTIVE` or `PAUSED`. Use [Remove KYC Source](/endpoints/customers/remove-kyc-source) to end a source for good.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="source" type="object">The source after the change, as on [List KYC Sources](/endpoints/customers/list-kyc-sources).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  A change is written to the customer audit log as `KYC_SOURCE_UPDATED`, naming the fields that changed. A new signing key is recorded with its fingerprint and the fingerprint of the key it replaced.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X PATCH "https://api.trusset.org/customers/api/kyc-sources/cmhw2a6r10003l80c9d4h1n8v" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "status": "PAUSED" }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/customers/api/kyc-sources/${sourceId}`,
+  {
+    method: 'PATCH',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'PAUSED' })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "source": {
+      "id": "cmhw2a6r10003l80c9d4h1n8v",
+      "name": "Hanse Haftungsdach GmbH",
+      "signingKey": "c201dc3ced8549ad4e07400a868d9fd043a8d316e7141989c33e8f2f5f844fd6",
+      "signingKeyFingerprint": "4b37 6734 b088 268b 89d3 cf6d 1a88 0a1c",
+      "profileKey": "PROFESSIONAL",
+      "accessLists": [
+        {
+          "id": "cmv2k8q1d0004l70a3n6p2w9e",
+          "name": "Depositors Q4",
+          "address": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37"
+        }
+      ],
+      "status": "PAUSED",
+      "tokenHint": "Qml8",
+      "tokenIssuedAt": "2026-11-09T08:31:02.118Z",
+      "lastDeliveryAt": "2026-11-12T09:14:09.204Z",
+      "createdAt": "2026-11-09T08:31:02.118Z",
+      "counts": { "received": 3, "opened": 1, "approved": 12 }
+    }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T10:02:17.441Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field sent is malformed, or `status` is not `ACTIVE` or `PAUSED`. `details.field` names the field |
+| `INVALID_INVESTOR_TYPE` | `400` | `profileKey` names no enabled verification profile of your instance |
+| `SOURCE_NOT_FOUND` | `404` | No KYC source with this ID belongs to your instance |
+| `ACCESS_LIST_NOT_FOUND` | `404` | A whitelist in `accessListIds` is not kept or managed by your instance on this network. `details.accessListIds` names them |
+| `INSTANCE_NOT_FOUND` | `404` | The instance behind your key is archived or no longer exists |
+| `SOURCE_REVOKED` | `409` | The source was removed and cannot be changed |
+| `SOURCE_NAME_TAKEN` | `409` | Another source of your instance uses this name |
+| `SOURCE_KEY_TAKEN` | `409` | Another source of your instance uses this signing key |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 20 KYC source writes per minute |
+| `UPDATE_KYC_SOURCE_FAILED` | `500` | The source could not be updated |

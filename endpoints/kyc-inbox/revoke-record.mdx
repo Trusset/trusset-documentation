@@ -1,0 +1,111 @@
+---
+title: 'Revoke Record'
+api: 'POST /kyc-inbox/{sourceId}/revocations'
+authMethod: 'bearer'
+description: 'Withdraw a record you delivered'
+---
+
+Revokes a record you delivered, with a statement signed by your signing key. Use it when the verification no longer stands, was issued in error, or is replaced by a new one. The statement names the record by its `recordDigest` and its wallet. The `envelopeId` is not used.
+
+## What a revocation does
+
+- The record becomes `REVOKED`, with your `reason`. Trusset deletes the ciphertext if it still holds it.
+- The bank receives a `customer.kyc_record_revoked` event.
+- From then on the record no longer supports listing the wallet on the bank's whitelists.
+
+<Warning>
+  A revocation removes nothing on chain. A wallet the bank already listed stays listed until the bank signs the removal with its own wallet. Trusset shows the bank that a removal is due and builds the transaction, but cannot send it. If the removal is urgent, tell the bank directly.
+</Warning>
+
+A record that is `RECEIVED`, `OPENED`, `APPROVED`, `EXPIRED` or `SUPERSEDED` can be revoked. A record that is `REJECTED` or `UNCLAIMED` stays as it is: the call answers `200` with that status and `replayed: false`. Revoking a record that is already `REVOKED` answers `200` with `replayed: true`. A paused source can still revoke.
+
+## The statement
+
+The header carries exactly the 8 keys below, as compact JSON, and travels as base64url without padding. See [Revocations](/endpoints/kyc-inbox/introduction#revocations) for the rules and the signature.
+
+```json
+{"v":1,"type":"REVOCATION","revocationId":"81f9d62002bd68416238d651237f5cb8","sourceId":"cmhw2a6r10003l80c9d4h1n8v","walletAddress":"0x8ba1f109551bd432803012645ac136ddd64dba72","recordDigest":"565dd632e69c3630319efbd08052d5fd1dfbdd5b1123b31e227502261fae5b9d","reason":"WITHDRAWN","issuedAt":"2027-02-03T08:40:12.118Z"}
+```
+
+`reason` is `EXPIRED`, `WITHDRAWN`, `SUPERSEDED`, `INVALID` or `OTHER`. Trusset treats the five the same way and passes the code to the bank as `revokeReason`. What each one means in your process is for you and the bank to agree. The statement has no free-text field.
+
+## Path Parameters
+
+<ParamField path="sourceId" type="string" required>
+  Your source ID, from the invite.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="header" type="string" required>
+  The revocation header bytes as base64url without padding. `issuedAt` must not be older than 24 hours and at most 10 minutes ahead.
+</ParamField>
+
+<ParamField body="signature" type="string" required>
+  Your 64-byte Ed25519 signature over the UTF-8 bytes of `trusset-kyc-revocation-v1` and a line feed, followed by the SHA-256 hash of the header bytes. Standard base64 with padding.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="recordId" type="string">The record's ID at the bank.</ResponseField>
+    <ResponseField name="status" type="string">`REVOKED`, or the record's unchanged status when it could not be revoked.</ResponseField>
+    <ResponseField name="revokedAt" type="string">When the revocation was recorded, ISO 8601. `null` when the record was not revoked.</ResponseField>
+    <ResponseField name="replayed" type="boolean">`true` when the record was already `REVOKED` before this call.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/kyc-inbox/cmhw2a6r10003l80c9d4h1n8v/revocations" \
+  -H "Authorization: Bearer tki_your_token_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "header": "eyJ2IjoxLCJ0eXBlIjoiUkVWT0NBVElPTiIsInJldm9jYXRpb25JZCI6IjgxZjlkNjIwMDJiZDY4NDE2MjM4ZDY1MT...",
+    "signature": "8g+w/XdFTeoMrIQYOP2Uc9YJHvVBM4zQqDMPE/KFAsZHXjYvhP2Q5Znyui7ll1HpltipwEvBC1vT8zzuSN2eAw=="
+  }'
+```
+```typescript TypeScript
+const res = await fetch(`${invite.api}/kyc-inbox/${invite.sourceId}/revocations`, {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${invite.token}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ header, signature })
+});
+const { data } = await res.json();
+
+if (data.status !== 'REVOKED') {
+  console.warn(`Not revoked. The record is ${data.status}.`);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "recordId": "cmhw3k9t20007l80c5q2x7m4d",
+    "status": "REVOKED",
+    "revokedAt": "2027-02-03T08:40:13.027Z",
+    "replayed": false
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2027-02-03T08:40:13.050Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | The body or the header is malformed, `reason` is not one of the five codes, `issuedAt` fails its rule, or `header.sourceId` is not this inbox. `details.field` names the field |
+| `UNAUTHORIZED` | `401` | The token is missing, malformed or wrong, the `sourceId` is unknown, or the bank removed the source |
+| `INVALID_SIGNATURE` | `401` | The signature does not verify against the signing key the bank registered for your source |
+| `RECORD_NOT_FOUND` | `404` | No record with this `recordDigest` and wallet was delivered through your inbox |
+| `RATE_LIMIT_EXCEEDED` | `429` | A rate limit was exceeded. See [Rate limits](/endpoints/kyc-inbox/introduction#rate-limits) |
+| `KYC_REVOCATION_FAILED` | `500` | The revocation could not be recorded |

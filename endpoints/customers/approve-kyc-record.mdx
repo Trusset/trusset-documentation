@@ -1,0 +1,209 @@
+---
+title: 'Approve KYC Record'
+api: 'POST /customers/api/kyc-records/{recordId}/approve'
+description: 'Accept an opened record and get the transactions that list its wallet'
+---
+
+Records your decision to accept an opened KYC record, and returns one unsigned `setListed` transaction for each whitelist bound to the record's source. The owner or a manager of the whitelist signs and broadcasts each one, then [Confirm Record Admission](/endpoints/customers/confirm-kyc-record-admission) records the result. Trusset holds no key and sends nothing.
+
+A record can be approved only after your tool opened it, so the file is on your side before you decide. Trusset never sees the file and takes no part in the decision.
+
+## What approving does
+
+- The record becomes `APPROVED`. From now until `validUntil`, [Set Whitelist Members](/endpoints/lending/set-access-list-members) accepts the record's wallet on the whitelists bound to its source.
+- An earlier `APPROVED` record from the same source for the same wallet becomes `SUPERSEDED`.
+- A `customer.kyc_record_approved` event goes to your customer webhooks.
+- Nothing changes on chain. The wallet is listed only when your wallet signs the transaction in `admissions[].plan`.
+
+Calling this again for an `APPROVED` record changes nothing and returns the admissions again. Use that to fetch the transaction later, or to build it for another signer.
+
+<Warning>
+  The approval is recorded before the transactions are built. When a build fails, for example with `NOT_ACCESS_LIST_MANAGER` because the signer cannot change the list, the call answers with that error and the record is `APPROVED` all the same. Fix the cause and call again to get the admissions.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="recordId" type="string" required>
+  The record `id` from [List KYC Records](/endpoints/customers/list-kyc-records).
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="signerAddress" type="string">
+  The wallet that will sign: the owner or a manager of the bound whitelists. Omitted, the first verified wallet of your instance that is the owner or a manager of the list is used. See [Who signs](/endpoints/lending/set-access-list-members#who-signs).
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="record" type="object">The record after the call, as on [List KYC Records](/endpoints/customers/list-kyc-records#response-fields).</ResponseField>
+    <ResponseField name="admissions" type="array">
+      One entry per whitelist bound to the record's source. Empty when none is bound.
+      <Expandable>
+        <ResponseField name="listId" type="string">The whitelist ID. Send it to [Confirm Record Admission](/endpoints/customers/confirm-kyc-record-admission).</ResponseField>
+        <ResponseField name="listName" type="string">The whitelist's name.</ResponseField>
+        <ResponseField name="listAddress" type="string">The list contract, checksummed.</ResponseField>
+        <ResponseField name="alreadyListed" type="boolean">`true` when the whitelist's record already holds the wallet as listed. `plan` is then `null`.</ResponseField>
+        <ResponseField name="plan" type="object">
+          The build for this list, with the fields of [Set Whitelist Members](/endpoints/lending/set-access-list-members#response-fields) for one wallet.
+          <Expandable>
+            <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+            <ResponseField name="transaction" type="object">The `setListed` call on the list: `{ to, data, chainId, value }`.</ResponseField>
+            <ResponseField name="functionName" type="string">`setListed`.</ResponseField>
+            <ResponseField name="description" type="string">What the transaction does.</ResponseField>
+            <ResponseField name="signer" type="string">The wallet that must sign, checksummed.</ResponseField>
+            <ResponseField name="signerRole" type="string">`OWNER` or `MANAGER`.</ResponseField>
+            <ResponseField name="warnings" type="array">`{ code, message }` entries. `LIST_SCOPE` names the markets and vaults the list gates.</ResponseField>
+          </Expandable>
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  `plan.confirmWith` names the confirm route of this record and the `listId` to send with the transaction hash. [Confirm Record Admission](/endpoints/customers/confirm-kyc-record-admission) verifies the transaction, checks that it listed this record's wallet, and writes the admission to the customer audit log next to the record.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/kyc-records/cmhw3k9t20007l80c5q2x7m4d/approve" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "signerAddress": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52" }'
+```
+```typescript TypeScript
+const base = `https://api.trusset.org/customers/api/kyc-records/${recordId}`;
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const res = await fetch(`${base}/approve`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ signerAddress: await listManager.getAddress() })
+});
+const { data } = await res.json();
+
+for (const admission of data.admissions) {
+  if (admission.alreadyListed) continue;
+  const tx = await listManager.sendTransaction(admission.plan.transaction);
+  await tx.wait();
+  await fetch(`${base}/admission/confirm`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ listId: admission.listId, txHash: tx.hash })
+  });
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "record": {
+      "id": "cmhw3k9t20007l80c5q2x7m4d",
+      "envelopeId": "75aa6ca04ca5ab4223136c3bea128de0",
+      "sourceId": "cmhw2a6r10003l80c9d4h1n8v",
+      "sourceName": "Hanse Haftungsdach GmbH",
+      "walletAddress": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+      "profileKey": "PROFESSIONAL",
+      "status": "APPROVED",
+      "recordDigest": "565dd632e69c3630319efbd08052d5fd1dfbdd5b1123b31e227502261fae5b9d",
+      "recipientKeyId": "b9619d9be69ed903",
+      "verifiedAt": "2026-11-10T00:00:00.000Z",
+      "validUntil": "2027-11-10T23:59:59.999Z",
+      "issuedAt": "2026-11-12T09:14:07.512Z",
+      "receivedAt": "2026-11-12T09:14:09.204Z",
+      "openedAt": "2026-11-12T09:40:31.870Z",
+      "approvedAt": "2026-11-12T10:15:02.336Z",
+      "rejectedAt": null,
+      "rejectReason": null,
+      "revokedAt": null,
+      "revokeReason": null,
+      "expiredAt": null,
+      "customerId": "cmhw3m2p40009l80c1r6t8y3b",
+      "sealedBytes": 240964,
+      "held": false,
+      "lists": [
+        {
+          "listId": "cmv2k8q1d0004l70a3n6p2w9e",
+          "name": "Depositors Q4",
+          "address": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+          "listed": false
+        }
+      ],
+      "action": "ADMIT"
+    },
+    "admissions": [
+      {
+        "listId": "cmv2k8q1d0004l70a3n6p2w9e",
+        "listName": "Depositors Q4",
+        "listAddress": "0x7D31e6b09a4c25F8E1b73d0a6C94e2f58B1A0C37",
+        "alreadyListed": false,
+        "plan": {
+          "action": "SIGN_TRANSACTION",
+          "transaction": {
+            "to": "0x7D31e6b09a4c25F8E1b73d0a6C94e2f58B1A0C37",
+            "data": "0x...",
+            "chainId": 11155111,
+            "value": "0"
+          },
+          "functionName": "setListed",
+          "description": "List 1 wallet on the whitelist (transaction 1 of 1)",
+          "listId": "cmv2k8q1d0004l70a3n6p2w9e",
+          "listAddress": "0x7D31e6b09a4c25F8E1b73d0a6C94e2f58B1A0C37",
+          "listed": true,
+          "accounts": 1,
+          "signer": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
+          "signerRole": "OWNER",
+          "maxBatch": 200,
+          "warnings": [],
+          "confirmWith": { "endpoint": "kyc-records/cmhw3k9t20007l80c5q2x7m4d/admission/confirm", "listId": "cmv2k8q1d0004l70a3n6p2w9e", "txHash": true }
+        }
+      }
+    ]
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T10:15:02.410Z"
+  }
+}
+```
+```json Error - Not Opened
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "RECORD_NOT_OPENED",
+    "message": "Open this record with your local tool first. A record is approved only after the bank holds and has reviewed the file."
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T09:30:00.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `signerAddress` is not a valid address |
+| `NOT_ACCESS_LIST_MANAGER` | `403` | The signer is neither the owner nor a manager of a bound whitelist. `details` names the signer and the owner. The record is already `APPROVED` |
+| `RECORD_NOT_FOUND` | `404` | No KYC record with this ID belongs to your instance |
+| `INSTANCE_NOT_FOUND` | `404` | The instance behind your key is archived or no longer exists |
+| `ACCESS_LIST_NOT_FOUND` | `404` | A bound whitelist is no longer kept or managed by your instance on this network |
+| `RECORD_NOT_OPENED` | `409` | The record is still `RECEIVED`. Open it with your tool first |
+| `RECORD_EXPIRED` | `409` | The record's `validUntil` has passed. Ask the source for a current record |
+| `RECORD_NOT_APPROVABLE` | `409` | The record is rejected, revoked, unclaimed or superseded. `details.status` is its status |
+| `TX_WOULD_REVERT` | `409` | The simulated `setListed` transaction reverts. Nothing was returned to sign |
+| `WALLET_NOT_CONFIGURED` | `412` | Your instance has no verified wallet to sign |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 KYC record writes per minute |
+| `APPROVE_KYC_RECORD_FAILED` | `500` | The approval could not be recorded |
+| `ACCESS_LISTS_NOT_CONFIGURED` | `501` | The whitelist factory is not deployed on your instance's network |
+| `ACCESS_LIST_UNREADABLE` | `503` | The list's owner and managers could not be read, so the signer could not be checked. Retry shortly |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read to simulate the transaction. Retry shortly |

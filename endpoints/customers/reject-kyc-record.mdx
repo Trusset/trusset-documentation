@@ -1,0 +1,125 @@
+---
+title: 'Reject KYC Record'
+api: 'POST /customers/api/kyc-records/{recordId}/reject'
+description: 'Refuse a record that is waiting or opened'
+---
+
+Rejects a record in status `RECEIVED` or `OPENED`. The record becomes `REJECTED`, Trusset deletes the ciphertext if it still holds it, and a `customer.kyc_record_rejected` event with the reason goes to your customer webhooks. The source reads the status and the reason from [Get Delivery Status](/endpoints/kyc-inbox/get-delivery-status).
+
+Your [local tool](/tools/kyc-courier/overview) calls this on its own when an envelope from a pinned source fails a cryptographic check. You call it for a record you reviewed and do not accept.
+
+A rejection is final for the record. The source can deliver a new record for the same wallet. Rejecting a record that is already `REJECTED` changes nothing and answers with the record.
+
+## Reasons
+
+| `reason` | Sent when |
+|---|---|
+| `BAD_SIGNATURE` | The tool found that a signature does not verify against the source key you pinned |
+| `DIGEST_MISMATCH` | The tool found that the decrypted record does not match its header: the record digest, the open commitment, a field repeated in both, or an attachment hash |
+| `UNDECRYPTABLE` | The tool could not decrypt the envelope with the record key |
+| `UNKNOWN_SOURCE_KEY`, `INCOMPLETE`, `NOT_ACCEPTED` | Yours to send after your own review. The tool never sends them |
+
+Trusset treats the six reasons the same way and shows the code to the source. The reason is a code only: this endpoint takes no free text.
+
+## Path Parameters
+
+<ParamField path="recordId" type="string" required>
+  The record `id` from [List KYC Records](/endpoints/customers/list-kyc-records).
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="reason" type="string" required>
+  One of the six codes above, in any letter case.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="record" type="object">The record after the call, as on [List KYC Records](/endpoints/customers/list-kyc-records#response-fields), with `status: REJECTED`, `rejectedAt` and `rejectReason`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  The rejection is written to the customer audit log as `KYC_RECORD_REJECTED`, with the reason and the status the record had before.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/kyc-records/cmhw3k9t20007l80c5q2x7m4d/reject" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "reason": "INCOMPLETE" }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/customers/api/kyc-records/${recordId}/reject`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason: 'INCOMPLETE' })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "record": {
+      "id": "cmhw3k9t20007l80c5q2x7m4d",
+      "envelopeId": "75aa6ca04ca5ab4223136c3bea128de0",
+      "sourceId": "cmhw2a6r10003l80c9d4h1n8v",
+      "sourceName": "Hanse Haftungsdach GmbH",
+      "walletAddress": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+      "profileKey": "PROFESSIONAL",
+      "status": "REJECTED",
+      "recordDigest": "565dd632e69c3630319efbd08052d5fd1dfbdd5b1123b31e227502261fae5b9d",
+      "recipientKeyId": "b9619d9be69ed903",
+      "verifiedAt": "2026-11-10T00:00:00.000Z",
+      "validUntil": "2027-11-10T23:59:59.999Z",
+      "issuedAt": "2026-11-12T09:14:07.512Z",
+      "receivedAt": "2026-11-12T09:14:09.204Z",
+      "openedAt": "2026-11-12T09:40:31.870Z",
+      "approvedAt": null,
+      "rejectedAt": "2026-11-12T10:15:02.336Z",
+      "rejectReason": "INCOMPLETE",
+      "revokedAt": null,
+      "revokeReason": null,
+      "expiredAt": null,
+      "customerId": "cmhw3m2p40009l80c1r6t8y3b",
+      "sealedBytes": 240964,
+      "held": false,
+      "lists": [
+        {
+          "listId": "cmv2k8q1d0004l70a3n6p2w9e",
+          "name": "Depositors Q4",
+          "address": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+          "listed": false
+        }
+      ],
+      "action": null
+    }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T10:15:02.360Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `reason` is missing or is not one of the six codes. `details.field` is `reason` |
+| `RECORD_NOT_FOUND` | `404` | No KYC record with this ID belongs to your instance |
+| `RECORD_NOT_REJECTABLE` | `409` | The record is approved, revoked, expired, unclaimed or superseded. `details.status` is its status |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 KYC record writes per minute |
+| `REJECT_KYC_RECORD_FAILED` | `500` | The rejection could not be recorded |

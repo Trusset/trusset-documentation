@@ -26,8 +26,10 @@ Every request authenticates with an instance API key in the `X-API-Key` header. 
 | `/verification-profiles` | The verification levels configured for your instance |
 | `/eligibility` | Admissions to and removals from the eligibility registers of your verification profiles |
 | `/disclosure-requests` | Requests asking a wallet holder to disclose a verified fact |
+| `/kyc-sources` | The verifiers you accept sealed KYC records from |
+| `/kyc-records` | Your record key and the sealed KYC records your sources delivered |
 
-Customer records need the `customers` service. Everything under `/identity`, `/id-links`, `/verification-profiles`, `/eligibility` and `/disclosure-requests` needs `identity`.
+Customer records need the `customers` service. Everything under `/identity`, `/id-links`, `/verification-profiles`, `/eligibility`, `/disclosure-requests`, `/kyc-sources` and `/kyc-records` needs `identity`.
 
 ## Which register you write to
 
@@ -169,6 +171,106 @@ Trusset never sees the underlying data. What reaches this API is the manifest, t
   A leaf can be a hiding commitment with no zk proof behind it, which the tool uses for fields like a surname where there is no predicate worth proving. Those leaves are marked `commitmentOnly` and are not attestable while proof verification is enforced.
 </Note>
 
+## Sealed KYC records
+
+A sealed KYC record is the KYC file of one wallet, delivered to you by a verifier you designate, your KYC source. The source encrypts the file to your record key and signs it. Trusset stores the ciphertext and a clear header with the wallet address, the source, the profile key, the dates and two digests. It holds no key that opens the file. You open it with the [KYC courier tool](/tools/kyc-courier/overview) on your own machine. See [Sealed KYC Records](/protocol/infrastructure/sealed-kyc-records) for the model.
+
+Sealed records are separate from [KYC proofs](#kyc-proofs), where you hold the KYC data yourself and publish evidence about it.
+
+<Steps>
+  <Step title="Register your record key">
+    `trusset-kyc keygen` creates the key pair on your machine. [Set Record Key](/endpoints/customers/set-kyc-record-key) registers the public half.
+  </Step>
+  <Step title="Add a source">
+    [Add KYC Source](/endpoints/customers/add-kyc-source) records the verifier's signing key, the verification profile it verifies for and the whitelists its records admit to. It returns the invite you hand to the verifier.
+  </Step>
+  <Step title="Open what arrives">
+    The source delivers through its [KYC inbox](/endpoints/kyc-inbox/introduction). `trusset-kyc open` downloads each envelope, verifies and decrypts it locally, files it, and proves the opening with [Open KYC Record](/endpoints/customers/open-kyc-record). Trusset then deletes the ciphertext.
+  </Step>
+  <Step title="Approve and sign">
+    [Approve KYC Record](/endpoints/customers/approve-kyc-record) records your decision and returns one unsigned `setListed` transaction for each whitelist bound to the source. Your wallet signs it, and [Confirm Record Admission](/endpoints/customers/confirm-kyc-record-admission) records the result.
+  </Step>
+</Steps>
+
+[List KYC Records](/endpoints/customers/list-kyc-records) shows every record with its status and the next step that is yours. [Reject KYC Record](/endpoints/customers/reject-kyc-record) refuses one. The Issuer Portal offers the same decisions, but it never downloads or opens an envelope: [Download Envelope](/endpoints/customers/get-kyc-record-envelope) and [Open KYC Record](/endpoints/customers/open-kyc-record) exist on the API key only.
+
+### Whitelists bound to a source
+
+Binding a [whitelist](/endpoints/lending/list-access-lists) to a source makes a record the condition for listing on it. [Set Whitelist Members](/endpoints/lending/set-access-list-members) then refuses to list a wallet with `409 KYC_RECORD_REQUIRED`, unless the wallet has a record from a source bound to that list that is `APPROVED` and whose `validUntil` has not passed. The check runs when Trusset builds the transaction. The list contract is unchanged, so its owner and managers can still call it directly with their own tools.
+
+When a source revokes a record, or its `validUntil` passes, nothing changes on chain. The record shows `action: REMOVE` while its wallet is still listed and no other approved, valid record covers it. [Build Record Removal](/endpoints/customers/build-kyc-record-removal) returns the removal for your wallet to sign, and [Confirm Record Removal](/endpoints/customers/confirm-kyc-record-removal) records it.
+
+Trusset deletes the ciphertext of a record when your tool opens it, when you reject it, when the source revokes it, when its `validUntil` passes, and when it stays unopened for 30 days. An instance holds at most 25 sources that are not removed, and a source binds at most 10 whitelists.
+
+### Record events
+
+A customer webhook set up in the Issuer Portal reports each change of a record:
+
+| Event | Sent when |
+|---|---|
+| `customer.kyc_record_received` | A source delivered a record |
+| `customer.kyc_record_opened` | Your tool proved it opened a record, and Trusset deleted the ciphertext |
+| `customer.kyc_record_rejected` | A record was rejected, by you or by your tool |
+| `customer.kyc_record_approved` | You approved a record |
+| `customer.kyc_record_revoked` | The source revoked a record |
+| `customer.kyc_record_expired` | A record's `validUntil` passed, or it stayed unopened for 30 days |
+
+Every event carries the same fields in `data`:
+
+| Field | Value |
+|---|---|
+| `recordId` | The record ID |
+| `envelopeId` | The envelope ID the source chose |
+| `walletAddress` | The wallet, checksummed |
+| `sourceId`, `sourceName` | The source that delivered the record |
+| `profileKey` | The verification profile the source verifies for |
+| `status` | The record's status after the change |
+| `recordDigest` | SHA-256 of the signed record document |
+| `verifiedAt`, `validUntil` | The dates the source stated, ISO 8601 |
+| `customerId` | The customer record that holds the wallet, or `null` |
+
+Three events add fields:
+
+| Event | Added fields |
+|---|---|
+| `customer.kyc_record_rejected` | `reason`: the reject reason code |
+| `customer.kyc_record_revoked` | `reason`: the source's reason, `EXPIRED`, `WITHDRAWN`, `SUPERSEDED`, `INVALID` or `OTHER`. `previousStatus`: the status before the revocation |
+| `customer.kyc_record_expired` | `reason`: `VALIDITY_PASSED` with `status: EXPIRED`, or `NOT_COLLECTED` with `status: UNCLAIMED`. `previousStatus`: the status before |
+
+```json
+{
+  "id": "0b6f1c1e-6a3e-4f0e-9d59-3f1f5a1d2c77",
+  "type": "customer.kyc_record_revoked",
+  "webhookId": "cmhv9d3k20001l80c7w5e2q9a",
+  "instanceId": "cmrz4d1v20000cghx8k6p3m7t",
+  "idempotencyKey": "customer.kyc_record_revoked:cmhw3k9t20007l80c5q2x7m4d",
+  "emittedAt": "2027-02-03T08:40:13.041Z",
+  "data": {
+    "recordId": "cmhw3k9t20007l80c5q2x7m4d",
+    "envelopeId": "75aa6ca04ca5ab4223136c3bea128de0",
+    "walletAddress": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+    "sourceId": "cmhw2a6r10003l80c9d4h1n8v",
+    "sourceName": "Hanse Haftungsdach GmbH",
+    "profileKey": "PROFESSIONAL",
+    "status": "REVOKED",
+    "recordDigest": "565dd632e69c3630319efbd08052d5fd1dfbdd5b1123b31e227502261fae5b9d",
+    "verifiedAt": "2026-11-10T00:00:00.000Z",
+    "validUntil": "2027-11-10T23:59:59.999Z",
+    "customerId": "cmhw3m2p40009l80c1r6t8y3b",
+    "reason": "WITHDRAWN",
+    "previousStatus": "APPROVED"
+  }
+}
+```
+
+Each of the six events is sent at most once for a record. No event carries anything from inside the KYC file.
+
+### Availability
+
+Sealed KYC records are switched on for development instances. On a production instance they stay off until Trusset enables them for your organisation. Until then [Set Record Key](/endpoints/customers/set-kyc-record-key), [Add KYC Source](/endpoints/customers/add-kyc-source) and [Reissue Source Invite](/endpoints/customers/reissue-kyc-source-invite) answer `409 SEALED_KYC_NOT_ENABLED`, and a delivery to the instance is refused with the same code.
+
+Whether you may rely on a verifier's KYC, and how personal data passes between you and the verifier, is governed by the agreements between the two of you. Trusset relays the sealed file and takes no part in assessing it.
+
 ## Disclosure requests
 
 A disclosure request asks the holder of a wallet to disclose one verified fact to your instance. The fact is age over 18 (`AGE`), country of residence (`COUNTRY`), or the complete on-chain verification (`FULL_KYC`).
@@ -189,7 +291,7 @@ The holder answers on verify.trusset.org with a consent the wallet signs and, fo
 }
 ```
 
-Routes under `/identity` and `/eligibility` always send both `data` and `error`, with the unused one `null`. So do [Get ID Link](/endpoints/customers/get-id-link), [Issue Sumsub Token](/endpoints/customers/issue-sumsub-token), [Bind Link Wallet](/endpoints/customers/bind-link-wallet) and [Recheck Link Review](/endpoints/customers/recheck-link-review). The other paths send only the one that applies, so a success has no `error` key and a failure has no `data` key. On failure, `error` carries `code` and `message`. Always branch on `success` rather than on the HTTP status alone.
+Routes under `/identity`, `/eligibility`, `/kyc-sources` and `/kyc-records` always send both `data` and `error`, with the unused one `null`. So do [Get ID Link](/endpoints/customers/get-id-link), [Issue Sumsub Token](/endpoints/customers/issue-sumsub-token), [Bind Link Wallet](/endpoints/customers/bind-link-wallet) and [Recheck Link Review](/endpoints/customers/recheck-link-review). The other paths send only the one that applies, so a success has no `error` key and a failure has no `data` key. On failure, `error` carries `code` and `message`. Always branch on `success` rather than on the HTTP status alone.
 
 The lists under `/manage` and `/id-links` put `total` in `metadata`. [List Disclosure Requests](/endpoints/customers/list-disclosure-requests) returns `data.items` and `data.pagination` instead.
 
@@ -220,7 +322,9 @@ Every request made with an API key counts against 200 requests per minute for th
 
 [Add Claims from Proof](/endpoints/customers/add-claims-from-proof), [Inspect Manifest](/endpoints/customers/inspect-manifest) and [Attest Proofs](/endpoints/customers/attest-proofs) also share a budget of 30 requests per minute per instance. It answers `429` with code `RATE_LIMITED`, not `RATE_LIMIT_EXCEEDED`, and a `Retry-After` header.
 
-Two more budgets of 120 requests per minute per instance apply. The admission and removal writes under `/eligibility` share one with [Get Wallet Eligibility](/endpoints/customers/get-wallet-eligibility). [Get ID Link](/endpoints/customers/get-id-link), [Issue Sumsub Token](/endpoints/customers/issue-sumsub-token), [Bind Link Wallet](/endpoints/customers/bind-link-wallet) and [Recheck Link Review](/endpoints/customers/recheck-link-review) share the other. Both answer `429 RATE_LIMIT_EXCEEDED` with a `Retry-After` header. No other Customers route has a tighter limit.
+Two more budgets of 120 requests per minute per instance apply. The admission and removal writes under `/eligibility` share one with [Get Wallet Eligibility](/endpoints/customers/get-wallet-eligibility). [Get ID Link](/endpoints/customers/get-id-link), [Issue Sumsub Token](/endpoints/customers/issue-sumsub-token), [Bind Link Wallet](/endpoints/customers/bind-link-wallet) and [Recheck Link Review](/endpoints/customers/recheck-link-review) share the other. Both answer `429 RATE_LIMIT_EXCEEDED` with a `Retry-After` header.
+
+The sealed KYC routes have four budgets per instance and minute: 240 reads and 120 writes under `/kyc-records`, and 120 reads and 20 writes under `/kyc-sources`. They answer `429 RATE_LIMIT_EXCEEDED` with a `Retry-After` header as well. No other Customers route has a tighter limit.
 
 ## Credits
 

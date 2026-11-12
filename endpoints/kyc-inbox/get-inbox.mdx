@@ -1,0 +1,98 @@
+---
+title: 'Describe Inbox'
+api: 'GET /kyc-inbox/{sourceId}'
+authMethod: 'bearer'
+description: 'Your source as the bank set it up, with the key the bank currently uses'
+---
+
+Returns how the bank set up your source: its name, status and profile key, the bank's current recipient key, the size limit and Trusset's clock. Call it before every delivery to check that the bank still uses the key your invite pins.
+
+<Warning>
+  Compare `recipientKey.publicKey` with the `recipientKey` in your invite and send nothing when they differ. Never seal to the key this endpoint reports. It passes through Trusset, and the invite, whose fingerprint you confirmed with the bank, is your reference. A different key means the bank replaced its key: ask the bank for a new invite.
+</Warning>
+
+## Path Parameters
+
+<ParamField path="sourceId" type="string" required>
+  Your source ID, from the invite.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="sourceId" type="string">Your source ID.</ResponseField>
+    <ResponseField name="name" type="string">The name the bank gave your source.</ResponseField>
+    <ResponseField name="status" type="string">`ACTIVE` or `PAUSED`. While paused, deliveries are refused with `403 SOURCE_PAUSED`.</ResponseField>
+    <ResponseField name="profileKey" type="string">The profile key every header must carry. When it differs from your invite, the bank changed it: ask for a new invite.</ResponseField>
+    <ResponseField name="instanceType" type="string">`PRODUCTION` or `DEVELOPMENT`.</ResponseField>
+    <ResponseField name="recipientKey" type="object">`{ keyId, publicKey }` of the bank's current recipient key, or `null` when the bank has none registered.</ResponseField>
+    <ResponseField name="limits" type="object">`{ maxCiphertextBytes }`: the largest ciphertext accepted, `6291456`.</ResponseField>
+    <ResponseField name="serverTime" type="string">Trusset's clock, ISO 8601. The timing rules for `issuedAt`, `verifiedAt` and `validUntil` are measured against it.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/kyc-inbox/cmhw2a6r10003l80c9d4h1n8v" \
+  -H "Authorization: Bearer tki_your_token_here"
+```
+```typescript TypeScript
+const res = await fetch(`${invite.api}/kyc-inbox/${invite.sourceId}`, {
+  headers: { Authorization: `Bearer ${invite.token}` }
+});
+const { data } = await res.json();
+
+if (!data.recipientKey || data.recipientKey.publicKey !== invite.recipientKey) {
+  throw new Error('The bank uses another key than the invite pins. Nothing was sent.');
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "sourceId": "cmhw2a6r10003l80c9d4h1n8v",
+    "name": "Hanse Haftungsdach GmbH",
+    "status": "ACTIVE",
+    "profileKey": "PROFESSIONAL",
+    "instanceType": "DEVELOPMENT",
+    "recipientKey": {
+      "keyId": "b9619d9be69ed903",
+      "publicKey": "d523432543eb506e3fbe5538bc2409ab97d016a8a8823ef0a7d416ac60967033"
+    },
+    "limits": { "maxCiphertextBytes": 6291456 },
+    "serverTime": "2026-11-12T09:14:06.880Z"
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T09:14:06.880Z"
+  }
+}
+```
+```json Error - Unauthorized
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "UNAUTHORIZED",
+    "message": "Invalid KYC source credentials"
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T09:14:06.880Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `UNAUTHORIZED` | `401` | The token is missing, malformed or wrong, the `sourceId` is unknown, or the bank removed the source |
+| `RATE_LIMIT_EXCEEDED` | `429` | A rate limit was exceeded. See [Rate limits](/endpoints/kyc-inbox/introduction#rate-limits) |
+| `KYC_INBOX_FAILED` | `500` | The inbox could not be read |

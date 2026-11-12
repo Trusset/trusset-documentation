@@ -1,0 +1,133 @@
+---
+title: "Bank walkthrough"
+description: "The bank's path through the KYC courier tool: create and register the record key, add a source and pin its signing key, see what is waiting, open and file records, approve them, and verify a filed record offline."
+icon: "building-columns"
+---
+
+This page is for the engineer or operations team at the bank that receives KYC files. After reading it you will have a record key registered, a verifier set up as a source, and a first record opened and filed on your own machine.
+
+Run the tool on a machine you control and that is allowed to hold KYC files. The examples assume a POSIX shell.
+
+<Steps>
+  <Step title="Create the record key">
+    ```bash
+    export TRUSSET_KYC_PASSPHRASE='a long passphrase'
+    trusset-kyc keygen
+    ```
+
+    ```
+    Recipient key created.
+    Public key:  d523432543eb506e3fbe5538bc2409ab97d016a8a8823ef0a7d416ac60967033
+    Key id:      b9619d9be69ed903
+    Fingerprint: b961 9d9b e69e d903 c31c 6f1a f3c6 a7d2
+    Stored in:   /srv/kyc/.trusset-kyc/recipient-keys/b9619d9be69ed903.json (encrypted with the passphrase)
+    Register the public key in the Trusset app, then back up the key file.
+    Without this key, records sealed to it cannot be opened and must be sent again.
+    ```
+
+    The private key is written to the keystore, `./.trusset-kyc` by default, encrypted with the passphrase. Back up the key file and the passphrase now. See [Keys and files](/tools/kyc-courier/keys-and-files).
+  </Step>
+
+  <Step title="Register the public key">
+    Register the public key as the record key of your instance, in the Issuer Portal or with [Set Record Key](/endpoints/customers/set-kyc-record-key). Only the public key is sent. On a production instance this step is refused until Trusset has enabled sealed KYC records for your organisation.
+  </Step>
+
+  <Step title="Add the verifier as a source">
+    The verifier sends you its signing public key, which `trusset-kyc source-keygen` printed on its side. Add the source in the Issuer Portal or with [Add KYC Source](/endpoints/customers/add-kyc-source): its name, that key, the verification profile it verifies for, and the whitelists its records admit to.
+
+    You get back an invite string. Hand it to the verifier over a confidential channel, because it holds the verifier's token.
+  </Step>
+
+  <Step title="Compare fingerprints, then pin the source">
+    Call the verifier. Read them the fingerprint of your record key and have them read you the fingerprint of their signing key. Only when both match, pin the signing key:
+
+    ```bash
+    trusset-kyc source add --id cmhw2a6r10003l80c9d4h1n8v --name "Hanse Haftungsdach GmbH" \
+      --key c201dc3ced8549ad4e07400a868d9fd043a8d316e7141989c33e8f2f5f844fd6
+    ```
+
+    ```
+    Pinned source cmhw2a6r10003l80c9d4h1n8v (Hanse Haftungsdach GmbH).
+    Signing key: c201dc3ced8549ad4e07400a868d9fd043a8d316e7141989c33e8f2f5f844fd6
+    Fingerprint: 4b37 6734 b088 268b 89d3 cf6d 1a88 0a1c
+    Records from this source are accepted only when signed by this key.
+    ```
+
+    `--id` is the source ID from the Issuer Portal or the API. From now on the tool accepts a record from this source only when both of its signatures verify against this key. `trusset-kyc source list` shows the pins.
+  </Step>
+
+  <Step title="See what is waiting">
+    ```bash
+    export TRUSSET_API_KEY='trusset_your_key_here'
+    trusset-kyc pull
+    ```
+
+    ```
+    1 record(s) with status RECEIVED.
+    cmhw3k9t20007l80c5q2x7m4d  RECEIVED  0x8ba1f109551bD432803012645Ac136ddd64DBA72  source cmhw2a6r10003l80c9d4h1n8v (Hanse Haftungsdach GmbH, pinned)  received 2026-11-12T09:14:09.204Z  valid until 2027-11-10T23:59:59.999Z  240964 bytes
+    ```
+
+    `pull` lists and decrypts nothing. A `customer.kyc_record_received` webhook event tells you when to look. `--status`, `--source` and `--wallet` filter the list.
+  </Step>
+
+  <Step title="Open the records">
+    ```bash
+    trusset-kyc open --all --out ./records
+    ```
+
+    ```
+    opened          cmhw3k9t20007l80c5q2x7m4d  /srv/kyc/records/0x8ba1f109551bd432803012645ac136ddd64dba72/75aa6ca04ca5ab4223136c3bea128de0
+    ```
+
+    `open <recordId> --out ./records` opens one record. For each record the tool works in this order and stops at the first step that fails:
+
+    1. It downloads the envelope and checks that its header matches the record Trusset listed.
+    2. It verifies the signature on the envelope against the pinned key.
+    3. It decrypts with the record key the header names.
+    4. It verifies the signature inside the record against the pinned key.
+    5. It checks the record against the header: the record digest, the open commitment, the wallet, source, profile and dates, and the hash of every attachment.
+    6. It writes the files to `--out`.
+    7. Only then does it tell Trusset the record is open, which makes Trusset delete the ciphertext.
+
+    The files land in `<out>/<walletAddress>/<envelopeId>/`. [Keys and files](/tools/kyc-courier/keys-and-files#a-filed-record) lists them.
+  </Step>
+
+  <Step title="Review and approve">
+    Review the filed record under your own procedures. Then approve or reject it in the Issuer Portal, or with [Approve KYC Record](/endpoints/customers/approve-kyc-record) and [Reject KYC Record](/endpoints/customers/reject-kyc-record). Approving returns the transaction that lists the wallet on each whitelist bound to the source. Your wallet signs it. The tool takes no part in this step.
+  </Step>
+</Steps>
+
+## What open reports
+
+Each record ends in one of these outcomes:
+
+| Line starts with | Meaning | Exit code |
+|---|---|---|
+| `opened` | Verified, filed and acknowledged. A record whose `validUntil` has already passed is still filed, with a note | 0 |
+| `already opened` | The record is no longer `RECEIVED` and is already filed in the output directory. Running `open` again is safe | 0 |
+| `not opened` | The record's source is not pinned. Nothing was decrypted and nothing was rejected. The line shows the key Trusset reports as a hint. Confirm the fingerprint with the verifier, run `source add`, then `open` again | 2 |
+| `rejected` | A pinned source's envelope failed a cryptographic check. The tool posted a rejection with `BAD_SIGNATURE`, `DIGEST_MISMATCH` or `UNDECRYPTABLE` and wrote no plaintext | 2 |
+| `not confirmed` | The files are on disk but Trusset did not confirm the acknowledgement. Run `open` again | 3 |
+| `failed` | Anything else, for example a record key that is not in this keystore, or a record that is authentic but malformed. Nothing was written and nothing was rejected | 1, 2 or 3 |
+
+With `--all` the tool continues with the remaining records after a failure. The exit code of the run is 2 when any record ended with 2, otherwise 3 when any ended with 3, otherwise 1 when any ended with 1, otherwise 0.
+
+<Warning>
+  Trusset deletes the ciphertext as soon as the opening is acknowledged. The files under `--out` are then your copy of the record. Put that directory on storage you back up and protect it like any other store of personal data.
+</Warning>
+
+## Verify a filed record offline
+
+```bash
+trusset-kyc verify ./records/0x8ba1f109551bd432803012645ac136ddd64dba72/75aa6ca04ca5ab4223136c3bea128de0
+```
+
+`verify` needs no network and no private key, so an auditor can run it on a copy. It checks the signature in `record.sig` over `record.json` with the key in `source.json`, compares that key with your pin when the source is pinned, checks the record digest and the other bindings against `header.json`, checks every attachment hash, and checks the envelope signature using the digest in `receipt.json`. It prints one line per check and exits 0 when the record verifies and 2 when it does not.
+
+## When a record is revoked or expires
+
+Nothing on your disk changes. The record's status on Trusset becomes `REVOKED` or `EXPIRED`, a webhook event reports it, and when the wallet is still listed the record shows `action: REMOVE`. Build the removal with [Build Record Removal](/endpoints/customers/build-kyc-record-removal) or in the Issuer Portal, and sign it with your wallet.
+
+## Replacing the record key
+
+`trusset-kyc keygen` can be run again. It adds a key and keeps the earlier ones, so envelopes sealed to an older key still open. `trusset-kyc key show` lists them. After you register the new public key, every source needs a new invite. See [Set Record Key](/endpoints/customers/set-kyc-record-key#replacing-the-key).

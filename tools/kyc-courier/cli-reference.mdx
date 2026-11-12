@@ -1,0 +1,159 @@
+---
+title: "CLI reference"
+description: "Every command and option of the KYC courier tool for the bank side and the verifier side, the environment variables it reads, its exit codes, its JSON output and how it behaves on the network."
+icon: "terminal"
+---
+
+This page is for the operator or integrator scripting the tool. After reading it you will know every command, every option, every environment variable, and what each exit code means.
+
+```
+trusset-kyc <command> [options]
+```
+
+## Common options
+
+| Option | Meaning |
+|---|---|
+| `--home <dir>` | The keystore directory. Default `./.trusset-kyc`, or the environment variable `TRUSSET_KYC_HOME` |
+| `--json` | Print one machine-readable JSON line on stdout instead of text |
+| `--api <url>` | The Trusset API address for the bank commands `pull` and `open`. Default `TRUSSET_API_URL`, or `https://api.trusset.org`. Every other command refuses this option. Verifier commands take the address from the invite |
+| `--help`, `-h` | Help for the tool or for one command |
+| `--version`, `-V` | The version |
+
+## Environment variables
+
+| Variable | Meaning |
+|---|---|
+| `TRUSSET_API_KEY` | The bank's instance API key, for `pull` and `open`. Read from the environment only. Never written to disk and never printed |
+| `TRUSSET_KYC_PASSPHRASE` | When set while a key is created, the private key is stored encrypted. It is then required whenever the key is used |
+| `TRUSSET_KYC_HOME` | The keystore directory |
+| `TRUSSET_API_URL` | The Trusset API address for the bank commands |
+
+The API address must use `https`. Plain `http` is accepted only for `localhost`, `127.0.0.1` and `[::1]`.
+
+## Bank commands
+
+### keygen
+
+```bash
+trusset-kyc keygen
+```
+
+Creates an X25519 record key pair and stores it in the keystore. Prints the public key, the key ID and the fingerprint. Running it again adds a key and keeps the earlier ones.
+
+### key show
+
+```bash
+trusset-kyc key show
+```
+
+Lists the record keys in the keystore, public parts only, and marks the newest.
+
+### source add, source list, source remove
+
+```bash
+trusset-kyc source add --id <sourceId> --name <name> --key <ed25519 public key hex>
+trusset-kyc source list
+trusset-kyc source remove --id <sourceId>
+```
+
+`source add` pins the signing key of a source. Records from that source are accepted only when signed by this key. A source that is already pinned is refused: remove the pin first to change its key.
+
+### pull
+
+```bash
+trusset-kyc pull [--status RECEIVED] [--source <sourceId>] [--wallet <0x...>]
+```
+
+Lists the records Trusset holds for your instance. Nothing is decrypted. `--status` takes one of the eight record statuses and defaults to `RECEIVED`. Each line says whether the record's source is pinned and whether the record key it is sealed to is in this keystore.
+
+### open
+
+```bash
+trusset-kyc open <recordId> --out <dir>
+trusset-kyc open --all --out <dir>
+```
+
+Downloads, verifies, decrypts and files one record, or every record in status `RECEIVED`, then acknowledges each to Trusset. `--out` is required. Give either one record ID or `--all`. The [bank walkthrough](/tools/kyc-courier/bank-walkthrough#what-open-reports) lists the outcomes.
+
+### verify
+
+```bash
+trusset-kyc verify <dir>
+```
+
+Verifies a filed record directory offline. Exits 0 when it verifies and 2 when it does not.
+
+## Verifier commands
+
+### source-keygen
+
+```bash
+trusset-kyc source-keygen
+```
+
+Creates the Ed25519 signing key pair and prints the public key and its fingerprint. A keystore holds one signing key, and the command refuses to overwrite it.
+
+### invite add, invite list, invite remove
+
+```bash
+trusset-kyc invite add <invite-string> [--replace]
+trusset-kyc invite list
+trusset-kyc invite remove --source <sourceId>
+```
+
+`invite add` stores the invite and confirms with the inbox that the bank's key equals the key in the invite. When that check fails, the invite stays stored and the command exits with an error that says so. `--replace` is needed to replace a stored invite for the same source. `invite list` never shows the token.
+
+### seal
+
+```bash
+trusset-kyc seal --source <sourceId> --wallet <0x...> --record <file.json> \
+  [--attach <file> ...] [--verified-at <ISO or YYYY-MM-DD>] --valid-until <ISO or YYYY-MM-DD> \
+  [--out <file>] [--send]
+```
+
+Seals and signs a record for the bank named in the stored invite and writes `<envelopeId>.envelope.json`. Works offline unless `--send` is given, which checks the bank's key and delivers in the same run. When the delivery fails, the envelope file is kept and can be sent later.
+
+### send
+
+```bash
+trusset-kyc send <envelope-file>
+```
+
+Delivers a sealed envelope. Before it posts, it checks that the envelope is sealed to the key the invite pins, that the timing rules hold, and that the inbox reports the same recipient key. When the keystore holds the signing key, it also checks that the envelope is signed by it.
+
+### status
+
+```bash
+trusset-kyc status --source <sourceId> <envelopeId>
+```
+
+Shows what happened to a delivered record.
+
+### revoke
+
+```bash
+trusset-kyc revoke --source <sourceId> --wallet <0x...> --digest <recordDigest> \
+  --reason <EXPIRED|WITHDRAWN|SUPERSEDED|INVALID|OTHER>
+```
+
+Signs and posts a revocation for a delivered record.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Usage or validation error, including a keystore that other users can read |
+| 2 | Verification or cryptographic failure: a signature, digest or key check failed, a source is not pinned, or the bank's key differs from the invite |
+| 3 | Network or server error. The message carries the `error.code` and `error.message` Trusset returned |
+
+Errors are written to stderr as one line starting with `error:`, warnings as lines starting with `warning:`.
+
+## JSON output
+
+With `--json` the tool prints one JSON object on one line of stdout. It carries `ok` and `command` plus the result fields of the command. On failure `ok` is `false` and an `error` object holds `code` and `message`. The exit code is the same as without `--json`.
+
+## Network behaviour
+
+Every call has a timeout of 60 seconds, and 300 seconds for uploading and downloading an envelope. Network failures and the status codes `502`, `503` and `504` are retried, up to 3 attempts in total, for calls that are safe to repeat. A `429 RATE_LIMIT_EXCEEDED` answer is waited out and retried, also up to 3 attempts. `INBOX_FULL` is not retried. Redirects are not followed.

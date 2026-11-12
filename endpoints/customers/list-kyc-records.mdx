@@ -1,0 +1,175 @@
+---
+title: 'List KYC Records'
+api: 'GET /customers/api/kyc-records'
+description: 'Sealed KYC records your sources delivered, in every state'
+---
+
+Lists the sealed KYC records of your instance, newest delivery first. A record is one KYC file a [KYC source](/endpoints/customers/list-kyc-sources) delivered for one wallet. This list shows the clear header of each record and where it stands. The file itself is never part of a response here: it is ciphertext until your [local tool](/tools/kyc-courier/overview) opens it. See [Sealed KYC records](/endpoints/customers/introduction#sealed-kyc-records).
+
+| `status` | Meaning |
+|---|---|
+| `RECEIVED` | Delivered and waiting. Trusset holds the ciphertext until your tool opens it |
+| `OPENED` | Your tool decrypted and filed the record and proved it with [Open KYC Record](/endpoints/customers/open-kyc-record). Trusset deleted the ciphertext. The record waits for your decision |
+| `APPROVED` | You approved the record. While it is valid, its wallet can be listed on the whitelists bound to the source |
+| `REJECTED` | You or your tool rejected the record. `rejectReason` says why |
+| `REVOKED` | The source revoked the record. `revokeReason` says why |
+| `EXPIRED` | `validUntil` passed while the record was `RECEIVED`, `OPENED` or `APPROVED` |
+| `UNCLAIMED` | The record stayed `RECEIVED` for 30 days and was never opened |
+| `SUPERSEDED` | A later record from the same source for the same wallet was approved |
+
+A record reads `EXPIRED` from the moment `validUntil` passes. `expiredAt` and the `customer.kyc_record_expired` event follow when the expiry is recorded, shortly after.
+
+`action` names the next step that is yours:
+
+| `action` | Next step |
+|---|---|
+| `OPEN` | Open the record with your tool: `trusset-kyc open` |
+| `APPROVE` | Decide on the opened record with [Approve KYC Record](/endpoints/customers/approve-kyc-record) or [Reject KYC Record](/endpoints/customers/reject-kyc-record) |
+| `ADMIT` | The record is approved and its wallet is not listed on at least one bound whitelist. Call [Approve KYC Record](/endpoints/customers/approve-kyc-record) again for the transaction |
+| `REMOVE` | The record is revoked or expired and its wallet is still listed on a bound whitelist with no other approved, valid record behind it. Build the removal with [Build Record Removal](/endpoints/customers/build-kyc-record-removal) |
+| `null` | Nothing is waiting on you |
+
+## Query Parameters
+
+<ParamField query="status" type="string">
+  Only records in this status, in any letter case. One value.
+</ParamField>
+
+<ParamField query="walletAddress" type="string">
+  Only records for this wallet, `0x` followed by 40 hex characters.
+</ParamField>
+
+<ParamField query="sourceId" type="string">
+  Only records this source delivered.
+</ParamField>
+
+<ParamField query="customerId" type="string">
+  Only records linked to this customer record.
+</ParamField>
+
+<ParamField query="limit" type="integer" default="50">
+  Records per page, from 1 to 100. A larger value reads as 100, and a value that is not a positive number as 50.
+</ParamField>
+
+<ParamField query="cursor" type="string">
+  The `nextCursor` of the previous page.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="records" type="array">
+      <Expandable>
+        <ResponseField name="id" type="string">The record ID. The other record endpoints take it as `recordId`.</ResponseField>
+        <ResponseField name="envelopeId" type="string">The ID the source gave the envelope, 32 hex characters.</ResponseField>
+        <ResponseField name="sourceId" type="string">The source that delivered it.</ResponseField>
+        <ResponseField name="sourceName" type="string">The source's name.</ResponseField>
+        <ResponseField name="walletAddress" type="string">The wallet the record is about, checksummed.</ResponseField>
+        <ResponseField name="profileKey" type="string">The verification profile the source verified under.</ResponseField>
+        <ResponseField name="status" type="string">See the table above.</ResponseField>
+        <ResponseField name="recordDigest" type="string">SHA-256 of the signed record document, 64 hex characters. Your tool checks the decrypted record against it.</ResponseField>
+        <ResponseField name="recipientKeyId" type="string">The record key the envelope is sealed to.</ResponseField>
+        <ResponseField name="verifiedAt" type="string">When the source verified the investor, as stated in the header. ISO 8601.</ResponseField>
+        <ResponseField name="validUntil" type="string">Until when the source vouches for the record.</ResponseField>
+        <ResponseField name="issuedAt" type="string">When the source sealed the envelope.</ResponseField>
+        <ResponseField name="receivedAt" type="string">When Trusset received it.</ResponseField>
+        <ResponseField name="openedAt" type="string">When your tool proved the opening, or `null`.</ResponseField>
+        <ResponseField name="approvedAt" type="string">When you approved it, or `null`.</ResponseField>
+        <ResponseField name="rejectedAt" type="string">When it was rejected, or `null`.</ResponseField>
+        <ResponseField name="rejectReason" type="string">The reason code sent with the rejection, or `null`.</ResponseField>
+        <ResponseField name="revokedAt" type="string">When the source revoked it, or `null`.</ResponseField>
+        <ResponseField name="revokeReason" type="string">`EXPIRED`, `WITHDRAWN`, `SUPERSEDED`, `INVALID` or `OTHER`, as the source stated, or `null`.</ResponseField>
+        <ResponseField name="expiredAt" type="string">When the expiry or the 30-day lapse was recorded, or `null`.</ResponseField>
+        <ResponseField name="customerId" type="string">The customer record that holds the wallet, or `null` when none does yet.</ResponseField>
+        <ResponseField name="sealedBytes" type="integer">Size of the sealed envelope in bytes: the encapsulated key plus the ciphertext.</ResponseField>
+        <ResponseField name="held" type="boolean">`true` while Trusset still stores the ciphertext.</ResponseField>
+        <ResponseField name="lists" type="array">One entry per whitelist bound to the record's source: `{ listId, name, address, listed }`. `listed` is what the whitelist's record holds for the wallet, which follows confirmed transactions and rescans. It is `null` when the whitelist record is missing.</ResponseField>
+        <ResponseField name="action" type="string">See the table above.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="nextCursor" type="string">Send it as `cursor` for the next page. `null` on the last page.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/customers/api/kyc-records?status=OPENED&limit=20" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const base = 'https://api.trusset.org/customers/api/kyc-records';
+const headers = { 'X-API-Key': 'trusset_your_key_here' };
+
+const waiting = [];
+let cursor: string | null = null;
+do {
+  const query = new URLSearchParams({ status: 'OPENED', limit: '100' });
+  if (cursor) query.set('cursor', cursor);
+  const res = await fetch(`${base}?${query}`, { headers });
+  const { data } = await res.json();
+  waiting.push(...data.records);
+  cursor = data.nextCursor;
+} while (cursor);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "records": [
+      {
+        "id": "cmhw3k9t20007l80c5q2x7m4d",
+        "envelopeId": "75aa6ca04ca5ab4223136c3bea128de0",
+        "sourceId": "cmhw2a6r10003l80c9d4h1n8v",
+        "sourceName": "Hanse Haftungsdach GmbH",
+        "walletAddress": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "profileKey": "PROFESSIONAL",
+        "status": "OPENED",
+        "recordDigest": "565dd632e69c3630319efbd08052d5fd1dfbdd5b1123b31e227502261fae5b9d",
+        "recipientKeyId": "b9619d9be69ed903",
+        "verifiedAt": "2026-11-10T00:00:00.000Z",
+        "validUntil": "2027-11-10T23:59:59.999Z",
+        "issuedAt": "2026-11-12T09:14:07.512Z",
+        "receivedAt": "2026-11-12T09:14:09.204Z",
+        "openedAt": "2026-11-12T09:40:31.870Z",
+        "approvedAt": null,
+        "rejectedAt": null,
+        "rejectReason": null,
+        "revokedAt": null,
+        "revokeReason": null,
+        "expiredAt": null,
+        "customerId": "cmhw3m2p40009l80c1r6t8y3b",
+        "sealedBytes": 240964,
+        "held": false,
+        "lists": [
+          {
+            "listId": "cmv2k8q1d0004l70a3n6p2w9e",
+            "name": "Depositors Q4",
+            "address": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+            "listed": false
+          }
+        ],
+        "action": "APPROVE"
+      }
+    ],
+    "nextCursor": null
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T09:45:00.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `status` is not one of the eight statuses, `walletAddress` is not a wallet address, or `sourceId`, `customerId` or `cursor` is not valid. `details.field` names the parameter |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 240 KYC record reads per minute. See [Rate limits](/endpoints/customers/introduction#rate-limits) |
+| `LIST_KYC_RECORDS_FAILED` | `500` | The records could not be read |

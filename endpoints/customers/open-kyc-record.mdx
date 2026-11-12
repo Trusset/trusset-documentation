@@ -1,0 +1,137 @@
+---
+title: 'Open KYC Record'
+api: 'POST /customers/api/kyc-records/{recordId}/open'
+description: 'Prove that a record was decrypted, so Trusset deletes its ciphertext'
+---
+
+Acknowledges that you hold the decrypted record. The proof is `openProof`, a random value the source placed inside the sealed record. Trusset holds only its SHA-256 hash, in the header's `openCommitment`, so only someone who decrypted the envelope can send the matching value.
+
+Your [local tool](/tools/kyc-courier/overview) calls this from `trusset-kyc open`, after it has verified the record and written the files to disk. You call it yourself only when you open envelopes with your own implementation.
+
+<Warning>
+  When the proof matches, Trusset deletes the ciphertext and the record becomes `OPENED`. The envelope cannot be downloaded again. Store the decrypted record first and acknowledge second, as the tool does. The only way to get the file again is a new delivery from the source.
+</Warning>
+
+## What opening does
+
+- The record becomes `OPENED` and `held` becomes `false`.
+- The record is linked to the customer record of your instance that holds the wallet. When no customer holds it, a customer record is created for the wallet with the record's `profileKey` as its `investorType`. It holds the wallet and the profile only. Nothing from the KYC file is added, because Trusset cannot read it.
+- A `customer.kyc_record_opened` event goes to your customer webhooks.
+
+Sending the proof again for a record that is already `OPENED` or `APPROVED` changes nothing and answers with the record, so a retry after a lost response is safe. Nothing is written on chain and no whitelist changes here. The next step is [Approve KYC Record](/endpoints/customers/approve-kyc-record) or [Reject KYC Record](/endpoints/customers/reject-kyc-record).
+
+## Path Parameters
+
+<ParamField path="recordId" type="string" required>
+  The record `id` from [List KYC Records](/endpoints/customers/list-kyc-records).
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="openProof" type="string" required>
+  The `openProof` field of the decrypted record document: 32 bytes as 64 lowercase hex characters.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="record" type="object">The record after the call, as on [List KYC Records](/endpoints/customers/list-kyc-records#response-fields).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/kyc-records/cmhw3k9t20007l80c5q2x7m4d/open" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "openProof": "2482d01e472949dc837fa2f501969c984d170bf13c7879439aaf98d7d1018413" }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/customers/api/kyc-records/${recordId}/open`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ openProof: decryptedRecord.openProof })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "record": {
+      "id": "cmhw3k9t20007l80c5q2x7m4d",
+      "envelopeId": "75aa6ca04ca5ab4223136c3bea128de0",
+      "sourceId": "cmhw2a6r10003l80c9d4h1n8v",
+      "sourceName": "Hanse Haftungsdach GmbH",
+      "walletAddress": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+      "profileKey": "PROFESSIONAL",
+      "status": "OPENED",
+      "recordDigest": "565dd632e69c3630319efbd08052d5fd1dfbdd5b1123b31e227502261fae5b9d",
+      "recipientKeyId": "b9619d9be69ed903",
+      "verifiedAt": "2026-11-10T00:00:00.000Z",
+      "validUntil": "2027-11-10T23:59:59.999Z",
+      "issuedAt": "2026-11-12T09:14:07.512Z",
+      "receivedAt": "2026-11-12T09:14:09.204Z",
+      "openedAt": "2026-11-12T09:40:31.870Z",
+      "approvedAt": null,
+      "rejectedAt": null,
+      "rejectReason": null,
+      "revokedAt": null,
+      "revokeReason": null,
+      "expiredAt": null,
+      "customerId": "cmhw3m2p40009l80c1r6t8y3b",
+      "sealedBytes": 240964,
+      "held": false,
+      "lists": [
+        {
+          "listId": "cmv2k8q1d0004l70a3n6p2w9e",
+          "name": "Depositors Q4",
+          "address": "0x7d31e6b09a4c25f8e1b73d0a6c94e2f58b1a0c37",
+          "listed": false
+        }
+      ],
+      "action": "APPROVE"
+    }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T09:40:31.902Z"
+  }
+}
+```
+```json Error - Proof Mismatch
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "OPEN_PROOF_MISMATCH",
+    "message": "openProof does not match this record. It is the value inside the decrypted record, so only the holder of the record key can supply it.",
+    "details": { "field": "openProof" }
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-12T09:40:31.902Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `OPEN_PROOF_MISMATCH` | `400` | `openProof` is missing, is not 64 lowercase hex characters, or does not hash to the record's `openCommitment`. Checked before the record's status |
+| `RECORD_NOT_FOUND` | `404` | No KYC record with this ID belongs to your instance |
+| `INSTANCE_NOT_FOUND` | `404` | The instance behind your key is archived or no longer exists |
+| `RECORD_NOT_OPENABLE` | `409` | The record is rejected, revoked, expired, unclaimed or superseded. `details.status` is its status |
+| `RECORD_EXPIRED` | `409` | The record's `validUntil` passed before it was opened. Ask the source for a current record |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 KYC record writes per minute |
+| `OPEN_KYC_RECORD_FAILED` | `500` | The opening could not be recorded |

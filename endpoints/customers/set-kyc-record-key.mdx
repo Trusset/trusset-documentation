@@ -1,0 +1,123 @@
+---
+title: 'Set Record Key'
+api: 'PUT /customers/api/kyc-records/recipient-key'
+description: 'Register the public key your KYC sources seal records to'
+---
+
+Registers the X25519 public key that `trusset-kyc keygen` prints as the record key of your instance. Every KYC source seals its records to this key, and only the private half in your tool's keystore opens them. See [Sealed KYC records](/endpoints/customers/introduction#sealed-kyc-records).
+
+Register the key before you add a source: [Add KYC Source](/endpoints/customers/add-kyc-source) is refused with `RECIPIENT_KEY_NOT_SET` without one.
+
+## Replacing the key
+
+Sending a different key replaces the one in use, which is kept in `history` with its `retiredAt`. Sending the key already in use changes nothing.
+
+<Warning>
+  After a replacement every source still holds an invite that pins the old key. A delivery sealed to the old key is refused with `409 RECIPIENT_KEY_MISMATCH`. Issue a new invite for each source with [Reissue Source Invite](/endpoints/customers/reissue-kyc-source-invite). `sourcesToReinvite` counts them.
+
+  Records already waiting stay sealed to the old key. Keep the old private key in the keystore until they are opened. `trusset-kyc keygen` adds a key and keeps the earlier ones for this reason.
+</Warning>
+
+A key that was registered and replaced cannot be registered again. Create a new key instead.
+
+## Body Parameters
+
+<ParamField body="publicKey" type="string" required>
+  The 32-byte X25519 public key as 64 hex characters, with or without a `0x` prefix. It is stored lowercased and unprefixed. The all-zero key is refused.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="recipientKey" type="object">The key now in use: `{ keyId, publicKey, fingerprint, createdAt }`, as on [Get Record Key](/endpoints/customers/get-kyc-record-key).</ResponseField>
+    <ResponseField name="history" type="array">Up to 50 keys of the instance, newest first: `{ keyId, fingerprint, createdAt, retiredAt }`.</ResponseField>
+    <ResponseField name="pendingRecords" type="integer">Records in status `RECEIVED`.</ResponseField>
+    <ResponseField name="sourcesToReinvite" type="integer">Sources that are not removed and need a new invite because this call replaced a key. `0` for a first key and when nothing changed.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  A change is written to the customer audit log as `KYC_RECIPIENT_KEY_SET`, with the new key ID and the one it replaced.
+</Note>
+
+<RequestExample>
+```bash cURL
+curl -X PUT "https://api.trusset.org/customers/api/kyc-records/recipient-key" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "publicKey": "d523432543eb506e3fbe5538bc2409ab97d016a8a8823ef0a7d416ac60967033" }'
+```
+```typescript TypeScript
+const res = await fetch('https://api.trusset.org/customers/api/kyc-records/recipient-key', {
+  method: 'PUT',
+  headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    publicKey: 'd523432543eb506e3fbe5538bc2409ab97d016a8a8823ef0a7d416ac60967033'
+  })
+});
+const { data } = await res.json();
+
+console.log(`Fingerprint to confirm with your sources: ${data.recipientKey.fingerprint}`);
+if (data.sourcesToReinvite > 0) {
+  console.warn(`${data.sourcesToReinvite} sources need a new invite`);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "recipientKey": {
+      "keyId": "b9619d9be69ed903",
+      "publicKey": "d523432543eb506e3fbe5538bc2409ab97d016a8a8823ef0a7d416ac60967033",
+      "fingerprint": "b961 9d9b e69e d903 c31c 6f1a f3c6 a7d2",
+      "createdAt": "2026-11-09T08:12:44.310Z"
+    },
+    "history": [
+      {
+        "keyId": "b9619d9be69ed903",
+        "fingerprint": "b961 9d9b e69e d903 c31c 6f1a f3c6 a7d2",
+        "createdAt": "2026-11-09T08:12:44.310Z",
+        "retiredAt": null
+      }
+    ],
+    "pendingRecords": 0,
+    "sourcesToReinvite": 0
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-09T08:12:44.352Z"
+  }
+}
+```
+```json Error - Not Enabled
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "SEALED_KYC_NOT_ENABLED",
+    "message": "Sealed KYC records are not enabled for production instances yet. Use a development instance, or ask Trusset to enable them for your organisation."
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-09T08:12:44.352Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `publicKey` is not 64 hex characters, or is the all-zero key. `details.field` is `publicKey` |
+| `INSTANCE_NOT_FOUND` | `404` | The instance behind your key is archived or no longer exists |
+| `SEALED_KYC_NOT_ENABLED` | `409` | Your instance is a production instance and sealed KYC records are not enabled for your organisation. See [Availability](/endpoints/customers/introduction#availability) |
+| `RECIPIENT_KEY_RETIRED` | `409` | This key was registered before and has been replaced. Create a new key with `trusset-kyc keygen` |
+| `RECIPIENT_KEY_CONFLICT` | `409` | Another request changed the key at the same time. Read the key again and retry |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 KYC record writes per minute |
+| `KYC_RECIPIENT_KEY_FAILED` | `500` | The key could not be written |

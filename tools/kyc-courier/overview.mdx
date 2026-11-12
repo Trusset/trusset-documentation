@@ -1,0 +1,93 @@
+---
+title: "Overview"
+description: "What the KYC courier tool does for a bank and for its KYC verifier, what Trusset can and cannot see or do in between, the two pinning rules that carry the trust model, and how you get the tool."
+icon: "circle-info"
+---
+
+This page is for the engineer or compliance officer deciding how KYC files will reach the bank. After reading it you will know what the tool does on each side, what Trusset holds in between, and which checks you must do yourself.
+
+The KYC courier (`trusset-kyc`) is a command line tool for [sealed KYC records](/protocol/infrastructure/sealed-kyc-records). It runs on your own machine and has two sides:
+
+- **The verifier** seals the KYC file of an investor so that only the bank can read it, signs it, and posts it to the bank's inbox on Trusset.
+- **The bank** downloads the sealed envelope, verifies and decrypts it locally, files the record, and proves to Trusset that it opened it. Trusset then deletes the ciphertext.
+
+Trusset stores and relays the sealed envelope in between. It never holds a key that opens one.
+
+## Who it is for
+
+| Role | What they do with the tool |
+|---|---|
+| Bank | Creates the record key, pins each verifier's signing key, opens the records that arrive, and can verify a filed record again offline at any time |
+| Verifier | Creates a signing key, stores the bank's invite, seals and sends records, follows their status, and revokes a record when needed |
+| Auditor | Runs `trusset-kyc verify` on a filed record directory. Needs no network and no private key |
+
+Approving a record and listing its wallet on a whitelist are not part of the tool. The bank does that in the Issuer Portal or through the [API](/endpoints/customers/approve-kyc-record), and its own wallet signs.
+
+## What Trusset sees
+
+- The envelope header: envelope ID, source ID, wallet address, profile key, recipient key ID, two digests and three timestamps.
+- The size of the ciphertext and the time of delivery.
+- Whether and when the bank opened, approved or rejected a record, and whether the verifier revoked it.
+
+## What Trusset cannot do
+
+- **Read a record.** Records are encrypted to the bank's X25519 key with HPKE (RFC 9180). The private key never leaves the bank's keystore.
+- **Forge or alter a record.** Each record is signed twice with the verifier's Ed25519 key: once inside the ciphertext, once over the header and the ciphertext. The bank's tool checks both against a key the bank pinned itself.
+- **Move a record to another wallet, source or profile.** Those fields are in the signed header, the header is bound into the encryption, and the same fields are repeated inside the signed record.
+- **Claim that a record was opened.** Opening is proven with a random value that exists only inside the ciphertext.
+
+## The two pinning rules
+
+These two rules are what make the list above hold even if Trusset were compromised:
+
+1. **The verifier pins the bank's key from the invite.** The tool never encrypts to a key that Trusset reports. If Trusset reports a different key than the invite holds, `send` refuses.
+2. **The bank pins each verifier's signing key in its own keystore.** The signing key Trusset reports is shown as a hint and is never used to verify a record.
+
+<Warning>
+  The invite itself is issued through Trusset. Compare fingerprints over a channel that does not run through Trusset, for example by phone, before the first record is sent:
+
+  - The verifier reads the recipient key fingerprint that `invite add` prints, and the bank compares it with its own.
+  - The bank reads the signing key fingerprint before it runs `source add`, and the verifier compares it with its own.
+
+  A fingerprint is the first 32 hex characters of SHA-256 over the raw public key, in 8 groups of 4, for example `b961 9d9b e69e d903 c31c 6f1a f3c6 a7d2`. A key pinned without this comparison is only the key Trusset relayed.
+</Warning>
+
+A compromised relay could still drop or delay envelopes, replay an old valid envelope, report wrong status values and report wrong key hints. It could not make the bank accept a record the pinned verifier did not sign, and it could not read anything.
+
+## What the tool does not decide
+
+The tool moves a file and proves where it came from. It does not judge whether the verification behind it is sufficient. Whether a bank may rely on a verifier's KYC, and how personal data may pass between the two, is governed by the agreements between the bank and the verifier.
+
+The tool does not check what a verifier seals. A record with wrong content is still validly signed, so the review of the file stays with the bank.
+
+## Getting the tool
+
+The tool is not published to a package registry. Trusset provides it during onboarding.
+
+It needs Node.js 18 or newer and has no runtime dependencies. All cryptography uses the `crypto` module built into Node.js. From the folder you received:
+
+```bash
+npm install -g .
+trusset-kyc --version
+```
+
+Or run it without installing: `node bin/trusset-kyc.js --help`.
+
+File modes are not enforced on Windows. Use a directory there that only your account can read.
+
+Version 1.0.0. Apache-2.0 license.
+
+<CardGroup cols={2}>
+  <Card title="Bank walkthrough" icon="building-columns" href="/tools/kyc-courier/bank-walkthrough">
+    From the record key to an opened and filed record
+  </Card>
+  <Card title="Verifier walkthrough" icon="paper-plane" href="/tools/kyc-courier/verifier-walkthrough">
+    From the invite to a delivered record, its status and a revocation
+  </Card>
+  <Card title="CLI reference" icon="terminal" href="/tools/kyc-courier/cli-reference">
+    Every command, option, environment variable and exit code
+  </Card>
+  <Card title="Keys and files" icon="key" href="/tools/kyc-courier/keys-and-files">
+    What is written to disk, how keys are protected, what to back up
+  </Card>
+</CardGroup>

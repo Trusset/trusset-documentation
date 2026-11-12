@@ -1,0 +1,125 @@
+---
+title: "Sealed KYC Records"
+description: "Receive the KYC file of an investor from the verifier you designate, as ciphertext only you can open"
+---
+
+An investor is often verified before they reach you, for example by the liability umbrella that onboarded them at the time of investment. A sealed KYC record brings that verifier's KYC file to you through Trusset without Trusset being able to read it. The verifier encrypts the file to a key whose private half exists only on your machine, signs it, and posts it to your inbox. You open it locally, decide, and your wallet signs the admission.
+
+## Who does what
+
+<CardGroup cols={3}>
+    <Card title="The verifier" icon="user-check">
+        Your KYC source. Seals the file to your key, signs it with its own key, delivers it, and can revoke it later
+    </Card>
+    <Card title="Trusset" icon="arrows-left-right">
+        Stores the sealed envelope and relays it. Holds no key that opens it and decrypts nothing
+    </Card>
+    <Card title="You" icon="building-columns">
+        Open the envelope with a tool on your own machine, file the record, approve or reject it, and sign every whitelist change
+    </Card>
+</CardGroup>
+
+## What Trusset holds
+
+For each record Trusset stores two things: the ciphertext, and a clear header.
+
+| Trusset holds | Trusset does not hold |
+|---|---|
+| The header: wallet address, source, profile key, the dates the verifier stated, and two digests | The KYC file: names, dates of birth, documents, attachments |
+| The size of the ciphertext and when it arrived | A key that opens an envelope |
+| Your decisions: opened, approved, rejected, and the verifier's revocation | Any decrypted copy, in the backend or in the Issuer Platform |
+
+The header has a fixed set of fields and no free text. Opening happens only in software you run. The Issuer Platform lists records and takes your decisions, and it never downloads or opens an envelope.
+
+Trusset also cannot alter a record or pass one off as coming from your verifier. The verifier signs each record twice, once inside the ciphertext and once over the header and the ciphertext, and your tool checks both against a signing key you pinned yourself.
+
+### When the ciphertext is deleted
+
+Trusset deletes the ciphertext of a record as soon as one of these happens:
+
+- your tool proves it opened the record
+- you reject the record
+- the verifier revokes it
+- its validity date passes
+- it stays uncollected for 30 days
+
+The header and the history of the record stay.
+
+## From record to whitelist
+
+<Steps>
+  <Step title="Create your record key">
+    The local tool, `trusset-kyc`, creates a key pair on your machine. You register the public half for your instance. The private half never leaves your keystore.
+  </Step>
+  <Step title="Designate a source">
+    You add the verifier as a KYC source with its signing key, the investor profile it verifies for, and the whitelists its records admit to. Trusset returns an invite, which you hand to the verifier. You and the verifier compare key fingerprints over a separate channel.
+  </Step>
+  <Step title="The verifier delivers">
+    The verifier seals the file of one wallet and posts it to your inbox. Trusset checks the header and the signature and stores the envelope.
+  </Step>
+  <Step title="You open it locally">
+    Your tool downloads the envelope with your API key, verifies both signatures against the key you pinned, decrypts, and files the record on your disk. It then proves the opening to Trusset, and Trusset deletes the ciphertext.
+  </Step>
+  <Step title="You decide">
+    You review the file and approve or reject the record, in the Issuer Platform or through the API.
+  </Step>
+  <Step title="Your wallet signs">
+    Approving returns one unsigned transaction for each whitelist bound to the source. The owner or a manager of the whitelist signs it. Trusset holds no key and sends nothing.
+  </Step>
+</Steps>
+
+## Whitelists bound to a source
+
+A [whitelist](/endpoints/lending/list-access-lists) gates a lending market or a vault, and by itself records nothing about why a wallet is on it. Binding it to a KYC source changes that. Trusset then builds a listing for a wallet only when the wallet has a record from a bound source that you opened and approved and that is still valid. That holds for the approval flow and for the ordinary whitelist member endpoint alike, which refuses other wallets with `KYC_RECORD_REQUIRED`.
+
+<Note>
+The requirement applies to every listing built through Trusset, in the Issuer Platform and through the API. The whitelist contract itself is unchanged: its owner and managers can still call it directly with their own tools.
+</Note>
+
+A source verifies for one [investor profile](/protocol/infrastructure/investor-profiles). Every record it delivers carries that profile's key, and a record under another key is refused.
+
+## Lifecycle
+
+| Status | Meaning |
+|---|---|
+| `RECEIVED` | Delivered and waiting. Trusset holds the ciphertext |
+| `OPENED` | Your tool decrypted and filed it. The ciphertext is deleted. Waiting for your decision |
+| `APPROVED` | You accepted it. Its wallet can be listed on the bound whitelists while the record is valid |
+| `REJECTED` | You or your tool refused it |
+| `REVOKED` | The verifier withdrew it |
+| `EXPIRED` | The validity date the verifier set has passed |
+| `UNCLAIMED` | It was not opened within 30 days |
+| `SUPERSEDED` | You approved a later record from the same source for the same wallet |
+
+A revocation or an expiry removes nothing on chain. The wallet stays listed until your wallet signs the removal. Trusset marks the record as waiting for a removal and builds the transaction, unless another approved, valid record still covers the wallet on that whitelist.
+
+Each change is reported to your customer webhooks: a record received, opened, rejected, approved, revoked or expired.
+
+## Limits
+
+- 25 KYC sources per instance
+- 10 whitelists per source
+- 6 MiB per sealed record, attachments included
+
+## Availability
+
+Sealed KYC records are switched on for development instances. For production instances Trusset enables them for each organisation. Until then, registering a record key, adding a source or issuing an invite on a production instance is refused with `SEALED_KYC_NOT_ENABLED`.
+
+## What stays between you and your verifier
+
+Trusset relays a sealed file. It does not verify an investor, does not assess a KYC file and takes no part in your decision to accept one. Whether you may rely on your verifier's KYC, and how personal data passes between you, is governed by the reliance and data processing agreements between you and the verifier.
+
+<CardGroup cols={2}>
+    <Card title="KYC courier tool" icon="terminal" href="/tools/kyc-courier/overview">
+        The local tool for the bank and the verifier, with its trust model
+    </Card>
+    <Card title="Records and sources API" icon="code" href="/endpoints/customers/introduction#sealed-kyc-records">
+        Register the key, manage sources, and approve, admit and remove through the API
+    </Card>
+    <Card title="KYC Inbox" icon="inbox" href="/endpoints/kyc-inbox/introduction">
+        The verifier's API and the envelope format
+    </Card>
+    <Card title="Whitelists" icon="list-check" href="/endpoints/lending/list-access-lists">
+        The lists a source admits to
+    </Card>
+</CardGroup>
