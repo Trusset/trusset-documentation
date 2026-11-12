@@ -21,7 +21,9 @@ The docs serve six readers who want different things from the same product. Nami
 
 Compliance and legal readers read the same pages as engineers. A page that reads as casual to a compliance officer costs a deal. There is no separate compliance edition and there should not be one.
 
-Five of these six readers have no page addressed to them today. That is tracked in `docs/OPEN-QUESTIONS.md`.
+Two entry pages route them. `protocol/banks.mdx` serves the bank or lender of record. `protocol/fintechs.mdx` serves the tokenization platform, the issuer and the app that embeds earn and borrow. The register provider and the custodian have no entry page of their own yet, which is tracked in `docs/OPEN-QUESTIONS.md`.
+
+Every new guide names its reader in the first line and links back to that reader's entry page. Every reference intro that one audience starts from carries one plain sentence pointing to its guide.
 
 ---
 
@@ -180,6 +182,10 @@ That ordering is not stylistic. A reader who meets that sentence after the happy
 Reference sections that document a thing rather than an action keep noun headings: "Response envelope", "Error codes", "Units".
 
 *Vale enforces:* nothing.
+
+### Keep guides and reference apart
+
+Pages in the Guides tab explain and decide. They carry little code, no admonition boxes, and link every endpoint and field they name to its reference page. The API Reference carries the parameters, the code and the error tables. A rule both need is written once, in the reference, and linked from the guide.
 
 ### Use tables for comparisons, prose for reasoning
 

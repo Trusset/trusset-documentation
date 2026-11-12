@@ -1,0 +1,92 @@
+---
+title: "Embed earn and borrow"
+description: "Add a bank-run earning vault and a borrow button to your app, with your clients signing every step from their own wallets."
+---
+
+This guide is for a fintech app, broker or wealth platform. By the end your clients can deposit stablecoins into a bank's vault and borrow against assets they hold. Your instance earns the distributor share on the deposits it brings. Each step links the endpoint that carries it out.
+
+Before you start, you need an instance, an API key and a published vault to offer. Borrowing also needs a market your instance holds that a lender of record has taken. [Open a market for your asset](/protocol/guides/open-a-market) covers that last part.
+
+## How the calls work
+
+Every write returns unsigned transactions, never a signed one. Your app hands them to the client's wallet, the client signs and broadcasts them in order, and your backend sends the mined hash back to confirm.
+
+```json
+{
+  "action": "SIGN_TRANSACTIONS",
+  "steps": [
+    { "action": "SIGN_TRANSACTION", "functionName": "approve", "transaction": { "to": "0xUSDC...", "data": "0x..." } },
+    { "action": "SIGN_TRANSACTION", "functionName": "deposit", "transaction": { "to": "0xVAULT...", "data": "0x..." } }
+  ],
+  "confirmStepIndex": 1
+}
+```
+
+Confirm with the hash of the step `confirmStepIndex` names, which is not always the last one. Positions and the transaction ledger are written on the confirm call. A loan broadcast without one is still live on chain, but your instance does not see it until the market is next read. See [Write operations](/endpoints/introduction#write-operations).
+
+## 1. Onboard each client once
+
+Create the client's record with [Create Customer](/endpoints/customers/create) and verify them through a hosted [ID Link](/endpoints/customers/create-id-link). When the review passes, the wallet is queued for the eligibility register of your [verification profile](/endpoints/customers/list-verification-profiles), and your wallet signs the admission with [Build Admission](/endpoints/customers/build-admission).
+
+Vaults and markets read that register before they admit a wallet. [Get Wallet Eligibility](/endpoints/customers/get-wallet-eligibility) shows where a wallet stands.
+
+Some banks need the KYC file itself, not only the verified wallet. Seal it so only the bank can open it, and deliver it with KYC Courier. See the [verifier walkthrough](/tools/kyc-courier/verifier-walkthrough).
+
+## 2. Offer earn
+
+[List Vaults](/endpoints/vaults/list-vaults) returns your own vaults, then every vault published on your network. Each record names its operating bank in `operatedBy`. Show the operator wherever you show the vault: the client deposits with that bank, not with you.
+
+[Deposit](/endpoints/vaults/deposit) builds the steps a deposit needs: the approval of the settlement token (stablecoin), then the deposit itself. The deposit names your instance as the client's distributor. After the client signs both, record it with [Confirm Transaction](/endpoints/vaults/confirm-transaction).
+
+A deposit can be refused for three reasons your app should explain to the client:
+
+| Code | What happened | What to do |
+|---|---|---|
+| `DEPOSITOR_NOT_VERIFIED` | A register the vault reads does not admit the wallet. The error names the register, and the profile when it is one of yours | Onboard the wallet under that profile and admit it |
+| `VAULT_MARKET_IMPAIRED` | A market the vault funds has a loan below its liquidation threshold, or seized debt waiting for sale | Wait until those loans settle. The share price does not yet show the possible loss |
+| `VAULT_NOT_PUBLISHED` | The vault is not published yet | Offer another vault, or wait for the operator to publish |
+
+[Redeem](/endpoints/vaults/redeem) builds the client's withdrawal. Redemptions cannot be paused. What bounds them is liquidity: idle funds pay first, then the vault draws on its markets as far as their free liquidity allows.
+
+## 3. Collect the distributor share
+
+The market sets aside a distributor share of every interest payment: 5 percent of the interest left after Trusset's 20 percent fee, which is 4 percent of the gross. A vault passes its slice to the distributors behind its depositors.
+
+The bank that operates the vault approves each distributor with [Set Distributor Approval](/endpoints/vaults/set-distributor-approval). Before it approves your instance, deposits you bring still go through, and their share goes to the vault operator. Clients bound to you before an approval is withdrawn stay bound.
+
+[Get Earnings](/endpoints/vaults/get-earnings) shows what is waiting per market. [Collect Distributor Fees](/endpoints/vaults/collect-distributor-fees) pulls it into the vault and [Pay Distributor](/endpoints/vaults/pay-distributor) pays it to your payout wallet. Any wallet can sign both: the vault pays you, never the signer.
+
+## 4. Offer borrow
+
+Quote first. [Get Max Borrow](/endpoints/lending/get-max-borrow) returns what a given amount of collateral supports at the current price. Then [Open Loan](/endpoints/lending/open-loan) builds the loan for the client's wallet to sign.
+
+Show the `offering` block before the client signs. When the market runs loan terms or a fixed rate, it is the only place the due date and the stamped rate appear ahead of the loan. On a market that charges an opening fee, the client receives the amount less the fee and owes the full amount.
+
+On a `FREEZE` market the collateral stays in the client's wallet, frozen, and no approval is needed. On a `CUSTODY` market the first step approves the market's adapter to take the tokens.
+
+Opening a loan is refused, with a code your app can map to a message, when:
+
+| Code | Cause |
+|---|---|
+| `MARKET_PENDING_CURATOR` | No lender of record has taken the market yet |
+| `IDENTITY_NOT_VERIFIED` | The wallet is not on the market's borrower register |
+| `EXCEEDS_MAX_BORROW` | The amount exceeds what the collateral supports |
+| `INSUFFICIENT_LIQUIDITY` | The pool and the vaults it can draw on hold less than the loan needs |
+| `PRICE_STALE` | The price is older than the market's staleness window |
+| `MARKET_PAUSED` | The lender of record paused the market |
+
+## 5. Keep clients out of liquidation
+
+Interest accrues every second, and the collateral price moves. Read the health factor with [Get Position](/endpoints/lending/get-position) and show it next to the debt. A health factor below `1.0` means the position can be liquidated.
+
+Two calls move a client away from that line. [Add Collateral](/endpoints/lending/add-collateral) raises the health factor without repaying, and only the borrower can sign it. [Repay Loan](/endpoints/lending/repay) lowers the debt, and any wallet can sign it, so an omnibus wallet can repay for its client. Repayment never waits on a price: it works while the price is stale, the market is paused or prices are halted.
+
+When a liquidation does happen, the market keeps at most the debt it discharged plus the penalty. Proceeds above that go back to the borrower. If that transfer fails, the surplus waits for the client to claim with [Claim Surplus](/endpoints/lending/claim-surplus).
+
+## 6. Show positions and statements
+
+[Get Lending Positions](/endpoints/customers/get-lending-positions) lists every loan behind one client, with its debt. [Get Position Statement](/endpoints/lending/get-position-statement) returns a PDF statement of one loan with its verified transaction trail.
+
+## Next
+
+[Launch a credit line](/protocol/guides/launch-a-credit-line) shows what the bank decides on the other side of your vault and market. The [SDK](/sdk/introduction) offers typed methods for these calls. Its `lending` module ships with 0.4.0, not yet released.

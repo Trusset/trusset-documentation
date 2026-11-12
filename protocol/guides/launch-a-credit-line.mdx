@@ -1,0 +1,99 @@
+---
+title: "Launch a credit line"
+description: "Take a lending market as lender of record and run a Lombard credit line on it, with the decision you make at each step."
+---
+
+This guide is for a bank that will act as lender of record. By the end you hold a market, have set its limits and gates, funded it, and chosen how seized collateral is sold. Each step names the decision you make and links the endpoint that carries it out. [How lending works](/protocol/concepts/how-lending-works) defines the terms used here.
+
+Before you start, you need an instance with a registered wallet, and Trusset's approval as a lender of record. Without the approval, taking a market is refused with `CURATOR_NOT_APPROVED`.
+
+## 1. Choose the market
+
+Markets reach you two ways. A deployer nominates your institution, or offers the market to any approved lender. [List Queued Markets](/endpoints/operators/list-queued-markets) returns both, with `canAccept` saying whether your instance can take each one.
+
+[Get Queued Market](/endpoints/operators/get-queued-market) is the credit file. It shows the collateral token as the chain reports it and as the issuer published it. It adds the offering, the terms status and the asset data the issuer attested, and ends with a deterministic review. Three things were fixed at deployment and cannot change:
+
+| Fixed at deployment | Options | What it means for you |
+|---|---|---|
+| Collateral mode | `FREEZE` or `CUSTODY` | `FREEZE` leaves the tokens in the borrower's wallet, frozen. `CUSTODY` moves them into the market's adapter |
+| Price source | `NAV`, `MARKET`, `ORACLE` or `FIXED` | Who prices the collateral, and whether a market sale is a valid exit |
+| Settlement token (stablecoin) | Any ERC-20 with 6 to 18 decimals, USDC by default | The currency you lend and are repaid in |
+
+A `MARKET`-priced market needs a borrower register that admits professional clients only, and refuses Dutch auctions. A `FIXED` price never goes stale, and it rules out the free-hand exchange sale.
+
+## 2. Take the role and name the parties
+
+[Accept Lender Role](/endpoints/operators/accept-lender-role) builds the adoption. In it you name the admin, the issuer, the collateral agent, the sale recipient, the liquidation operator, the oracle owner and the price signer, and you declare the realization mode:
+
+- `EXCHANGE_SALE`: seized collateral is sold on a market.
+- `ISSUER_REDEMPTION`: the issuer redeems it.
+- `AUCTION`: it is sold through the market's Dutch auction.
+
+Adoption is final, and every address in it receives its role in the same transaction. Check each one before signing. After it mines, [Confirm Lender Role](/endpoints/operators/confirm-lender-role) records the market and returns the `market.id` every later call takes. Name a guardian afterwards with [Set Access Role](/endpoints/operators/set-access-role): an emergency wallet that can pause the market and halt prices for at most 24 hours, and nothing else.
+
+## 3. Set the limits
+
+Your issuer role sets the risk parameters with [Update Market Config](/endpoints/lending/update-config). Defaults are seeded at deployment.
+
+| Parameter | Bound | Decision |
+|---|---|---|
+| `collateralFactor` | At most 9000 | How much a borrower can draw per unit of collateral value |
+| `liquidationThreshold` | At most 9500, and above `collateralFactor` | Where a position becomes liquidatable. The gap to the collateral factor is the borrower's buffer |
+| `closeFactor` | 1000 to 5000 | How much debt one liquidation can discharge |
+| `liquidationPenalty` | 0 to 5000 | The markup on seized collateral |
+
+While loans are open, the liquidation threshold moves at most 10 percentage points per call. Lowering it immediately puts loans at risk that were healthy a moment earlier.
+
+Then decide the loan shape. [Set Term Config](/endpoints/lending/set-term-config) sets the maximum duration, a terminal due date and the grace period, 3 days by default. [Set Rate Mode](/endpoints/lending/set-rate-mode) chooses a utilization curve, a capped curve or a fixed rate stamped per loan. A fixed rate needs loan terms. [Set Reserve Ratio](/endpoints/lending/set-reserve-ratio) holds back up to 50 percent of the pool from borrowing.
+
+Publish your terms of use with [Save Terms](/endpoints/lending/save-terms). A loan on a market without them is not refused, but its calldata carries a warning.
+
+## 4. Decide who borrows and who funds
+
+[Set Identity Gates](/endpoints/lending/set-identity-gates) installs two registers. The borrower register examines every loan and every further draw. The provider register examines every vault depositor. Each can be:
+
+- an ERC-3643 identity registry or another register that answers `isVerified`,
+- the eligibility register of a [verification profile](/endpoints/customers/list-verification-profiles),
+- a [whitelist](/endpoints/lending/list-access-lists) that lists wallets by hand.
+
+A whitelist examines no identity. As a provider register it is accepted only with your attestation that it lists identified wallets only.
+
+When a fintech onboards your borrowers, its verifier can send you each KYC file sealed so only your bank can open it. Set up the receiving side with the [KYC Courier bank walkthrough](/tools/kyc-courier/bank-walkthrough).
+
+## 5. Price the collateral
+
+On a `NAV` or `MARKET` market your price signer publishes prices with [Sync Oracle Price](/endpoints/lending/sync-oracle). A price older than `maxPriceAge`, 24 hours by default, blocks new loans, further draws and liquidations. Repayment never waits on a price, so a missed push freezes growth without trapping borrowers.
+
+A signer that keeps its key outside your instance signs with [Sign Price](/endpoints/lending/sign-price) or posts its attestation to [Record Price Attestation](/endpoints/lending/record-price-attestation).
+
+## 6. Fund the market
+
+Your operator wallet deposits first with [Add Liquidity](/endpoints/lending/add-liquidity). The first deposit into an empty pool must be at least 1,000 whole units of the settlement token.
+
+Everyone else funds through your vaults. Create a vault in the [Issuer Portal](https://issuers.trusset.org) and allocate it to the market. A market can also draw on the vault when a loan needs liquidity. Switch that on with [Set Vault Liquidity](/endpoints/lending/set-vault-liquidity) and [Register Vault](/endpoints/lending/register-vault), then set a cap for the market in the portal. An instance runs at most three live vault products.
+
+Fintech apps bring depositors to your vaults. Approve each one with [Set Distributor Approval](/endpoints/vaults/set-distributor-approval), and the deposits it brings credit it the fixed distributor share. A deposit brought by a fintech you have not approved still goes through, and that share goes to you. Nothing a fintech does changes your vault or market settings.
+
+## 7. Check readiness, then lend
+
+[Get Configuration Status](/endpoints/lending/get-configuration-status) reports what is still outstanding, including token-side authorizations that the token's agent must sign. Direct borrowers at the market only once it reports ready.
+
+## 8. Watch the book and realize collateral
+
+[Hooks](/endpoints/lending/list-hooks) run risk monitors on a schedule and send signed notices. [Get Liquidatable Loans](/endpoints/lending/get-liquidatable-loans) lists every position that can be liquidated now, with its trigger: health, term, or both.
+
+Liquidation needs the liquidator role, granted with [Set Liquidator Role](/endpoints/operators/set-liquidator-role) to a desk or a [liquidation bot](/endpoints/lending/list-bots). What follows depends on your route:
+
+- **Two-step router**, where every router starts. Seized collateral waits on the router. Your router operator withdraws it to the sale recipient, sells it off-platform, reports the proceeds and settles.
+- **Atomic sale**, for `MARKET`-priced markets with `EXCHANGE_SALE`. The sale recipient buys at its standing bid inside the liquidation. Switch it on with [Set Atomic Mode](/endpoints/lending/set-atomic-mode).
+- **Dutch auction**. Bidders buy from the market's auction venue at a decaying price. Wire it with [Wire Auction Module](/endpoints/lending/wire-auction-module).
+
+A liquidation left unsettled for 7 days can be written off against the insurance fund with [Handle Liquidation Timeout](/endpoints/lending/handle-timeout). Write-off does not recover collateral from the router, so dispose of or return the collateral first.
+
+## 9. Collect fees and run the market
+
+The operator share, 8 percent of interest after Trusset's fee, leaves through [Sweep Operator Fees](/endpoints/lending/sweep-operator-fees) to your operator wallet. Loan extensions are proposed by your issuer role and confirmed by your admin. Every upgrade of the market and its contracts is announced 7 days before it executes, so borrowers and providers can exit first.
+
+## Next
+
+[Embed earn and borrow](/protocol/guides/embed-earn-and-borrow) shows what a fintech builds on top of your market. [Operators](/endpoints/operators/introduction) and [Lending](/endpoints/lending/introduction) are the full reference.
