@@ -132,12 +132,34 @@ The root hash appears in three places and they are the same value: `kycHash.hex`
         country: readFileSync(`${bundle}/proofs/country.bin`).toString('base64'),
         nationality: readFileSync(`${bundle}/proofs/nationality.bin`).toString('base64'),
       },
+      selected: ['KYC', 'RESIDENCY', 'CITIZENSHIP'],
     }, { signer })
     ```
 
+    `selected` must match the proofs you send. Without it, every claim the bundle backs is filed, and on an instance that enforces proofs each of them needs its STARK: `ACCREDITATION` needs `proofs/investorType.bin`, so the call above without `selected` stops at `PROOF_MISSING`. `KYC` needs no file, since it is the root itself. To file every claim the bundle backs, send every file in `proofs/` and leave `selected` out:
+
+    ```typescript
+    import { readdirSync } from 'node:fs'
+
+    const proofs = Object.fromEntries(
+      readdirSync(`${bundle}/proofs`)
+        .filter(file => file.endsWith('.bin'))
+        .map(file => [file.slice(0, -'.bin'.length), readFileSync(`${bundle}/proofs/${file}`).toString('base64')]),
+    )
+
+    const all = await trusset.customers.identity.addClaimsFromProof({
+      walletAddress: manifest.walletAddress,
+      manifest,
+      manifestSig: readFileSync(`${bundle}/manifest.sig`),
+      proofs,
+    }, { signer })
+    ```
+
+    A development instance does not enforce proofs by default, so a call that passes there can still stop at `PROOF_MISSING` on a production instance. To test the production behaviour there, turn on `proofVerificationEnabled` with [Set Operator Key](/endpoints/customers/set-operator-key) and check that [Get Operator Key](/endpoints/customers/get-operator-key) reports `proofVerificationEnforced: true`.
+
     `manifest.sig` holds 64 raw bytes. Pass them as read; the SDK sends them base64-encoded. A base64 string (`readFileSync(path).toString('base64')`) or 0x-prefixed hex works as well. The file read as text cannot carry the signature, so the SDK refuses it with a `ValidationError` before any request is sent.
 
-    One transaction is signed per claim, in the order the backend returns them. `claims.added` counts what landed, and `claims.claims` holds one entry per claim with `claimType`, `dataHash`, `status`, and `txHash` or `error`. Use `selected: ['KYC']` to add a subset.
+    One transaction is signed per claim, in the order the backend returns them. `claims.added` counts what landed, and `claims.claims` holds one entry per claim with `claimType`, `dataHash`, `status`, and `txHash` or `error`. `selected: ['KYC']` adds the root claim alone, with no proof file.
   </Step>
   <Step title="Check the result">
     `status.onChain.isVerified` is now `true` and `status.onChain.kycHash` matches the manifest. Both calls are reads and need no signature.

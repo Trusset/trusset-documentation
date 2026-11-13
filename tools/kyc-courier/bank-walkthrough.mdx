@@ -36,7 +36,7 @@ Run the tool on a machine you control and that is allowed to hold KYC files. The
   </Step>
 
   <Step title="Compare fingerprints, then pin the source">
-    Call the verifier. Read them the fingerprint of your record key and have them read you the fingerprint of their signing key. Only when both match, pin the signing key:
+    Call the verifier, over a channel that does not run through Trusset. Read them the fingerprint of your record key as `trusset-kyc key show` prints it on this machine, never from the Issuer Portal: the portal and the invite both come from Trusset. The verifier's tool stores the invite only when your fingerprint matches the key in it. Have them read you the fingerprint of their signing key. Only when it matches, pin the signing key:
 
     ```bash
     trusset-kyc source add --id cmhw2a6r10003l80c9d4h1n8v --name "Hanse Haftungsdach GmbH" \
@@ -52,7 +52,14 @@ Run the tool on a machine you control and that is allowed to hold KYC files. The
 
     `--id` is the source ID from the Issuer Portal or the API. From now on the tool accepts a record from this source only when both of its signatures verify against this key. `trusset-kyc source list` shows the pins.
 
-    When the verifier later changes its signing key, compare the new fingerprint with it over a separate channel, then run the same command with the new key and `--replace`. The former key is kept as a retired key, so the records you filed under it still verify.
+    When the verifier later changes its signing key, first run `trusset-kyc open --all`, so every record still waiting under the former key is opened while that key is pinned. Then compare the new fingerprint with the verifier over a separate channel and run the same command with the new key, `--replace` and a decision about the former key:
+
+    ```bash
+    trusset-kyc source add --id cmhw2a6r10003l80c9d4h1n8v --name "Hanse Haftungsdach GmbH" \
+      --key <new signing key> --replace --former-key retire
+    ```
+
+    `--former-key retire` is a planned rotation: the records you filed under the former key still verify. `--former-key revoke` is for a key that was lost or exposed: the records filed under it no longer verify, because anyone holding it could have signed them. Either way the former key opens no new record, whatever date the envelope claims. A record that arrives later under it is held, not rejected; ask the verifier to seal it again with its current key. A retired key that turns out to be exposed is revoked with `trusset-kyc source revoke-key --id <sourceId> --key <former key>`. A revoked key can never be pinned again, for any source, and `source remove` keeps it revoked.
   </Step>
 
   <Step title="See what is waiting">
@@ -105,7 +112,9 @@ Each record ends in one of these outcomes:
 | `opened` | Verified, filed and acknowledged. A record whose `validUntil` has already passed is still filed, with a note | 0 |
 | `already opened` | The record is no longer `RECEIVED` and is already filed in the output directory. Running `open` again is safe | 0 |
 | `not opened` | The record's source is not pinned. Nothing was decrypted and nothing was rejected. The line shows the key Trusset reports as a hint. Confirm the fingerprint with the verifier, run `source add`, then `open` again | 2 |
-| `not opened`, key changed | The envelope does not verify against the pinned key but does verify against the key Trusset now reports for the source. Nothing was decrypted and nothing was rejected. The line shows both fingerprints. If the verifier changed its key, confirm the new fingerprint with it, run `source add --replace`, then `open` again. If it did not, reject the record in the Issuer Portal | 2 |
+| `not opened`, key changed | The envelope does not verify against the pinned key but does verify against the key Trusset now reports for the source. Nothing was decrypted and nothing was rejected. The line shows both fingerprints. If the verifier changed its key, confirm the new fingerprint with it, run `source add --replace --former-key retire` (`revoke` if the former key was exposed), then `open` again. If it did not, reject the record in the Issuer Portal | 2 |
+| `not opened`, retired key | The envelope is signed with a retired key of the source, which opens no new record. Nothing was decrypted and nothing was rejected. Ask the verifier to seal the record again with its current key, then reject this one in the Issuer Portal | 2 |
+| `not opened`, revoked key | The envelope is signed with a revoked key of the source, so anyone holding that key may have signed it. Nothing was decrypted and nothing was rejected. Reject it in the Issuer Portal and ask the verifier to seal it again | 2 |
 | `rejected` | A pinned source's envelope failed a cryptographic check, and no other key reported for the source explains it. The tool posted a rejection with `BAD_SIGNATURE`, `DIGEST_MISMATCH` or `UNDECRYPTABLE` and wrote no plaintext | 2 |
 | `not confirmed` | The files are on disk but Trusset did not confirm the acknowledgement. Run `open` again | 3 |
 | `failed` | Anything else, for example a record key that is not in this keystore, or a record that is authentic but malformed. Nothing was written and nothing was rejected | 1, 2 or 3 |
@@ -122,7 +131,7 @@ With `--all` the tool continues with the remaining records after a failure. The 
 trusset-kyc verify ./records/0x8ba1f109551bd432803012645ac136ddd64dba72/75aa6ca04ca5ab4223136c3bea128de0
 ```
 
-`verify` needs no network and no private key, so an auditor can run it on a copy. It checks the signature in `record.sig` over `record.json` with the key in `source.json`, and checks that this key is one you trust: your pin or one of its retired keys, or, on a machine without the pin, the verifier's fingerprint given with `--fingerprint`. Without that anchor the record does not verify. It also checks the record digest and the other bindings against `header.json`, checks every attachment hash, and checks the envelope signature using the digest in `receipt.json`. It prints one line per check and exits 0 when the record verifies and 2 when it does not.
+`verify` needs no network and no private key, so an auditor can run it on a copy. It checks the signature in `record.sig` over `record.json` with the key in `source.json`, and checks that this key is one you trust: your pin, one of its retired keys for a record sealed before that key was retired, or, on a machine without the pin, the verifier's fingerprint given with `--fingerprint`. A revoked key anchors nothing. Without that anchor the record does not verify. It also checks the record digest and the other bindings against `header.json`, checks every attachment hash, and checks the envelope signature using the digest in `receipt.json`. It prints one line per check and exits 0 when the record verifies and 2 when it does not.
 
 ## When a record is revoked or expires
 

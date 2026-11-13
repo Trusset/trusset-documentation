@@ -49,15 +49,20 @@ trusset-kyc key show
 
 Lists the record keys in the keystore, public parts only, and marks the newest.
 
-### source add, source list, source remove
+### source add, source revoke-key, source list, source remove
 
 ```bash
-trusset-kyc source add --id <sourceId> --name <name> --key <ed25519 public key hex> [--replace]
+trusset-kyc source add --id <sourceId> --name <name> --key <ed25519 public key hex> [--replace --former-key <retire|revoke>]
+trusset-kyc source revoke-key --id <sourceId> --key <ed25519 public key hex>
 trusset-kyc source list
 trusset-kyc source remove --id <sourceId>
 ```
 
-`source add` pins the signing key of a source. Records from that source are accepted only when signed by this key. A source that is already pinned is refused unless `--replace` is given. With `--replace` the new key is pinned and the former key is kept as a retired key: it opens no new record, and records filed under it still verify. `source list` shows how many former keys a source has. `source remove` deletes the pin and its retired keys.
+`source add` pins the signing key of a source. Records from that source are accepted only when signed by this key. A source that is already pinned is refused unless `--replace` is given, and `--replace` needs a decision about the former key. `--former-key retire` is a planned rotation: the former key opens no new record, and records filed while it was pinned still verify. `--former-key revoke` is for a key that was lost or exposed: it opens no new record, and records filed under it no longer verify. `--former-key` without `--replace` is refused. Run `open --all` before you pin a new key, because a former key never opens a record again, whatever date the envelope claims.
+
+`source revoke-key` revokes a retired key that later turned out to be exposed. The current key cannot be revoked this way; pin the new key with `--replace --former-key revoke` instead. A revoked key can never be pinned again, for this or any other source.
+
+`source list` shows how many retired and revoked keys a source has. `source remove` deletes the pin and its retired keys. Its revoked keys stay in the keystore, so removing a source and adding it again does not undo a revocation.
 
 ### pull
 
@@ -82,7 +87,7 @@ Downloads, verifies, decrypts and files one record, or every record in status `R
 trusset-kyc verify <dir> [--key <ed25519 public key hex> | --fingerprint <fingerprint>]
 ```
 
-Verifies a filed record directory offline. The key in the folder's `source.json` must match a key you trust: the source's pin in this keystore, one of its retired keys, or the key or fingerprint given with `--key` or `--fingerprint`. Without one of these the record does not verify. Exits 0 when it verifies and 2 when it does not.
+Verifies a filed record directory offline. The key in the folder's `source.json` must match a key you trust: the source's pin in this keystore, one of its retired keys for a record sealed before that key was retired, or the key or fingerprint given with `--key` or `--fingerprint`. A revoked key anchors nothing. Without one of these the record does not verify. The envelope signature is always checked, so a receipt without a valid `sealedDigest` or a missing `envelope.sig` makes the record fail. Exits 0 when it verifies and 2 when it does not.
 
 ## Verifier commands
 
@@ -94,15 +99,20 @@ trusset-kyc source-keygen
 
 Creates the Ed25519 signing key pair and prints the public key and its fingerprint. A keystore holds one signing key, and the command refuses to overwrite it.
 
-### invite add, invite list, invite remove
+### invite add, invite confirm, invite list, invite remove
 
 ```bash
-trusset-kyc invite add <invite-string> [--replace]
+trusset-kyc invite add <invite-string> --fingerprint <recipient key fingerprint read out by the bank> [--replace]
+trusset-kyc invite confirm --source <sourceId> --fingerprint <recipient key fingerprint read out by the bank>
 trusset-kyc invite list
 trusset-kyc invite remove --source <sourceId>
 ```
 
-`invite add` stores the invite and confirms with the inbox that the bank's key equals the key in the invite. When that check fails, the invite stays stored and the command exits with an error that says so. `--replace` is needed to replace a stored invite for the same source. `invite list` never shows the token.
+`invite add` requires `--fingerprint`: the fingerprint of the bank's recipient key as the bank read it out from `trusset-kyc key show` over a channel that does not run through Trusset. The tool checks that the key in the invite has exactly this fingerprint. When it does not, nothing is stored and the command exits with 2 (`FINGERPRINT_MISMATCH`). Without `--fingerprint` nothing is stored and it exits with 1 (`FINGERPRINT_REQUIRED`). When it matches, the invite is stored as confirmed and the tool asks the inbox for the bank's key as a consistency check; when that check fails, the invite stays stored and the command exits with an error that says so. `--replace` is needed to replace a stored invite for the same source.
+
+`invite confirm` confirms an invite stored by version 1.1.0 or earlier, which `seal` and `send` refuse until then (`INVITE_NOT_CONFIRMED`). A wrong fingerprint leaves the invite stored but not confirmed.
+
+`invite list` never shows the token, and shows the recipient key, its key ID and its fingerprint only for a confirmed invite.
 
 ### seal
 
@@ -112,7 +122,7 @@ trusset-kyc seal --source <sourceId> --wallet <0x...> --record <file.json> \
   [--out <file>] [--send]
 ```
 
-Seals and signs a record for the bank named in the stored invite and writes `<envelopeId>.envelope.json`. Works offline unless `--send` is given, which checks the bank's key and delivers in the same run. When the delivery fails, the envelope file is kept and can be sent later.
+Seals and signs a record for the bank named in the stored invite and writes `<envelopeId>.envelope.json`. The invite must be confirmed against the bank's fingerprint. Works offline unless `--send` is given, which checks the bank's key and delivers in the same run. When the delivery fails, the envelope file is kept and can be sent later.
 
 ### send
 
