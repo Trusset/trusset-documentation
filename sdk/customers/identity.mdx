@@ -10,7 +10,7 @@ The `identity` sub-module works against the <Tooltip tip="UUPS-upgradeable, MiCA
 Each write method takes the same three shapes. Without options it returns the unsigned transaction. With `{ signer }` it signs, broadcasts, waits for the transaction to mine and confirms it with Trusset. With `{ txHash }` it only confirms a transaction you broadcast yourself.
 
 <Warning>
-  Only a confirmed transaction updates the customer record, and the backend confirms nothing until it has read the mined receipt. If the confirm call fails after the transaction mined, the identity is on chain but the record is not. With `{ signer }` the SDK then throws a `ConfirmationError` whose `txHash` is the hash to confirm and whose `transactions` lists every hash it sent: confirm again with `{ txHash: err.txHash }` instead of repeating the write. When you broadcast yourself, confirm again with `{ txHash }`.
+  Only a confirmed transaction updates the customer record, and the backend confirms nothing until it has read the mined receipt. If the confirm call fails after the transaction mined, the identity is on chain but the record is not. With `{ signer }` the error is the API's own and does not carry the hash, so check `getStatus` before you repeat the write. When you broadcast yourself, confirm again with `{ txHash }`.
 </Warning>
 
 The signer must be the registered issuer wallet, because the registry checks its KYC provider role on chain. Any ethers v5 `Signer` works, from a self-custody wallet or a regulated custodian, with no preference between them. The SDK never asks for, stores or sends a private key.
@@ -28,7 +28,7 @@ const result = await trusset.customers.identity.verify({
 }, { signer })
 ```
 
-To sign in your own infrastructure instead, call the method without options. On the Trusset register the result has `action: 'SIGN_TRANSACTION'`, a `transaction` with `to` and `data`, and the `chainId` of your instance. Broadcast it, wait for it to mine, then call the same method again with the hash. An instance bound to its own ERC-3643 register answers with a phased plan instead, so check `action` before you broadcast; see [Own ERC-3643 registers](#own-erc-3643-registers).
+To sign in your own infrastructure instead, call the method without options. The result has `action: 'SIGN_TRANSACTION'` and a `transaction` with `to`, `data` and the `chainId` of your instance. Broadcast it, wait for it to mine, then call the same method again with the hash.
 
 ```typescript
 const prepared = await trusset.customers.identity.verify({
@@ -36,10 +36,6 @@ const prepared = await trusset.customers.identity.verify({
   country: 'DEU',
   kycHash: '0x591aa0f6c2a3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d',
 })
-
-if (prepared.action !== 'SIGN_TRANSACTION') {
-  throw new Error(`This instance writes to its own register: sign the ${prepared.phase} phase first`)
-}
 
 const tx = await signer.sendTransaction(prepared.transaction)
 await tx.wait(1)
@@ -56,8 +52,6 @@ Confirm with the values the prepared response returned, here `kycHash`. The back
 The SDK broadcasts the calldata the API returned without decoding it. If your compliance process requires checking calldata before signing, decode `transaction.to` and `transaction.data` in your own code before you broadcast.
 
 With a signer, a write waits for the transaction to mine, so expect tens of seconds. The SDK raises its own request timeout for these calls to 60 seconds, and to 180 seconds for proof claims, because the backend verifies the proof bundle on both legs.
-
-Before anything is built, the SDK checks that the signer is connected to your instance's network and refuses with a `ValidationError` otherwise; it never switches networks. It estimates each transaction and sends it with 50% gas headroom, so an identity update that lands a block after the previous write does not run out of gas. A transaction that reverts raises a `ConfirmationError` with code `TRANSACTION_FAILED`. Every signed result carries `transactions`, one entry per transaction sent, with its `functionName` and `txHash`.
 
 ## Verify an identity
 
@@ -127,40 +121,9 @@ const result = await trusset.customers.identity.batchVerify([
 ], { signer })
 ```
 
-The result counts `submitted`, `accepted`, `totalEntries` and `rejectedCount`, and carries `rejected`, `onChainSkipped`, `txHash` and `gasUsed`. With `{ signer }`, `submitted` and `rejected` cover every entry you sent: an entry refused while the transaction was prepared stays in `rejected` with its index in your array. Use single `verify` calls when you need per-address update semantics.
+The result counts `submitted`, `accepted`, `totalEntries` and `rejectedCount`, and carries `rejected`, `txHash` and `gasUsed`. Use single `verify` calls when you need per-address update semantics.
 
 When you confirm a batch yourself with `{ txHash }`, pass the `entries` from the prepared response, not the ones you submitted. Rejected entries never reached the transaction, and the confirm is checked against the accepted ones.
-
-## Own ERC-3643 registers
-
-An instance can be bound to the issuer's own ERC-3643 (T-REX 3 or 4) identity register instead of the Trusset register. There a verification is three things: an ONCHAINID contract for the wallet, a claim on it signed by a claim key of the register's trusted issuer, and the registration on the register. The API hands them out phase by phase, and each answer names the next step:
-
-| Phase | `action` | What it holds |
-|---|---|---|
-| `DEPLOY_IDENTITY` | `SIGN_TRANSACTIONS` | One ONCHAINID deployment per wallet that has none |
-| `SIGN_CLAIMS` | `SIGN_MESSAGES` | One `messageHash` per claim, to sign as an EIP-191 personal message |
-| `REGISTER` | `SIGN_TRANSACTIONS` | The claim transactions and the registration, in order, with `confirmStepIndex` |
-
-With `{ signer }` the SDK runs the phases for you on `verify`, `verifyFromManifest`, `batchVerify`, `addClaim` and `addClaimsFromProof`: it deploys and records each missing ONCHAINID, signs each claim message, signs the remaining steps and confirms the step that registers the wallet. The signer must hold a CLAIM key (purpose 3) on the trusted issuer, since it signs the claims; otherwise the API refuses with `CLAIM_SIGNER_NOT_TRUSTED` before anything is signed. `revoke` and `revokeClaim` are one transaction on these registers as well.
-
-```typescript
-const result = await trusset.customers.identity.verify({
-  walletAddress: '0x1234567890abcdef1234567890abcdef12345678',
-  country: 'DEU',
-}, { signer })
-
-console.log(result.transactions?.map(t => t.functionName))
-```
-
-To run the phases yourself, call without options and repeat the call with what each phase produced: record each deployment with `deployOnchainId(wallet, { txHash })`, then pass `identities` (wallet to ONCHAINID), `claimSignatures` (`{ walletAddress, signature, claimType }`) and `signerAddress` in the input. `batchVerify` takes them as its second argument.
-
-```typescript
-const prepared = await trusset.customers.identity.deployOnchainId(walletAddress, { signerAddress: issuerWallet })
-
-const recorded = await trusset.customers.identity.deployOnchainId(walletAddress, { txHash: deploymentTxHash })
-```
-
-`deployOnchainId` with `{ signer }` deploys and records the ONCHAINID in one call, and returns the existing one, with `exists: true`, when the wallet already has an identity. ERC-3643 T-REX 5 registers are not supported yet and answer `REGISTER_VERSION_UNSUPPORTED`.
 
 ## Revoke an identity
 
@@ -232,13 +195,10 @@ const result = await trusset.customers.identity.addClaimsFromProof({
 
 `result.added` counts the claims confirmed on chain and `result.total` the claims attempted. `result.claims` holds one entry per claim with `claimType`, `dataHash`, `status` (`confirmed`, `failed` or `skipped`), and `txHash` or `error`. `result.verification` reports how the proof bundle was verified.
 
-Without options the method returns `action: 'SIGN_TRANSACTIONS'` with ordered `steps`. Broadcast them in order, then confirm all of them at once with `{ txResults }`, pairing each step's `claimType` with its hash. On an [own ERC-3643 register](#own-erc-3643-registers) the first answer is the `SIGN_CLAIMS` phase instead, which carries no `verification` yet:
+Without options the method returns `action: 'SIGN_TRANSACTIONS'` with ordered `steps`. Broadcast them in order, then confirm all of them at once with `{ txResults }`, pairing each step's `claimType` with its hash:
 
 ```typescript
 const prepared = await trusset.customers.identity.addClaimsFromProof({ walletAddress, manifest, manifestSig, proofs })
-if (!('verification' in prepared)) {
-  throw new Error('Sign the claim messages first, then call again with claimSignatures')
-}
 
 const txResults = []
 for (const step of prepared.steps) {

@@ -24,23 +24,12 @@ import {
 | `ValidationError` | 400 | Input rejected before hitting the API | Fix the input. Retrying is pointless. |
 | `AuthError` | 401 | API key is invalid, expired, or the instance is archived | Check the key and the instance state. |
 | `NetworkError` | 0 | Timeout, DNS failure, connection refused | Retry a read. For a write, check status first. |
-| `ConfirmationError` | from the API, or 0 | A signed write broadcast at least one transaction but could not finish | Read `transactions` and `txHash`, then confirm with `{ txHash }`. Do not repeat the write. |
+| `ConfirmationError` | from the API, or 0 | A lending flow broadcast at least one transaction but could not finish | Read `transactions` and `txHash`, then confirm with `{ txHash }`. Do not repeat the write. |
 | `TrussetError` | 4xx / 5xx | Server returned a non-success response | Branch on `code`. |
 
 Order the branches from most specific to least. `TrussetError` is the base class, so a leading `instanceof TrussetError` swallows every other case.
 
-`ConfirmationError` comes from every write signed with `{ signer }`, in the customers and the lending module alike. Its `code` is `TRANSACTION_FAILED` when a transaction reverted or a step failed after earlier steps were broadcast, and `CONFIRMATION_FAILED` when every step mined but Trusset could not record the result. `transactions` lists each step with its `functionName`, `txHash`, `optional` flag and `error`, and `txHash` is the hash to confirm. `failure` holds the underlying error, the API's own `TrussetError` when the confirm call failed.
-
-A few codes come from the SDK itself and are raised before anything is signed:
-
-| Code | Fires when |
-|---|---|
-| `UNSIGNABLE_PLAN` | The API answered a write with no transaction the SDK can sign, or with a contract creation that carries no code |
-| `UNSIGNABLE_STEP` | A step of a multi-step plan carries no signable transaction |
-| `UNSIGNABLE_MESSAGE` | An own register asked for a claim signature in a form other than an EIP-191 message hash |
-| `CLAIM_SIGNATURE_REFUSED` | An own register asked again for a claim the signer already signed, so the signer is not a claim key of its trusted issuer |
-| `PLAN_DID_NOT_SETTLE` | An own register plan did not reach its transactions within six rounds |
-| `CHAIN_MISMATCH` | A prepared transaction names a chain other than the instance's |
+`ConfirmationError` comes from the lending module's signing flows. Its `code` is `TRANSACTION_FAILED` when a step of a plan failed after earlier steps were already broadcast, and `CONFIRMATION_FAILED` when every step mined but Trusset could not record the result. `transactions` lists each step with its `functionName`, `txHash`, `optional` flag and `error`, and `txHash` is the hash to confirm. The customer identity writes do not throw it: a confirm that fails there surfaces the API's own error.
 
 ## Catch errors
 
@@ -104,8 +93,6 @@ Every `TrussetError` instance exposes:
 | `TX_WRONG_FUNCTION` | 400 | The transaction called a different function than the write being confirmed |
 | `TX_TARGET_MISMATCH` | 400 | The transaction acted on a different wallet than the one named in the confirm |
 | `TX_ENTRIES_MISMATCH` | 400 | A batch confirm named entries that do not match the mined transaction. Confirm with the prepared `entries` |
-| `CLAIM_SIGNER_NOT_TRUSTED` | 403 | On an own ERC-3643 register, the signer holds no CLAIM key on the register's trusted issuer |
-| `REGISTER_VERSION_UNSUPPORTED` | 409 | The instance's own register is an ERC-3643 T-REX 5 registry, which customer registration does not support yet |
 | `VALIDATION_ERROR` | 400 | Input rejected, by the SDK before sending or by the API with `details` per field |
 
 ## Hosted verification page codes
@@ -154,7 +141,7 @@ Read requests (GET) are retried on transient failures. Writes are not: repeating
 
 On a `429` the SDK waits as long as the server's `Retry-After` header says, at most 60 seconds, then sends the request again. Every write route shares a limit of 10 requests per minute per API key, so a burst of writes waits rather than fails. Other retries back off exponentially: 1s, 2s, 4s, capped at 10s. `maxRetries` in the client constructor caps the attempts, and `0` disables retries.
 
-Confirm calls of on-chain writes also retry `TX_NOT_FOUND` up to three times, after 3, 6 and 12 seconds, because the node answering Trusset may not have seen a receipt your wallet already has. The lending module's confirm calls additionally retry `408`, `502`, `503`, `504` and network errors, because the backend records one mined transaction once. The customer identity confirms keep the other write rules above.
+The lending module's confirm calls are the one write that also retries `408`, `502`, `503`, `504` and network errors, because the backend records one mined transaction once. The customer identity confirms keep the write rules above.
 
 <Tip>
   If an on-chain identity write fails ambiguously, check `identity.getStatus` or `identity.getClaims` before repeating it, because the transaction may have landed anyway. Verification and claim writes are safe to repeat: re-verifying updates the identity, and re-adding a claim overwrites it.
