@@ -1,28 +1,53 @@
 ---
 title: "Roles and signatures"
-description: "Which party signs each step of a lending market, from deployment to settlement."
+description: "The ten roles on a lending market, who receives each one at adoption, and which wallet signs every step."
 ---
 
-Every write on a market is a transaction that one party signs from its own wallet. This page maps each step to that party, so a bank and a fintech can see where their work starts and where the other's begins. [How lending works](/protocol/concepts/how-lending-works) defines the objects named here.
+Every write on a market is a transaction that one wallet signs. This page lists the ten roles a lending market runs on, who receives each one, and which role or party signs each step. [How lending works](/protocol/concepts/how-lending-works) defines the objects named here, and [Operators](/endpoints/operators/introduction#roles) is the reference for the same roles.
 
-Trusset never signs for another party. The API builds each transaction, the named party signs and broadcasts it, and the API verifies the mined receipt before recording anything. A request that carries key material is refused with `400 KEY_MATERIAL_REJECTED`.
+Trusset holds none of these roles and never signs for another party. The API builds each transaction, the named wallet signs and broadcasts it, and the API verifies the mined receipt before recording anything.
 
-## The parties
+## The ten market roles
 
-| Party | Usually | Holds |
+A market starts with no role holders. The lender of record names them when it takes the market, in one transaction. The guardian is the only role granted afterwards. The first four sit on the market and the next two on its liquidation router. The price signer and the oracle owner act on the price oracle, and the last two own the rate model and the insurance fund.
+
+| Role | Named at adoption as | What it can do | Example holder |
+|---|---|---|---|
+| Market admin (`MARKET_ADMIN`) | `admin` | Grants and revokes the market's roles, pauses and resumes the market, sets identity registers, vault liquidity and the auction venue, confirms loan extensions, writes off timed-out liquidations, and announces upgrades of the market and its rate model | The lender of record, usually the bank operating the market |
+| Issuer (`MARKET_ISSUER`) | `issuer` | Sets the risk parameters, loan terms and reserve ratio, and proposes loan extensions | The bank's credit or risk desk |
+| Liquidator (`MARKET_LIQUIDATOR`) | `liquidator`, optional. The signing wallet when omitted | Starts the liquidation of a loan that is unhealthy or past its term | A collateral management desk, a liquidation agent or a liquidation bot |
+| Guardian (`MARKET_GUARDIAN`) | Not named. The market admin grants it after adoption | Pauses the market, halts prices for at most 24 hours and removes a price signer. Nothing else | The bank's security or incident response team |
+| Router admin (`ROUTER_ADMIN`) | `admin` | Grants and revokes the router's roles, authorizes the market, changes the sale recipient, writes off and reopens liquidations, returns collateral to a borrower, and announces router upgrades | The lender of record |
+| Router operator (`ROUTER_OPERATOR`) | `liquidationOperator` | Withdraws seized collateral to the sale recipient, reports sales and settles liquidations | A broker or trading desk that sells the collateral |
+| Price signer (`ORACLE_SIGNER`) | `priceSigner` | Pushes prices and signs price quotes, within the oracle's deviation bound | A valuation agent, a fund administrator, an auditor or the bank's pricing desk |
+| Oracle owner | `oracleOwner` | Everything a price signer can do, plus adding and removing signers, setting the staleness window and deviation bound, lifting a price halt and announcing oracle upgrades | The bank's pricing or risk function |
+| Rate model owner | `issuer` | Sets the interest curve, the rate mode and the fixed-rate ceiling | The bank's treasury or ALM desk |
+| Insurance fund owner | `admin` | Announces, cancels and executes withdrawals from the reserve, each after a seven-day notice, and announces fund upgrades | The bank's treasury or risk function |
+
+Two adoption fields therefore carry more than one role. The `admin` wallet becomes market admin, router admin and insurance fund owner. The `issuer` wallet becomes issuer and rate model owner. [Set Access Role](/endpoints/operators/set-access-role) later grants or revokes the seven roles that sit on the market, the router and the oracle, and [Get Access Role](/endpoints/operators/get-access-role) checks any address.
+
+## Named at adoption, but not roles
+
+Adoption also names two addresses that carry no capability on the market.
+
+**Collateral agent** (`collateralAgent`). Recorded as the pledgee on every collateral lock. It can do nothing on the market, the adapter or the router.
+
+**Sale recipient** (`saleRecipient`). Where seized collateral goes when the router operator withdraws it for sale.
+
+The wallet that signs the adoption becomes the **operator wallet**. It is the only address besides registered vaults that deposits into the pool directly, and it receives the operator share of interest. It moves only by its own signature, with [Rotate Operator Wallet](/endpoints/lending/rotate-operator-wallet).
+
+## Other parties
+
+These parties act on a market without holding any of its roles.
+
+| Party | Who | What they sign |
 |---|---|---|
-| Deployer | A tokenization platform, an issuer or a fintech that imported the token | The wallet that deployed the market. It nominates candidates for lender of record |
-| Token agent | The issuer's tokenization platform | The agent or identity registry role on the collateral token, outside Trusset |
-| Lender of record | A bank or licensed lender | The operator wallet, and every market role it names at adoption |
-| Price signer | A valuation agent, fund administrator or the bank's pricing desk | `ORACLE_SIGNER` on the market's oracle |
-| Depositor | An investor using a fintech's app or the bank's own channel | Vault shares |
-| Distributor | The fintech whose instance built the deposit | A share of the interest its depositors' capital earns |
-| Borrower | A client of the fintech or the bank | The position and its collateral |
-| Liquidator | A collateral desk, a liquidation agent or a liquidation bot | `MARKET_LIQUIDATOR` on the market |
-| Router operator | A broker or trading desk | `ROUTER_OPERATOR` on the market's liquidation router |
-| Register provider | The keeper of the token's register | The register entry, outside Trusset |
-
-[Operators](/endpoints/operators/introduction#roles) lists the ten market, router and oracle roles the lender of record hands out, with what each one can change.
+| Deployer | The instance that imported the token and deployed the market, often a tokenization platform | The deployment and its nominations |
+| Token agent | The agent or identity registry operator of the collateral token, outside Trusset | The authorizations that let the market's contracts hold or freeze the token |
+| Borrower | A client of a fintech or of the bank | Its own loans, draws and collateral |
+| Depositor | An investor in one of the lender of record's vaults | Its own deposits and redemptions |
+| Distributor | The instance whose deposit call brought the depositor | Nothing on the market. It earns the distributor share once the vault owner approves it |
+| Register provider | The keeper of the token's register | The register entry, in its own register |
 
 ## Who signs each step
 
@@ -30,26 +55,37 @@ Trusset never signs for another party. The API builds each transaction, the name
 |---|---|---|
 | Deploy the market | Deployer | [Deploy Market](/endpoints/lending/deploy-market) |
 | Nominate a candidate | Deployer, or Trusset's factory owner | [Nominate Candidate](/endpoints/lending/nominate-candidate) |
-| Authorize the market's adapter and router on the token | Token agent or identity registry operator | [Configure Market](/endpoints/lending/configure-market) |
-| Take the market | Lender of record | [Accept Lender Role](/endpoints/operators/accept-lender-role) |
-| Set risk limits, terms and the reserve ratio | The issuer role the lender of record named | [Update Market Config](/endpoints/lending/update-config), [Set Term Config](/endpoints/lending/set-term-config) |
+| Authorize the market's contracts on the token | Token agent | [Configure Market](/endpoints/lending/configure-market) |
+| Take the market | The lender of record's wallet, which becomes the operator wallet | [Accept Lender Role](/endpoints/operators/accept-lender-role) |
+| Set risk parameters, loan terms and the reserve ratio | Issuer | [Update Market Config](/endpoints/lending/update-config), [Set Term Config](/endpoints/lending/set-term-config), [Set Reserve Ratio](/endpoints/lending/set-reserve-ratio) |
+| Set the rate mode and the fixed-rate ceiling | Rate model owner | [Set Rate Mode](/endpoints/lending/set-rate-mode), [Set Max Fixed Rate](/endpoints/lending/set-max-fixed-rate) |
 | Install the borrower and provider registers | Market admin | [Set Identity Gates](/endpoints/lending/set-identity-gates) |
-| Publish terms of use | No signature. A database write by the lender of record's instance | [Save Terms](/endpoints/lending/save-terms) |
-| Push a price | Price signer | [Sync Oracle Price](/endpoints/lending/sync-oracle) |
+| Connect vault liquidity | Market admin | [Set Vault Liquidity](/endpoints/lending/set-vault-liquidity), [Register Vault](/endpoints/lending/register-vault) |
+| Grant or revoke a role | Market admin for market roles, router admin for router roles, oracle owner for price signers | [Set Access Role](/endpoints/operators/set-access-role) |
+| Propose and confirm a loan extension | Issuer proposes, market admin confirms | [Propose Extension](/endpoints/lending/propose-extension), [Extension Action](/endpoints/lending/extension-action) |
+| Publish terms of use | No signature. A database write by an instance whose wallet is the lender of record, market admin or issuer | [Save Terms](/endpoints/lending/save-terms) |
+| Push a price | Price signer or oracle owner | [Sync Oracle Price](/endpoints/lending/sync-oracle) |
 | Fund the pool directly | Operator wallet | [Add Liquidity](/endpoints/lending/add-liquidity) |
 | Deposit into a vault | Depositor | [Deposit](/endpoints/vaults/deposit) |
 | Open a loan, draw more, add collateral | Borrower | [Open Loan](/endpoints/lending/open-loan), [Borrow More](/endpoints/lending/borrow-more), [Add Collateral](/endpoints/lending/add-collateral) |
 | Repay | Any wallet. The collateral always returns to the borrower | [Repay Loan](/endpoints/lending/repay) |
 | Start a liquidation | Liquidator | [Liquidate Loan](/endpoints/lending/liquidate) |
-| Sell seized collateral and settle | Router operator | [Withdraw Collateral for Sale](/endpoints/lending/withdraw-collateral-for-sale), [Settle Liquidation](/endpoints/lending/settle-liquidation) |
-| Pause the market or halt prices | Guardian, or the admin for a pause | [Pause Market](/endpoints/lending/pause-market), [Halt Prices](/endpoints/lending/halt-prices) |
+| Withdraw seized collateral for sale, report and settle | Router operator | [Withdraw Collateral for Sale](/endpoints/lending/withdraw-collateral-for-sale), [Report Partial Sale](/endpoints/lending/report-partial-sale), [Settle Liquidation](/endpoints/lending/settle-liquidation) |
+| Switch the router to atomic sale | Router admin | [Set Atomic Mode](/endpoints/lending/set-atomic-mode) |
+| Write off a liquidation unsettled for 7 days | Market admin | [Handle Liquidation Timeout](/endpoints/lending/handle-timeout) |
+| Close or reopen a router record | Router admin | [Close Liquidation](/endpoints/lending/close-liquidation), [Reopen Liquidation](/endpoints/lending/reopen-liquidation) |
+| Pause the market | Guardian or market admin. Only the market admin resumes it | [Pause Market](/endpoints/lending/pause-market) |
+| Halt prices | Guardian. The oracle owner lifts the halt, or it ends by itself | [Halt Prices](/endpoints/lending/halt-prices) |
+| Withdraw from the insurance fund | Insurance fund owner, after a seven-day notice | [Withdraw from Insurance Fund](/endpoints/lending/withdraw-insurance) |
+| Top up the insurance fund | Any wallet | [Top Up Insurance Fund](/endpoints/lending/top-up-insurance) |
+| Announce an upgrade | Market admin for the market and its rate model, router admin for the router, oracle owner for the oracle, insurance fund owner for the fund | [Upgrade Market](/endpoints/lending/upgrade-market) |
 | Collect and pay distributor fees | Any wallet. The vault pays the distributor, never the signer | [Collect Distributor Fees](/endpoints/vaults/collect-distributor-fees), [Pay Distributor](/endpoints/vaults/pay-distributor) |
 | Record the pledge in the register | Register provider, in its own register | [List Pledges](/endpoints/asset-register/list-pledges) supplies the facts |
 
 ## Where each audience starts
 
-A bank's first signature is the adoption, and from then on its wallets sign every configuration change. [Launch a credit line](/protocol/guides/launch-a-credit-line) walks through them in order.
+A bank's first signature is the adoption. From then on, the wallets it named sign every configuration change. [Launch a credit line](/protocol/guides/launch-a-credit-line) walks through them in order.
 
-A tokenization platform signs the deployment and, as the token agent, the authorizations on the token. [Open a market for your asset](/protocol/guides/open-a-market) covers both.
+A tokenization platform signs the deployment and, when it is the token agent, the authorizations on the token. [Open a market for your asset](/protocol/guides/open-a-market) covers both.
 
-A fintech app signs nothing on the market itself. Its clients sign deposits, loans and repayments from their own wallets, and the app's instance builds each transaction. [Embed earn and borrow](/protocol/guides/embed-earn-and-borrow) shows the flow.
+A fintech app holds no market role. Its clients sign deposits, loans and repayments from their own wallets, and the app's instance builds each transaction. [Embed earn and borrow](/protocol/guides/embed-earn-and-borrow) shows the flow.
