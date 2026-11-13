@@ -1,0 +1,86 @@
+---
+title: "Legal Documents"
+description: "Record, replace and read the legal documents of a market and its loans on the document registry"
+---
+
+`lending.documents` works against the document registry: per market and loan it stores a document's name, its SHA-256 and, for a public document, where to fetch it. `loanId` 0 is the market itself; any other value is a loan the market opened. Only the wallet holding `DEFAULT_ADMIN_ROLE` on the market records or removes a document, and Trusset signs nothing.
+
+## Read the documents
+
+```typescript
+const docs = await trusset.lending.documents.list(marketId)
+
+for (const d of docs.documents) console.log(d.name, d.visibility, d.contentHash, d.uri)
+
+const loanDocs = await trusset.lending.documents.list(marketId, loanId)
+console.log(loanDocs.staged.map(s => [s.name, s.submittedBy, s.recordedOnChain]))
+```
+
+`bundle` holds the documents of the market's attested asset data (for `loanId` 0), `documents` what the registry holds, `staged` loan documents waiting for the admin's record, and `history` every record and removal from the index. `viewer.canWrite` says whether one of your verified wallets holds the admin role.
+
+## Record a document
+
+A name is lowercase letters, digits and hyphens, at most 31 characters; `suggestedNames` on the list lists the usual ones, such as `legal-opinion` or `loan-agreement`. Every document is `public` or `private`, with no default. A private document records its hash alone, and the file stays with the parties. A public one is uploaded first, then recorded with the `ipfs://` uri the upload returned. Loan documents are always private.
+
+```typescript
+import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+
+const file = readFileSync('legal-opinion.pdf')
+const contentHash = createHash('sha256').update(file).digest('hex')
+
+const recorded = await trusset.lending.documents.set(marketId, {
+  loanId: 0,
+  name: 'legal-opinion',
+  contentHash,
+  visibility: 'private',
+}, { signer: admin })
+
+console.log(recorded.txHash, recorded.events)
+```
+
+For a public market document, upload the PDF and record its uri. The upload is pinned to IPFS for good and must hold no personal data, so it needs `noPersonalData: true`. The SDK computes the SHA-256 of the bytes when `contentHash` is left out.
+
+```typescript
+const pinned = await trusset.lending.documents.upload(readFileSync('issuance-terms.pdf'), { noPersonalData: true })
+
+await trusset.lending.documents.set(marketId, {
+  name: 'issuance-terms',
+  contentHash: pinned.contentHash,
+  visibility: 'public',
+  uri: pinned.uri,
+}, { signer: admin })
+```
+
+`remove` takes the `loanId` and `name`. With a signer, the SDK names the signer as `signerAddress`, so the API checks its role and simulates the call before anything is signed, and it refuses a build made for another admin wallet. Without options each write returns the unsigned `setDocument` or `removeDocument` transaction; confirm one you broadcast yourself with `{ txHash }`.
+
+## Loan documents from the borrower
+
+A loan's borrower stages a document for the admin, who records it after comparing the file with its SHA-256:
+
+```typescript
+const { stage } = await trusset.lending.documents.stage(marketId, {
+  loanId,
+  name: 'pledge-agreement',
+  contentHash: pledgeAgreementHash,
+  visibility: 'private',
+  submittedBy: borrowerWallet,
+})
+
+await trusset.lending.documents.record(marketId, stage.id, { signer: admin })
+
+await trusset.lending.documents.dismiss(marketId, otherStageId)
+```
+
+`submittedBy` names the loan's borrower, which the server checks against the market; it does not prove who sent the entry.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `documents.list` | [Get Documents](/endpoints/lending/get-legal-documents) |
+| `documents.set`, `documents.remove` | [Record Document](/endpoints/lending/record-legal-document), confirmed through [Confirm Document](/endpoints/lending/confirm-legal-document) |
+| `documents.upload` | [Upload Public Document](/endpoints/lending/upload-legal-document) |
+| `documents.stage` | [Stage Loan Document](/endpoints/lending/stage-loan-document) |
+| `documents.record` | [Record Staged Document](/endpoints/lending/record-staged-document) |
+| `documents.dismiss` | [Dismiss Staged Document](/endpoints/lending/dismiss-staged-document) |

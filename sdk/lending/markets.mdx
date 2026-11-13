@@ -3,10 +3,6 @@ title: "Markets"
 description: "Deploy, read, configure and upgrade lending markets with the SDK"
 ---
 
-<Warning>
-Not yet released. The `lending` module described here ships with `@trusset/sdk` 0.4.0, which is not on npm yet: `npm install @trusset/sdk` installs 0.1.0, which carries the customers module only. Until 0.4.0 is published, call the [Lending API](/endpoints/lending/introduction) directly.
-</Warning>
-
 A market lends one settlement token (stablecoin) against one collateral token. The API calls it `borrowAsset`. Each market has two identifiers: `marketId`, the record ID your instance keeps, and `marketAddress`, the contract. Every method on `trusset.lending.markets` that names a market takes the `marketId`, and sending a contract address in its place throws a `ValidationError` before any request.
 
 Every write on this page takes the three call shapes of the [signing model](/sdk/lending/signing): no options to prepare, `{ signer }` to sign and confirm, `{ txHash }` to confirm a transaction you broadcast yourself.
@@ -230,20 +226,47 @@ A `MARKET`-priced market lends to professional borrowers only, so its borrower r
 
 ## Upgrade a market
 
-`upgradeStatus` shows each proxy's current and target implementation before anything is built. `upgrade` moves one proxy onto the implementation the factory serves: `market` and `router` are signed by their admins, `rateModel` and `insuranceFund` by their owners. The target implementation is always read from the factory and cannot be named.
+`upgradeStatus` shows each proxy's current and target implementation before anything is built. `upgrade` moves one proxy onto the implementation the factory serves: `market` and `router` are signed by their admins, `rateModel`, `insuranceFund` and `oracle` by their owners. The target implementation is always read from the factory and cannot be named.
+
+A contract on the role-model generation carries a seven-day upgrade notice, shown in `notice` on the status (and on each of `router`, `rateModel`, `insuranceFund` and `oracle`). Its upgrade takes two transactions: `action: 'propose'` announces the implementation, and `action: 'execute'` moves onto it once `notice.ready` is true, so borrowers and providers can exit first. `action: 'cancel'` withdraws an announcement. A contract without the notice takes its one instant upgrade with the default `execute`.
 
 ```typescript
 const status = await trusset.lending.markets.upgradeStatus(marketId)
 
-if (status.upgradeAvailable) {
-  const upgraded = await trusset.lending.markets.upgrade(marketId, { target: 'market' }, { signer: admin })
+if (status.upgradeAvailable && status.notice?.supported && !status.notice.pendingImplementation) {
+  const announced = await trusset.lending.markets.upgrade(marketId, { target: 'market', action: 'propose' }, { signer: admin })
+
+  console.log(announced.activatesAtIso)
+}
+
+if (status.notice?.ready) {
+  const upgraded = await trusset.lending.markets.upgrade(marketId, { target: 'market', action: 'execute' }, { signer: admin })
 
   console.log(upgraded.implementation)
 }
 ```
 
-`upgrade` signs and confirms the upgrade only. Every upgrade is announced 7 days before it can execute, so borrowers and providers can exit first. See [Upgrade Market](/endpoints/lending/upgrade-market).
+Executing before the notice ran out answers `UPGRADE_NOT_READY` with `details.reason` (`NO_PROPOSAL`, `NOTICE_RUNNING` or `PROPOSAL_DIFFERS`). The SDK confirms with the action it signed. When you confirm yourself with `{ txHash }`, pass the same `target` and `action` in the input. See [Upgrade Market](/endpoints/lending/upgrade-market).
 
+## Guardians, price halt and pause
+
+A market on the role-model generation names guardians: wallets with `GUARDIAN_ROLE`, granted by the market admin with `operators.setAccessRole(marketId, { address, action: 'grant', role: 'MARKET_GUARDIAN' })`. A guardian can pause the market and halt its oracle price for up to 24 hours; only the market admin unpauses, and only the oracle owner lifts a halt early.
+
+```typescript
+const { guardians, isGuardian } = await trusset.lending.markets.guardians(marketId, guardianWallet)
+
+const halt = await trusset.lending.markets.priceHalt(marketId)
+
+if (isGuardian && halt.canHaltNow) {
+  await trusset.lending.markets.setPriceHalt(marketId, { action: 'halt', durationSeconds: 3600 }, { signer: guardian })
+}
+
+await trusset.lending.markets.setPaused(marketId, true, { signer: guardian })
+```
+
+With a signer, both writes send the signer's address with the build, so the API refuses a wallet without the role (`NOT_GUARDIAN`, `NOT_ADMIN`) before anything is signed. A lift is signed by the oracle owner the build names. `thresholdCooldown` reads whether the liquidation threshold can move now: while debt is outstanding it moves at most once every 24 hours.
+
+## Methods and endpoints
 ## Methods and endpoints
 
 | Method | Endpoint |
@@ -271,3 +294,8 @@ if (status.upgradeAvailable) {
 | `setIdentityGates` | [Set Identity Gates](/endpoints/lending/set-identity-gates) |
 | `upgradeStatus` | [Get Upgrade Status](/endpoints/lending/get-upgrade-status) |
 | `upgrade` | [Upgrade Market](/endpoints/lending/upgrade-market) |
+| `guardians` | [Get Guardians](/endpoints/lending/get-guardians) |
+| `priceHalt` | [Get Oracle Halt](/endpoints/lending/get-oracle-halt) |
+| `setPriceHalt` | [Halt Prices](/endpoints/lending/halt-prices) |
+| `thresholdCooldown` | [Get Threshold Cooldown](/endpoints/lending/get-threshold-cooldown) |
+| `setPaused` | [Pause Market](/endpoints/lending/pause-market) |
