@@ -4,7 +4,7 @@ api: 'GET /lending-external-securities-v2/api/markets/{marketId}/insurance/statu
 description: 'What the market insurance fund holds, has paid and can cover, and what the market has lost'
 ---
 
-Returns the market's insurance fund: what it holds and has paid out, whether it covers this market, and what the market has booked for it but not yet swept. It also reports the losses the market has taken, and states in words when the reserve is drawn on this market's generation.
+Returns the market's insurance fund: what it holds and has paid out, whether it covers this market, and what the market has booked for it but not yet swept. It also reports the losses the market has taken, and states in words when the reserve is drawn.
 
 The fund reports only what it paid. Read `marketBadDebt` beside it, because a fund that covered nothing and a market that never took a loss otherwise look the same.
 
@@ -12,20 +12,14 @@ The fund reports only what it paid. Read `marketBadDebt` beside it, because a fu
 
 Where the market draws on it, the reserve absorbs a shortfall ahead of the liquidity providers, but only up to what it holds. A draw larger than the balance pays the balance, and the pool books the rest. A fund whose owner has withdrawn this market's authorization pays nothing and blocks nothing, so the whole loss lands on the pool.
 
-Which events draw on the reserve depends on the market implementation, reported as `generation.settlementDrawsReserve`.
+The market draws on the reserve on every first settlement that retains less than the record's claim, whether through the liquidation router, a batch settlement or the auction venue's closing fill. It also draws on it on the write-off after the 7-day window, and for the residual of an instant whole-position realization. `generation.settlementDrawsReserve` reports this as `true`, or `null` when it could not be read.
 
-| `settlementDrawsReserve` | The market draws on the reserve |
-|---|---|
-| `true` | On every first settlement that retains less than the record's claim, whether through the liquidation router, a batch settlement or the auction venue's closing fill. Also on the write-off after the 7-day window, and for the residual of an instant whole-position realization |
-| `false` | Only on the write-off after the 7-day window and for the residual of an instant whole-position realization. A sale settled below the debt books its shortfall on the pool without consulting the reserve |
-| `null` | Could not be read. Retry shortly |
+A later recovery on a record the reserve advanced against makes the pool whole on the record's claim first. Only what is left above the claim repays the reserve. `disclosure` states all of this in words.
 
-A later recovery on a record the reserve advanced against is shared differently too. With `true`, the recovery makes the pool whole on the record's claim first, and only what is left above the claim repays the reserve. With `false`, the recovery repays the reserve before anything becomes pool income. `disclosure` states all of this in words, chosen for this market.
-
-The reserve is funded two ways. [Sweep Protocol Fees](/endpoints/lending/sweep-protocol-fees) deposits the insurance-fund rate's share of interest, and [Top Up Insurance Fund](/endpoints/lending/top-up-insurance) lets any wallet add capital. Apart from coverage paid to an authorized market, only the fund owner can take money out, through [Withdraw from Insurance Fund](/endpoints/lending/withdraw-insurance). On the current fund implementation that withdrawal is announced 7 days ahead and executes within the following 7 days, for the announced amount and destination only, so every provider can see the first-loss buffer leaving before it does. `withdrawalNotice` reports what is announced, and `generation.withdrawalNotice` whether the fund runs the notice at all.
+The reserve is funded two ways. [Sweep Protocol Fees](/endpoints/lending/sweep-protocol-fees) deposits the insurance-fund rate's share of interest, and [Top Up Insurance Fund](/endpoints/lending/top-up-insurance) lets any wallet add capital. Apart from coverage paid to an authorized market, only the fund owner can take money out, through [Withdraw from Insurance Fund](/endpoints/lending/withdraw-insurance). That withdrawal is announced 7 days ahead and executes within the following 7 days, for the announced amount and destination only, so every provider can see the first-loss buffer leaving before it does. `withdrawalNotice` reports what is announced.
 
 <Warning>
-  An authorized address draws coverage that is paid to it directly, so who is authorized matters as much as the withdrawal notice. On the current fund implementation a new authorization is announced 7 days ahead and the fund owner activates it within the following 7 days; until then the address cannot draw, and removing an authorization takes effect at once. On an older implementation the owner authorizes any address at once, which `reserveAccess.legacyWarning` says until the owner upgrades the fund. `reserveAccess` lists every address other than this market that the fund authorizes and every announcement still pending, so a draw outside the notice never goes unseen. An authorized plain wallet, not a market contract, is called out in `reserveAccess.warning`.
+  An authorized address draws coverage that is paid to it directly, so who is authorized matters as much as the withdrawal notice. A new authorization is announced 7 days ahead and the fund owner activates it within the following 7 days. Until then the address cannot draw. Removing an authorization takes effect at once. `reserveAccess` lists every address other than this market that the fund authorizes and every announcement still pending, so a draw outside the notice never goes unseen. An authorized plain wallet, not a market contract, is called out in `reserveAccess.warning`.
 </Warning>
 
 ## Path Parameters
@@ -49,12 +43,12 @@ The reserve is funded two ways. [Sweep Protocol Fees](/endpoints/lending/sweep-p
         <ResponseField name="currentBalance" type="string">The fund's balance of the borrow asset, which is what it can pay today.</ResponseField>
       </Expandable>
     </ResponseField>
-    <ResponseField name="generation" type="object">`settlementDrawsReserve`, described above, `topUpBooked` and `withdrawalNotice`. `topUpBooked` is `true` when the fund books a top-up as a deposit and `null` when unreadable. It is `false` on the earlier fund implementation, which only accepts a plain transfer it does not book. `withdrawalNotice` is `true` when the fund announces withdrawals 7 days ahead, `false` on an implementation that withdraws in one step, `null` when unreadable.</ResponseField>
+    <ResponseField name="generation" type="object">`settlementDrawsReserve`, `topUpBooked` and `withdrawalNotice`, each `true`, or `null` when unreadable. The market draws on the reserve as described above, the fund books a top-up as a deposit, and it announces withdrawals 7 days ahead.</ResponseField>
     <ResponseField name="withdrawalNotice" type="object">
       The fund's withdrawal notice. `null` when it could not be read at all.
       <Expandable>
         <ResponseField name="fundAddress" type="string">The fund, lowercased.</ResponseField>
-        <ResponseField name="supported" type="boolean">Whether the fund's implementation runs the notice. `false` on an earlier implementation, where the fields below stay `null` and `false` and `readable`, `pending`, `secondsUntilReady` and `owner` are absent. `null` when unreadable.</ResponseField>
+        <ResponseField name="supported" type="boolean">`true`: the fund runs the notice. `null` when unreadable.</ResponseField>
         <ResponseField name="readable" type="boolean">Present when `supported` is `true`. `false` when the announced values could not be read.</ResponseField>
         <ResponseField name="pending" type="boolean">Whether a withdrawal is announced. Present only when `readable` is `true`.</ResponseField>
         <ResponseField name="pendingAmount" type="string">The announced amount as a decimal string, or `null`. `pendingAmountRaw` is the same in the borrow asset's smallest unit.</ResponseField>
@@ -73,12 +67,12 @@ The reserve is funded two ways. [Sweep Protocol Fees](/endpoints/lending/sweep-p
       Who can draw on the reserve besides the owner's announced withdrawal. `null` when it could not be read at all.
       <Expandable>
         <ResponseField name="indexed" type="boolean">`true` when the fund's authorization history was read from the index. `false` when only this market could be checked.</ResponseField>
-        <ResponseField name="noticeSupported" type="boolean">`true` when the fund's implementation announces every new authorization 7 days ahead, `false` when it authorizes at once, `null` when unreadable.</ResponseField>
+        <ResponseField name="noticeSupported" type="boolean">`true`: the fund announces every new authorization 7 days ahead. `null` when unreadable.</ResponseField>
         <ResponseField name="ownMarketAuthorized" type="boolean">Whether the fund authorizes this market, read on the chain. `null` when unreadable.</ResponseField>
         <ResponseField name="others" type="array">`{ address, confirmed, authorizedAt, txHash, isContract }` for every other address the fund authorizes. `confirmed` is `true` when the chain confirms it now, and `isContract` is `false` for a plain wallet.</ResponseField>
-        <ResponseField name="announced" type="array">`{ address, confirmed, activatesAt, activatesAtIso, lapsesAtIso, ready, lapsed, txHash, isContract }` for every announced authorization not yet activated or withdrawn. `ready` is `true` while the owner can activate it, `lapsed` once its week has passed without activation. Always empty when `noticeSupported` is not `true`.</ResponseField>
+        <ResponseField name="announced" type="array">`{ address, confirmed, activatesAt, activatesAtIso, lapsesAtIso, ready, lapsed, txHash, isContract }` for every announced authorization not yet activated or withdrawn. `ready` is `true` while the owner can activate it, `lapsed` once its week has passed without activation. Empty when `noticeSupported` is `null`.</ResponseField>
         <ResponseField name="warning" type="string">The other authorized addresses and the pending announcements in words, or `null` when there are none.</ResponseField>
-        <ResponseField name="legacyWarning" type="string">Present when `noticeSupported` is `false`: the fund still authorizes at once until its owner upgrades it. Otherwise `null`.</ResponseField>
+        <ResponseField name="legacyWarning" type="string">Always `null`.</ResponseField>
         <ResponseField name="note" type="string">Why the list may be incomplete, or `null`.</ResponseField>
       </Expandable>
     </ResponseField>
@@ -99,7 +93,7 @@ The reserve is funded two ways. [Sweep Protocol Fees](/endpoints/lending/sweep-p
         <ResponseField name="totalLosses" type="string">Every loss the index recorded on the market.</ResponseField>
       </Expandable>
     </ResponseField>
-    <ResponseField name="disclosure" type="object">Plain-language statements chosen for this market's generation, written to be shown to liquidity providers as they are. `draws` says when the reserve is drawn, `repayment` how a later recovery is shared, and `topUp` whether a top-up is booked. The two `generation` flags are repeated beside them.</ResponseField>
+    <ResponseField name="disclosure" type="object">Plain-language statements for this market, written to be shown to liquidity providers as they are. `draws` says when the reserve is drawn, `repayment` how a later recovery is shared, and `topUp` how a top-up is booked. The `generation` flags are repeated beside them.</ResponseField>
     <ResponseField name="fundImplementation" type="object">
       The fund's upgrade position. `implementation` carries the same object.
       <Expandable>
@@ -121,7 +115,7 @@ The reserve is funded two ways. [Sweep Protocol Fees](/endpoints/lending/sweep-p
 </ResponseField>
 
 <Note>
-  On a fund that books top-ups, reading this endpoint also records top-ups nobody recorded through [Record Insurance Top-Up](/endpoints/lending/record-insurance-top-up). It looks back 50,000 blocks, runs at most once a minute per market, and skips deposits from markets the fund authorizes, which are protocol-fee sweeps.
+  Reading this endpoint also records top-ups nobody recorded through [Record Insurance Top-Up](/endpoints/lending/record-insurance-top-up). It looks back 50,000 blocks, runs at most once a minute per market, and skips deposits from markets the fund authorizes, which are protocol-fee sweeps.
 </Note>
 
 <RequestExample>

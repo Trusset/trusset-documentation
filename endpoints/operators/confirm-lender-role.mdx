@@ -1,7 +1,7 @@
 ---
 title: 'Confirm Lender Role'
 api: 'POST /lending-external-securities-v2/api/markets/queued/{marketAddress}/confirm-accept'
-description: 'Record a mined adoption and read what the handover left outstanding'
+description: 'Record a mined adoption and confirm the satellite handover'
 ---
 
 Records a mined `acceptCuratorRole` transaction on this instance. The call verifies the receipt against the lending factory and checks that the factory now names the signing wallet as lender of record. It then writes the market onto this instance with the parties the factory recorded. It returns `201` with the recorded market, the satellite handover state and the asset data approval the receipt carries.
@@ -32,9 +32,7 @@ When a register the adoption installed is a whitelist, the lender of record can 
 
 ## Handover
 
-On a market deployed through the current factory, adoption hands the price oracle, the interest rate model and the insurance fund to their named owners inside the same transaction. `handover.complete` then reads `true` and `acceptOwnershipCalldata` is empty.
-
-A market from an earlier generation hands them over in two steps. Until each named owner calls `acceptOwnership`, the market itself, or the factory on the oldest markets, remains their owner of record and the lender of record cannot govern them. `acceptOwnershipCalldata` lists each outstanding leg with the wallet that must sign it. [Get Handover](/endpoints/operators/get-handover) reads the same state later.
+Adoption hands the price oracle, the interest rate model and the insurance fund to their named owners inside the same transaction. `handover.complete` then reads `true` and `acceptOwnershipCalldata` is empty. [Get Handover](/endpoints/operators/get-handover) reads the same state later.
 
 ## Standing policy terms
 
@@ -51,15 +49,15 @@ When this instance holds a standing policy that matches the market's deployer or
       The satellite ownership state after adoption, or `null` when it could not be read.
       <Expandable>
         <ResponseField name="readable" type="boolean">`false` when the factory could not be read. No other field is present then.</ResponseField>
-        <ResponseField name="stage" type="string">`COMPLETE`, `PENDING`, `NOT_STARTED` or `UNKNOWN`.</ResponseField>
-        <ResponseField name="complete" type="boolean">`true` when every satellite is held by an owner the lender of record named.</ResponseField>
-        <ResponseField name="surrendered" type="boolean">Whether the factory recorded the handover decision.</ResponseField>
-        <ResponseField name="oraclePending" type="boolean">The oracle still waits for its named owner.</ResponseField>
-        <ResponseField name="interestModelPending" type="boolean">The interest rate model still waits for its named owner.</ResponseField>
-        <ResponseField name="insuranceFundPending" type="boolean">The insurance fund still waits for its named owner.</ResponseField>
-        <ResponseField name="nothingPending" type="boolean">None of the three is pending.</ResponseField>
-        <ResponseField name="satellites" type="object">`oracle`, `interestModel` and `insuranceFund`, each `{ address, owner, pendingOwner, heldBy, pending }`. `heldBy` is `factory`, `market`, `owner` or `null`.</ResponseField>
-        <ResponseField name="acceptOwnershipCalldata" type="array">Outstanding `acceptOwnership` legs, each `{ key, to, data, signer, description }` plus the chain binding. Empty when nothing is outstanding.</ResponseField>
+        <ResponseField name="stage" type="string">`COMPLETE` after adoption. `UNKNOWN` when the adoption flag could not be read.</ResponseField>
+        <ResponseField name="complete" type="boolean">`true`: every satellite is held by an owner the lender of record named.</ResponseField>
+        <ResponseField name="surrendered" type="boolean">Whether the factory recorded the adoption.</ResponseField>
+        <ResponseField name="oraclePending" type="boolean">`false`: the oracle belongs to its named owner.</ResponseField>
+        <ResponseField name="interestModelPending" type="boolean">`false`: the interest rate model belongs to its named owner.</ResponseField>
+        <ResponseField name="insuranceFundPending" type="boolean">`false`: the insurance fund belongs to its named owner.</ResponseField>
+        <ResponseField name="nothingPending" type="boolean">`true`: none of the three is pending.</ResponseField>
+        <ResponseField name="satellites" type="object">`oracle`, `interestModel` and `insuranceFund`, each `{ address, owner, pendingOwner, heldBy, pending }`. `heldBy` reads `owner`, or `null` when unreadable, and `pendingOwner` reads `null`.</ResponseField>
+        <ResponseField name="acceptOwnershipCalldata" type="array">Empty, because adoption completes the handover.</ResponseField>
       </Expandable>
     </ResponseField>
     <ResponseField name="borrowerProfile" type="object">The verification profile of your instance whose eligibility register the borrower register is, or `null`.</ResponseField>
@@ -95,7 +93,7 @@ const res = await fetch(
 );
 const { data } = await res.json();
 const marketId = data.market.id;
-const outstanding = data.handover?.acceptOwnershipCalldata ?? [];
+const handoverComplete = data.handover?.complete === true;
 ```
 </RequestExample>
 
@@ -195,9 +193,9 @@ const outstanding = data.handover?.acceptOwnershipCalldata ?? [];
 | `CONFIRM_ACCEPT_FAILED` | `400` | The adoption could not be recorded for a reason that carries no code of its own |
 | `CURATOR_NOT_APPROVED` | `403` | Trusset has not approved this account to act as a lender of record |
 | `ACCEPT_NOT_INSTANCE_BOUND` | `403` | The adoption was signed by a wallet that is not verified for this instance |
-| `MARKET_NOT_V2` | `404` | The address is not a market of the v2 lending factory this instance deploys to |
+| `MARKET_NOT_V2` | `404` | The address is not a market of the lending factory this instance deploys to |
 | `ADOPTION_NOT_RECORDED` | `409` | The factory reports no lender of record for the market, or a different one than the signing wallet |
-| `MARKET_VERIFICATION_UNAVAILABLE` | `503` | The address could not be checked against the v2 factory. Retry shortly |
+| `MARKET_VERIFICATION_UNAVAILABLE` | `503` | The address could not be checked against the lending factory. Retry shortly |
 | `DEPLOYMENT_UNREADABLE` | `503` | The market could not be read from the factory after adoption. Retry shortly |
 | `FACTORY_READ_FAILED` | `503` | The factory could not be reached. Retry shortly |
 

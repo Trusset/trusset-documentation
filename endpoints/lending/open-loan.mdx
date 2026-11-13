@@ -88,8 +88,8 @@ The calldata response carries an `offering` block whenever the market runs loan 
     <ResponseField name="termGracePeriodSeconds" type="string">Seconds after the due date before the term penalty applies. Present only when the market runs terms.</ResponseField>
     <ResponseField name="termPenaltyBps" type="integer">The term penalty in basis points. Present only when the market runs terms.</ResponseField>
     <ResponseField name="fixedRateBps" type="integer">The rate this loan would be stamped with, in basis points. Present only when the market's interest model stamps a fixed rate. A stamped rate does not move with utilization for the life of the loan.</ResponseField>
-    <ResponseField name="stampedAtSigning" type="array">The figures stamped onto the loan when the transaction mines. Always `dueAt`, plus `fixedRate` when a fixed rate is stamped. A market that stamps terms per loan adds `termGracePeriod` and `termPenalty`.</ResponseField>
-    <ResponseField name="termStamping" type="string">`PER_LOAN` when the market stamps the grace period and term penalty onto each loan at signing. `MARKET_CONFIG` when open loans follow the live term configuration instead. `UNKNOWN` when that could not be read.</ResponseField>
+    <ResponseField name="stampedAtSigning" type="array">The figures stamped onto the loan when the transaction mines. Always `dueAt`, `termGracePeriod` and `termPenalty`, plus `fixedRate` when a fixed rate is stamped.</ResponseField>
+    <ResponseField name="termStamping" type="string">`PER_LOAN`: the market stamps the grace period and term penalty onto each loan at signing. `UNKNOWN` when that could not be read.</ResponseField>
     <ResponseField name="appliesToOpenLoans" type="array">Term settings a later configuration change would still reach on this loan. Empty on a `PER_LOAN` market, `termGracePeriod` and `termPenalty` otherwise.</ResponseField>
   </Expandable>
 </ResponseField>
@@ -150,7 +150,6 @@ The borrower register is read from the market at call time, so a register the ma
 
 The build call refuses a payee the transaction could not pay:
 
-- A market whose implementation predates pay-to answers `409 PAY_TO_UNSUPPORTED`. Its admin upgrades it with [Upgrade Market](/endpoints/lending/upgrade-market). `payToSupported` on [List Markets](/endpoints/lending/list-markets) shows which markets take a payee.
 - The payee may not be one of the market's own contracts or a contract it is wired to: the market, its liquidation router, its collateral adapter, its auction venue, its insurance fund, the settlement token (stablecoin), the collateral token, the oracle, the interest rate model or a vault registered on the market. That is refused with `400 PAY_TO_NOT_ALLOWED`, and `details.reason` names which. The market itself refuses the first five. It would pay the others, and the proceeds would be lost to the borrower while the full debt stays owed.
 - A payee that the borrower register does not admit is refused with `400 PAYEE_NOT_VERIFIED`. `details` carries `payee`, `register`, and `requiredProfile` or `accessList` when the register is one of your profiles' eligibility registers or a whitelist. A payee whose removal from that register is pending is refused with `409 ELIGIBILITY_REMOVAL_PENDING`. When that register is the previous Trusset ID Register, a payee it does not admit is refused with `409 IDENTITY_GATE_RETIRED` instead, with `details.gate` `borrower` and `details.payee`, because that register takes no new identities.
 
@@ -160,9 +159,9 @@ The calldata response then carries `payeeAddress` and a `payee` block, and its `
 
 Some markets draw on vault liquidity, shown as `useVaultLiquidity` on [Get Market Metrics](/endpoints/lending/get-metrics). There, a borrow larger than the pool's borrowable liquidity pulls the shortfall from the registered vaults inside the borrower's own transaction. The draw is the smallest amount that covers the shortfall with the reserve earmark intact. The confirm response lists each draw in `vaultDraws`.
 
-The API refuses such a loan only when no draw could fund it. `INSUFFICIENT_LIQUIDITY` then names what the connected vaults can draw right now. A market whose implementation still holds a draw into an empty pool to the first-deposit floor refuses a smaller draw with `FIRST_DRAW_BELOW_FLOOR`, and the message names the remedies.
+The API refuses such a loan only when no draw could fund it. `INSUFFICIENT_LIQUIDITY` then names what the connected vaults can draw right now.
 
-The chart traces the draw inside the market on the current implementation. A vault that reverts or sends nothing counts as a zero draw, and the market moves on to the next one.
+The chart traces the draw inside the market. A vault that reverts or sends nothing counts as a zero draw, and the market moves on to the next one.
 
 <Frame caption="Vault draw, market side">
   <img className="block dark:hidden" src="/images/flows/lending-vault-jit-draw.svg" alt="Flowchart of how the market draws a borrow shortfall from its registered vaults" />
@@ -524,7 +523,6 @@ The price, supply-cap, collateral-value and liquidity checks run in the order th
 | `PRICE_DEVIATION_TOO_LARGE` | `400` | The `signedPrice` moves further from the oracle's current price than its `maxDeviationBps` allows |
 | `PRICE_WINDOW_DEVIATION_TOO_LARGE` | `400` | The `signedPrice` falls outside the band the oracle accepts within its current one-hour window |
 | `INSUFFICIENT_LIQUIDITY` | `400` | The pool, after its reserve earmark and any vault draw it could make, holds less than the loan needs |
-| `FIRST_DRAW_BELOW_FLOOR` | `400` | The pool is empty and the vault draw that would fund this borrow is below the first-deposit floor this market's implementation applies to draws |
 | `INSUFFICIENT_FREE_COLLATERAL` | `400` | On a `FREEZE` market, `borrowerAddress` holds fewer unfrozen tokens than `collateralAmount`. `details` carries `holder`, `balance`, `frozen` and `free` |
 | `COLLATERAL_TRANSFER_RESTRICTED` | `400` | The collateral token's compliance rules block moving this collateral into the custody adapter |
 | `COLLATERAL_GRANULARITY_MISMATCH` | `400` | `collateralAmount` is not a whole multiple of the collateral token's ERC-1400 granularity, so the token would refuse the transfer. The message names the nearest amounts that are |
@@ -537,7 +535,6 @@ The price, supply-cap, collateral-value and liquidity checks run in the order th
 | `EXTERNAL_FEED_ACTIVE` | `409` | A `signedPrice` was sent to a market that prices from an external feed. Retry without it |
 | `FIXED_PRICE_ACTIVE` | `409` | A `signedPrice` was sent to a market with a fixed price, whose oracle refuses every signed price. Retry without it: the loan prices against the fixed price |
 | `SIGNED_PRICE_OUTDATED` | `409` | The `signedPrice` is not dated after the price the oracle already holds, so the oracle would refuse it. Sign a fresh quote |
-| `PAY_TO_UNSUPPORTED` | `409` | `payToAddress` was sent to a market whose implementation predates pay-to. Upgrade the market, or omit `payToAddress` |
 | `ELIGIBILITY_REMOVAL_PENDING` | `409` | The borrower's or the payee's admission to the borrower register is waiting for removal, so no new loan is prepared for it. `details` carries `register` and `wallet`, plus `reason` and `profileKey` when the admission is your instance's |
 | `CLIENT_NOT_ELIGIBLE` | `409` | The client named by `clientReference` may not carry this loan. `details.reason` is `REJECTED`, `REVOKED`, `COUNTRY_BLOCKED`, `NOT_PROFESSIONAL` or `NOT_VERIFIED`. See [Client of record](#client-of-record) |
 | `CLIENT_REFERENCE_CONFLICT` | `409` | On confirm, the loan is already attributed to another client and `reattribute` was not `true` |
