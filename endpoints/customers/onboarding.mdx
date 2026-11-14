@@ -1,0 +1,126 @@
+---
+title: 'Onboarding'
+description: 'One onboarding per customer, run inside your own app from start to registration'
+---
+
+An onboarding takes one customer from "unknown" to "may act on your markets" through a single path. Your backend starts it, your app runs the identity check or waits for your verifier, and your wallet signs what has to go on chain. Every answer names the status and the next step, so your integration follows one object instead of links, queues and records.
+
+```
+https://api.trusset.org/customers/api/onboarding
+```
+
+Every request authenticates with an instance API key in the `X-API-Key` header and needs the `identity` service.
+
+## One customer, one onboarding
+
+An onboarding belongs to a customer record. Address it in the path by the customer `id`, your own `externalId`, the reference key (`ref_...`) or the wallet address. [Start Onboarding](/endpoints/customers/start-onboarding) creates the customer record when your `externalId` or wallet is new, so one call is enough to begin.
+
+Starting again for the same customer returns the onboarding that is already running. It does not open a second identity check.
+
+## Two providers
+
+| Provider | Who verifies | What your app does |
+|---|---|---|
+| `TRUSSET` | The identity check Trusset provides, on Trusset's Sumsub account, held to the rules of the [verification profile](/endpoints/customers/list-verification-profiles) | Runs the Sumsub WebSDK or MobileSDK with the token the onboarding hands out |
+| `KYC_SOURCE` | A verifier you added as a [KYC source](/endpoints/customers/add-kyc-source) | Sends the customer to that verifier. The source delivers a [sealed KYC record](/protocol/infrastructure/sealed-kyc-records) that only you can open |
+
+The provider follows your configuration. When a start names no `provider`, a profile with an active KYC source onboards through that source, and every other profile through `TRUSSET`. [Onboarding Options](/endpoints/customers/onboarding-options) lists the profiles of your instance with the provider each one defaults to. Name `provider` to decide per customer.
+
+## Status and next step
+
+`status` says where the onboarding stands. `nextAction` says who acts next and which call that is.
+
+| Status | Provider | Who acts | Next |
+|---|---|---|---|
+| `NOT_STARTED` | | You | [Start Onboarding](/endpoints/customers/start-onboarding) |
+| `IDENTITY_CHECK` | `TRUSSET` | Customer | Run the check in your app with an [SDK token](/endpoints/customers/issue-onboarding-token) |
+| `RESUBMISSION` | `TRUSSET` | Customer | The review asked for a resubmission. Reopen the check with a new token |
+| `IN_REVIEW` | `TRUSSET` | Sumsub | Wait for `customer.kyc_reviewed`, or [recheck](/endpoints/customers/recheck-onboarding) |
+| `AWAITING_WALLET` | both | You | [Bind Wallet](/endpoints/customers/bind-onboarding-wallet) |
+| `AWAITING_RECORD` | `KYC_SOURCE` | The source | Wait for `customer.kyc_record_received` |
+| `RECORD_RECEIVED` | `KYC_SOURCE` | You | Open the record with the [KYC courier tool](/tools/kyc-courier/overview) |
+| `AWAITING_DECISION` | `KYC_SOURCE` | You | [Decide Record](/endpoints/customers/decide-onboarding-record) |
+| `AWAITING_SIGNATURE` | both | Your wallet | [Build Transactions](/endpoints/customers/build-onboarding-transactions), sign, [confirm](/endpoints/customers/confirm-onboarding-transactions) |
+| `REGISTRATION_STALLED` | `TRUSSET` | You | The approval has no registration in the queue. [Recheck](/endpoints/customers/recheck-onboarding) queues it again |
+| `COMPLETED` | both | Nobody | |
+| `REJECTED` | both | Nobody | Start again with `restart: true` for a new check |
+| `EXPIRED` | both | You | The check lapsed or was cancelled, or the record expired. Start again |
+| `HELD_BY_ANOTHER_ISSUER` | `TRUSSET` | Nobody | Another issuer registered the wallet on the Trusset ID Register |
+
+`AWAITING_SIGNATURE` carries `nextAction.kind`, which names what your wallet signs:
+
+| Kind | Signs |
+|---|---|
+| `IDENTITY_REGISTRATION` | The customer's registration on your identity register, with its residency claim |
+| `ELIGIBILITY_ADMISSION` | The admission to the [eligibility register](/endpoints/customers/introduction#eligibility-registers) of the profile, after the registration |
+| `WHITELIST_ADMISSION` | The listing on the whitelists bound to the KYC source, after you approved the record |
+
+## The identity check in your app
+
+<Steps>
+  <Step title="Start">
+    [Start Onboarding](/endpoints/customers/start-onboarding) with your `externalId` and the profile. The answer carries `sdk.token`.
+  </Step>
+  <Step title="Run the check">
+    Pass the token to the Sumsub WebSDK or MobileSDK. When it expires, [Issue SDK Token](/endpoints/customers/issue-onboarding-token) returns a new one for the same applicant.
+  </Step>
+  <Step title="Bind the wallet">
+    [Bind Wallet](/endpoints/customers/bind-onboarding-wallet) when the customer connects one, before or after the review. Send it with the start when you already know it.
+  </Step>
+  <Step title="Sign">
+    When the status reads `AWAITING_SIGNATURE`, [Build Transactions](/endpoints/customers/build-onboarding-transactions) returns unsigned transactions. A wallet of your instance signs them, and [Confirm Transactions](/endpoints/customers/confirm-onboarding-transactions) records the result.
+  </Step>
+</Steps>
+
+The review is held to the [review rules](/endpoints/customers/create-id-link#review-rules) of ID links: the profile's level, its applicant type and its blocked countries. An ID link stays the record behind the check, and `identityCheck.linkId` names it.
+
+## Through your KYC source
+
+<Steps>
+  <Step title="Start">
+    [Start Onboarding](/endpoints/customers/start-onboarding) for a profile your source verifies for, with the customer's wallet. The status reads `AWAITING_RECORD`.
+  </Step>
+  <Step title="The source delivers">
+    Your verifier checks the customer and delivers the sealed record for that wallet through its [KYC inbox](/endpoints/kyc-inbox/introduction). The status turns `RECORD_RECEIVED`.
+  </Step>
+  <Step title="Open and decide">
+    `trusset-kyc open` opens the record on your machine. The status turns `AWAITING_DECISION`, and [Decide Record](/endpoints/customers/decide-onboarding-record) approves or rejects it.
+  </Step>
+  <Step title="Sign">
+    An approved record whose source is bound to whitelists reads `AWAITING_SIGNATURE`. Build, sign and confirm as above. Without bound whitelists the onboarding is `COMPLETED` with the approval.
+  </Step>
+</Steps>
+
+An onboarding through a KYC source admits the wallet to whitelists. It does not register the wallet on your identity register, and the customer record keeps its `status`.
+
+## What a start replaces
+
+A running onboarding is never replaced silently.
+
+| The customer's onboarding is | A new start |
+|---|---|
+| Running, same profile and provider | Returns it, `started: false` |
+| Running, another profile, provider or source | `409 ONBOARDING_IN_PROGRESS`. Send `restart: true` to replace it, or [cancel](/endpoints/customers/cancel-onboarding) it |
+| Approved and waiting for a wallet or a signature, or holding a delivered record | `409 ONBOARDING_IN_PROGRESS`, also with `restart: true`. Finish it first |
+| `COMPLETED`, `REJECTED` or `HELD_BY_ANOTHER_ISSUER` | Returns it. `restart: true` runs a new check |
+| `NOT_STARTED` or `EXPIRED` | Starts |
+
+Replacing an open identity check revokes it, so a review that arrives later registers nothing.
+
+## Events
+
+A customer webhook set up in the Issuer Portal reports each step: `customer.kyc_reviewed`, `customer.registration_pending` and `customer.registered` for the identity check, and the `customer.kyc_record_*` events for a KYC source. Read the onboarding again when one arrives. [Get Onboarding](/endpoints/customers/get-onboarding) never calls Sumsub, so polling it costs one request and nothing else.
+
+## What Trusset holds
+
+The onboarding takes no name, email address or phone number. It stores the customer's wallet, country and profile, your `externalId`, and the provider it runs through. The company name of a `COMPANY` profile is the one exception: it names the customer record and pre-fills the company applicant.
+
+Nothing is signed on your behalf. Every transaction is returned unsigned, and a wallet of your instance signs and broadcasts it.
+
+## Response envelope
+
+Every route sends both `data` and `error`, with the unused one `null`. A refusal can carry `error.details`, for example the `status` an onboarding is in.
+
+## Rate limits
+
+Reads share 240 requests per minute per instance, and every other call shares 120. Both answer `429 RATE_LIMIT_EXCEEDED` with a `Retry-After` header. The 200 requests per minute of the API key apply as well.

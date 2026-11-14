@@ -1,0 +1,79 @@
+---
+title: 'Decide Record'
+api: 'POST /customers/api/onboarding/{customer}/decision'
+description: 'Approve or reject the sealed KYC record of an onboarding'
+---
+
+Records your decision on the sealed KYC record a KYC source delivered for the customer. It applies to an onboarding through a `KYC_SOURCE` only. The review of a Trusset identity check is decided by the check itself.
+
+A record is approved only after you opened it: the status reads `AWAITING_DECISION`. Opening happens on your own machine with the [KYC courier tool](/tools/kyc-courier/overview), which proves it with [Open KYC Record](/endpoints/customers/open-kyc-record). Trusset never opens a record.
+
+Approving returns one unsigned `setListed` transaction for each whitelist bound to the source that does not list the wallet yet. The status then reads `AWAITING_SIGNATURE`. When the source is bound to no whitelist, the approval completes the onboarding.
+
+## Path Parameters
+
+<ParamField path="customer" type="string" required>
+  The customer `id`, your `externalId`, the reference key or a wallet address of the customer.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="decision" type="string" required>
+  `APPROVE` or `REJECT`.
+</ParamField>
+
+<ParamField body="reason" type="string" default="NOT_ACCEPTED">
+  With `REJECT`: `BAD_SIGNATURE`, `DIGEST_MISMATCH`, `UNKNOWN_SOURCE_KEY`, `UNDECRYPTABLE`, `INCOMPLETE` or `NOT_ACCEPTED`.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  With `APPROVE`: the wallet of your instance that will sign the whitelist admissions. The transactions are checked against it.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="decision" type="string">`APPROVE` or `REJECT`.</ResponseField>
+    <ResponseField name="admissions" type="array">
+      With `APPROVE`: one entry per whitelist bound to the source, each `listId`, `listName`, `listAddress`, `alreadyListed` and `plan`, the unsigned transaction, or `null` when the wallet is listed already. [Build Transactions](/endpoints/customers/build-onboarding-transactions) returns the same plans again.
+    </ResponseField>
+    <ResponseField name="onboarding" type="object">The onboarding after the decision.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/onboarding/client-51877/decision" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -d '{ "decision": "APPROVE", "signerAddress": "0x8ba1f109551bD432803012645Ac136ddd64DBA72" }'
+```
+```typescript TypeScript
+const response = await fetch(
+  'https://api.trusset.org/customers/api/onboarding/client-51877/decision',
+  {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-API-Key': 'trusset_your_key_here' },
+    body: JSON.stringify({ decision: 'APPROVE', signerAddress: '0x8ba1f109551bD432803012645Ac136ddd64DBA72' })
+  }
+);
+const { data } = await response.json();
+```
+</RequestExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_DECISION` | `400` | `decision` is neither `APPROVE` nor `REJECT` |
+| `INVALID_INPUT` | `400` | `reason` is not one of the reject reasons |
+| `INVALID_ADDRESS` | `400` | `signerAddress` is malformed |
+| `CUSTOMER_NOT_FOUND` | `404` | No customer of your instance matches `customer` |
+| `DECISION_NOT_APPLICABLE` | `409` | The onboarding runs on the Trusset identity check, or no record arrived yet |
+| `RECORD_NOT_OPENED` | `409` | The record is still sealed. Open it with your local tool first |
+| `RECORD_NOT_APPROVABLE` | `409` | The record was rejected, revoked or superseded |
+| `RECORD_NOT_REJECTABLE` | `409` | Only a waiting or opened record can be rejected |
+| `RECORD_EXPIRED` | `409` | The record passed its validity date |
+| `RATE_LIMIT_EXCEEDED` | `429` | More than 120 onboarding writes in the minute |
+| `ONBOARDING_DECISION_FAILED` | `500` | The decision failed on the server |

@@ -1,0 +1,131 @@
+---
+title: "Onboarding"
+description: "Onboard a customer inside your own app through one sub-module"
+---
+
+The `onboarding` sub-module runs the whole onboarding of one customer: the identity check in your app or the sealed record from your KYC source, the wallet, and the transactions your wallet signs. Each customer has one onboarding, addressed by the customer `id`, your `externalId`, the reference key or the wallet. See [Onboarding](/endpoints/customers/onboarding) for the statuses and the rules.
+
+## Start
+
+```typescript
+const { onboarding, sdk } = await trusset.customers.onboarding.start({
+  externalId: 'client-48213',
+  profile: 'RETAIL',
+  country: 'DE',
+})
+```
+
+`start` creates the customer record when the `externalId` is new, and returns the running onboarding when there is one. For the Trusset identity check, `sdk.token` is the Sumsub access token your app passes to the WebSDK or MobileSDK.
+
+<Expandable title="StartOnboardingInput fields">
+  <ParamField body="customerId" type="string">
+    The `id` of an existing customer.
+  </ParamField>
+  <ParamField body="referenceKey" type="string">
+    The reference key of an existing customer.
+  </ParamField>
+  <ParamField body="externalId" type="string">
+    Your own ID for the customer. Created when it is new.
+  </ParamField>
+  <ParamField body="walletAddress" type="string">
+    The customer's wallet, bound at the start.
+  </ParamField>
+  <ParamField body="profile" type="string" default="RETAIL">
+    The key of a verification profile.
+  </ParamField>
+  <ParamField body="country" type="string">
+    ISO 3166-1 country code.
+  </ParamField>
+  <ParamField body="provider" type="string">
+    `TRUSSET` or `KYC_SOURCE`. Without it the profile's configuration decides.
+  </ParamField>
+  <ParamField body="sourceId" type="string">
+    The KYC source to go through.
+  </ParamField>
+  <ParamField body="company" type="object">
+    `name` and `registrationNumber` for a `COMPANY` profile.
+  </ParamField>
+  <ParamField body="restart" type="boolean">
+    Replace a running onboarding, or run a new check for a settled customer.
+  </ParamField>
+  <ParamField body="expiryDays" type="number" default={30}>
+    Days the identity check stays open. Range: 1-365.
+  </ParamField>
+</Expandable>
+
+## Run the identity check
+
+Pass the token to the Sumsub SDK and hand it a refresh function. Every token is issued for the same applicant.
+
+```typescript
+const refresh = async () => (await trusset.customers.onboarding.token('client-48213')).token
+snsWebSdk.init(sdk.token, refresh).build().launch('#sumsub')
+```
+
+## Follow the status
+
+`get` reads the onboarding without calling a provider or the chain. Call it when a customer webhook arrives.
+
+```typescript
+const state = await trusset.customers.onboarding.get('client-48213')
+console.log(state.status, state.nextAction.type)
+```
+
+`recheck` asks Sumsub for a review that did not arrive, and queues a registration again when the status reads `REGISTRATION_STALLED`.
+
+```typescript
+const { review, onboarding } = await trusset.customers.onboarding.recheck('client-48213')
+```
+
+## Bind the wallet
+
+```typescript
+await trusset.customers.onboarding.bindWallet('client-48213', '0x96C5822784130360F904372b83E130be4A1894D6')
+```
+
+## Sign what waits
+
+When the status reads `AWAITING_SIGNATURE`, build the transactions, sign each one with a wallet of your instance, and confirm with the kind you signed.
+
+```typescript
+const built = await trusset.customers.onboarding.buildTransactions('client-48213', { signerAddress })
+
+if (built.kind === 'IDENTITY_REGISTRATION') {
+  const steps = built.plan.steps as { stepType: string; transaction: { to: string; data: string } }[]
+  const hashes: Record<string, string> = {}
+  for (const step of steps) {
+    const sent = await signer.sendTransaction(step.transaction)
+    await sent.wait()
+    hashes[step.stepType] = sent.hash
+  }
+  await trusset.customers.onboarding.confirmTransactions('client-48213', {
+    kind: built.kind,
+    txHash: hashes.verify,
+    claimTxResults: hashes.residencyClaim ? [{ id: built.pendingId!, txHash: hashes.residencyClaim }] : undefined,
+  })
+}
+```
+
+The SDK returns the transactions unsigned and never holds a key.
+
+## Through a KYC source
+
+For a profile with a KYC source, `start` answers `AWAITING_RECORD` and no token. After you opened the delivered record with the KYC courier tool, record your decision:
+
+```typescript
+const { admissions } = await trusset.customers.onboarding.decide('client-51877', {
+  decision: 'APPROVE',
+  signerAddress,
+})
+```
+
+`admissions` holds one unsigned transaction for each whitelist bound to the source. Confirm each one with `confirmTransactions` and `kind: 'WHITELIST_ADMISSION'`, naming the `listId`.
+
+## Options and cancel
+
+`options` lists the profiles of your instance with the provider each one defaults to. `cancel` closes a running onboarding that was not approved yet.
+
+```typescript
+const { profiles } = await trusset.customers.onboarding.options()
+const { cancelled } = await trusset.customers.onboarding.cancel('client-48213')
+```

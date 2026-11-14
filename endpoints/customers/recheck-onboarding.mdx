@@ -1,0 +1,55 @@
+---
+title: 'Recheck Onboarding'
+api: 'POST /customers/api/onboarding/{customer}/recheck'
+description: 'Ask for a review that did not arrive, or queue a registration that was not queued'
+---
+
+Brings an onboarding forward when it should have moved and did not. It does two things, depending on the status:
+
+- While the identity check is `IN_REVIEW` and no `customer.kyc_reviewed` event arrived, it asks Sumsub for the review and applies it under the same [review rules](/endpoints/customers/create-id-link#review-rules) as the webhook.
+- When the status reads `REGISTRATION_STALLED`, the check was approved with a wallet, but no registration is waiting in the queue and the wallet is not verified. The recheck queues the registration again. A register that cannot be read at the approval does not cause this: the approval is queued all the same.
+
+On any other onboarding it changes nothing and returns the onboarding as it is. An onboarding through a KYC source has nothing to ask for: its records are delivered to you.
+
+## Path Parameters
+
+<ParamField path="customer" type="string" required>
+  The customer `id`, your `externalId`, the reference key or a wallet address of the customer.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="review" type="object">
+      What the recheck found, or `null` when there was nothing to ask. `outcome` is `PENDING_REVIEW`, `APPROVED`, `REFUSED`, `REJECTED`, `RETRY`, `UNCONFIRMED` or `SETTLED`, and an approval adds `registration`: `PENDING`, `REGISTERED`, `AWAITING_WALLET` or `NOT_QUEUED`.
+    </ResponseField>
+    <ResponseField name="onboarding" type="object">The onboarding after the recheck.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/onboarding/client-48213/recheck" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const response = await fetch(
+  'https://api.trusset.org/customers/api/onboarding/client-48213/recheck',
+  { method: 'POST', headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await response.json();
+console.log(data.review?.outcome, data.onboarding.status);
+```
+</RequestExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `COUNTRY_BLOCKED` | `403` | The profile now blocks the customer's country, so nothing was queued |
+| `CUSTOMER_NOT_FOUND` | `404` | No customer of your instance matches `customer` |
+| `NO_APPLICANT` | `409` | The identity check has not started yet |
+| `RATE_LIMIT_EXCEEDED` | `429` | More than 120 onboarding writes in the minute |
+| `ONBOARDING_RECHECK_FAILED` | `500` | The recheck failed on the server |
+| `SUMSUB_UNAVAILABLE` | `503` | Sumsub could not be reached. Retry shortly |

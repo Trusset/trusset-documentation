@@ -1,0 +1,211 @@
+---
+title: 'Start Onboarding'
+api: 'POST /customers/api/onboarding'
+description: 'Start or resume the onboarding of one customer'
+---
+
+Starts the onboarding of a customer, or returns the one that is already running. Call it from your backend when the customer begins verification in your app. The same call is safe to repeat: it never opens a second identity check for a customer whose check is still open.
+
+For the `TRUSSET` provider the answer carries `sdk.token`, which your app passes to the Sumsub WebSDK or MobileSDK. For a `KYC_SOURCE` it names the source the record is expected from. See [Onboarding](/endpoints/customers/onboarding) for the whole path.
+
+## Who the customer is
+
+Name the customer with one of `customerId`, `referenceKey`, `externalId` or `walletAddress`. They are tried in that order.
+
+An `externalId` or a wallet that matches no customer creates the customer record, with the profile, the country and the wallet you send. A `customerId` or `referenceKey` that matches nothing is refused with `404 CUSTOMER_NOT_FOUND`.
+
+A new customer whose wallet your instance already verified on its register starts as `verified`, and the onboarding answers `COMPLETED` without a check.
+
+## Body Parameters
+
+<ParamField body="customerId" type="string">
+  The `id` of an existing customer.
+</ParamField>
+
+<ParamField body="referenceKey" type="string">
+  The reference key of an existing customer, `ref_...`.
+</ParamField>
+
+<ParamField body="externalId" type="string">
+  Your own ID for the customer, 1 to 128 characters. Created when it is new.
+</ParamField>
+
+<ParamField body="walletAddress" type="string">
+  The customer's wallet. It is bound at the start when the customer has none, under the rules of [Bind Wallet](/endpoints/customers/bind-onboarding-wallet). A customer who already holds another wallet is refused with `409 CUSTOMER_WALLET_MISMATCH`.
+</ParamField>
+
+<ParamField body="profile" type="string">
+  The `key` of an enabled [verification profile](/endpoints/customers/list-verification-profiles), matched exactly. `investorType` is accepted as another name for it. Defaults to the profile of the running onboarding, then to the customer's investor type, then to `RETAIL`.
+</ParamField>
+
+<ParamField body="country" type="string">
+  ISO 3166-1 alpha-2, alpha-3 or numeric. A country the profile blocks is refused with `403 COUNTRY_BLOCKED` before anything is created. Defaults to the customer's country.
+</ParamField>
+
+<ParamField body="provider" type="string">
+  `TRUSSET` or `KYC_SOURCE`. Without it, a running onboarding keeps its provider, a profile with an active KYC source uses that source, and every other profile uses `TRUSSET`.
+</ParamField>
+
+<ParamField body="sourceId" type="string">
+  The KYC source to go through. It implies `provider: KYC_SOURCE`. Required when several active sources verify for the profile (`400 SOURCE_REQUIRED`, with the sources in `error.details.sources`).
+</ParamField>
+
+<ParamField body="company" type="object">
+  For a profile whose `entityType` is `COMPANY`: `name` and `registrationNumber`, both strings. They pre-fill the company applicant, and `name` names a customer record created by this call.
+</ParamField>
+
+<ParamField body="restart" type="boolean" default="false">
+  Replaces a running onboarding that can still be replaced, or runs a new check for a customer who is `COMPLETED` or `REJECTED`. See [What a start replaces](/endpoints/customers/onboarding#what-a-start-replaces).
+</ParamField>
+
+<ParamField body="expiryDays" type="integer" default="30">
+  Days the identity check stays open, from 1 to 365. Used by the `TRUSSET` provider only.
+</ParamField>
+
+## Response Fields
+
+The call answers `201` when it started something and `200` when it returned an onboarding as it was.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="created" type="boolean">`true` when this call created the customer record.</ResponseField>
+    <ResponseField name="started" type="boolean">`true` when a new identity check was opened or a new wait for a record began.</ResponseField>
+    <ResponseField name="providerReason" type="string">`REQUESTED` when you named the provider, `PROFILE_SOURCE` when the profile's KYC source decided, `DEFAULT` for the Trusset check, `RESUMED` when a running onboarding was returned.</ResponseField>
+    <ResponseField name="onboarding" type="object">The onboarding. [Get Onboarding](/endpoints/customers/get-onboarding#response-fields) describes every field.</ResponseField>
+    <ResponseField name="sdk" type="object">
+      The Sumsub access token, present while the status is `IDENTITY_CHECK` or `RESUBMISSION`, otherwise `null`: `token`, `expiresInSeconds` (`1200`), `levelName` and `applicantType`.
+    </ResponseField>
+    <ResponseField name="sdkError" type="object">Present only when the onboarding stands but no token could be issued just now: `code` and `message`. [Issue SDK Token](/endpoints/customers/issue-onboarding-token) retries it.</ResponseField>
+    <ResponseField name="warnings" type="array">Present only when the applicant could not be created in advance. The check still opens.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/onboarding" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -d '{
+    "externalId": "client-48213",
+    "profile": "RETAIL",
+    "country": "DE"
+  }'
+```
+```typescript TypeScript
+const response = await fetch('https://api.trusset.org/customers/api/onboarding', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-API-Key': 'trusset_your_key_here'
+  },
+  body: JSON.stringify({ externalId: 'client-48213', profile: 'RETAIL', country: 'DE' })
+});
+const { success, data, error } = await response.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+const accessToken = data.sdk?.token;
+```
+</RequestExample>
+
+<ResponseExample>
+```json Started
+{
+  "success": true,
+  "data": {
+    "created": true,
+    "started": true,
+    "providerReason": "DEFAULT",
+    "onboarding": {
+      "customerId": "cmwgx2e5l000giinmq96qvnzr",
+      "externalId": "client-48213",
+      "referenceKey": "ref_35453b0bf8faf7a3c9abffea18eb235b",
+      "walletAddress": null,
+      "profile": { "key": "RETAIL", "name": "Retail", "entityType": "INDIVIDUAL", "professionalOnly": false },
+      "country": "DEU",
+      "provider": "TRUSSET",
+      "status": "IDENTITY_CHECK",
+      "reason": null,
+      "nextAction": {
+        "type": "RUN_IDENTITY_CHECK",
+        "actor": "CUSTOMER",
+        "method": "POST",
+        "endpoint": "/customers/api/onboarding/cmwgx2e5l000giinmq96qvnzr/token",
+        "message": "Run the identity check in your app: request a token and pass it to the Sumsub WebSDK or MobileSDK."
+      },
+      "identityCheck": {
+        "provider": "SUMSUB",
+        "linkId": "cmwgx2e5t000kiinmzg44d012",
+        "applicantType": "individual",
+        "review": { "status": null, "answer": null, "rejectLabels": null },
+        "expiresAt": "2026-12-14T21:27:22.671Z",
+        "hostedUrl": "https://verify.trusset.org/link/3dce38cd5aa5f829fa461074d82ccfc58ed20a0cbd95b5dd04a1a66280a4beb6"
+      },
+      "kycSource": null,
+      "kycRecord": null,
+      "registration": null,
+      "registrationSkipped": null,
+      "admissions": [],
+      "customerStatus": "pending",
+      "verifiedAt": null,
+      "startedAt": "2026-11-14T21:27:22.676Z"
+    },
+    "sdk": {
+      "token": "_act-sbx-jwt-eyJhbGciOiJub25lIn0...",
+      "expiresInSeconds": 1200,
+      "levelName": "basic-kyc-level",
+      "applicantType": "individual"
+    }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "a0062f94-1284-4eec-bf64-f7016ac90790",
+    "timestamp": "2026-11-14T21:27:22.683Z"
+  }
+}
+```
+```json Error - In Progress
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ONBOARDING_IN_PROGRESS",
+    "message": "This customer has an onboarding that is IN_REVIEW under the RETAIL profile. Send restart: true to replace it with this one, or cancel it first.",
+    "details": { "status": "IN_REVIEW", "provider": "TRUSSET", "profileKey": "RETAIL" }
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-14T21:31:02.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `MISSING_IDENTIFIER` | `400` | No `customerId`, `referenceKey`, `externalId` or `walletAddress` |
+| `INVALID_INPUT` | `400` | A field has the wrong type or length, or `sourceId` was sent with `provider: TRUSSET` |
+| `INVALID_ADDRESS` | `400` | `walletAddress` is not a 42-character `0x` address, or is the zero address |
+| `INVALID_COUNTRY` | `400` | `country` is not an ISO 3166-1 code |
+| `INVALID_PROVIDER` | `400` | `provider` is neither `TRUSSET` nor `KYC_SOURCE` |
+| `INVALID_INVESTOR_TYPE` | `400` | `profile` is not the key of an enabled profile of your instance |
+| `INVALID_EXPIRY` | `400` | `expiryDays` is not a whole number from 1 to 365 |
+| `SOURCE_REQUIRED` | `400` | Several active KYC sources verify for the profile and none was named |
+| `COUNTRY_BLOCKED` | `403` | The profile blocks the country |
+| `CUSTOMER_NOT_FOUND` | `404` | No customer has this `customerId` or `referenceKey` |
+| `SOURCE_NOT_FOUND` | `404` | No KYC source of your instance has this `sourceId` |
+| `CUSTOMER_EXISTS` | `409` | The `externalId` is new, but the wallet belongs to another customer |
+| `CUSTOMER_WALLET_MISMATCH` | `409` | The customer already holds another wallet |
+| `WALLET_IN_USE` | `409` | The wallet belongs to another customer of your instance |
+| `ONBOARDING_IN_PROGRESS` | `409` | An onboarding is running that this start would replace. `error.details` carries its `status`, `provider` and `profileKey` |
+| `RESTART_REQUIRED` | `409` | The customer is settled under another profile or provider. Send `restart: true` |
+| `KYC_SOURCE_NOT_CONFIGURED` | `409` | `provider: KYC_SOURCE`, and no active source verifies for the profile |
+| `SOURCE_PROFILE_MISMATCH` | `409` | The source verifies for another profile |
+| `SOURCE_PAUSED` | `409` | The named source is paused |
+| `SOURCE_UNAVAILABLE` | `409` | The source a running onboarding goes through is paused or removed |
+| `RECIPIENT_KEY_NOT_SET` | `409` | `KYC_SOURCE`, and your instance has no [record key](/endpoints/customers/set-kyc-record-key) |
+| `SEALED_KYC_NOT_ENABLED` | `409` | `KYC_SOURCE` on a production instance that sealed KYC records are not enabled for |
+| `SUMSUB_LEVEL_UNKNOWN` | `409` | The profile names a Sumsub level that does not exist. Correct it in the Issuer Portal |
+| `RATE_LIMIT_EXCEEDED` | `429` | More than 120 onboarding writes in the minute |
+| `ONBOARDING_START_FAILED` | `500` | The start failed on the server |
+| `KYC_UNAVAILABLE` | `503` | The Trusset identity check is not available. Retry shortly |

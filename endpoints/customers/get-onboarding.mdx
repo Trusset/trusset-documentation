@@ -1,0 +1,141 @@
+---
+title: 'Get Onboarding'
+api: 'GET /customers/api/onboarding/{customer}'
+description: 'The status of one customer onboarding and the step that comes next'
+---
+
+Returns the onboarding of one customer: its provider, its status, the next step and everything behind it. The answer is built from your instance's records on every call. It reads no chain and calls no provider, so it is cheap to poll after a webhook.
+
+A customer onboarded before this API existed has an onboarding too. One who passed an [ID link](/endpoints/customers/create-id-link) reads as `TRUSSET`, one with sealed KYC records as `KYC_SOURCE`, and a customer verified directly reads `COMPLETED` with `provider: null`.
+
+## Path Parameters
+
+<ParamField path="customer" type="string" required>
+  The customer `id`, your `externalId`, the reference key (`ref_...`) or a wallet address of the customer. An `id` is tried before an `externalId`. URL-encode an `externalId` that contains reserved characters.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="customerId" type="string">The customer record.</ResponseField>
+    <ResponseField name="externalId" type="string">Your ID, or `null`.</ResponseField>
+    <ResponseField name="referenceKey" type="string">The reference key, or `null` for a customer created with a wallet.</ResponseField>
+    <ResponseField name="walletAddress" type="string">The customer's wallet, checksummed, or `null`.</ResponseField>
+    <ResponseField name="profile" type="object">`key`, `name`, `entityType` and `professionalOnly` of the verification profile the onboarding runs under.</ResponseField>
+    <ResponseField name="country" type="string">ISO 3166-1 alpha-3, or `null`.</ResponseField>
+    <ResponseField name="provider" type="string">`TRUSSET`, `KYC_SOURCE`, or `null` when no onboarding was started.</ResponseField>
+    <ResponseField name="status" type="string">One of the statuses in [Status and next step](/endpoints/customers/onboarding#status-and-next-step).</ResponseField>
+    <ResponseField name="reason" type="object">
+      Why the onboarding is `REJECTED`, `EXPIRED` or `HELD_BY_ANOTHER_ISSUER`, otherwise `null`. `code` is `KYC_REJECTED`, `COUNTRY_BLOCKED`, `KYC_LEVEL_MISMATCH`, `KYC_LEVEL_UNKNOWN` or `KYC_ENTITY_MISMATCH` for a refused review, `CHECK_EXPIRED`, `CHECK_CANCELLED` or `REGISTRATION_DISMISSED` for a lapsed check, `KYC_RECORD_REJECTED` with `rejectReason`, or `KYC_RECORD_REVOKED`, `KYC_RECORD_EXPIRED`, `KYC_RECORD_UNCLAIMED` or `KYC_RECORD_SUPERSEDED` for a record. A rejected review carries `rejectLabels`, a blocked country `country`.
+    </ResponseField>
+    <ResponseField name="nextAction" type="object">
+      <Expandable>
+        <ResponseField name="type" type="string">`START`, `RUN_IDENTITY_CHECK`, `WAIT_FOR_REVIEW`, `BIND_WALLET`, `WAIT_FOR_RECORD`, `OPEN_RECORD`, `DECIDE_RECORD`, `SIGN_TRANSACTIONS`, `RECHECK` or `NONE`.</ResponseField>
+        <ResponseField name="actor" type="string">`CUSTOMER`, `ISSUER` (you), `PROVIDER` (Sumsub or your KYC source) or `NONE`.</ResponseField>
+        <ResponseField name="kind" type="string">With `SIGN_TRANSACTIONS`: `IDENTITY_REGISTRATION`, `ELIGIBILITY_ADMISSION` or `WHITELIST_ADMISSION`.</ResponseField>
+        <ResponseField name="method" type="string">The HTTP method of the call that takes the step, when there is one.</ResponseField>
+        <ResponseField name="endpoint" type="string">Its path.</ResponseField>
+        <ResponseField name="recordId" type="string">With `OPEN_RECORD` and `DECIDE_RECORD`: the sealed record.</ResponseField>
+        <ResponseField name="message" type="string">The step in one sentence.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="identityCheck" type="object">
+      For `TRUSSET`, otherwise `null`: `provider` (`SUMSUB`), `linkId` (the ID link behind the check), `applicantType`, `review` (`status`, `answer`, `rejectLabels`), `expiresAt` and `hostedUrl`.
+    </ResponseField>
+    <ResponseField name="kycSource" type="object">For `KYC_SOURCE`, otherwise `null`: `id`, `name`, `status` and `profileKey` of the source.</ResponseField>
+    <ResponseField name="kycRecord" type="object">
+      The sealed record that decides the onboarding, or `null` while none arrived: `id`, `sourceId`, `sourceName`, `status`, `action`, `walletAddress`, `profileKey`, `verifiedAt`, `validUntil`, the dates of each step, `rejectReason` and `lists`, the whitelists bound to the source with `listed` for this wallet.
+    </ResponseField>
+    <ResponseField name="registration" type="object">The registration queued for your wallet, or `null`: `pendingId`, `status` (`PENDING`, `CONFIRMED` or `DISMISSED`), `txHash` and `confirmedAt`.</ResponseField>
+    <ResponseField name="registrationSkipped" type="object">Set when an approval queued nothing, with `reason` and `message`. See [Get ID Link](/endpoints/customers/get-id-link).</ResponseField>
+    <ResponseField name="admissions" type="array">The wallet's admissions to eligibility registers: `id`, `profileKey`, `registryAddress`, `status`, `admittedTxHash`, `admittedAt` and `removalReason`.</ResponseField>
+    <ResponseField name="customerStatus" type="string">The `status` of the customer record. It means the on-chain identity and is not changed by a KYC source.</ResponseField>
+    <ResponseField name="verifiedAt" type="string">ISO 8601, or `null`.</ResponseField>
+    <ResponseField name="startedAt" type="string">When this API started the onboarding, or `null` for one it did not start.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  `identityCheck.hostedUrl` opens the same check on verify.trusset.org. On an onboarding without a bound wallet, the first visitor who signs in with a wallet there binds it. Treat the URL as a credential and hand it only to the customer, or do not use it at all when your app runs the check.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/customers/api/onboarding/client-48213" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const response = await fetch(
+  `https://api.trusset.org/customers/api/onboarding/${encodeURIComponent('client-48213')}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await response.json();
+console.log(data.status, data.nextAction.type);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Record Received
+{
+  "success": true,
+  "data": {
+    "customerId": "cmwgx2jo9003hiinmxafkbn4f",
+    "externalId": "client-51877",
+    "referenceKey": "ref_4c978b9281d28c3ea7726aa561b6fed3",
+    "walletAddress": "0x4FC3faF0D29A55212aB1ea070aCf5bc69a791734",
+    "profile": { "key": "PROFESSIONAL", "name": "Professional", "entityType": "INDIVIDUAL", "professionalOnly": true },
+    "country": null,
+    "provider": "KYC_SOURCE",
+    "status": "RECORD_RECEIVED",
+    "reason": null,
+    "nextAction": {
+      "type": "OPEN_RECORD",
+      "actor": "ISSUER",
+      "recordId": "cmwgx2jt5003qiinmrc23p6eg",
+      "method": "GET",
+      "endpoint": "/customers/api/kyc-records/cmwgx2jt5003qiinmrc23p6eg/envelope",
+      "message": "Open the sealed record with the KYC courier tool on your own machine. Trusset holds no key that opens it."
+    },
+    "identityCheck": null,
+    "kycSource": { "id": "cmwgx2jnn003diinmv99ki3kh", "name": "Hanse Haftungsdach", "status": "ACTIVE", "profileKey": "PROFESSIONAL" },
+    "kycRecord": {
+      "id": "cmwgx2jt5003qiinmrc23p6eg",
+      "sourceId": "cmwgx2jnn003diinmv99ki3kh",
+      "sourceName": "Hanse Haftungsdach",
+      "status": "RECEIVED",
+      "action": "OPEN",
+      "walletAddress": "0x4FC3faF0D29A55212aB1ea070aCf5bc69a791734",
+      "profileKey": "PROFESSIONAL",
+      "verifiedAt": "2026-11-13T21:27:29.988Z",
+      "validUntil": "2027-09-10T21:27:29.988Z",
+      "receivedAt": "2026-11-14T21:27:29.993Z",
+      "openedAt": null,
+      "approvedAt": null,
+      "rejectedAt": null,
+      "rejectReason": null,
+      "lists": []
+    },
+    "registration": null,
+    "registrationSkipped": null,
+    "admissions": [],
+    "customerStatus": "pending",
+    "verifiedAt": null,
+    "startedAt": "2026-11-14T21:27:29.821Z"
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "3c8902be-83b8-4b88-9d4c-c268197733f9",
+    "timestamp": "2026-11-14T21:27:30.003Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `CUSTOMER_NOT_FOUND` | `404` | No customer of your instance matches `customer`, or the customer is archived |
+| `RATE_LIMIT_EXCEEDED` | `429` | More than 240 onboarding reads in the minute |
+| `ONBOARDING_FETCH_FAILED` | `500` | The read failed on the server |
