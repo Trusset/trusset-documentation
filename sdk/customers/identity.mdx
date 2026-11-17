@@ -133,12 +133,13 @@ When you confirm a batch yourself with `{ txHash }`, pass the `entries` from the
 
 ## Own ERC-3643 registers
 
-An instance can be bound to the issuer's own ERC-3643 (T-REX 3 or 4) identity register instead of the Trusset register. There a verification is three things: an ONCHAINID contract for the wallet, a claim on it signed by a claim key of the register's trusted issuer, and the registration on the register. The API hands them out phase by phase, and each answer names the next step:
+An instance can be bound to the issuer's own ERC-3643 (T-REX 3, 4 or 5) identity register instead of the Trusset register. There a verification is three things: an ONCHAINID contract for the wallet, a claim on it signed by a claim key of the register's trusted issuer, and the registration on the register. The API hands them out phase by phase, and each answer names the next step:
 
 | Phase | `action` | What it holds |
 |---|---|---|
 | `DEPLOY_IDENTITY` | `SIGN_TRANSACTIONS` | One ONCHAINID deployment per wallet that has none |
-| `SIGN_CLAIMS` | `SIGN_MESSAGES` | One `messageHash` per claim, to sign as an EIP-191 personal message |
+| `CREATE_IDENTITY` | `SIGN_TRANSACTIONS` | T-REX 5 only, in place of `DEPLOY_IDENTITY`. One `createIdentityFor` per wallet that has no ONCHAINID, sent to the register's identity factory. Needs no confirm |
+| `SIGN_CLAIMS` | `SIGN_MESSAGES` | One `messageHash` per claim, to sign as an EIP-191 personal message. On T-REX 5 the message has `scheme: 'eip712'`, a `typedData` to sign and an `issuedAt` to send back |
 | `REGISTER` | `SIGN_TRANSACTIONS` | The claim transactions and the registration, in order, with `confirmStepIndex` |
 
 With `{ signer }` the SDK runs the phases for you on `verify`, `verifyFromManifest`, `batchVerify`, `addClaim` and `addClaimsFromProof`: it deploys and records each missing ONCHAINID, signs each claim message, signs the remaining steps and confirms the step that registers the wallet. The signer must hold a CLAIM key (purpose 3) on the trusted issuer, since it signs the claims; otherwise the API refuses with `CLAIM_SIGNER_NOT_TRUSTED` before anything is signed. `revoke` and `revokeClaim` are one transaction on these registers as well.
@@ -160,7 +161,36 @@ const prepared = await trusset.customers.identity.deployOnchainId(walletAddress,
 const recorded = await trusset.customers.identity.deployOnchainId(walletAddress, { txHash: deploymentTxHash })
 ```
 
-`deployOnchainId` with `{ signer }` deploys and records the ONCHAINID in one call, and returns the existing one, with `exists: true`, when the wallet already has an identity. ERC-3643 T-REX 5 registers are not supported yet and answer `REGISTER_VERSION_UNSUPPORTED`.
+`deployOnchainId` with `{ signer }` deploys and records the ONCHAINID in one call, and returns the existing one, with `exists: true`, when the wallet already has an identity.
+
+### T-REX 5 registers
+
+<Note>
+  Available from `@trusset/sdk` 0.7.0.
+</Note>
+
+On a T-REX 5 register (ONCHAINID 3 identities) the plan carries `trexVersion: 5` and `identityFactory`, and every step names the wallet that must sign it in `signer`. With `{ signer }` the runner handles the differences for you:
+
+- In `CREATE_IDENTITY` it sends each `createIdentityFor` and confirms nothing: the identity factory links the identity to the wallet, so the runner builds the next phase once the transactions are mined.
+- It signs a message with `scheme: 'eip712'` with the signer's `_signTypedData` over the message's `typedData`, and sends the signature back with the message's `issuedAt`. EIP-191 messages are signed as before.
+- Before it signs anything, it refuses with `SIGNER_ROLE_MISSING` when a step's `signer` is not the signer you passed. The API answers the same code when the signer lacks the role a phase needs. One signer therefore has to hold every role the run reaches: the IDENTITY_ISSUER role of the factory when a wallet has no ONCHAINID, a CLAIM_SIGNER and a MANAGEMENT key on the trusted issuer identity, and the AGENT role of the register.
+- `revoke` and `revokeClaim` send the signer's address as `signerAddress`, so on a T-REX 5 register the signer must hold a MANAGEMENT key on the trusted issuer identity, which is what revokes the claim.
+
+`deployOnchainId` accepts the T-REX 5 creation as well: with `{ signer }` it sends `createIdentityFor` from the signer, which must hold the IDENTITY_ISSUER role of the factory and be the wallet the answer names in `signer`, and records the identity. The result carries `trexVersion: 5` and `identityFactory`. The investor wallet becomes the only MANAGEMENT key of its ONCHAINID.
+
+To run the phases yourself on a T-REX 5 register, sign each message's `typedData` and send `claimSignatures` entries as `{ walletAddress, signature, claimType, issuedAt }`, with `issuedAt` exactly as the message gave it.
+
+```typescript
+for (const message of plan.messages ?? []) {
+  if (message.scheme === 'eip712' && message.typedData) {
+    const { domain, types, message: value } = message.typedData
+    const signature = await signer._signTypedData(domain, types, value)
+    claimSignatures.push({ walletAddress: message.walletAddress, signature, claimType: message.claimType, issuedAt: message.issuedAt })
+  }
+}
+```
+
+The types for these plans are exported: `TrexVersion` (`4 | 5`), `RegisterPhase`, which includes `'CREATE_IDENTITY'`, `ClaimSignature` with its optional `issuedAt`, and `ClaimSigningRequest`, whose `scheme` is `'eip191' | 'eip712'` and which carries `typedData` and `issuedAt` for `'eip712'`.
 
 ## Revoke an identity
 
@@ -173,6 +203,8 @@ const result = await trusset.customers.identity.revoke('0x1234567890abcdef123456
 ```
 
 The result carries `walletAddress`, `status`, `txHash` and `gasUsed`.
+
+On a T-REX 5 register `revoke` revokes the wallet's KYC claim with `revokeClaimByDigest` instead of deleting the identity, so verifying the wallet again signs a new claim and reverses it. See [Revoke Identity](/endpoints/customers/revoke-identity#on-a-t-rex-5-register).
 
 ## Get identity status
 
@@ -193,7 +225,7 @@ const status = await trusset.customers.identity.getStatus('0x1234567890abcdef123
 | `status.offChain.status` | `pending`, `verified`, or `revoked` |
 | `status.offChain.country`, `investorType`, `verifiedAt` | The customer record's values |
 
-If no customer record exists, `offChain` is `null`. If the address was never verified on chain, `onChain.isVerified` is `false` with a status of `none`.
+If no customer record exists, `offChain` is `null`. If the address was never verified on chain, `onChain.isVerified` is `false` with a status of `none`. On an instance bound to a T-REX 5 register, `onChain.trexVersion` is `5`.
 
 ## On-chain claims
 

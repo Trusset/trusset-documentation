@@ -37,13 +37,45 @@ Customer records need the `customers` service. Everything under `/identity`, `/o
 
 An instance writes to the Trusset ID Register by default, or to its own register when it is bound to one. Its own register is either a Trusset identity register or an ERC-3643 identity registry (Tokeny T-REX with ONCHAINID). Every identity call resolves the register automatically, and no endpoint takes a registry address. Calldata responses name the kind in `registerKind`: `TRUSSET` or `TREX`.
 
-The request is the same on both kinds, but the work behind it is not. On a Trusset register, each write is one transaction from a wallet holding `KYC_PROVIDER_ROLE`, or `REGISTER_OPERATOR_ROLE` to revoke an identity. On an ERC-3643 registry, registering a wallet can take three rounds: deploying its ONCHAINID, signing each claim as a message, then adding the claims and registering the identity. [Verify Identity](/endpoints/customers/verify-identity) sets out which key signs each step.
+Customer registration supports ERC-3643 T-REX 4 registers with ONCHAINID 2 identities and T-REX 5 registers with ONCHAINID 3 identities. Either can be bound as your instance's own register in the Issuer Portal, and calldata responses from an ERC-3643 register carry `trexVersion`, `4` or `5`. [T-REX 5 registers](#t-rex-5-registers) sets out what differs on the newer version.
+
+The request is the same on both kinds, but the work behind it is not. On a Trusset register, each write is one transaction from a wallet holding `KYC_PROVIDER_ROLE`, or `REGISTER_OPERATOR_ROLE` to revoke an identity. On an ERC-3643 registry, registering a wallet can take three rounds: deploying its ONCHAINID, signing each claim as a message, then adding the claims and registering the identity. On a T-REX 5 register the identity factory creates the ONCHAINID instead, and each claim is signed as EIP-712 typed data. [Verify Identity](/endpoints/customers/verify-identity) sets out which key signs each step.
 
 When none of your instance's wallets holds the role a write needs, the write is refused before any calldata is handed out. A Trusset register answers `403 KYC_PROVIDER_ROLE_MISSING`, `403 REGISTER_OPERATOR_ROLE_MISSING` for a revocation or `403 COMPLIANCE_ROLE_MISSING` for a freeze, and an ERC-3643 registry `403 REGISTRY_AGENT_MISSING`. The check is skipped when the instance has no registered wallet or the role cannot be read, and a write without the role then reverts on chain.
 
 On the Trusset ID Register, Trusset grants all three roles to a registered, verified wallet of your instance: open the wallet page of the issuer app and press **Grant on-chain roles** on the wallet card, which lists the roles the wallet is missing. The grant is part of the issuer app (`POST /issuer-wallets/wallets/:instanceId/:walletId/grant-roles` with the issuer app login), not of the API key. A refusal can outlast a new grant by up to a minute. On your instance's own register, the register owner grants the roles.
 
 The Trusset ID Register is shared by every instance without a register of its own, so it holds one identity per wallet. Your instance revokes and freezes only identities one of its own wallets registered, and is refused with `403 IDENTITY_HELD_BY_ANOTHER_ISSUER` for an identity another issuer's wallet wrote. An identity the copy into the current register carried over counts for the wallet that first registered it, and one the Trusset platform wrote before issuer wallets signed counts as yours when the wallet belongs to one of your customers.
+
+### T-REX 5 registers
+
+A T-REX 5 suite grants write access through its AccessManager and names an identity factory that creates the ONCHAINIDs. Before your instance is bound to one, the Issuer Portal checks it against your instance's registered wallets (`POST /instances/app/{instanceId}/identity-registry/check` with the issuer app login). The answer carries `trexVersion`, `identityFactory`, `identityCreatable`, and `roles`, which reports for each role below whether one of your wallets holds it (`held`) and which ones do (`holders`).
+
+| Role | A wallet of your instance holds it when | Used for |
+|---|---|---|
+| `AGENT` | The AccessManager lets it call the register, `canCall(wallet, registry, selector)`, in place of `isAgent` on T-REX 4 | `registerIdentity` |
+| `CLAIM_SIGNER` | It is a CLAIM_SIGNER key (purpose 3) on a trusted issuer identity of the register | Signing claims |
+| `CLAIM_MANAGER` | It is a MANAGEMENT key (purpose 1) on that issuer identity | Writing claims with `addClaimTo` and revoking them with `revokeClaimByDigest` |
+| `IDENTITY_ISSUER` | It holds the role the identity factory's authority requires to create identities | Creating an ONCHAINID for a wallet that has none. Optional and reported as `identityCreatable`: without it your instance cannot create identities for new wallets |
+
+The check refuses a register your instance cannot write to:
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `REGISTER_VERSION_UNSUPPORTED` | `409` | The register claims T-REX 5 but names no identity factory, so it is not a T-REX 5 register this service can write to |
+| `REGISTRY_AGENT_MISSING` | `403` | None of your wallets holds the AGENT role |
+| `REGISTRY_NO_CLAIM_TOPICS` | `409` | The register requires no claim topic |
+| `REGISTRY_NO_TRUSTED_ISSUER` | `409` | The register names no trusted issuer for its claim topic |
+| `CLAIM_SIGNER_MISSING` | `403` | None of your wallets holds a CLAIM_SIGNER key on a trusted issuer identity |
+| `CLAIM_MANAGER_MISSING` | `403` | None of your wallets holds a MANAGEMENT key on that issuer identity, which is the key that writes and revokes claims |
+
+Identity writes on a T-REX 5 register ([Verify Identity](/endpoints/customers/verify-identity), [Batch Verify](/endpoints/customers/batch-verify), [Build Pending Registration](/endpoints/customers/build-pending-registration), [Onboarding](/endpoints/customers/onboarding) and a re-verification) return the same plan as on T-REX 4, with `trexVersion: 5` and `identityFactory`, in up to three phases: `CREATE_IDENTITY`, where the identity factory creates each missing ONCHAINID with the investor wallet as its only MANAGEMENT key; `SIGN_CLAIMS`, with EIP-712 typed data to sign; and `REGISTER`. Each step names the wallet that must sign it in `signer`. [Verify Identity](/endpoints/customers/verify-identity#verify-on-an-erc-3643-t-rex-5-register) sets out each phase.
+
+Three more things differ from T-REX 4:
+
+- A T-REX 5 register records no country. The country stays on the customer record, and Verify Identity and Batch Verify add `{ code: 'COUNTRY_NOT_ON_REGISTER' }` to the plan's `warnings`. Batch writes add no country steps there.
+- A wallet counts as verified when its ONCHAINID from the identity factory holds valid claims for the required topics. The plan registers the wallet on the register as well, but the contract does not require that. [Identity Status](/endpoints/customers/identity-status) answers `trexVersion: 5`.
+- [Revoke Identity](/endpoints/customers/revoke-identity) revokes the wallet's KYC claim with `revokeClaimByDigest`, which a new verification reverses. `deleteIdentity` is never used there, because it would bar the wallet for good.
 
 ### The Trusset ID Register
 
@@ -61,7 +93,7 @@ Binding either Trusset register as your instance's own register in the Issuer Po
 
 Every write that changes the registry returns unsigned calldata for a wallet you control to sign and broadcast. Nothing is submitted on your behalf. Call the endpoint once without `txHash` to get the transaction, then again with the hash to have the receipt verified and the result recorded.
 
-Some writes vary that shape. [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) and [Attest Proofs](/endpoints/customers/attest-proofs) confirm several receipts in one call with `txResults`. The pending queue and ONCHAINID deployments confirm on their own endpoints. On an ERC-3643 registry, a write can first answer with messages to sign, which the next call sends back as `claimSignatures`. When a plan holds several transactions, `confirmStepIndex` names the one to confirm.
+Some writes vary that shape. [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) and [Attest Proofs](/endpoints/customers/attest-proofs) confirm several receipts in one call with `txResults`. The pending queue and ONCHAINID deployments confirm on their own endpoints. On an ERC-3643 registry, a write can first answer with messages to sign, which the next call sends back as `claimSignatures`. On a T-REX 5 register each signature goes back with the `issuedAt` its message carried. When a plan holds several transactions, `confirmStepIndex` names the one to confirm.
 
 ## Pending approvals
 
@@ -69,13 +101,13 @@ When a customer passes KYC through an [ID link](/endpoints/customers/create-id-l
 
 Work the queue with [List Pending Verifications](/endpoints/customers/list-pending-verifications), [Build Pending Registration](/endpoints/customers/build-pending-registration) and [Confirm Pending Registration](/endpoints/customers/confirm-pending-registration). [Dismiss Pending Verification](/endpoints/customers/dismiss-pending-verification) closes a row for good.
 
-On an ERC-3643 registry a wallet needs an ONCHAINID before it can be registered. Build Pending Registration asks for one in its first phase when the wallet has none. [Deploy ONCHAINID](/endpoints/customers/deploy-onchainid) and [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid) deploy one ahead of time.
+On an ERC-3643 registry a wallet needs an ONCHAINID before it can be registered. Build Pending Registration asks for one in its first phase when the wallet has none. [Deploy ONCHAINID](/endpoints/customers/deploy-onchainid) and [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid) deploy one ahead of time. On a T-REX 5 register that phase is `CREATE_IDENTITY`: the identity factory creates the ONCHAINID and links it to the wallet, so it needs no confirm.
 
 ## Eligibility registers
 
 A [verification profile](/endpoints/customers/list-verification-profiles) can carry an eligibility register: an on-chain identity register that holds exactly the wallets admitted under that profile. Lending markets and vaults read it as a gate, so a market can lend only to the customers of one profile and a vault can take deposits only from them. A register is deployed for a profile, or an existing one bound to it, in the Issuer Portal. A deployed register extends your instance's own ERC-3643 identity register, so an instance that writes to the Trusset ID Register cannot deploy one (`409 ELIGIBILITY_REQUIRES_OWN_REGISTER`). It can still bind an existing ERC-3643 register to a profile that is not limited to professional clients (`PUT /customers/verification-profiles/{id}/eligibility-register`). That register is read only here, in the `EXTERNAL` mode below. Only a profile limited to professional clients needs your instance's own ERC-3643 register first. A profile without a register named as a market or vault gate answers `409 ELIGIBILITY_REGISTER_NOT_SET`, and its message gives the remedy that fits the profile. Both codes carry `details.registryMode: TRUSSET` on such an instance. This API manages who is on it.
 
-One register stands for one profile of an instance. The Issuer Portal refuses to bind a register that another profile of the instance already uses (`ELIGIBILITY_REGISTER_IN_USE`), or one that keeps its identities in the same identity storage as another profile's register (`ELIGIBILITY_STORAGE_IN_USE`). A profile limited to professional clients takes only a register in the `REGISTER` mode below, whose admissions your instance signs (`PROFESSIONAL_REGISTER_REQUIRED`), because lending markets rely on it to admit professional clients only. A bound profile's `professionalOnly` setting cannot change until the register is unbound.
+One register stands for one profile of an instance. The Issuer Portal refuses to bind a register that another profile of the instance already uses (`ELIGIBILITY_REGISTER_IN_USE`), or one that keeps its identities in the same identity storage as another profile's register (`ELIGIBILITY_STORAGE_IN_USE`). A profile limited to professional clients takes only a register in the `REGISTER` or `CLAIM` mode below, whose admissions your instance signs (`PROFESSIONAL_REGISTER_REQUIRED`), because lending markets rely on it to admit professional clients only. A bound profile's `professionalOnly` setting cannot change until the register is unbound.
 
 Admissions work like the pending queue. A wallet waits as an admission, your wallet signs the transaction that puts it on the register, and the confirm reads the outcome from the chain.
 
@@ -95,6 +127,8 @@ Admissions work like the pending queue. A wallet waits as an admission, your wal
 </Steps>
 
 Removals take the same path with [Request Removal](/endpoints/customers/request-removal), [Build Removal](/endpoints/customers/build-removal), which returns one `deleteIdentity` transaction per wallet, and [Confirm Removal](/endpoints/customers/confirm-removal), which reads `IdentityRemoved` logs. [List Admissions](/endpoints/customers/list-admissions) shows the queue in every state, [Get Wallet Eligibility](/endpoints/customers/get-wallet-eligibility) shows one wallet across every register, and [List Eligibility Profiles](/endpoints/customers/list-eligibility-profiles) lists the profiles that have one.
+
+On a register in the `CLAIM` mode an admission is a profile claim instead. [Build Admission](/endpoints/customers/build-admission) first answers EIP-712 messages to sign, then one `addClaimTo` transaction per wallet. [Build Removal](/endpoints/customers/build-removal) answers one `revokeClaimByDigest` per wallet. Both confirms read the claim transactions, and membership is read live from the register's `isVerified`.
 
 Trusset queues these on its own:
 
@@ -118,10 +152,24 @@ What this API can do on a register depends on the register. The mode is recorded
 | Mode | Register | Admissions |
 |---|---|---|
 | `REGISTER` | An ERC-3643 identity registry with its own identity storage, one of your instance's verified wallets as an agent, on an instance that runs its own ERC-3643 register. A register deployed from the Issuer Portal is one | Built and confirmed here |
+| `CLAIM` | An ERC-3643 T-REX 5 identity registry on the same identity factory as your instance's own T-REX 5 register. It requires the claim topics of your instance register plus exactly one more, the profile topic, and trusts for that topic a claim issuer on which one of your wallets holds a CLAIM_SIGNER and a MANAGEMENT key | Built and confirmed here, as profile claims your wallets sign and write |
 | `INSTANCE_REGISTER` | Your instance register itself | Registering a wallet on your instance register is its admission. [Request Admission](/endpoints/customers/request-admission) answers `mode: INSTANCE_REGISTER`, and the builds refuse with `ELIGIBILITY_ADMISSION_INSTANCE_REGISTER` |
-| `EXTERNAL` | Any other register: one that is not ERC-3643, one that shares your instance register's identity storage, one where none of your wallets is an agent, or any register while your instance has no ERC-3643 register of its own | Read only. [Request Admission](/endpoints/customers/request-admission) refuses with `ADMISSIONS_MANAGED_EXTERNALLY`, the builds refuse with `ELIGIBILITY_ADMISSION_EXTERNAL`, and the register's owner admits wallets with its own tools. [Get Wallet Eligibility](/endpoints/customers/get-wallet-eligibility) still reads it |
+| `EXTERNAL` | Any other register: one that is not ERC-3643, an ERC-3643 T-REX 5 register that does not qualify for `CLAIM`, one that shares your instance register's identity storage, one where none of your wallets is an agent, or any register while your instance has no ERC-3643 register of its own | Read only. [Request Admission](/endpoints/customers/request-admission) refuses with `ADMISSIONS_MANAGED_EXTERNALLY`, the builds refuse with `ELIGIBILITY_ADMISSION_EXTERNAL`, and the register's owner admits wallets with its own tools. [Get Wallet Eligibility](/endpoints/customers/get-wallet-eligibility) still reads it |
+
+Before a register is bound, the Issuer Portal checks it (`POST /customers/verification-profiles/{id}/eligibility-register/check` with the issuer app login). The answer names the mode the register would get in `admission` and carries `trexVersion`: `4` or `5` for an ERC-3643 register, `null` for any other. A T-REX 5 register that qualifies for `CLAIM` answers `admission: CLAIM` with `profileTopic`, `claimIssuer`, `claimSigners` and `claimManagers`. One that would qualify but for one point keeps `admission: EXTERNAL`, and `warnings` names the point:
+
+| `warnings[].code` | Cause |
+|---|---|
+| `IDENTITY_FACTORY_DIFFERS` | The register uses another identity factory than your instance register, so your customers' identities do not count there |
+| `PROFILE_TOPIC_MISSING` | The register requires no topic beyond your instance register's, so every verified customer already counts as admitted |
+| `PROFILE_TOPICS_AMBIGUOUS` | The register requires more than one topic beyond your instance register's, and an admission writes one profile claim |
+| `CLAIM_ISSUER_NOT_HELD` | None of your wallets holds both a CLAIM_SIGNER and a MANAGEMENT key on a trusted issuer of the profile topic |
+
+A T-REX 5 register bound while your instance register is not T-REX 5 is accepted as a read-only gate: lending markets and vaults read it, `admission` is `EXTERNAL`, and `warnings` contains `{ code: 'TREX5_READ_ONLY' }`. Wallets are admitted to it with the holder's own T-REX 5 tooling, never from Trusset. A register without an `isAgent` method does not fail the check as an outage: it reads as having no agent among your wallets.
 
 A register deployed from the Issuer Portal uses the claim topics and trusted issuers of your instance register, and a wallet is admitted with the ONCHAINID your instance register holds for it. It therefore reads as verified there on the same claims, which is why [Build Admission](/endpoints/customers/build-admission) skips a wallet your instance register does not verify yet.
+
+On an instance whose own register is T-REX 5, deploying an eligibility register from the Issuer Portal is refused with `409 ELIGIBILITY_DEPLOY_TREX5`, because the deployed register would be T-REX 4 and could not read ONCHAINID 3 identities. Deploy a T-REX 5 identity registry with your ERC-3643 tooling on the same identity factory, require one claim topic for the profile, trust your claim issuer for it, then bind it. Its admissions are then in the `CLAIM` mode.
 
 Eligibility registers are available on Ethereum instances only. A customer webhook set up in the Issuer Portal reports the queue as `eligibility.admission_pending`, `eligibility.admitted`, `eligibility.removal_pending` and `eligibility.removed`.
 
@@ -144,7 +192,7 @@ The four canonical slots are reserved on this API. [Add Claim](/endpoints/custom
 
 The four assignable slots take a hash you supply. What they mean is your convention, and a proof for a field with no canonical meaning can be filed in one of them.
 
-On an ERC-3643 registry the claims live on the wallet's ONCHAINID instead. Each slot except `KYC` becomes the topic `uint256(keccak256(name))`, where `name` is the slot name such as `RESIDENCY`. A `KYC` claim takes the register's first required claim topic that one of your wallets can sign for. A CLAIM key of the registry's trusted issuer signs each claim.
+On an ERC-3643 registry the claims live on the wallet's ONCHAINID instead. Each slot except `KYC` becomes the topic `uint256(keccak256(name))`, where `name` is the slot name such as `RESIDENCY`. A `KYC` claim takes the register's first required claim topic that one of your wallets can sign for. A CLAIM key of the registry's trusted issuer signs each claim. On a T-REX 5 register a CLAIM_SIGNER key of the trusted issuer signs each claim as EIP-712 typed data, and a MANAGEMENT key of that issuer identity writes it onto the ONCHAINID with `addClaimTo`.
 
 ## KYC proofs
 

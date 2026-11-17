@@ -8,6 +8,8 @@ Returns the unsigned contract creation that deploys an ONCHAINID for a customer'
 
 Only an instance bound to an ERC-3643 register can use it. A Trusset register needs no ONCHAINID, and the call answers `REGISTER_OPERATION_UNSUPPORTED`.
 
+Customer registration supports ERC-3643 T-REX 4 registers with ONCHAINID 2 identities and T-REX 5 registers with ONCHAINID 3 identities. On a T-REX 5 register this call returns a creation through the register's identity factory instead of a contract creation: see [On a T-REX 5 register](#on-a-t-rex-5-register) and [Which register you write to](/endpoints/customers/introduction#which-register-you-write-to).
+
 <Warning>
   This call asks only the register whether the wallet has an ONCHAINID. It does not see one you deployed and confirmed for a wallet that is not registered yet, and plans a second deployment. Confirming that one as well replaces the recorded identity with the newer one.
 
@@ -24,6 +26,8 @@ The ONCHAINID is created with `managementKey` as its management key. That is an 
 
 <ParamField body="signerAddress" type="string">
   The wallet to name as the management key. Omit it to use your instance's primary registered wallet, or the most recently registered one when none is primary. Name a wallet registered to your instance, because the confirm refuses any other with `MANAGEMENT_KEY_NOT_INSTANCE`. A malformed address is ignored.
+
+  On a T-REX 5 register it names the wallet that will send the creation instead, and is never a management key. It must hold the IDENTITY_ISSUER role of the identity factory's authority, or the call answers `403 SIGNER_ROLE_MISSING`.
 </ParamField>
 
 ## Broadcast the deployment
@@ -34,21 +38,34 @@ Any wallet can send it. The confirm checks the management key the deployment nam
 
 Then record it with [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid), using the same `walletAddress`. Until then, [Build Pending Registration](/endpoints/customers/build-pending-registration) does not know the identity exists.
 
+## On a T-REX 5 register
+
+The answer carries `trexVersion: 5`. When the identity factory already links an active identity to the wallet, the call returns it with `exists: true` and builds nothing. Otherwise it returns one transaction, `stepType: createIdentity`, that calls `createIdentityFor` on the identity factory, so `transaction.to` is the factory. `identityType` is `CORPORATE` for a company customer and `INDIVIDUAL` otherwise, and the salt is `trusset-<chainId>-<wallet>`, which carries no personal data.
+
+The investor wallet becomes the only MANAGEMENT key of its ONCHAINID. Your issuer wallets hold no key on it, so the answer carries no `managementKey` or `implementationAuthority`. The warning above does not apply either: the factory answers for the wallet, so no second identity is planned.
+
+Send the transaction from the wallet the answer names in `signer`, which holds the IDENTITY_ISSUER role of the factory's authority. The factory links the identity to the wallet as the transaction mines, so the identity writes find it without a confirm. [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid) still records it on the customer record.
+
+The call refuses with `IDENTITY_ISSUER_MISSING` when none of your instance's wallets holds the IDENTITY_ISSUER role, `IDENTITY_TYPE_NOT_ENABLED` when the factory has no policy for the identity type, and `IDENTITY_BINDING_REVOKED` when the wallet's binding on the factory is revoked. Use another wallet for the customer then.
+
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="registerKind" type="string">`TREX`.</ResponseField>
     <ResponseField name="walletAddress" type="string">The customer's wallet, checksummed.</ResponseField>
-    <ResponseField name="exists" type="boolean">`true` when the register already holds an ONCHAINID for the wallet. Nothing is built then.</ResponseField>
+    <ResponseField name="trexVersion" type="integer">T-REX 5 only. `5`.</ResponseField>
+    <ResponseField name="exists" type="boolean">`true` when the register already holds an ONCHAINID for the wallet. Nothing is built then. On a T-REX 5 register, `true` when the identity factory links an active identity to the wallet.</ResponseField>
     <ResponseField name="identity" type="string">The registered ONCHAINID. When `exists` is `true` only.</ResponseField>
-    <ResponseField name="registered" type="boolean">Whether the wallet is on the register, which is always `true` when `exists` is. When `exists` is `true` only.</ResponseField>
+    <ResponseField name="registered" type="boolean">Whether the wallet is on the register, which is always `true` when `exists` is. When `exists` is `true` only. On a T-REX 5 register it can be `false`, since the factory links the identity before the wallet is registered, or `null` when the register could not be read.</ResponseField>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`. This field and the ones down to `description` come back only when `exists` is `false`.</ResponseField>
-    <ResponseField name="stepType" type="string">`deployIdentity`.</ResponseField>
-    <ResponseField name="transaction" type="object">`to` (`null`), `data`, and `create` (`true`).</ResponseField>
-    <ResponseField name="functionName" type="string">`IdentityProxy`.</ResponseField>
-    <ResponseField name="managementKey" type="string">The management key the ONCHAINID is created with.</ResponseField>
-    <ResponseField name="implementationAuthority" type="string">The implementation authority the ONCHAINID proxies to, read from an identity already on the register.</ResponseField>
+    <ResponseField name="stepType" type="string">`deployIdentity`, or `createIdentity` on a T-REX 5 register.</ResponseField>
+    <ResponseField name="transaction" type="object">`to` (`null`), `data`, and `create` (`true`). On a T-REX 5 register `{ to, data }`, where `to` is the identity factory.</ResponseField>
+    <ResponseField name="functionName" type="string">`IdentityProxy`, or `createIdentityFor` on a T-REX 5 register.</ResponseField>
+    <ResponseField name="identityType" type="string">T-REX 5 only. `INDIVIDUAL` or `CORPORATE`.</ResponseField>
+    <ResponseField name="signer" type="string">T-REX 5 only. The wallet that must send the creation, which holds the IDENTITY_ISSUER role of the factory's authority.</ResponseField>
+    <ResponseField name="managementKey" type="string">The management key the ONCHAINID is created with. T-REX 4 only.</ResponseField>
+    <ResponseField name="implementationAuthority" type="string">The implementation authority the ONCHAINID proxies to, read from an identity already on the register. T-REX 4 only.</ResponseField>
     <ResponseField name="description" type="string">What the step does.</ResponseField>
     <ResponseField name="confirmWith" type="object">`endpoint` and `fields` of the confirm. Present in both shapes.</ResponseField>
   </Expandable>
@@ -164,6 +181,12 @@ if (!built.data.exists) {
 | `NO_REGISTERED_WALLET` | `409` | No `signerAddress` was sent and your instance has no registered Ethereum wallet to name as the management key |
 | `ONCHAINID_AUTHORITY_UNKNOWN` | `409` | Neither `signerAddress` nor any registered wallet of your instance is on the register with an ONCHAINID to read the implementation authority from |
 | `OWN_REGISTRY_NOT_CONFIGURED` | `409` | Your instance is set to its own register but holds no valid register address |
-| `REGISTER_OPERATION_UNSUPPORTED` | `409` | Your instance writes to a Trusset register. The same answer comes back when the register could not be read to tell its interface, so retry once before relying on it |
+| `REGISTER_OPERATION_UNSUPPORTED` | `409` | Your instance writes to a Trusset register |
+| `REGISTER_VERSION_UNSUPPORTED` | `409` | The register claims T-REX 5 but names no identity factory, so it is not a T-REX 5 register this service can write to |
+| `IDENTITY_ISSUER_MISSING` | `403` | T-REX 5: none of your instance's wallets holds the IDENTITY_ISSUER role of the identity factory's authority |
+| `SIGNER_ROLE_MISSING` | `403` | T-REX 5: `signerAddress` does not hold the IDENTITY_ISSUER role. The message names the wallets that do |
+| `IDENTITY_TYPE_NOT_ENABLED` | `409` | T-REX 5: the identity factory has no policy for the wallet's identity type |
+| `IDENTITY_BINDING_REVOKED` | `409` | T-REX 5: the wallet's binding on the identity factory is revoked, so no identity can be created or linked for it |
+| `REGISTRY_PROBE_FAILED` | `503` | The register could not be read to tell its interface; retry shortly |
 | `ONCHAINID_BUILD_FAILED` | `400` | A chain read failed |
 | `ONCHAINID_BUILD_FAILED` | `500` | Any other failure |

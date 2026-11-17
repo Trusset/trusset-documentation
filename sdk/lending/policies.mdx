@@ -1,0 +1,98 @@
+---
+title: "Standing Policies"
+description: "Record once how your institution takes markets of one deployer or one collateral token as lender of record"
+---
+
+<Note>
+  Available from `@trusset/sdk` 0.7.0.
+</Note>
+
+A standing policy says in advance how your institution takes markets of one deployer wallet, or of one collateral token, as lender of record. It never signs anything. Every market it matches is still adopted with one transaction signed by your own wallet through [`operators.accept`](/sdk/lending/operators#take-the-lender-of-record-role), so every policy answer carries `signatureStillRequired: true`.
+
+A market matches a policy on its exact deployer (`kind: 'DEPLOYER'`) or its exact collateral token (`kind: 'COLLATERAL_TOKEN'`). An enabled `DEPLOYER` policy wins over an enabled `COLLATERAL_TOKEN` policy, and a switched-off policy never matches. A match does three things:
+
+- The market carries the policy in `standingPolicy` on `operators.queued()` and `operators.queuedMarket()`.
+- Its `acceptanceTerms` are what the issuer app pre-fills on the adoption form. A realization path applies only where the market's price source offers it: `EXCHANGE_SALE` only on a `MARKET`-priced market, `AUCTION` only on a market priced any other way.
+- When the adoption is confirmed, the policy's [terms library](/sdk/lending/terms#terms-library) template is published as the market's terms of use while the market has none.
+
+`trusset.lending.policies` covers the four calls. Policies are a database record: nothing is signed and nothing goes on chain, so none of these methods takes a signer.
+
+## Read your policies
+
+Any key of the instance can read the policies. `isBank` says whether your account may write them.
+
+```typescript
+const { policies, isBank } = await trusset.lending.policies.list()
+
+for (const policy of policies) {
+  console.log(policy.id, policy.kind, policy.address, policy.enabled, policy.template?.title, policy.template?.archived)
+}
+```
+
+Enabled policies come first, newest first within each group. `template` is the bound template as `{ id, title, version, archived }`, or `null` when the policy binds none.
+
+## Create a policy
+
+Only an account Trusset approved as a lender of record can write policies. Any other account is refused with `CURATOR_NOT_APPROVED`.
+
+```typescript
+const { policy } = await trusset.lending.policies.create({
+  kind: 'DEPLOYER',
+  address: '0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52',
+  label: 'ACME Industrial AG',
+  termsTemplateId: templateId,
+  acceptanceTerms: {
+    admin: lenderAddress,
+    issuer: lenderAddress,
+    realizationMode: 'ISSUER_REDEMPTION',
+    liquidityCommitment: '250000',
+    maxFixedRateBps: 1200,
+  },
+})
+```
+
+`acceptanceTerms` takes these keys, all optional: the parties `admin`, `issuer`, `collateralAgent`, `saleRecipient`, `liquidationOperator`, `oracleOwner` and `priceSigner`, the borrower register `identityRegistry`, `realizationMode` (`EXCHANGE_SALE`, `ISSUER_REDEMPTION` or `AUCTION`), `liquidityCommitment` (a decimal string with up to 18 decimals) and `maxFixedRateBps` (an integer from 1 to 50000). The SDK refuses a key it does not know, a malformed or zero address and a value out of range with a `ValidationError` before any request. `label` takes at most 120 characters.
+
+An instance holds one policy per `kind` and `address`. A second one is refused with `STANDING_POLICY_EXISTS`: update the existing one instead. A template that is archived is refused with `TEMPLATE_ARCHIVED`.
+
+## Change, pause and remove a policy
+
+`update` changes only the fields you send. `acceptanceTerms` replaces the whole object, so send every key you want to keep. `label: null` clears the label, and `termsTemplateId: null` binds no template.
+
+```typescript
+await trusset.lending.policies.update(policyId, { enabled: false })
+
+await trusset.lending.policies.update(policyId, {
+  enabled: true,
+  termsTemplateId: newTemplateId,
+})
+```
+
+`enabled: false` is the reversible pause: the policy stays stored and matches nothing until it is switched on again. A policy whose template has been archived cannot be switched on alone (`TEMPLATE_ARCHIVED`), because a market adopted under it would go live without terms of use. Bind another template, or `null`, in the same call. An empty update is refused before any request.
+
+`remove` deletes the policy for good and returns the record as it was. Prefer the pause when the policy may be needed again.
+
+```typescript
+const { policy: removed } = await trusset.lending.policies.remove(policyId)
+```
+
+## What the queue shows
+
+On a queue row and on `queuedMarket`, `standingPolicy` is the matching policy as `{ id, kind, address, label, termsTemplateId, acceptanceTerms, template, signatureStillRequired }`, or `null`. When the bound template is archived, `standingPolicy.template.archived` is `true` and nothing is published at adoption: the confirmed adoption carries `termsApplyError` with `TEMPLATE_ARCHIVED`.
+
+```typescript
+const queue = await trusset.lending.operators.queued()
+
+for (const row of queue.markets) {
+  if (row.standingPolicy?.template?.archived) console.log(row.marketAddress, 'policy template archived, bind another before adopting')
+}
+```
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `policies.list` | [List Standing Policies](/endpoints/operators/list-standing-policies) |
+| `policies.create` | [Create Standing Policy](/endpoints/operators/create-standing-policy) |
+| `policies.update` | [Update Standing Policy](/endpoints/operators/update-standing-policy) |
+| `policies.remove` | [Delete Standing Policy](/endpoints/operators/delete-standing-policy) |

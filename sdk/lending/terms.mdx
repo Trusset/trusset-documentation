@@ -1,6 +1,6 @@
 ---
 title: "Terms of Use"
-description: "Publish a market's terms of use, present them to borrowers, read every version and export a copy for the record"
+description: "Publish a market's terms of use, present them to borrowers, read every version, export a copy for the record and keep a terms library"
 ---
 
 Terms of use are stored against the market's contract address, not against an instance. Every instance that holds the market reads the same document, including the instance that deployed it. Saving is a database write, not a transaction: nothing is signed and nothing goes on chain, so none of these methods takes a signer.
@@ -27,7 +27,7 @@ console.log(saved.terms.version, saved.terms.contentHash, saved.terms.changed)
 
 Every save that changes something writes a new version and keeps the old ones. A save identical to the current record writes nothing and answers `changed: false`. `authority` on the result says which role the save was made under.
 
-To bind a template from your instance's terms library instead, send `templateId`. The template's text is saved and `content` is ignored. Templates are managed in the issuer app, and only the instance that authored a template can bind it.
+To bind a template from your instance's [terms library](#terms-library) instead, send `templateId`. The template's current version is saved and `content` is ignored. Only the instance that authored a template can bind it, and an archived template is refused with `TEMPLATE_ARCHIVED`.
 
 ### Stage a draft
 
@@ -101,6 +101,64 @@ The PDF header carries the market and collateral token addresses, the version an
 
 The **Lender of record** line prints the wallet that saved the version. That can be a wallet holding the market's admin or issuer role rather than the lender of record's own.
 
+## Terms library
+
+<Note>
+  Available from `@trusset/sdk` 0.7.0.
+</Note>
+
+The terms library keeps your instance's terms of use as templates: written once, bound to many markets with `save` and `templateId`, and published at adoption by a [standing policy](/sdk/lending/policies). Any key of the instance can read the library. Writing it needs an account Trusset approved as a lender of record, which `canAuthor` reports. Any other account is refused with `CURATOR_NOT_APPROVED`.
+
+```typescript
+const { templates, canAuthor } = await trusset.lending.terms.templates({ includeArchived: true })
+
+for (const template of templates) console.log(template.id, template.title, template.version, template.archived, template.usage)
+```
+
+`templates` leaves archived templates out unless `includeArchived` is `true`, and returns no text. `template` returns one in full: `content`, the `versions` newest first (at most 100, without their text) and the `markets` bound to it, each with its binding `status`.
+
+```typescript
+const { template } = await trusset.lending.terms.template(templateId)
+
+const behind = template.markets.filter(market => market.status === 'TEMPLATE_OUTDATED')
+```
+
+### Write templates
+
+```typescript
+const { template: created } = await trusset.lending.terms.createTemplate({
+  title: 'Secured credit line, house terms',
+  content: '# Terms of use\n\nThese terms govern borrowing against pledged securities on this market.',
+})
+
+const { template: edited, changed } = await trusset.lending.terms.updateTemplate(created.id, {
+  content: '# Terms of use\n\nRevised house terms.',
+})
+```
+
+`title` takes 1 to 200 characters. `content` follows the rules of `save`: the SDK refuses content over 262,144 bytes of UTF-8, blank content and control characters other than tab, newline and carriage return before any request. `updateTemplate` needs at least one of `title`, `content` and `archived`.
+
+A change to the title or the text writes a new template version and answers `changed: true`. Markets bound to the template keep the version they published until they are bound again with `save` and the same `templateId`. Until then their binding reads `TEMPLATE_OUTDATED`.
+
+### Archive a template
+
+`archiveTemplate` archives a template, and `updateTemplate` with `archived: false` restores it. Archiving writes no version, so `changed` is `false`. An archived template stays readable and cannot be bound any more.
+
+```typescript
+import { TrussetError } from '@trusset/sdk'
+
+try {
+  await trusset.lending.terms.archiveTemplate(templateId)
+} catch (err) {
+  if (err instanceof TrussetError && err.code === 'TEMPLATE_IN_USE') {
+    const { markets, policies } = err.details as { markets: { marketAddress: string }[]; policies: { id: string }[] }
+    console.log(markets.map(m => m.marketAddress), policies.map(p => p.id))
+  } else throw err
+}
+```
+
+A template still bound to a published, non-customised market, or to any standing policy whether switched on or off, cannot be archived: the call answers `TEMPLATE_IN_USE`, and `details` names the `markets` and `policies`. Bind those markets to another template, or customise their terms, and bind those policies to another template or to none with `policies.update`, then archive again. See [Archive Terms Template](/endpoints/lending/archive-terms-template#when-archiving-is-refused).
+
 ## Methods and endpoints
 
 | Method | Endpoint |
@@ -111,3 +169,8 @@ The **Lender of record** line prints the wallet that saved the version. That can
 | `terms.save` | [Save Terms](/endpoints/lending/save-terms) |
 | `terms.unpublish` | [Unpublish Terms](/endpoints/lending/unpublish-terms) |
 | `terms.export` | [Export Terms](/endpoints/lending/export-terms) |
+| `terms.templates` | [List Terms Templates](/endpoints/lending/list-terms-templates) |
+| `terms.template` | [Get Terms Template](/endpoints/lending/get-terms-template) |
+| `terms.createTemplate` | [Create Terms Template](/endpoints/lending/create-terms-template) |
+| `terms.updateTemplate` | [Update Terms Template](/endpoints/lending/update-terms-template) |
+| `terms.archiveTemplate` | [Archive Terms Template](/endpoints/lending/archive-terms-template) |

@@ -1,0 +1,126 @@
+---
+title: 'Update Terms Template'
+api: 'PUT /lending-external-securities-v2/api/markets/terms-library/{templateId}'
+description: 'Edit a terms library template, or archive and restore it'
+---
+
+Changes one template of this instance's terms library. Send only the fields to change: a field you leave out keeps its value. This is a database write: nothing is signed and nothing goes on chain.
+
+A change to the title or the text writes a new template version and answers `changed: true`. Markets bound to the template keep the version they published until they are bound again with [Save Terms](/endpoints/lending/save-terms) and the same `templateId`. Until then they read `TEMPLATE_OUTDATED`, as [Get Terms Template](/endpoints/lending/get-terms-template) and [Get Terms](/endpoints/lending/get-terms) report. A [standing policy](/endpoints/operators/list-standing-policies) publishes the version that is current when a market is adopted.
+
+`archived: true` archives the template, as [Archive Terms Template](/endpoints/lending/archive-terms-template) does, and `archived: false` restores it. Archiving alone writes no version and answers `changed: false`. A request that changes nothing writes nothing and answers `changed: false` as well.
+
+Only an account Trusset approved as a lender of record can author templates. Any other account is refused with `403 CURATOR_NOT_APPROVED` before the body is read.
+
+## Path Parameters
+
+<ParamField path="templateId" type="string" required>
+  Template ID from [List Terms Templates](/endpoints/lending/list-terms-templates), 1 to 100 characters.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="title" type="string">
+  New title, 1 to 200 characters, under the rules of [Create Terms Template](/endpoints/lending/create-terms-template#body-parameters).
+</ParamField>
+
+<ParamField body="content" type="string">
+  New text as markdown, under the rules of [Create Terms Template](/endpoints/lending/create-terms-template#body-parameters): at most 262,144 bytes of UTF-8, not blank, no control characters other than tab, newline and carriage return.
+</ParamField>
+
+<ParamField body="archived" type="boolean">
+  `true` to archive the template, `false` to restore it. Archiving is refused with `409 TEMPLATE_IN_USE` while the template is still bound to a published, non-customised market or to any standing policy, switched off or not. See [Archive Terms Template](/endpoints/lending/archive-terms-template#when-archiving-is-refused).
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="template" type="object">The template after the change, with the fields of [Get Terms Template](/endpoints/lending/get-terms-template#response-fields) except `versions` and `markets`. `content` and `usage` are included.</ResponseField>
+    <ResponseField name="changed" type="boolean">`true` when the title or the text changed and a new version was written. `false` when only `archived` changed, or nothing did.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X PUT "https://api.trusset.org/lending-external-securities-v2/api/markets/terms-library/cmwh2t9e10002l80d7s3k5m8c" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "# Terms of Use\n\n## 1. Lender of record\n\nACME Bank AG acts as lender of record for this market.\n\n## 2. Collateral\n\nPledged tokens stay frozen in the wallet of the borrower.\n"
+  }'
+```
+```typescript TypeScript
+import { readFile } from 'node:fs/promises';
+
+const content = await readFile('./house-terms.md', 'utf8');
+
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/markets/terms-library/${templateId}`,
+  {
+    method: 'PUT',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ content })
+  }
+);
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+console.log(data.changed, data.template.version);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "template": {
+      "id": "cmwh2t9e10002l80d7s3k5m8c",
+      "instanceId": "cmrz4d1v20000cghx8k6p3m7t",
+      "title": "Secured credit line, house terms",
+      "version": 3,
+      "contentHash": "0x6c1f0b2e9a47d385c2e0f81b97a4d6c3e5f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8",
+      "archived": false,
+      "archivedAt": null,
+      "createdBy": "cmrz3a8q10000cghxf5w2n9k4",
+      "updatedBy": "cmrz3a8q10000cghxf5w2n9k4",
+      "createdAt": "2026-11-10T08:15:00.000Z",
+      "updatedAt": "2026-11-16T13:58:22.000Z",
+      "contentBytes": 172,
+      "content": "# Terms of Use\n\n## 1. Lender of record\n\nACME Bank AG acts as lender of record for this market.\n\n## 2. Collateral\n\nPledged tokens stay frozen in the wallet of the borrower.\n",
+      "usage": {
+        "markets": 2,
+        "current": 0,
+        "outdated": 2,
+        "customised": 0,
+        "unpublished": 0
+      }
+    },
+    "changed": true
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-11-16T13:58:22.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "cmrz4d1v20000cghx8k6p3m7t"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `templateId` or a field breaks its type or length rule |
+| `INVALID_TERMS_TITLE` | `400` | The title is blank after trimming, or contains control characters |
+| `INVALID_TERMS_CONTENT` | `400` | The document is blank, or contains control characters other than tab, newline and carriage return |
+| `TEMPLATE_SAVE_FAILED` | `400` | The template could not be saved for a reason that carries no code of its own |
+| `CURATOR_NOT_APPROVED` | `403` | Trusset has not approved this account to act as a lender of record |
+| `TEMPLATE_NOT_FOUND` | `404` | No template with this ID exists on this instance |
+| `TEMPLATE_IN_USE` | `409` | `archived: true`, and the template is still bound to a published, non-customised market or to a standing policy. `error.details` names them, see [Archive Terms Template](/endpoints/lending/archive-terms-template#when-archiving-is-refused) |
+| `TERMS_TOO_LARGE` | `413` | The document exceeds 262,144 bytes of UTF-8 |
+| `RATE_LIMIT_EXCEEDED` | `429` | More than 10 writes in the minute |

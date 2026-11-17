@@ -46,8 +46,14 @@ Writes a claim to the registry from a hash you supply. It covers the four slots 
   ERC-3643 register only. The EIP-191 signature over the `messageHash` from a `SIGN_MESSAGES` answer, as 65-byte hex.
 </ParamField>
 
+<ParamField body="claimSignatures" type="array">
+  T-REX 5 register only, in place of `claimSignature`. `[{ walletAddress, signature, claimType, issuedAt }]`, where `signature` signs the message's `typedData` and `issuedAt` is sent back exactly as the message gave it.
+</ParamField>
+
 <ParamField body="signerAddress" type="string">
   ERC-3643 register only. The instance wallet that signs the claim. It must hold a CLAIM key on the register's trusted issuer.
+
+  On a T-REX 5 register it names the wallet you will sign the current answer with: a CLAIM_SIGNER key for the message, a MANAGEMENT key of the trusted issuer identity for the `addClaimTo` step. Lacking that key, the call answers `403 SIGNER_ROLE_MISSING`.
 </ParamField>
 
 ## Sign and confirm
@@ -66,13 +72,24 @@ When the instance is bound to an ERC-3643 register, the claim is written to the 
 
 A wallet with no ONCHAINID is refused with `NOT_REGISTERED`. Deploy one first with `POST /customers/api/identity/onchainid` and confirm it, so it is recorded. The claim carries no expiry, so `expiryDays` is not written and the confirm leg reports `expiry: 0`. The role check becomes an agent check on the register.
 
+On a T-REX 5 register (`trexVersion: 5`) the two rounds work the same way with these differences:
+
+1. The `SIGN_MESSAGES` answer carries a message with `scheme: eip712`, `typedData` and `issuedAt`. Sign `typedData` as EIP-712 typed data with a wallet that holds a CLAIM_SIGNER key on `claimIssuer`.
+2. Call again with `claimSignatures`, each entry carrying its message's `issuedAt`. The `SIGN_TRANSACTIONS` answer holds one `addClaimTo` step addressed to the trusted issuer identity, which writes the claim onto the subject's ONCHAINID. A MANAGEMENT key of the issuer identity sends it, and the step names that wallet in `signer`.
+3. The confirm leg accepts an `addClaimTo` that writes onto this wallet's ONCHAINID.
+
+A wallet with no ONCHAINID on the register's identity factory yet is refused with `NOT_REGISTERED`: verify the wallet first with [Verify Identity](/endpoints/customers/verify-identity), which creates its identity.
+
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_CLAIM_SIGNATURE` | `400` | The signature is not 65-byte hex, or does not recover for this identity, topic and data |
 | `REGISTRY_AGENT_MISSING` | `403` | None of your instance's wallets is an agent of the register |
 | `CLAIM_SIGNER_MISSING` | `403` | None of your instance's wallets holds a CLAIM key on the register's trusted issuer |
 | `CLAIM_SIGNER_NOT_TRUSTED` | `403` | `signerAddress`, or the wallet the signature recovers to, holds no CLAIM key on the trusted issuer |
-| `NOT_REGISTERED` | `409` | The wallet has no ONCHAINID yet |
+| `CLAIM_MANAGER_MISSING` | `403` | T-REX 5: none of your instance's wallets holds a MANAGEMENT key on the trusted issuer identity |
+| `SIGNER_ROLE_MISSING` | `403` | T-REX 5: `signerAddress` lacks the key this answer needs. The message names the wallets that hold it |
+| `NOT_REGISTERED` | `409` | The wallet has no ONCHAINID yet. On T-REX 5, none on the register's identity factory |
+| `CLAIM_NOT_VALID` | `409` | T-REX 5: the trusted issuer does not accept the signed claim. Sign it again |
 | `REGISTRY_NO_CLAIM_TOPICS` | `409` | The register requires no claim topics, so there is nothing to file |
 | `REGISTRY_NO_TRUSTED_ISSUER` | `409` | The register names no trusted issuer for its claim topic |
 | `CHAIN_UNAVAILABLE` | `503` | The confirmed transaction could not be read |
@@ -85,8 +102,8 @@ A wallet with no ONCHAINID is refused with `NOT_REGISTERED`. Deploy one first wi
     <ResponseField name="transaction" type="object">The unsigned registry call. Trusset register, calldata leg only.</ResponseField>
     <ResponseField name="functionName" type="string">`addClaim`. Trusset register, calldata leg only.</ResponseField>
     <ResponseField name="registerKind" type="string">`TRUSSET` or `TREX`. Calldata leg only.</ResponseField>
-    <ResponseField name="messages" type="array">ERC-3643 register only: the claim message to sign, with `messageHash`, `claimType`, `identity`, `topic` and `claimIssuer`.</ResponseField>
-    <ResponseField name="steps" type="array">ERC-3643 register only: the `addClaim` transaction to the ONCHAINID, once the signature is in.</ResponseField>
+    <ResponseField name="messages" type="array">ERC-3643 register only: the claim message to sign, with `messageHash`, `claimType`, `identity`, `topic` and `claimIssuer`. On a T-REX 5 register it adds `scheme: eip712`, `typedData` and `issuedAt`.</ResponseField>
+    <ResponseField name="steps" type="array">ERC-3643 register only: the `addClaim` transaction to the ONCHAINID, once the signature is in. On a T-REX 5 register, the `addClaimTo` transaction to the trusted issuer identity, with `signer`.</ResponseField>
     <ResponseField name="walletAddress" type="string">The subject, checksummed.</ResponseField>
     <ResponseField name="claimType" type="string">The slot, by name. On the confirm leg it is read back from the mined transaction, not echoed.</ResponseField>
     <ResponseField name="dataHash" type="string">The hash written, lowercased. On the confirm leg it is read back from the mined transaction.</ResponseField>

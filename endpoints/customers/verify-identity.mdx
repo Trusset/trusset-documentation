@@ -17,6 +17,8 @@ What you sign depends on the register. Every calldata response names it in `regi
 | `TRUSSET` | The Trusset ID Register, or your own deployment of the same contract | One transaction, `verifyIdentity` or `updateIdentity` |
 | `TREX` | Your own ERC-3643 (T-REX) identity registry, with ONCHAINID identities | A plan in up to three phases, one call per phase |
 
+An ERC-3643 plan also carries `trexVersion`: `4` for a T-REX 4 register with ONCHAINID 2 identities, `5` for a T-REX 5 register with ONCHAINID 3 identities. The two versions differ in their first two phases. See [Verify on an ERC-3643 register](#verify-on-an-erc-3643-register) and [Verify on an ERC-3643 T-REX 5 register](#verify-on-an-erc-3643-t-rex-5-register).
+
 ## Body Parameters
 
 <ParamField body="walletAddress" type="string" required>
@@ -24,7 +26,7 @@ What you sign depends on the register. Every calldata response names it in `regi
 </ParamField>
 
 <ParamField body="country" type="string" required>
-  ISO 3166-1 code as alpha-2 (`DE`), alpha-3 (`DEU`) or numeric (`276`). Stored in alpha-3 form. An ERC-3643 register also receives it, as the numeric code.
+  ISO 3166-1 code as alpha-2 (`DE`), alpha-3 (`DEU`) or numeric (`276`). Stored in alpha-3 form. An ERC-3643 register also receives it, as the numeric code. A T-REX 5 register records no country: it stays on the customer record only, and the plan's `warnings` carries `{ code: 'COUNTRY_NOT_ON_REGISTER' }`.
 
   Refused with `COUNTRY_BLOCKED` when it is on the blocked list of the [verification profile](/endpoints/customers/list-verification-profiles) named after `investorType`.
 </ParamField>
@@ -55,20 +57,24 @@ What you sign depends on the register. Every calldata response names it in `regi
 
 <ParamField body="claimSignatures" type="array">
   ERC-3643 only. The signatures from the `SIGN_CLAIMS` phase, as `[{ walletAddress, signature }]`. An entry may add `claimType`, such as `KYC`.
+
+  On a T-REX 5 register each entry also carries `issuedAt`, exactly as its message gave it: `[{ walletAddress, signature, claimType, issuedAt }]`. A signature without it is not used, and the call answers `SIGN_CLAIMS` again.
 </ParamField>
 
 <ParamField body="claimSignature" type="string">
-  ERC-3643 only. A single claim signature for `walletAddress`, instead of `claimSignatures`.
+  ERC-3643 only. A single claim signature for `walletAddress`, instead of `claimSignatures`. On a T-REX 5 register send `claimSignatures`, since the signature needs its `issuedAt`.
 </ParamField>
 
 <ParamField body="identities" type="object">
-  ERC-3643 only. An ONCHAINID you deployed with your own tooling, keyed by wallet: `{ "<wallet>": "<onchainid>" }`. It is used when the register holds no identity for the wallet and the contract answers as an ONCHAINID. Otherwise it is ignored.
+  ERC-3643 only. An ONCHAINID you deployed with your own tooling, keyed by wallet: `{ "<wallet>": "<onchainid>" }`. It is used when the register holds no identity for the wallet and the contract answers as an ONCHAINID. Otherwise it is ignored. A T-REX 5 register ignores it and reads the identity its identity factory links to the wallet.
 </ParamField>
 
 <ParamField body="signerAddress" type="string">
   ERC-3643 only. The wallet that will sign the claim. Refused with `CLAIM_SIGNER_NOT_TRUSTED` when it holds no claim key on the register's trusted issuer. Defaults to the first of your instance's wallets, primary first, that holds one.
 
   It also becomes the management key of any ONCHAINID the plan deploys. Name a wallet registered to your instance, because [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid) refuses any other management key.
+
+  On a T-REX 5 register it names the wallet you will sign the current phase with, and is never a management key of the investor's ONCHAINID. When it lacks the role a step or a message of that phase needs, the call answers `403 SIGNER_ROLE_MISSING`, and the message names the role and the wallets that hold it. Omitted, each step names a wallet of your instance that holds the role.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -86,7 +92,7 @@ What you sign depends on the register. Every calldata response names it in `regi
     <ResponseField name="softExpiry" type="integer">Unix seconds, or `0`. Not written to an ERC-3643 register.</ResponseField>
     <ResponseField name="hardExpiry" type="integer">Unix seconds, or `0`. Not written to an ERC-3643 register.</ResponseField>
     <ResponseField name="operation" type="string">`update` when the wallet already holds an unrevoked identity on a Trusset register, or is already on an ERC-3643 register. `verify` otherwise.</ResponseField>
-    <ResponseField name="confirmWith" type="object">`{ endpoint: "POST /customers/api/identity/verify", field: "txHash" }`. It names this endpoint in every phase, including `DEPLOY_IDENTITY`, where the deployments are confirmed elsewhere.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint: "POST /customers/api/identity/verify", field: "txHash" }`. It names this endpoint in every phase, including `DEPLOY_IDENTITY`, where the deployments are confirmed elsewhere, and `CREATE_IDENTITY`, which needs no confirm.</ResponseField>
   </Expandable>
   <Expandable title="Calldata leg, Trusset register">
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
@@ -95,19 +101,22 @@ What you sign depends on the register. Every calldata response names it in `regi
     <ResponseField name="description" type="string">What the transaction does.</ResponseField>
   </Expandable>
   <Expandable title="Calldata leg, ERC-3643 register">
-    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` in `DEPLOY_IDENTITY` and `REGISTER`, `SIGN_MESSAGES` in `SIGN_CLAIMS`.</ResponseField>
-    <ResponseField name="phase" type="string">`DEPLOY_IDENTITY`, `SIGN_CLAIMS` or `REGISTER`.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` in `DEPLOY_IDENTITY`, `CREATE_IDENTITY` and `REGISTER`, `SIGN_MESSAGES` in `SIGN_CLAIMS`.</ResponseField>
+    <ResponseField name="phase" type="string">`DEPLOY_IDENTITY`, `SIGN_CLAIMS` or `REGISTER`. On a T-REX 5 register `CREATE_IDENTITY` takes the place of `DEPLOY_IDENTITY`.</ResponseField>
+    <ResponseField name="trexVersion" type="integer">`4` or `5`.</ResponseField>
+    <ResponseField name="identityFactory" type="string">T-REX 5 only. The identity factory the register names, which creates the ONCHAINIDs.</ResponseField>
     <ResponseField name="register" type="string">The identity registry address.</ResponseField>
     <ResponseField name="signerAddress" type="string">The wallet the plan was built for. It holds a claim key on `claimIssuer`.</ResponseField>
     <ResponseField name="claimSigners" type="string[]">Among `signerAddress` and your instance's wallets, those that hold a claim key on `claimIssuer`.</ResponseField>
     <ResponseField name="claimIssuer" type="string">The trusted issuer contract whose claim key signs the claim.</ResponseField>
     <ResponseField name="claimTopic" type="string">The claim topic the register requires, as a decimal string.</ResponseField>
     <ResponseField name="identities" type="object">The ONCHAINID of each wallet, where one is known.</ResponseField>
-    <ResponseField name="steps" type="array">`DEPLOY_IDENTITY` and `REGISTER` only. Transactions to send in order, each with `stepType` (`deployIdentity`, `claim`, `verify` or `country`), `walletAddress`, `transaction`, `functionName` and `description`. A deployment's `transaction` is `{ to: null, data, create: true }`, and the step adds `managementKey` and `implementationAuthority`.</ResponseField>
-    <ResponseField name="messages" type="array">`SIGN_CLAIMS` only. One per claim, with `walletAddress`, `identity`, `topic`, `claimIssuer`, `data`, `messageHash`, `scheme` (`eip191`), `claimType` and `description`.</ResponseField>
+    <ResponseField name="steps" type="array">`DEPLOY_IDENTITY` and `REGISTER` only. Transactions to send in order, each with `stepType` (`deployIdentity`, `claim`, `verify` or `country`), `walletAddress`, `transaction`, `functionName` and `description`. A deployment's `transaction` is `{ to: null, data, create: true }`, and the step adds `managementKey` and `implementationAuthority`. On a T-REX 5 register `CREATE_IDENTITY` has steps too, and every step adds `signer`, the wallet that must sign it. The step types there are `createIdentity` (`createIdentityFor` on the identity factory, with `identityType`), `claim` (`addClaimTo` on the trusted issuer), `rotateClaim` (`revokeClaimByDigest` on the trusted issuer) and `verify` (`registerIdentity`). There is no `country` step.</ResponseField>
+    <ResponseField name="messages" type="array">`SIGN_CLAIMS` only. One per claim, with `walletAddress`, `identity`, `topic`, `claimIssuer`, `data`, `messageHash`, `scheme` (`eip191`), `claimType` and `description`. On a T-REX 5 register `scheme` is `eip712`, `messageHash` is the EIP-712 digest, and each message adds `typedData` and `issuedAt`.</ResponseField>
     <ResponseField name="confirmStepIndex" type="integer">`REGISTER` only. The step whose hash confirms the registration.</ResponseField>
     <ResponseField name="registerStep" type="string">`REGISTER` only. `registerIdentity` when the wallet is new to the register, `null` when it is already on it.</ResponseField>
-    <ResponseField name="next" type="string">`DEPLOY_IDENTITY` and `SIGN_CLAIMS` only. What to do before calling again.</ResponseField>
+    <ResponseField name="next" type="string">`DEPLOY_IDENTITY`, `CREATE_IDENTITY` and `SIGN_CLAIMS` only. What to do before calling again.</ResponseField>
+    <ResponseField name="warnings" type="array">What the register does not record, each `{ code, message }`. On a T-REX 5 register it holds `COUNTRY_NOT_ON_REGISTER`: the country is kept on the customer record only.</ResponseField>
   </Expandable>
   <Expandable title="Confirm leg">
     <ResponseField name="walletAddress" type="string">The wallet, checksummed.</ResponseField>
@@ -132,6 +141,8 @@ The endpoint picks `updateIdentity` when the wallet already holds an identity th
 When the wallet already holds an active identity, the calldata calls `updateIdentity` instead. On the Trusset ID Register, which instances without a register of their own share, that update is refused with `403 IDENTITY_HELD_BY_ANOTHER_ISSUER` when the identity was registered by a wallet that is not one of your instance's and has not expired. Before handing out calldata, the API checks that one of your instance's wallets holds `KYC_PROVIDER_ROLE`. It refuses with `KYC_PROVIDER_ROLE_MISSING` only when it can read every wallet and none holds the role. With no wallet registered, or when the read fails, it lets the call through. The verdict is cached for 60 seconds, so a refusal can outlast a new role grant by up to a minute.
 
 ## Verify on an ERC-3643 register
+
+This section covers a T-REX 4 register (`trexVersion: 4`). A T-REX 5 register follows [the next section](#verify-on-an-erc-3643-t-rex-5-register).
 
 Each call answers the next phase. Call again with what the previous phase produced until `phase` is `REGISTER`, carrying the same `kycHash` throughout.
 
@@ -162,6 +173,41 @@ An ERC-3643 register stores no investor type and no expiry. `investorType` reach
 
 The ERC-3643 example sends everything from one `wallet` that is both an agent of the register and a claim signer. Passing its address as `signerAddress` makes it the management key of any ONCHAINID it deploys, so it can also send the `claim` step.
 
+## Verify on an ERC-3643 T-REX 5 register
+
+A T-REX 5 register (`trexVersion: 5`) answers with the same plan, with `identityFactory` added, in up to three phases. Repeat the same call after each phase, with the same `kycHash`, until `phase` is `REGISTER`.
+
+<Steps>
+  <Step title="Create the ONCHAINID (CREATE_IDENTITY)">
+    Returned when the wallet has no ONCHAINID. One step per wallet without an identity, `stepType: createIdentity`, calls `createIdentityFor` on `identityFactory`. `identityType` is `CORPORATE` for a customer of type company and `INDIVIDUAL` otherwise, and the salt is `trusset-<chainId>-<wallet>`, which carries no personal data. The investor wallet becomes the only MANAGEMENT key of its ONCHAINID, and your issuer wallets hold no key on it.
+
+    The factory links the identity to the wallet, so nothing needs confirming: once the transactions are mined, repeat the call. [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid) still works and records the identity on the customer record. This phase replaces `DEPLOY_IDENTITY`, which stays T-REX 4 only.
+  </Step>
+  <Step title="Sign the claim (SIGN_CLAIMS)">
+    Each message has `scheme: eip712`, `typedData`, `issuedAt`, `messageHash` and `claimType`. `typedData` is the EIP-712 claim `Claim(topic, subject, ClaimData{issuedAt, validUntil, Metadata{scheme, uri}, payload})` in the signing domain of the trusted issuer's own identity. `issuedAt` is the latest block time in unix seconds, and `messageHash` is the EIP-712 digest.
+
+    Sign `typedData` (`eth_signTypedData_v4`) with a wallet that holds a CLAIM_SIGNER key on `claimIssuer`, then call again with `claimSignatures: [{ walletAddress, signature, claimType, issuedAt }]`. Send `issuedAt` back exactly as the message gave it, because the signature covers it.
+  </Step>
+  <Step title="Register (REGISTER)">
+    Send `steps` in order. A `claim` step calls `addClaimTo` on the trusted issuer, which writes the signed claim onto the wallet's ONCHAINID. When a wallet is verified again with a different KYC claim from the same issuer, a `rotateClaim` step follows, calling `revokeClaimByDigest` with the previous claim's digest so its signature can never be written back. A `verify` step calls `registerIdentity(wallet, identity, 0)` when the wallet is not on the register yet. Confirm with the hash of `steps[confirmStepIndex]`.
+  </Step>
+</Steps>
+
+| Transaction or signature | Who must hold what |
+|---|---|
+| `createIdentityFor` on the identity factory | The IDENTITY_ISSUER role of the factory's authority |
+| Claim signature | A CLAIM_SIGNER key (purpose 3) on `claimIssuer` |
+| `addClaimTo`, `revokeClaimByDigest` on the trusted issuer | A MANAGEMENT key (purpose 1) on the trusted issuer identity |
+| `registerIdentity` | The AGENT role of the register, which the suite's AccessManager grants |
+
+Every step names the wallet that must sign it in `signer`, so several wallets of your instance can share the work. When you send `signerAddress` and it lacks the role a step or message of the phase needs, the call answers `403 SIGNER_ROLE_MISSING` before anything is built, and the message names the role and the wallets that hold it.
+
+The API refuses up front with `REGISTRY_AGENT_MISSING` when no wallet of your instance holds the AGENT role, `CLAIM_SIGNER_MISSING` when none holds a CLAIM_SIGNER key on a trusted issuer, and `CLAIM_MANAGER_MISSING` when none holds a MANAGEMENT key on it. For a wallet without an ONCHAINID it refuses with `IDENTITY_ISSUER_MISSING` when none holds the IDENTITY_ISSUER role, `IDENTITY_TYPE_NOT_ENABLED` when the factory has no policy for the identity type, and `IDENTITY_BINDING_REVOKED` when the wallet's binding on the factory is revoked: register another wallet for the customer then.
+
+A T-REX 5 register records no country, no investor type and no expiry. The country stays on the customer record, and `warnings` carries `{ code: 'COUNTRY_NOT_ON_REGISTER' }`. The wallet counts as verified once its ONCHAINID holds valid claims for the register's required topics. The plan registers it on the register as well, but the contract does not require that.
+
+The T-REX 5 example sends everything from one `wallet` that holds every role above. With the roles spread over several wallets, send each step from the wallet its `signer` names.
+
 ## Confirm
 
 The confirm leg reads the mined transaction and refuses it before writing anything when:
@@ -171,6 +217,8 @@ The confirm leg reads the mined transaction and refuses it before writing anythi
 - on the Trusset ID Register, it was not signed by one of your instance's verified wallets (`UNAUTHORIZED_SIGNER`). On your own register the signer is logged, not checked
 - on a Trusset register, the mined investor type differs from this request's (`TX_INVESTOR_TYPE_MISMATCH`)
 - on an ERC-3643 register, the register does not yet report the wallet as verified (`NOT_VERIFIED_ON_REGISTER`)
+
+On a T-REX 5 register the confirmed transaction may call `registerIdentity` on the register, or `addClaimTo` or `revokeClaimByDigest` on one of its trusted issuers, sent directly or through a smart-account wallet. One that calls none of them is refused with `TX_WRONG_FUNCTION`, and a claim written onto another wallet's ONCHAINID with `TX_TARGET_MISMATCH`.
 
 Then it writes the customer record with `country`, the profile key `investorType` resolved to, `status: "verified"`, `verifiedAt` and the `kycHash` read from the chain, and records the write in your instance's verification history as a `VERIFY_DIRECT` entry with the operation (`verify` or `update`), the mined investor type, the transaction and its signer. A reclassification through this endpoint therefore shows in the history like one made in the issuer app. When the profile `investorType` names has an eligibility register, the wallet's admission to it is queued for your wallet to sign. See [Eligibility registers](/endpoints/customers/introduction#eligibility-registers).
 
@@ -256,6 +304,61 @@ if (plan.phase === 'SIGN_CLAIMS') {
   for (const message of plan.messages) {
     const signature = await wallet.signMessage(ethers.utils.arrayify(message.messageHash));
     claimSignatures.push({ walletAddress: message.walletAddress, signature });
+  }
+  plan = await post('/verify', { ...request, claimSignatures });
+}
+
+const hashes: string[] = [];
+for (const step of plan.steps) {
+  const tx = await wallet.sendTransaction(step.transaction);
+  await tx.wait();
+  hashes.push(tx.hash);
+}
+
+const confirmed = await post('/verify', { ...request, txHash: hashes[plan.confirmStepIndex] });
+```
+```typescript TypeScript ERC-3643 T-REX 5
+const base = 'https://api.trusset.org/customers/api/identity';
+const headers = {
+  'Content-Type': 'application/json',
+  'X-API-Key': 'trusset_your_key_here'
+};
+const post = async (path: string, body: Record<string, unknown>) => {
+  const res = await fetch(`${base}${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
+  const json = await res.json();
+  if (!json.success) throw new Error(`${json.error.code}: ${json.error.message}`);
+  return json.data;
+};
+
+const request: Record<string, unknown> = {
+  walletAddress: '0xaBc123DEf456789012345678901234567890aBCD',
+  country: 'DE',
+  investorType: 'PROFESSIONAL',
+  signerAddress: await wallet.getAddress()
+};
+
+let plan = await post('/verify', request);
+request.kycHash = plan.kycHash;
+
+if (plan.phase === 'CREATE_IDENTITY') {
+  for (const step of plan.steps) {
+    const tx = await wallet.sendTransaction(step.transaction);
+    await tx.wait();
+  }
+  plan = await post('/verify', request);
+}
+
+if (plan.phase === 'SIGN_CLAIMS') {
+  const claimSignatures = [];
+  for (const message of plan.messages) {
+    const { domain, types, message: value } = message.typedData;
+    const signature = await wallet._signTypedData(domain, types, value);
+    claimSignatures.push({
+      walletAddress: message.walletAddress,
+      signature,
+      claimType: message.claimType,
+      issuedAt: message.issuedAt
+    });
   }
   plan = await post('/verify', { ...request, claimSignatures });
 }
@@ -462,10 +565,18 @@ const confirmed = await post('/verify', { ...request, txHash: hashes[plan.confir
 | `REGISTRY_AGENT_MISSING` | `403` | ERC-3643: none of your instance's wallets is an agent of the register |
 | `CLAIM_SIGNER_MISSING` | `403` | ERC-3643: none of your instance's wallets holds a claim key on the trusted issuer |
 | `CLAIM_SIGNER_NOT_TRUSTED` | `403` | ERC-3643: `signerAddress`, or the wallet a claim signature recovers to, holds no claim key on the trusted issuer |
-| `INVALID_CLAIM_SIGNATURE` | `400` | ERC-3643: a claim signature is not 65-byte hex, or recovers to no signer |
+| `INVALID_CLAIM_SIGNATURE` | `400` | ERC-3643: a claim signature is not 65-byte hex, or recovers to no signer. On T-REX 5, also one that is not a valid EIP-712 signature over the claim |
+| `CLAIM_MANAGER_MISSING` | `403` | T-REX 5: none of your instance's wallets holds a MANAGEMENT key on the trusted issuer identity, which writes the claim |
+| `IDENTITY_ISSUER_MISSING` | `403` | T-REX 5: the wallet has no ONCHAINID, and none of your instance's wallets holds the IDENTITY_ISSUER role of the identity factory's authority |
+| `SIGNER_ROLE_MISSING` | `403` | T-REX 5: `signerAddress` lacks the role a step or message of this phase needs. The message names the role and the wallets that hold it |
 | `REGISTRY_NO_CLAIM_TOPICS` | `409` | ERC-3643: the register requires no claim topic, so there is no claim to register |
 | `REGISTRY_NO_TRUSTED_ISSUER` | `409` | ERC-3643: the register names no trusted issuer for its claim topic |
 | `ONCHAINID_AUTHORITY_UNKNOWN` | `409` | ERC-3643: the wallet has no ONCHAINID, and no identity on the register reveals the implementation to deploy |
+| `IDENTITY_TYPE_NOT_ENABLED` | `409` | T-REX 5: the identity factory has no policy for the wallet's identity type, `INDIVIDUAL` or `CORPORATE` |
+| `IDENTITY_BINDING_REVOKED` | `409` | T-REX 5: the wallet's binding on the identity factory is revoked, so no identity can be created or linked for it. Use another wallet |
+| `CLAIM_NOT_VALID` | `409` | T-REX 5: the trusted issuer does not accept the signed claim (`isClaimValid` answers `false`), for example because its digest is revoked. Sign it again |
+| `CLAIM_ISSUER_UNREADABLE` | `409` | T-REX 5: the trusted issuer does not answer as an ONCHAINID 3 identity, so no claim can be signed for it |
+| `REGISTER_VERSION_UNSUPPORTED` | `409` | The register claims T-REX 5 but names no identity factory, so it is not a T-REX 5 register this service can write to |
 | `OWN_REGISTRY_NOT_CONFIGURED` | `409` | The instance is bound to its own register but no valid register address is set |
 | `REGISTRY_PROBE_FAILED` | `503` | Your own register could not be read to tell its kind, or the trusted issuer could not be read to check a claim signer |
 | `INVALID_TX` | `400` | `txHash` is not 32-byte hex |

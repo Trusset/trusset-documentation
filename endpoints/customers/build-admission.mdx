@@ -6,7 +6,9 @@ description: 'The unsigned transaction that puts waiting wallets on a profile el
 
 Returns the unsigned transaction that registers waiting admissions of one profile on its eligibility register. A wallet of your instance that is an agent of the register signs and broadcasts it, then [Confirm Admission](/endpoints/customers/confirm-admission) records the result. Trusset holds no key and sends nothing.
 
-Only a register in the `REGISTER` mode can be built for. A profile bound to your instance register, or to a register managed outside Trusset, is refused. See [Which registers can be signed here](/endpoints/customers/introduction#which-registers-can-be-signed-here).
+Only a register in the `REGISTER` or `CLAIM` mode can be built for. A profile bound to your instance register, or to a register managed outside Trusset, is refused. See [Which registers can be signed here](/endpoints/customers/introduction#which-registers-can-be-signed-here).
+
+Admissions are built for ERC-3643 T-REX 4 registers with ONCHAINID 2 identities in the `REGISTER` mode, as described first below. A T-REX 5 register (ONCHAINID 3 identities) on the same identity factory as your instance's own T-REX 5 register is in the `CLAIM` mode, where an admission is a profile claim your wallet signs: see [Admit by profile claim](#admit-by-profile-claim). A T-REX 5 register bound while your instance register is not T-REX 5 stays a read-only gate here: the build answers `409 ELIGIBILITY_ADMISSION_EXTERNAL` with a message saying why, and wallets are admitted to it with the holder's own T-REX 5 tooling.
 
 ## Body Parameters
 
@@ -20,6 +22,12 @@ Only a register in the `REGISTER` mode can be built for. A profile bound to your
 
 <ParamField body="signerAddress" type="string" required>
   The wallet that will sign. It must be a verified Ethereum wallet of your instance and an agent of the register. The transaction is simulated from it before anything is returned.
+
+  In the `CLAIM` mode it needs no agent role. It must hold a CLAIM_SIGNER key on the claim issuer to receive the messages, and a MANAGEMENT key on it to receive the transactions.
+</ParamField>
+
+<ParamField body="claimSignatures" type="array">
+  `CLAIM` mode only. The signed messages of the first answer, as `[{ walletAddress, signature, issuedAt }]`, with `issuedAt` exactly as each message gave it. At most 50 are read. An entry without `issuedAt` is not used, and the call answers its message again.
 </ParamField>
 
 <ParamField body="ids" type="string[]">
@@ -38,7 +46,7 @@ The checks run in this order, and the first that fails refuses the call:
 
 1. `signerAddress` is a verified wallet of your instance (`SIGNER_NOT_INSTANCE_WALLET`).
 2. The profile has a register, the register answers `isVerified(address)` with a single bool, and its mode is `REGISTER` (`ELIGIBILITY_ADMISSION_INSTANCE_REGISTER`, `ELIGIBILITY_ADMISSION_EXTERNAL`).
-3. `signerAddress` is an agent of the register (`ELIGIBILITY_AGENT_REQUIRED`). The message names the wallets that are.
+3. `signerAddress` is an agent of the register (`ELIGIBILITY_AGENT_REQUIRED`). The message names the wallets that are. In the `CLAIM` mode the key checks under [Admit by profile claim](#admit-by-profile-claim) take its place.
 4. At least one admission is waiting among the ones selected (`NOTHING_TO_ADMIT`).
 
 Then each admission is checked against your instance register and the eligibility register. An admission that fails is left out of the transaction and reported in `skipped`:
@@ -52,11 +60,31 @@ Then each admission is checked against your instance register and the eligibilit
 
 Every remaining wallet is registered with the ONCHAINID and the country your instance register holds for it, so the eligibility register reads the same identity and claims. Last, the transaction is simulated from `signerAddress`. When it would revert, the call is refused with `ELIGIBILITY_TX_WOULD_REVERT` and nothing is returned to sign.
 
+## Admit by profile claim
+
+In the `CLAIM` mode the profile register is a T-REX 5 identity registry on your instance register's identity factory. It requires one claim topic beyond your instance register's, `profileTopic`, and a wallet is admitted when its ONCHAINID carries a valid claim for that topic from `claimIssuer`. The build takes two calls with the same selection.
+
+<Steps>
+  <Step title="Sign the profile claims">
+    The first call answers `action: SIGN_MESSAGES`, `phase: SIGN_CLAIMS`, with one entry in `messages` per wallet. Each has `scheme: eip712`, `typedData`, `issuedAt`, `messageHash` (the EIP-712 digest) and `claimType: PROFILE`, and its payload is the profile's `requirementsHash`. `signerAddress` must hold a CLAIM_SIGNER key on `claimIssuer` (`ELIGIBILITY_CLAIM_SIGNER_REQUIRED` otherwise). Sign each `typedData` as EIP-712 typed data with it.
+  </Step>
+  <Step title="Write the claims">
+    Call again with `claimSignatures: [{ walletAddress, signature, issuedAt }]`. `signerAddress` must now hold a MANAGEMENT key on `claimIssuer` (`ELIGIBILITY_CLAIM_MANAGER_REQUIRED` otherwise). Each signature is checked and refused with `INVALID_CLAIM_SIGNATURE`, `CLAIM_SIGNER_NOT_TRUSTED` or `CLAIM_NOT_VALID`, the message naming the wallet. The answer is `action: SIGN_TRANSACTIONS` with one `addClaimTo` step per wallet, `stepType: admit`, addressed to `claimIssuer`. The first step is simulated from `signerAddress` (`ELIGIBILITY_TX_WOULD_REVERT`).
+  </Step>
+  <Step title="Confirm">
+    Broadcast each step and confirm each hash on its own with [Confirm Admission](/endpoints/customers/confirm-admission).
+  </Step>
+</Steps>
+
+The wallets are checked as above, with two differences. `ALREADY_ADMITTED` means the wallet already reads as verified on the eligibility register. `COUNTRY_BLOCKED` reads the country on the customer record, since a T-REX 5 register records none.
+
+Both answers add `admission: CLAIM`, `claimIssuer`, `profileTopic` and `waiting`, the number of admissions waiting among the ones selected. They carry no top-level `transaction` or `functionName`. Each step adds `signer`, the wallet that sends it, and `subject`, the wallet admitted, and its `walletAddress` is the wallet admitted rather than the signer. `confirmWith` adds `perStep: true`.
+
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="action" type="string">`SIGN_TRANSACTION`, or `NONE` when every selected admission was skipped. `NONE` comes with empty `steps` and `rows` and without `transaction`, `functionName` or `confirmWith`.</ResponseField>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`, or `NONE` when every selected admission was skipped. `NONE` comes with empty `steps` and `rows` and without `transaction`, `functionName` or `confirmWith`. In the `CLAIM` mode, `SIGN_MESSAGES` and then `SIGN_TRANSACTIONS`.</ResponseField>
     <ResponseField name="profile" type="object">`{ key, name, entityType, professionalOnly, requirementsHash }` of the profile.</ResponseField>
     <ResponseField name="registryAddress" type="string">The eligibility register, checksummed.</ResponseField>
     <ResponseField name="signerAddress" type="string">The wallet that must sign, checksummed.</ResponseField>
@@ -199,8 +227,13 @@ if (plan.action === 'SIGN_TRANSACTION') {
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_ADDRESS` | `400` | `signerAddress` is missing, malformed or the zero address |
+| `INVALID_CLAIM_SIGNATURE` | `400` | `CLAIM` mode: a claim signature is not 65-byte hex, or not a valid EIP-712 signature over the profile claim |
 | `SIGNER_NOT_INSTANCE_WALLET` | `403` | `signerAddress` is not a verified Ethereum wallet of your instance |
 | `ELIGIBILITY_AGENT_REQUIRED` | `403` | `signerAddress` is not an agent of the register |
+| `ELIGIBILITY_CLAIM_SIGNER_REQUIRED` | `403` | `CLAIM` mode: `signerAddress` holds no CLAIM_SIGNER key on the claim issuer. The message names the wallets that do |
+| `ELIGIBILITY_CLAIM_MANAGER_REQUIRED` | `403` | `CLAIM` mode: `signerAddress` holds no MANAGEMENT key on the claim issuer. The message names the wallets that do |
+| `CLAIM_SIGNER_NOT_TRUSTED` | `403` | `CLAIM` mode: a claim signature recovers to a wallet that holds no CLAIM_SIGNER key on the claim issuer |
+| `CLAIM_NOT_VALID` | `409` | `CLAIM` mode: the claim issuer does not accept a signed profile claim. Sign it again |
 | `INSTANCE_NOT_FOUND` | `404` | The instance behind your key is archived or no longer exists |
 | `PROFILE_NOT_FOUND` | `404` | Neither `profileId` nor `profileKey` names a profile of your instance |
 | `ELIGIBILITY_NETWORK_UNSUPPORTED` | `409` | Your instance is not on Ethereum |

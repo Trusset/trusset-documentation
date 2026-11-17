@@ -14,6 +14,8 @@ Name the customer with one of `customerId`, `referenceKey`, `externalId` or `wal
 
 An `externalId` or a wallet that matches no customer creates the customer record, with the profile, the country and the wallet you send. A `customerId` or `referenceKey` that matches nothing is refused with `404 CUSTOMER_NOT_FOUND`. The record is written only once the profile, the country and the provider are accepted, so a start refused for one of them leaves nothing behind.
 
+A wallet held by an archived customer record of your instance is refused with `409 WALLET_IN_USE`, as on [Bind Wallet](/endpoints/customers/bind-onboarding-wallet): restore that record, or bind another wallet. The start does not restore the archived record.
+
 A new customer whose wallet your instance already verified on its register starts as `verified`, and the onboarding answers `COMPLETED` without a check.
 
 ## Body Parameters
@@ -27,11 +29,11 @@ A new customer whose wallet your instance already verified on its register start
 </ParamField>
 
 <ParamField body="externalId" type="string">
-  Your own ID for the customer, 1 to 128 characters. Created when it is new.
+  Your own ID for the customer, 1 to 128 characters. Created when it is new. It must not look like a wallet address (`0x` followed by 40 hex characters) or start with `ref_`, because the `/:customer` routes read such an identifier as a wallet or a reference key. Either is refused with `400 INVALID_INPUT` and `error.details.field: "externalId"`.
 </ParamField>
 
 <ParamField body="walletAddress" type="string">
-  The customer's wallet. It is bound at the start when the customer has none, under the rules of [Bind Wallet](/endpoints/customers/bind-onboarding-wallet). A customer who already holds another wallet is refused with `409 CUSTOMER_WALLET_MISMATCH`.
+  The customer's wallet. It is bound at the start when the customer has none, under the rules of [Bind Wallet](/endpoints/customers/bind-onboarding-wallet). A customer who already holds another wallet is refused with `409 CUSTOMER_WALLET_MISMATCH`, and a wallet held by an archived customer record with `409 WALLET_IN_USE`.
 </ParamField>
 
 <ParamField body="profile" type="string">
@@ -64,11 +66,11 @@ A new customer whose wallet your instance already verified on its register start
 
 ## Response Fields
 
-The call answers `201` when it started something and `200` when it returned an onboarding as it was.
+The call answers `201` when it started something and `200` when it returned an onboarding as it was. Every answer carries `Cache-Control: no-store`, because it can carry an applicant access token.
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="created" type="boolean">`true` when this call created the customer record.</ResponseField>
+    <ResponseField name="created" type="boolean">`true` only when this call inserted the customer record. A start that found the record, because a concurrent start created it a moment earlier for example, answers `false`.</ResponseField>
     <ResponseField name="started" type="boolean">`true` when a new identity check was opened or a new wait for a record began.</ResponseField>
     <ResponseField name="providerReason" type="string">`REQUESTED` when you named the provider, `PROFILE_SOURCE` when the profile's KYC source decided, `DEFAULT` for the Trusset check, `RESUMED` when a running onboarding was returned.</ResponseField>
     <ResponseField name="onboarding" type="object">The onboarding. [Get Onboarding](/endpoints/customers/get-onboarding#response-fields) describes every field.</ResponseField>
@@ -184,7 +186,7 @@ const accessToken = data.sdk?.token;
 | Code | HTTP | Cause |
 |---|---|---|
 | `MISSING_IDENTIFIER` | `400` | No `customerId`, `referenceKey`, `externalId` or `walletAddress` |
-| `INVALID_INPUT` | `400` | A field has the wrong type or length, or `sourceId` was sent with `provider: TRUSSET` |
+| `INVALID_INPUT` | `400` | A field has the wrong type or length, `sourceId` was sent with `provider: TRUSSET`, or `externalId` looks like a wallet address or starts with `ref_` (`error.details.field: "externalId"`) |
 | `INVALID_ADDRESS` | `400` | `walletAddress` is not a 42-character `0x` address, or is the zero address |
 | `INVALID_COUNTRY` | `400` | `country` is not an ISO 3166-1 code |
 | `INVALID_PROVIDER` | `400` | `provider` is neither `TRUSSET` nor `KYC_SOURCE` |
@@ -196,7 +198,7 @@ const accessToken = data.sdk?.token;
 | `SOURCE_NOT_FOUND` | `404` | No KYC source of your instance has this `sourceId` |
 | `CUSTOMER_EXISTS` | `409` | The `externalId` is new, but the wallet belongs to another customer |
 | `CUSTOMER_WALLET_MISMATCH` | `409` | The customer already holds another wallet |
-| `WALLET_IN_USE` | `409` | The wallet belongs to another customer of your instance |
+| `WALLET_IN_USE` | `409` | The wallet belongs to another customer of your instance, an archived one included. Restore that record, or bind another wallet |
 | `ONBOARDING_IN_PROGRESS` | `409` | An onboarding is running that this start would replace. `error.details` carries its `status`, `provider` and `profileKey` |
 | `RESTART_REQUIRED` | `409` | The customer is settled under another profile or provider. Send `restart: true` |
 | `KYC_SOURCE_NOT_CONFIGURED` | `409` | `provider: KYC_SOURCE`, and no active source verifies for the profile |

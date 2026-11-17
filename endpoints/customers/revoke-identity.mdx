@@ -8,6 +8,8 @@ Revokes a wallet's identity on the register your instance writes to, and marks t
 
 <Warning>
   On an ERC-3643 register, revoking deletes the wallet's entry from the register and nothing else. The ONCHAINID and its KYC claim stay as they are. To invalidate the claim as well, call [Revoke Claim](/endpoints/customers/revoke-claim) first. Once the entry is deleted, the claim can no longer be found through the wallet.
+
+  A T-REX 5 register works the other way round: revoking revokes the KYC claim and leaves the register entry. See [On a T-REX 5 register](#on-a-t-rex-5-register).
 </Warning>
 
 Both registers answer with one transaction. What it does depends on `registerKind`:
@@ -16,6 +18,7 @@ Both registers answer with one transaction. What it does depends on `registerKin
 |---|---|---|---|
 | `TRUSSET` | `revokeIdentity` on the register | The identity stays on the register and reads as `revoked` | A wallet with `REGISTER_OPERATOR_ROLE` |
 | `TREX` | `deleteIdentity` on the register | The wallet's entry is removed from the register | An agent of the register |
+| `TREX`, `trexVersion: 5` | `revokeClaimByDigest(digest)` on the trusted issuer identity that signed the wallet's KYC claim | The KYC claim is revoked, so the wallet stops counting as verified on every register that trusts this issuer. Verifying again signs a new claim | A MANAGEMENT key (purpose 1) of the trusted issuer identity |
 
 Call it once without `txHash` to get the calldata, and again with `txHash` once the transaction is mined. The record is updated on the second call.
 
@@ -27,6 +30,8 @@ Call it once without `txHash` to get the calldata, and again with `txHash` once 
 
 <ParamField body="signerAddress" type="string">
   ERC-3643 only. Returned as `signerAddress`, in place of your primary wallet. The API does not check it.
+
+  On a T-REX 5 register it is checked: it must hold a MANAGEMENT key on the issuer identity of the claim, or the call answers `403 SIGNER_ROLE_MISSING`, and the message names the wallets that hold one. Omitted, the first of your instance's wallets that holds one is returned.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -46,6 +51,12 @@ Call it once without `txHash` to get the calldata, and again with `txHash` once 
     <ResponseField name="register" type="string">ERC-3643 only. The register address.</ResponseField>
     <ResponseField name="signerAddress" type="string">ERC-3643 only. Your primary wallet, or the `signerAddress` you sent. It is not checked to be an agent.</ResponseField>
     <ResponseField name="stepType" type="string">ERC-3643 only. Always `revoke`.</ResponseField>
+    <ResponseField name="trexVersion" type="integer">ERC-3643 only. `4` or `5`.</ResponseField>
+    <ResponseField name="identityFactory" type="string">T-REX 5 only. The identity factory the register names.</ResponseField>
+    <ResponseField name="digest" type="string">T-REX 5 only. The EIP-712 digest of the KYC claim being revoked. `functionName` is then `revokeClaimByDigest`, and `transaction.to` is the trusted issuer identity.</ResponseField>
+    <ResponseField name="signer" type="string">T-REX 5 only. The wallet that must sign, a MANAGEMENT key of the trusted issuer identity.</ResponseField>
+    <ResponseField name="identity" type="string">T-REX 5 only. The wallet's ONCHAINID.</ResponseField>
+    <ResponseField name="claimId" type="string">T-REX 5 only. The claim being revoked.</ResponseField>
     <ResponseField name="confirmWith" type="object">`{ endpoint: "POST /customers/api/identity/revoke", field: "txHash" }`.</ResponseField>
   </Expandable>
   <Expandable title="Confirm leg">
@@ -61,6 +72,12 @@ Call it once without `txHash` to get the calldata, and again with `txHash` once 
 On a Trusset register, the API refuses with `REGISTER_OPERATOR_ROLE_MISSING` when it can read that none of your instance's wallets holds the role. Grant it with **Grant on-chain roles** on the wallet page of the issuer app (see [Customers](/endpoints/customers/introduction)). On the Trusset ID Register, which every instance without a register of its own shares, it refuses with `IDENTITY_HELD_BY_ANOTHER_ISSUER` when the identity was registered by a wallet that is not one of your instance's, and with `CHAIN_UNAVAILABLE` when the register cannot be read to tell. A wallet with no active identity there is refused with `409 IDENTITY_NOT_REGISTERED`, because revoking it would revert on chain.
 
 On an ERC-3643 register, it refuses with `REGISTRY_AGENT_MISSING` when none of your instance's wallets is an agent. It refuses with `NOT_REGISTERED` when the wallet is not on the register.
+
+### On a T-REX 5 register
+
+A T-REX 5 register never sees `deleteIdentity` from this endpoint, because deleting an identity there bars the wallet for good. The call revokes the wallet's KYC claim instead, with one `revokeClaimByDigest` step on the trusted issuer identity that signed it, signed by a MANAGEMENT key of that issuer identity. The ONCHAINID and the register entry stay, and [Verify Identity](/endpoints/customers/verify-identity) signs a new claim to verify the wallet again.
+
+Besides `REGISTRY_AGENT_MISSING`, the build refuses with `NOT_REGISTERED` when the wallet carries no KYC claim from a trusted issuer of the register, `ALREADY_REVOKED` when that claim is revoked already, `CLAIM_ISSUER_UNREADABLE` when the issuer does not answer as an ONCHAINID 3 identity, so the claim's digest cannot be computed, and `CLAIM_MANAGER_MISSING` when none of your instance's wallets holds a MANAGEMENT key on the issuer identity. The confirm leg accepts a `revokeClaimByDigest` on a trusted issuer of the register, sent directly or through a smart-account wallet, whose digest is a claim of this wallet.
 
 ## Confirm
 
@@ -195,7 +212,11 @@ await fetch(url, {
 | `IDENTITY_NOT_REGISTERED` | `409` | Trusset ID Register: the wallet holds no active identity, so there is nothing to revoke. Calldata leg only |
 | `UNAUTHORIZED_SIGNER` | `403` | Trusset ID Register, confirm leg: the transaction was not signed by a verified wallet of your instance |
 | `REGISTRY_AGENT_MISSING` | `403` | ERC-3643: none of your instance's wallets is an agent of the register |
-| `NOT_REGISTERED` | `409` | ERC-3643: the wallet is not on the register |
+| `NOT_REGISTERED` | `409` | ERC-3643: the wallet is not on the register. T-REX 5: the wallet carries no KYC claim from a trusted issuer of the register |
+| `ALREADY_REVOKED` | `409` | T-REX 5: the wallet's KYC claim is already revoked |
+| `CLAIM_ISSUER_UNREADABLE` | `409` | T-REX 5: the claim issuer does not answer as an ONCHAINID 3 identity, so its claim's digest cannot be revoked from here |
+| `CLAIM_MANAGER_MISSING` | `403` | T-REX 5: none of your instance's wallets holds a MANAGEMENT key on the claim issuer identity |
+| `SIGNER_ROLE_MISSING` | `403` | T-REX 5: `signerAddress` holds no MANAGEMENT key on the claim issuer identity. The message names the wallets that do |
 | `OWN_REGISTRY_NOT_CONFIGURED` | `409` | The instance is bound to its own register but no valid register address is set |
 | `REGISTRY_PROBE_FAILED` | `503` | Your own register could not be read to tell its kind |
 | `INVALID_TX` | `400` | `txHash` is not 32-byte hex |
