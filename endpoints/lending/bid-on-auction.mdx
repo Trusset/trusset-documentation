@@ -37,7 +37,7 @@ The API prices the bid and refuses auctions that are closed or past their end ti
 </ParamField>
 
 <ParamField body="bidder" type="string">
-  The wallet that will sign the bid, `0x` followed by 40 hex characters. When supplied, the bid is checked against it before any calldata is built. The auction's borrower is refused with `SELF_PURCHASE_NOT_ALLOWED`, a borrow asset balance below `estimatedCost` with `INSUFFICIENT_BALANCE`, and a wallet the collateral token refuses to receive the collateral from the venue with `BIDDER_CANNOT_RECEIVE`. When the wallet's allowance to the venue already covers `estimatedCost`, the `approve` step is left out. A balance, allowance or token verdict that cannot be read refuses nothing, and the `approve` step stays. Not used on the confirm call.
+  The wallet that will sign the bid, `0x` followed by 40 hex characters. When supplied, the bid is checked against it before any calldata is built. The auction's borrower is refused with `SELF_PURCHASE_NOT_ALLOWED`, a borrow asset balance below `estimatedCost` with `INSUFFICIENT_BALANCE`, and a wallet the collateral token refuses to receive the collateral from the venue with `BIDDER_CANNOT_RECEIVE`. When the wallet's allowance to the venue already covers `estimatedCost`, the `approve` step is left out. A smaller allowance can be left over, for example from an earlier bid. Some borrow assets, USDT among them, refuse to move a non-zero allowance straight to a new value. In that case an `approve` of zero is placed before the approval. A borrow asset that refuses both approvals from this wallet answers `APPROVAL_REFUSED`. A balance, allowance or token verdict that cannot be read refuses nothing, and the `approve` step stays. Not used on the confirm call.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -46,11 +46,11 @@ The API prices the bid and refuses auctions that are closed or past their end ti
 
 ## Sign the Two Steps
 
-Without `txHash` the response is `SIGN_TRANSACTIONS` with two steps, or with the bid alone when the allowance of `bidder` already covers it. Sign them from the bidding wallet, in order, because the venue pulls the payment from the wallet that calls it.
+Without `txHash` the response is `SIGN_TRANSACTIONS`, usually with two steps. It holds the bid alone when the allowance of `bidder` already covers it. It holds three steps when the borrow asset needs its allowance set to zero first. Sign them from the bidding wallet, in order, because the venue pulls the payment from the wallet that calls it. The price only falls after the approval is priced, so a bid usually leaves a small allowance behind. The next build for the same `bidder` takes it into account.
 
 <Steps>
   <Step title="Approve the venue">
-    `approve` on the borrow asset, naming the auction venue as spender, for `estimatedCost`. The venue collects the payment, not the market. Left out when the allowance of `bidder` to the venue already covers `estimatedCost`.
+    `approve` on the borrow asset, naming the auction venue as spender, for `estimatedCost`. The venue collects the payment, not the market. Left out when the allowance of `bidder` to the venue already covers `estimatedCost`, and preceded by an `approve` of zero when the token demands it.
   </Step>
   <Step title="Bid">
     `bidOnAuction` on the venue, for the clamped `collateralAmount`. Confirm with this step's hash, which `confirmStepIndex` names.
@@ -71,11 +71,12 @@ Only the confirmation of that closing bid carries `auctionSettled: true` with th
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS` when `txHash` is omitted.</ResponseField>
     <ResponseField name="auctionId" type="integer">Auction the bid targets.</ResponseField>
-    <ResponseField name="steps" type="array">The transactions above, each `{ action, transaction: { to, data, value, chainId }, functionName }`. The `approve` step also carries a `description`.</ResponseField>
+    <ResponseField name="steps" type="array">The transactions above, each `{ action, transaction: { to, data, value, chainId }, functionName }`. An `approve` step also carries a `description`, `stepKind` (`approveZeroFirst` for the reset to zero, `approve` for the approval itself) and `approval` with the token, spender and amount.</ResponseField>
+    <ResponseField name="allowance" type="object">`{ checked, covers, zeroFirst, standingRaw }`. What was read of the allowance of `bidder` to the venue. `checked` is `false` without `bidder` or when the read failed.</ResponseField>
     <ResponseField name="venueAddress" type="string">The market's auction venue, lowercased. The approval's spender and the bid's target.</ResponseField>
     <ResponseField name="bidderChecked" type="boolean">`true` when `bidder` was supplied, so the borrower, balance and token checks ran against it. `false` when it was not. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="note" type="string">Present when `bidderChecked` is `false`. Says that the borrower check, the bidder balance and whether the token admits the bidder were not checked before signing.</ResponseField>
-    <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm with: `1`, or `0` when the `approve` step was left out.</ResponseField>
+    <ResponseField name="confirmStepIndex" type="integer">Index of the step to confirm with, always the last: `1`, `0` when the `approve` step was left out, or `2` when an `approve` of zero comes first.</ResponseField>
     <ResponseField name="confirmWith" type="string">`bidOnAuction`.</ResponseField>
     <ResponseField name="collateralAmount" type="string">Collateral the bid will buy, clamped to what the auction has left.</ResponseField>
     <ResponseField name="pricePerUnit" type="string">The auction's price per whole collateral unit at quote time, in borrow asset units.</ResponseField>
@@ -170,7 +171,14 @@ if (auction.biddable && Number(auction.currentPrice) <= reservePrice) {
           "chainId": 11155111
         },
         "functionName": "approve",
-        "description": "Approve the auction venue to pull USDC"
+        "description": "Approve the auction venue to pull USDC",
+        "stepKind": "approve",
+        "approval": {
+          "token": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+          "spender": "0x5c3e8a91d2f04b7e6a1c9d38f0b2e47a6d15c8e3",
+          "amount": "11218.0",
+          "amountRaw": "11218000000"
+        }
       },
       {
         "action": "SIGN_TRANSACTION",
@@ -183,6 +191,7 @@ if (auction.biddable && Number(auction.currentPrice) <= reservePrice) {
         "functionName": "bidOnAuction"
       }
     ],
+    "allowance": { "checked": true, "covers": false, "zeroFirst": false, "standingRaw": "0" },
     "venueAddress": "0x5c3e8a91d2f04b7e6a1c9d38f0b2e47a6d15c8e3",
     "bidder": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
     "bidderChecked": true,
@@ -266,6 +275,7 @@ if (auction.biddable && Number(auction.currentPrice) <= reservePrice) {
 | `AUCTION_EXPIRED` | `409` | The auction passed its end time. The error carries `endTime` and `settleWith` |
 | `INSUFFICIENT_BALANCE` | `409` | `bidder` holds less of the borrow asset than `estimatedCost` at the current auction price |
 | `BIDDER_CANNOT_RECEIVE` | `409` | The collateral token refuses to deliver the auctioned collateral from the venue to `bidder` |
+| `APPROVAL_REFUSED` | `409` | The borrow asset refuses an approval from `bidder` to the venue, both to the bid cost and to zero, so no bid is built |
 | `AUCTION_STATE_UNAVAILABLE` | `503` | The auction could not be read on-chain, so the bid could not be priced. Retry shortly |
 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).

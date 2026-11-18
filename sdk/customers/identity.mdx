@@ -264,7 +264,7 @@ const result = await trusset.customers.identity.addClaimsFromProof({
 
 `result.added` counts the claims confirmed on chain and `result.total` the claims attempted. `result.claims` holds one entry per claim with `claimType`, `dataHash`, `status` (`confirmed`, `failed` or `skipped`), and `txHash` or `error`. `result.verification` reports how the proof bundle was verified.
 
-Without options the method returns `action: 'SIGN_TRANSACTIONS'` with ordered `steps`. Broadcast them in order, then confirm all of them at once with `{ txResults }`, pairing each step's `claimType` with its hash. On an [own ERC-3643 register](#own-erc-3643-registers) the first answer is the `SIGN_CLAIMS` phase instead, which carries no `verification` yet:
+Without options the method returns `action: 'SIGN_TRANSACTIONS'` with ordered `steps`. Broadcast them in order, then confirm all of them at once with `{ txResults }`, pairing the `claimType` of each step that writes a claim with its hash. On a T-REX 5 register the plan can also hold a `rotateClaim` step, which revokes the claim a new one replaces. Broadcast it, and leave it out of `txResults`. With `{ signer }` the SDK does this pairing itself. On an [own ERC-3643 register](#own-erc-3643-registers) the first answer is the `SIGN_CLAIMS` phase instead, which carries no `verification` yet:
 
 ```typescript
 const prepared = await trusset.customers.identity.addClaimsFromProof({ walletAddress, manifest, manifestSig, proofs })
@@ -276,13 +276,17 @@ const txResults = []
 for (const step of prepared.steps) {
   const tx = await signer.sendTransaction(step.transaction)
   await tx.wait(1)
-  txResults.push({ claimType: step.claimType, txHash: tx.hash })
+  if (step.stepType === 'ADD_CLAIM' || step.stepType === 'ROOT_ROTATION') {
+    txResults.push({ claimType: step.claimType, txHash: tx.hash })
+  }
 }
 
 const result = await trusset.customers.identity.addClaimsFromProof({ walletAddress, manifest, manifestSig, proofs }, { txResults })
 ```
 
-Failure modes: `NOT_VERIFIED`, `IDENTITY_REVOKED`, `HASH_MISMATCH`, `WALLET_MISMATCH`, `PROOF_MISSING`, `PROOF_INVALID`, `UNREGISTERED_OPERATOR_KEY`, `STUB_NOT_ALLOWED`, `INVALID_MANIFEST`, `NO_SELECTED_CLAIMS`. See the [troubleshooting table](/sdk/customers/kyc-proofs#troubleshooting).
+Failure modes: `NOT_VERIFIED`, `IDENTITY_REVOKED`, `HASH_MISMATCH`, `WALLET_MISMATCH`, `PROOF_MISSING`, `PROOF_DIGEST_MISMATCH`, `LEAF_HASH_MISMATCH`, `PROOF_INVALID`, `INVALID_PROOFS`, `UNSUPPORTED_VERSION`, `UNREGISTERED_OPERATOR_KEY`, `STUB_NOT_ALLOWED`, `INVALID_MANIFEST`, `NO_SELECTED_CLAIMS`. See the [troubleshooting table](/sdk/customers/kyc-proofs#troubleshooting).
+
+When every claim of a confirm fails, the API answers `NO_CLAIMS_ADDED` and the SDK throws. The per-claim reasons are on the error: `err.data.claims` holds the same entries a successful confirm returns in `result.claims`. With `{ txResults }` the error's `code` is `NO_CLAIMS_ADDED`. With `{ signer }` it is a `ConfirmationError` with the code `CONFIRMATION_FAILED`, and `NO_CLAIMS_ADDED` is on `err.failure.code`.
 
 ### Manual claims
 

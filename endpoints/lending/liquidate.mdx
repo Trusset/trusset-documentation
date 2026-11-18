@@ -17,7 +17,7 @@ With Dutch auctions **enabled**, the collateral goes to the market's auction ven
 A market whose lender of record declared `AUCTION` as its realization path is refused with `409 AUCTION_PATH_NOT_ENABLED` while Dutch auctions are off, because the seizure would go to the router for a direct sale instead. Wire the venue with [Wire Auction Module](/endpoints/lending/wire-auction-module) and turn on `useDutchAuction` with [Update Market Config](/endpoints/lending/update-config) first. `readiness.auctionPathMissing` reports this state.
 
 <Warning>
-  The signing wallet must hold `LIQUIDATOR_ROLE` on the market. Role state is reported in `readiness` but never blocks the calldata. You sign in your own environment, so the wallet this API knows about is not necessarily the one that will call. A wallet without the role has its transaction reverted on-chain rather than rejected here. Pass `signerAddress` to have `readiness` answer for the wallet you intend to use.
+  The call to the market needs a wallet that holds `LIQUIDATOR_ROLE` on it. A [liquidation bot](/endpoints/lending/connect-bot) connected to the market removes that need. When the wallet in `signerAddress` does not hold the role and a connected, unpaused bot does, the transaction returned calls `liquidate` on the bot. Any wallet may sign it, and `via` reads `BOT`. Pass `signerAddress` to have the answer built for the wallet you intend to use. A `signerAddress` that does not hold the role, on a market no bot covers, is refused with `LIQUIDATOR_ROLE_MISSING`. Without `signerAddress` the call to the market is always returned, because the wallet this API knows about is not necessarily the one that will call. `readiness.liquidatorViaBot` still says whether a connected bot could carry it. That transaction reverts on-chain from a wallet without the role.
 </Warning>
 
 ## Path Parameters
@@ -38,7 +38,7 @@ A market whose lender of record declared `AUCTION` as its realization path is re
 </ParamField>
 
 <ParamField body="signerAddress" type="string">
-  Wallet you intend to liquidate with. Used to resolve `readiness` against that address rather than against your instance's primary verified wallet. It does not appear in the transaction. On a collateral token whose ERC-1400 `granularity()` is above one base unit it is required: the exact liquidation is simulated from it before the calldata is returned, and without it the call is refused with `COLLATERAL_GRANULARITY_UNCHECKED`. When the granularity or the simulation cannot be read, the calldata is returned and the contract decides. Anything that is not a valid address is ignored.
+  Wallet you intend to liquidate with. `readiness` is resolved against that address rather than against your instance's primary verified wallet. It also decides what is built. A wallet that holds `LIQUIDATOR_ROLE` gets the call to the market. A wallet without it gets the call to a connected bot when one covers the market, and `LIQUIDATOR_ROLE_MISSING` otherwise. It does not appear in the transaction. On a collateral token whose ERC-1400 `granularity()` is above one base unit it is required: the exact liquidation is simulated from it before the calldata is returned, and without it the call is refused with `COLLATERAL_GRANULARITY_UNCHECKED`. When the granularity or the simulation cannot be read, the calldata is returned and the contract decides. Anything that is not a valid address is ignored.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -52,8 +52,11 @@ Without `txHash` the response is the unsigned `liquidate` call, alongside a `rea
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the market contract. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">Unsigned transaction, `{ to, data, value, chainId }`, targeting the market contract, or the liquidation bot when `via` is `BOT`. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="functionName" type="string">`liquidate`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="via" type="string">`MARKET` when the transaction calls the market, `BOT` when it calls a connected liquidation bot that forwards to the market. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="botAddress" type="string | null">The bot the transaction calls when `via` is `BOT`, lowercase. `null` otherwise.</ResponseField>
+    <ResponseField name="note" type="string">Present when `via` is `BOT`. Says why the bot is used.</ResponseField>
     <ResponseField name="readiness" type="object">
       Realization readiness for this market, or `null` when it could not be read. Returned when `txHash` is omitted, and also attached to the errors below. It carries the same fields as [Get Liquidation Config](/endpoints/lending/get-liquidation-config), without `marketId`, `marketAddress`, `liquidationRouterAddress` and `stats`. The decisive ones:
       <Expandable>
@@ -173,6 +176,8 @@ const { data: liquidation } = await confirmed.json();
       "chainId": 11155111
     },
     "functionName": "liquidate",
+    "via": "MARKET",
+    "botAddress": null,
     "readiness": {
       "routerAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf",
       "routerAuthorized": true,
@@ -379,6 +384,8 @@ Refusals from the readiness, loan, atomic and granularity checks carry the full 
 | `VALIDATION_ERROR` | `400` | A `signedPrice` field has the wrong type, or `txHash` is present but malformed |
 | `INVALID_SIGNED_PRICE` | `400` | The `signedPrice` is malformed, expired, or not signed by an authorized signer of the market's oracle |
 | `PRICE_DEVIATION_TOO_LARGE`, `PRICE_WINDOW_DEVIATION_TOO_LARGE` | `400` | The `signedPrice` moves further from the stored price than the oracle accepts, in one step or within its current hour. `details` carries the band |
+| `LIQUIDATOR_ROLE_MISSING` | `400` | `signerAddress` does not hold `LIQUIDATOR_ROLE` on the market and no connected liquidation bot covers it. The error carries `calldata`, the role grant for the market admin to sign, and `readiness` |
+| `ROLE_UNVERIFIABLE` | `503` | The role of `signerAddress` could not be read. Nothing was built. Retry shortly |
 | `LIQUIDATION_NOT_READY` | `400` | The router is not authorized on the market, or the collateral token will not let the router hold the seized tokens. `409` when the router runs atomic mode and the token refuses delivery of this loan's seizure. See [Atomic sale](#atomic-sale) |
 | `COLLATERAL_TRANSFER_RESTRICTED` | `400` | The collateral token's compliance rules block the seizure transfer to the router |
 | `PRICE_STALE` | `400` | The oracle price is stale, so `liquidate` reverts. Push a fresh price first, or carry an accepted `signedPrice` |
@@ -404,5 +411,5 @@ Refusals from the readiness, loan, atomic and granularity checks carry the full 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction).
 
 <Tip>
-  A missing `LIQUIDATOR_ROLE` shows as `liquidatorRoleReady: false` in `readiness` rather than as an error. Resolve it through [Set Liquidator Role](/endpoints/operators/set-liquidator-role) when the market admin drives the grant, or let a [connected liquidation bot](/endpoints/lending/connect-bot) hold it.
+  Without `signerAddress`, a missing `LIQUIDATOR_ROLE` shows as `liquidatorRoleReady: false` in `readiness` rather than as an error. Resolve it through [Set Liquidator Role](/endpoints/operators/set-liquidator-role) when the market admin drives the grant, or let a [connected liquidation bot](/endpoints/lending/connect-bot) hold it. A liquidation sent through a bot is confirmed with this same call and the hash of the transaction that called the bot.
 </Tip>

@@ -5,7 +5,7 @@ description: "Deploy, connect, fund and stop the liquidation contracts an operat
 
 A liquidation bot is a small contract you deploy and own. It holds `LIQUIDATOR_ROLE` on the markets connected to it, so any caller can trigger a liquidation through it and no wallet has to hold the role itself. The wallet that deploys a bot owns it and signs every change to it. Trusset holds no key to a bot and never calls one.
 
-The SDK builds no call to the bot's own `liquidate`, because the API builds none. A keeper you run, or any third party, encodes that call from the bot contract's ABI. The bot forwards it to the market, which checks the role, the price and the loan, and reverts otherwise.
+A keeper you run, or any third party, calls the bot's own `liquidate(market, loanId, signedPrice)`. The bot forwards it to the market, which checks the role, the price and the loan, and reverts otherwise. [`liquidations.liquidate`](/sdk/lending/liquidations#liquidate-a-loan) builds that call for you: when the signing wallet does not hold `LIQUIDATOR_ROLE` and a connected, unpaused bot covers the market, the transaction it returns is addressed to the bot.
 
 Every write on this page follows the [signing model](/sdk/lending/signing): without options it returns the unsigned transaction, with `{ signer }` it signs and confirms, and with `{ txHash }` it confirms one you broadcast. Any ethers v5 `Signer` works, self-custody or regulated custodian, with no preference.
 
@@ -40,9 +40,19 @@ if ('alreadyInState' in connected) console.log('already connected')
 else console.log(connected.transactions.map(t => t.functionName))
 ```
 
-Before it signs anything, the SDK checks the signer against each step's `authority`. A `BOT_OWNER` step needs the bot's `ownerWallet`. A `MARKET_ADMIN` step needs a wallet holding `MARKET_ADMIN` on the market, which the SDK reads from the API. A wrong wallet throws a `ValidationError`, and a role that cannot be read throws `ROLE_UNREADABLE` with status 503. In both cases nothing was signed.
+With a signer, the SDK sends the signer's address with the build, and the API returns only the steps that wallet can sign. A wallet that holds one half signs that half. The result then carries `partial: true` and the steps left for the other wallet under `pending`, each with its `requiredSigner`. A `note` says who finishes the connection. A wallet that can sign neither half is refused with `MARKET_ADMIN_REQUIRED` or `SIGNER_NOT_AUTHORIZED`, and nothing was signed.
 
-When the two halves belong to two wallets, prepare without a signer and have each wallet sign the step its `authority` names:
+```typescript
+const half = await trusset.lending.bots.connect(botId, marketId, { signer: botOwner })
+
+if ('partial' in half && half.partial) {
+  console.log(half.note, half.pending.map(step => step.requiredSigner))
+}
+```
+
+Before it signs anything, the SDK also checks the signer against each step's `authority`. A `BOT_OWNER` step needs the bot's owner as the chain reports it. A `MARKET_ADMIN` step needs a wallet holding `MARKET_ADMIN` on the market, which the SDK reads from the API. A role that cannot be read throws `ROLE_UNREADABLE` with status 503, and nothing was signed.
+
+When the two halves belong to two wallets, you can also prepare without a signer and have each wallet sign the step its `authority` names. Each step carries `requiredSigner`, the wallet the API read for it:
 
 ```typescript
 const prepared = await trusset.lending.bots.connect(botId, marketId)
@@ -69,7 +79,7 @@ A market still looking for its lender of record has no market admin, so its mark
 await trusset.lending.bots.disconnect(botId, marketId, { signer: botOwner })
 ```
 
-The bot step alone is enough to stop the bot on that market, and it is the one the owner can take without the market admin. With a signer, the SDK signs the whole plan, so it refuses when the plan also holds a `MARKET_ADMIN` step the owner cannot sign. Prepare without a signer then, and have the owner sign the bot step.
+The bot step alone is enough to stop the bot on that market, and it is the one the owner can take without the market admin. With the owner as signer, the SDK signs the bot step, and the result lists the `revokeRole` step under `pending` for the market admin.
 
 ## Fund the refunds
 
@@ -125,7 +135,7 @@ console.log(prepared.balance, prepared.amountWei, prepared.withdrawsAll, prepare
 await trusset.lending.bots.withdraw(botId, { amountWei: '100000000000000000', to: walletAddress }, { signer: botOwner })
 ```
 
-Prepare first when you want to see the payout: the response discloses the balance and what the transaction pays at that balance. `to` defaults to the bot's recorded owner. A bot whose balance is zero is refused with `NOTHING_TO_WITHDRAW`, because the contract would revert.
+Prepare first when you want to see the payout: the response discloses the balance and what the transaction pays at that balance. `to` defaults to the bot's owner as the chain reports it, returned as `owner`, which is the wallet that has to sign. A bot whose balance is zero is refused with `NOTHING_TO_WITHDRAW`, because the contract would revert.
 
 ## Label or archive a bot
 

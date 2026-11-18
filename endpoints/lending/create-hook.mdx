@@ -34,7 +34,7 @@ Each delivery is a `POST` with these headers:
 | `x-hook-id`, `x-hook-type` | The hook and the event: `afterLiquidation` or `riskBreach` |
 | `user-agent` | `Trusset-Lending-Hook/1.0` |
 
-The body carries `id`, `event`, `hookId`, `marketId`, `emittedAt` and `timestamp`, the last two both the time the event was queued. A liquidation adds `loanId`, `marketLiquidationId`, `auctionId`, `collateralAmount`, `debtOwed`, `borrower`, `txHash` and `marketAddress`. It also adds the outcome: `realization` (`ATOMIC`, `ROUTER` or `VENUE`), the atomic sale's `buyer`, `proceeds`, `surplus` and `reserve` as [Liquidate Loan](/endpoints/lending/liquidate) returns them, and `payee`, the loan's pay-to address. A field with no value reads `null`. A breach adds `monitorHookId`, `monitorName`, `riskUri`, `checkedAt`, `breached` with the failing fields and their values, and `fields`.
+The body carries `id`, `event`, `hookId`, `marketId`, `emittedAt` and `timestamp`, the last two both the time the event was queued. A liquidation adds `loanId`, `marketLiquidationId`, `auctionId`, `collateralAmount`, `debtOwed`, `borrower`, `txHash` and `marketAddress`. `debtOwed` is the debt this liquidation takes off the loan, which under a close factor below 100 percent is a part of what the loan owed. `totalDebtAtSeizure` is what the loan owed when it was liquidated, `remainingDebt` is the difference, and `loanClosed` says whether the loan was closed when the notice was built. A loan also closes when the liquidation takes its last collateral, so `loanClosed: true` beside a `remainingDebt` above zero is a loan closed with a residual. `totalDebtAtSeizure` and `remainingDebt` read `null` when the market or its record of this liquidation could not be read, and `loanClosed` reads `null` when the loan could not be read. `borrower` and `marketAddress` are lowercase on every liquidation the platform reports. A run made through [Execute Hook](/endpoints/lending/execute-hook) forwards them as sent. It also adds the outcome: `realization` (`ATOMIC`, `ROUTER` or `VENUE`), the atomic sale's `buyer`, `proceeds`, `surplus` and `reserve` as [Liquidate Loan](/endpoints/lending/liquidate) returns them, and `payee`, the loan's pay-to address. A field with no value reads `null`. A breach adds `monitorHookId`, `monitorName`, `riskUri`, `checkedAt`, `breached` with the failing fields and their values, and `fields`.
 
 The signing secret is returned once, as `webhookSecret`, when the hook is created. Store it then. [Rotate Hook Secret](/endpoints/lending/rotate-hook-secret) issues a new one, and [List Hook Deliveries](/endpoints/lending/list-hook-deliveries) lists the deliveries with their status, attempts and last error.
 
@@ -65,9 +65,9 @@ A monitor is due once `checkFrequency` has passed since its last run, and a new 
 <ParamField body="riskFields" type="array">
   Checks applied to the JSON body `riskUri` returns, at most 20. Required and non-empty for `monitorRisk`. Evaluation stops at the first field that fails.
   <Expandable>
-    <ParamField body="path" type="string" required>Dot-notation path into the response body, 1 to 256 characters. A field fails when the path resolves to nothing.</ParamField>
+    <ParamField body="path" type="string" required>Dot-notation path into the response body, 1 to 256 characters. A field fails when the path resolves to nothing: a key that is missing, a value of `null`, or a name the object only inherits, such as `constructor`.</ParamField>
     <ParamField body="operator" type="string">One of `>`, `>=`, `<`, `<=`, `==`, `!=`. Compared only when `threshold` is also set. A field with neither passes whenever its path resolves.</ParamField>
-    <ParamField body="threshold" type="number">Value the resolved field is compared against. The field is used as the JSON returns it, and `==` and `!=` compare strictly, so a numeric string never equals a number.</ParamField>
+    <ParamField body="threshold" type="number">Value the resolved field is compared against. Every operator compares numbers. A value that is a number, or a plain decimal string such as `"12.5"`, is compared as that number. Any other value fails the field under every operator, `!=` included: an empty string, `true` or `false`, an array, an object and text such as `"1e3"` never pass.</ParamField>
   </Expandable>
 </ParamField>
 
@@ -84,7 +84,7 @@ A monitor is due once `checkFrequency` has passed since its last run, and a new 
   <Expandable>
     <ParamField body="parameter" type="string" required>One of `healthFactor`, `collateralValue`, `debtValue`, `collateralRatio`, `interestAccrued`.</ParamField>
     <ParamField body="operator" type="string" required>One of `>`, `>=`, `<`, `<=`, `==`, `!=`.</ParamField>
-    <ParamField body="threshold" type="string" required>Comparison value as a decimal string, at most 64 characters. Both sides are parsed as numbers.</ParamField>
+    <ParamField body="threshold" type="string" required>Comparison value as a plain decimal string, such as `1.5`, `5` or `-0.25`, at most 64 characters. Anything else is refused with `VALIDATION_ERROR`: an empty string, `1,5`, `1.5e3`, `0x10` or a value with spaces. The value in the data is read the same way, and a value that is not a decimal number fails the check.</ParamField>
   </Expandable>
 </ParamField>
 
@@ -93,7 +93,7 @@ A monitor is due once `checkFrequency` has passed since its last run, and a new 
 </ParamField>
 
 <ParamField body="maxBuyPrice" type="string">
-  Ceiling for a `buy` action, as a decimal string in the borrow asset per whole collateral token. When the auction's current price is above it, the run returns no steps.
+  Ceiling for a `buy` action, as a decimal string with a point in the borrow asset per whole collateral token, such as `1.5`. An empty string means no ceiling, and any other value that is not a decimal is refused with `VALIDATION_ERROR`. When the auction's current price is above it, the run returns no steps.
 </ParamField>
 
 <ParamField body="webhookUrl" type="string">

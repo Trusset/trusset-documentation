@@ -53,7 +53,7 @@ The subject must already be verified on chain, and a wallet whose `kycHash` on t
 </ParamField>
 
 <ParamField body="txResults" type="array">
-  Send this to confirm. An array of `{ claimType, txHash }`, one per claim you broadcast, with `claimType` as a name or an index. Omit it to receive the calldata.
+  Send this to confirm. An array of `{ claimType, txHash }`, one per claim you broadcast, with `claimType` as a name or an index. Name the transaction that wrote the claim. A step that only revokes the claim being replaced, `rotateClaim` on a T-REX 5 register, is broadcast but does not belong here. When several entries name one claim type, at most three are read and the first that wrote the claim is recorded. Omit it to receive the calldata.
 </ParamField>
 
 <ParamField body="claimSignatures" type="array">
@@ -112,7 +112,7 @@ On a T-REX 5 register (`trexVersion: 5`) the messages carry `scheme: eip712`, `t
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`. On an ERC-3643 register the first answer is `SIGN_MESSAGES`. Calldata leg only.</ResponseField>
     <ResponseField name="registerKind" type="string">`TRUSSET` or `TREX`, the interface of the register this instance writes to. Calldata leg only.</ResponseField>
-    <ResponseField name="steps" type="array">One per claim, `KYC` first: the unsigned transaction plus `stepType`, `claimType`, `dataHash` and `expiry`. Calldata leg only.</ResponseField>
+    <ResponseField name="steps" type="array">One per claim, `KYC` first: the unsigned transaction plus `stepType`, `claimType`, `dataHash` and `expiry`. A claim that replaces one already on a T-REX 5 register adds a `rotateClaim` step before its own. Calldata leg only.</ResponseField>
     <ResponseField name="messages" type="array">ERC-3643 register only: one claim message per claim, each with `messageHash`, `claimType`, `identity`, `topic` and `claimIssuer`. On a T-REX 5 register each adds `scheme: eip712`, `typedData` and `issuedAt`.</ResponseField>
     <ResponseField name="next" type="string">ERC-3643 register only: what to send on the next call.</ResponseField>
     <ResponseField name="walletAddress" type="string">The subject, checksummed.</ResponseField>
@@ -149,7 +149,7 @@ The wallet, root, signature, freshness, trust-anchor, Merkle and proof-presence 
 | `UNSUPPORTED_CIRCUIT` | `400` | The circuit is not one this verifier knows |
 | `UNAPPROVED_PARAMS` | `400` | The predicate parameters are outside the network's trust anchors |
 | `UNAPPROVED_LIST` | `400` | The list root or depth the proof committed to is not one this network accepts |
-| `STUB_NOT_ALLOWED` | `400` | A `stub` bundle was sent to a production instance |
+| `STUB_NOT_ALLOWED` | `400` | A `stub` bundle was sent to a production instance, or to a development instance on which proof verification is enforced |
 | `NO_SELECTED_CLAIMS` | `400` | Nothing in `selected` is backed by this bundle |
 | `PROOF_TOO_LARGE` | `413` | A decoded proof is over 256 KiB, all proofs together over 4 MiB, or the manifest over 64 KiB |
 | `TOO_MANY_LEAVES` | `413` | The bundle carries more than 32 leaves |
@@ -214,7 +214,9 @@ const txResults = [];
 for (const step of built.data.steps) {
   const tx = await signer.sendTransaction(step.transaction);
   await tx.wait();
-  txResults.push({ claimType: step.claimType, txHash: tx.hash });
+  if (step.stepType === 'ADD_CLAIM' || step.stepType === 'ROOT_ROTATION') {
+    txResults.push({ claimType: step.claimType, txHash: tx.hash });
+  }
 }
 
 const confirmed = await fetch(url, {

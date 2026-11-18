@@ -56,7 +56,7 @@ A `2xx` answer delivers it. A `5xx`, `408`, `425` or `429` answer, a timeout or 
 
 ## Monitor an external risk source
 
-A `monitorRisk` hook fetches `riskUri` on a schedule and checks fields of the JSON it returns. A field with a dot-notation `path` fails when the path resolves to nothing, or when its comparison with `threshold` fails.
+A `monitorRisk` hook fetches `riskUri` on a schedule and checks fields of the JSON it returns. A field with a dot-notation `path` fails when the path resolves to nothing, which includes a value of `null`, or when its comparison with `threshold` fails. Every comparison is between numbers: a number or a plain decimal string is compared, and any other value fails the field. A feed that stops reporting a figure therefore reads as a breach, never as healthy.
 
 ```typescript
 const monitor = await trusset.lending.hooks.create(marketId, {
@@ -99,6 +99,8 @@ await trusset.lending.hooks.create(marketId, {
 })
 ```
 
+`threshold` is a plain decimal string, such as `'1.5'` or `'5'`. The SDK refuses anything else before any request, for example `''`, `'1,5'` or `'1.5e3'`, and so does the API.
+
 The checks run against the liquidation's data, not against chain state. A liquidation's data carries `debtValue` and none of the other four parameters, so a check on `healthFactor`, `collateralValue`, `collateralRatio` or `interestAccrued` fails on every liquidation. Those parameters only take effect in a test run where you supply them.
 
 ## Test a hook
@@ -117,7 +119,7 @@ console.log(checkRun.result)
 
 The call answers HTTP 200 whenever the hook ran, including when the hook itself failed. Read the outcome from `success` and `result`. A monitor run lists each evaluated field in `fields`, and a check run lists `checkResults`.
 
-Executing an `inform` hook sends a real delivery to its `webhookUrl`. The run returns at once with `queued: true` and the `deliveryId`, before anything is sent. Pass an `eventKey` to make the call idempotent: a second call with the same key queues nothing and returns `duplicate: true`.
+Executing an `inform` hook sends a real delivery to its `webhookUrl`. The run returns at once with `queued: true` and the `deliveryId`, before anything is sent. Pass an `eventKey` to make the call idempotent: a second call with the same key queues nothing and returns `duplicate: true`. The key is stored with the prefix `manual:`, so a test run never takes the place of a real liquidation, whatever key it carries.
 
 ```typescript
 const queued = await trusset.lending.hooks.execute(marketId, hookId, {
@@ -130,10 +132,10 @@ The SDK never repeats an `execute` call after an ambiguous failure, because a re
 ### Buy hooks return steps, not bids
 
 <Warning>
-  A `buy` hook never bids. It returns an approval and a `bidOnAuction` step, priced when they were built, and nothing confirms them. The auction charges its price when the bid lands. The bid reverts if, for example, the auction ended, the price is stale or the signer is the borrower. The balance check before the steps reads only the instance's registered wallet, whichever wallet signs.
+  A `buy` hook never bids. It returns the approval steps the registered wallet still needs and a `bidOnAuction` step, priced when they were built, and nothing confirms them. No approval is returned when the wallet's allowance already covers the bid. An approval of zero comes first when the borrow asset refuses to change a non-zero allowance, as USDT does. The auction charges its price when the bid lands. The bid reverts if, for example, the auction ended, the price is stale or the signer is the borrower. The balance check and the allowance read before the steps look only at the instance's registered wallet, returned as `signerAddress`, whichever wallet signs.
 </Warning>
 
-Treat a `buy` run as a price signal. To place the bid, use `auctions.bid` with the auction id from the run. It builds the same two steps, signs them with the bidder's wallet and confirms the mined bid. See [Auctions](/sdk/lending/auctions).
+Treat a `buy` run as a price signal. To place the bid, use `auctions.bid` with the auction id from the run. It builds the same steps, signs them with the bidder's wallet and confirms the mined bid. That is one step when the allowance covers the cost, two for an approval and the bid, and three when the token needs its allowance reset to zero first. See [Auctions](/sdk/lending/auctions).
 
 ## Change, pause or delete a hook
 

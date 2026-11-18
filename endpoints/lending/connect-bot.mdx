@@ -11,9 +11,11 @@ Builds the transactions that connect a bot to one of the instance's markets, or 
 | Bot side | `setMarketEnabled(market, true)` or `false`, on the bot | `BOT_OWNER`: the bot's owner wallet |
 | Market side | `grantRole` or `revokeRole` of `LIQUIDATOR_ROLE` for the bot, on the market | `MARKET_ADMIN`: the market admin, holder of `DEFAULT_ADMIN_ROLE` on the market |
 
+The API reads who holds each half before it answers. Every step names the wallet that must sign it as `requiredSigner`. For the bot step that is the bot's owner as the chain reports it. For the market step it is a wallet known to the instance that holds `DEFAULT_ADMIN_ROLE` on the market. Send `signerAddress` to get only the steps that wallet can sign. The steps another wallet must sign then come back under `pending`, and `partial` is `true`. One wallet therefore never signs a half connection without being told who finishes it. A wallet that can sign none of the steps is refused.
+
 Trusset holds no key and signs neither step. The bot step comes first in both directions. The two are independent transactions, so neither has to be mined before the other. Either half alone stops the bot acting on a market, and the bot step is the one the owner can take without the market admin.
 
-A market still seeking a lender of record has no market admin, so its market step cannot succeed. This call does not check for that. A lender of record can instead grant the role while taking it, by naming the bot as `liquidator` on [Accept Lender Role](/endpoints/operators/accept-lender-role). [Set Liquidator Role](/endpoints/operators/set-liquidator-role) grants it too.
+A market still seeking a lender of record has no market admin, so its market step cannot succeed, and its `requiredSigner` reads `null`. A lender of record can instead grant the role while taking it, by naming the bot as `liquidator` on [Accept Lender Role](/endpoints/operators/accept-lender-role). [Set Liquidator Role](/endpoints/operators/set-liquidator-role) grants it too.
 
 ## Path Parameters
 
@@ -29,6 +31,10 @@ A market still seeking a lender of record has no market admin, so its market ste
   `true` to connect, `false` to disconnect.
 </ParamField>
 
+<ParamField body="signerAddress" type="string">
+  The wallet that will sign, `0x` followed by 40 hex characters. With it, `steps` holds only what this wallet can sign: the bot step when it owns the bot, the market step when it holds `DEFAULT_ADMIN_ROLE` on the market. Without it, `steps` holds every step, each for the wallet its `requiredSigner` names.
+</ParamField>
+
 ## Response Fields
 
 When both halves already match the request, `data` is `{ success: true, alreadyInState: true, connected, marketId }` and there is nothing to sign. Otherwise:
@@ -37,16 +43,23 @@ When both halves already match the request, `data` is `{ success: true, alreadyI
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
     <ResponseField name="steps" type="array">
-      One or two transactions, the bot step first.
+      One or two transactions, the bot step first. With `signerAddress`, only the ones that wallet can sign.
       <Expandable>
         <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
         <ResponseField name="transaction" type="object">Unsigned call: `to` is the bot for the bot step and the market for the market step, plus `data`, `value` (`"0"`) and `chainId`.</ResponseField>
         <ResponseField name="functionName" type="string">`setMarketEnabled` on the bot step, `grantRole` or `revokeRole` on the market step.</ResponseField>
         <ResponseField name="description" type="string">What the step does.</ResponseField>
         <ResponseField name="authority" type="string">`BOT_OWNER` or `MARKET_ADMIN`, the party that must sign.</ResponseField>
+        <ResponseField name="requiredSigner" type="string | null">The wallet that must sign the step, lowercase. The bot step names the bot's on-chain owner. The market step names a wallet that holds `DEFAULT_ADMIN_ROLE` on the market, or `null` when no wallet known to the instance holds that role.</ResponseField>
       </Expandable>
     </ResponseField>
     <ResponseField name="confirmStepIndex" type="integer">Index of the last step. Its mined hash is the one to send to [Confirm Bot Transaction](/endpoints/lending/confirm-bot-transaction).</ResponseField>
+    <ResponseField name="signer" type="string | null">The `signerAddress` the plan was built for, or `null` when none was sent.</ResponseField>
+    <ResponseField name="botOwner" type="string">The bot's owner as the chain reports it.</ResponseField>
+    <ResponseField name="marketAdmin" type="string | null">A wallet known to the instance that holds `DEFAULT_ADMIN_ROLE` on the market, or `null`.</ResponseField>
+    <ResponseField name="partial" type="boolean">`true` when `signerAddress` can sign only part of the change, so `pending` is not empty.</ResponseField>
+    <ResponseField name="pending" type="array">The steps another wallet must sign, in the shape of `steps`. Empty without `signerAddress`.</ResponseField>
+    <ResponseField name="note" type="string">Present when two wallets are involved. Says who signs what.</ResponseField>
     <ResponseField name="functionName" type="string">`connectMarket` or `disconnectMarket`. A label for the operation, not a contract function.</ResponseField>
     <ResponseField name="marketId" type="string">Market ID.</ResponseField>
     <ResponseField name="marketAddress" type="string">Market contract address.</ResponseField>
@@ -104,7 +117,8 @@ if (!data.alreadyInState) {
         },
         "functionName": "setMarketEnabled",
         "description": "Allow the bot to act on NYF1",
-        "authority": "BOT_OWNER"
+        "authority": "BOT_OWNER",
+        "requiredSigner": "0x8cc2a1b0c3d4e5f60718293a4b5c6d7e8f90bf88"
       },
       {
         "action": "SIGN_TRANSACTION",
@@ -116,13 +130,19 @@ if (!data.alreadyInState) {
         },
         "functionName": "grantRole",
         "description": "Grant the bot the liquidator role on the market",
-        "authority": "MARKET_ADMIN"
+        "authority": "MARKET_ADMIN",
+        "requiredSigner": "0x8cc2a1b0c3d4e5f60718293a4b5c6d7e8f90bf88"
       }
     ],
     "confirmStepIndex": 1,
+    "signer": null,
+    "partial": false,
+    "pending": [],
     "functionName": "connectMarket",
     "marketId": "clx_secmarket_001",
     "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "botOwner": "0x8cc2a1b0c3d4e5f60718293a4b5c6d7e8f90bf88",
+    "marketAdmin": "0x8cc2a1b0c3d4e5f60718293a4b5c6d7e8f90bf88",
     "confirmWith": { "endpoint": "confirm-tx", "txHash": true }
   },
   "error": null,
@@ -160,7 +180,9 @@ if (!data.alreadyInState) {
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | `marketId` is missing, empty or longer than 100 characters, or `connect` is not a boolean |
+| `VALIDATION_ERROR` | `400` | `marketId` is missing, empty or longer than 100 characters, `connect` is not a boolean, or `signerAddress` is not an address |
+| `MARKET_ADMIN_REQUIRED` | `409` | Only the market step is left and `signerAddress` does not hold `DEFAULT_ADMIN_ROLE` on the market. `details` carries `pending`, the step for the market admin, with `marketAdmin` and `botOwner` |
+| `SIGNER_NOT_AUTHORIZED` | `409` | `signerAddress` can sign none of the steps that are left: it does not own the bot where the bot's step is open, and does not administer the market where the role step is open. `details` carries `pending` |
 | `BOT_NOT_FOUND` | `404` | No bot with this ID belongs to your instance |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID belongs to your instance, or it has no on-chain address |
 | `BOT_NOT_DEPLOYED` | `409` | The bot record has no contract address |
