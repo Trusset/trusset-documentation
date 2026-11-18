@@ -28,7 +28,7 @@ Webhooks are created and managed in the Issuer Portal, on the Webhooks page of t
   </Step>
 </Steps>
 
-An instance holds at most 10 pledge webhooks. The webhook's details list every delivery with its status and offer a test delivery, a replay per delivery, a new signing secret, a pause switch and deletion.
+An instance holds at most 10 pledge webhooks. The webhook's details list the deliveries, newest first, with their status and offer a test delivery, a replay per delivery, a new signing secret, a pause switch and deletion.
 
 ## Which markets a webhook covers
 
@@ -78,7 +78,7 @@ In a `CUSTODY` market the token moves to the adapter, which is a transfer for se
     <ResponseField name="holder" type="string">The wallet whose collateral is locked.</ResponseField>
     <ResponseField name="pledgee" type="string">The collateral agent named on the lock. `null` when the adapter records no pledgee.</ResponseField>
     <ResponseField name="pledgeeUnavailable" type="boolean">`true` when `pledgee` is `null` because the adapter does not record one.</ResponseField>
-    <ResponseField name="amount" type="string">The amount this event moved, in the token's base units.</ResponseField>
+    <ResponseField name="amount" type="string">The amount this event moved, in the token's base units. On `pledge.shortfall` it is the part the token could not release: the amount requested less the amount unfrozen.</ResponseField>
     <ResponseField name="currentAmount" type="string">What is still locked under `ref` after this event, in base units.</ResponseField>
     <ResponseField name="active" type="boolean">`true` while the pledge has not ended and `currentAmount` is above zero.</ResponseField>
     <ResponseField name="loanId" type="string">The loan the lock was created for, when exactly one loan of the market is recorded for the locking transaction. `null` otherwise.</ResponseField>
@@ -185,7 +185,11 @@ Answer with any `2xx` within 10 seconds to accept a delivery. Do the work after 
 
 A delivery gets up to 10 attempts over about 24 hours. The waits between them are 30 seconds, 2 minutes, 10 minutes, 30 minutes, 1 hour, 2 hours, 4 hours, 8 hours and 8 hours.
 
-**Order.** The events of one webhook leave in chain order, by block and log position. While a delivery waits for its retry, the later events of the same webhook wait behind it. Once it is delivered, or marked failed, the queue moves on. Replays are sent at once and hold nothing back.
+**Order.** The events of one market leave in chain order, by block and log position. Each market is read on its own, so there is no single order across the markets of one webhook. While a delivery waits for its retry, the later events of the same webhook wait behind it. Once it is delivered, or marked failed, the queue moves on. A replay is sent at once and holds nothing back. On a paused webhook it waits, and it is sent first when the webhook is switched back on.
+
+**Suspended accounts.** While an account is suspended, its webhooks keep collecting events and send nothing. The queue is sent in order once the account is restored, as far as the 30-day retention reaches.
+
+**Access.** A delivery is sent only while the webhook's instance still reads the market of the event. When an issuer removes or replaces a register, or the market leaves the instance, the deliveries still queued for that market are not sent. They show as failed with the reason `Not sent: this instance no longer reads the market of this event`, they do not count against the endpoint, and their content is no longer shown. A replay of such a delivery is refused with `403 MARKET_NOT_READABLE`.
 
 **At least once.** A delivery can reach you more than once, for example when your `2xx` was lost on the way. Process each `idempotencyKey` once.
 

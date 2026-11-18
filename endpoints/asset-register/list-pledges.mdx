@@ -9,7 +9,7 @@ description: 'Every pledge a market has recorded against its collateral token'
 </Warning>
 
 <Warning>
-  `index.historyTruncatedBeforeBlock` is reported once, on the response to the request that ran the market's first scan. Every later response reads `null`, and `index.complete` can read `true`, although the locks created before that block stay missing. Record the value the first time you see it. See [Reading the index](#reading-the-index).
+  `index.historyTruncatedBeforeBlock` says where the record starts when the market's first scan could not find the deployment block. It is stored with the index and reported on every response. Locks created before that block stay missing, and `index.complete` stays `false`. See [Reading the index](#reading-the-index).
 </Warning>
 
 Returns every pledge the market's collateral adapter has recorded against the collateral token, oldest first. Each record carries the holder, the pledgee, the amount, the transaction that created the lock, and how the pledge ended if it has.
@@ -103,9 +103,9 @@ A register does not have to poll this endpoint. [Pledge webhooks](/endpoints/ass
         <ResponseField name="lastScanAt" type="string">When the index was last scanned, whether or not the scan moved it.</ResponseField>
         <ResponseField name="synced" type="boolean">Whether this request ran the scan.</ResponseField>
         <ResponseField name="reason" type="string">Why it did not. `null` when it did.</ResponseField>
-        <ResponseField name="historyTruncatedBeforeBlock" type="integer">Set only on the response to the request that ran the market's first scan, and only when that scan could not find the deployment block. The scan then started 200,000 blocks back from the finalized block, and locks created before this block are missing for good. `null` on every other response.</ResponseField>
+        <ResponseField name="historyTruncatedBeforeBlock" type="integer">Set when the market's first scan could not find the deployment block. The scan then started 200,000 blocks back from the finalized block, and locks created before this block are missing for good. The value is stored with the index and reported on every response. `null` when the record starts at the deployment block, and for an index started before 18 November 2026.</ResponseField>
         <ResponseField name="unparsedLogsThisScan" type="integer">Adapter logs this scan could not decode. `null` when this request scanned no blocks. Above zero does not mean a pledge is missing. See below.</ResponseField>
-        <ResponseField name="complete" type="boolean">True when this request ran the scan, the scan decoded every log, and it reported no truncated history.</ResponseField>
+        <ResponseField name="complete" type="boolean">True when this request ran the scan, the scan reached `finalizedBlock` and decoded every log, and the history is not truncated.</ResponseField>
       </Expandable>
     </ResponseField>
   </Expandable>
@@ -153,21 +153,21 @@ The scan reads at most 200,000 blocks per request, in chunks of 10,000, and stop
 | `FINALITY_UNREAD` | The chain's finalized block could not be read |
 | `NO_ADAPTER` | The deployment names no collateral adapter |
 | `ADAPTER_UNREADABLE` | The adapter could not be reached |
-| `SCAN_FAILED` | The scan stopped on an error |
+| `SCAN_FAILED` | The scan stopped on an error, or a range of adapter logs could not be read. What was read before that is stored |
 
 Records already in the index are returned in all seven cases.
 
-The first scan starts at the market's deployment block when a platform record of the deployment transaction exists. Without one it starts 200,000 blocks back from the finalized block, and that one response carries `historyTruncatedBeforeBlock`. Nothing stores the value, so the next response reads `null` again.
+The first scan starts at the market's deployment block when a platform record of the deployment transaction exists. Without one it starts 200,000 blocks back from the finalized block and stores that start as `historyTruncatedBeforeBlock`. When the deployment transaction is recorded but the chain read for it fails, the scan does not start: the response reads `SCAN_FAILED` and a later call tries again.
 
 ### What `complete: false` actually means
 
-`complete` is `synced`, and no truncated history reported on this response, and no unparsed logs. The last of those three is the one to read carefully.
+`complete` is `synced`, with `scannedToBlock` at `finalizedBlock`, no truncated history, and no unparsed logs. The last of those four is the one to read carefully.
 
 The index models seven adapter events: `Locked`, `Increased`, `Decreased`, `Released`, `Enforced`, `RefSplit` and `FreezeShortfall`. The custody adapter also emits events that are not about a pledge: `CollateralEscrowed` and `EscrowedCollateralClaimed`, when a return to the borrower was blocked on compliance and held instead. Any of those in the scanned window is counted in `unparsedLogsThisScan` and turns `complete` to `false`.
 
 So read the parts rather than the flag alone:
 
-- `historyTruncatedBeforeBlock` is the one that means pledges are genuinely missing, and they stay missing. It appears on one response only.
+- `historyTruncatedBeforeBlock` is the one that means pledges are genuinely missing, and they stay missing. It is reported on every response.
 - `scannedToBlock` below `finalizedBlock` means the scan has not caught up. Call again. Both trail the chain head by the finality delay, which is expected.
 - `unparsedLogsThisScan` on its own is informational. The pledges returned for the blocks scanned are complete.
 
@@ -183,6 +183,8 @@ The count covers only the blocks this request scanned. A `false` caused by unpar
 | `AUTH_REQUIRED` | `401` | No `X-API-Key` header |
 | `AUTH_FAILED` | `401` | The key is malformed, unknown, expired, or its instance is archived |
 | `CREDIT_LIMIT_EXCEEDED` | `402` | The instance's monthly credit allowance is exhausted |
+| `ACCOUNT_FROZEN` | `403` | The account behind the key is suspended |
+| `SERVICE_NOT_ENABLED` | `403` | The account has neither the lending service nor a register approval |
 | `CURATOR_NOT_APPROVED` | `403` | The market is open to any lender of record and this account is not approved to act as one |
 | `NOT_NOMINATED` | `403` | No verified wallet of this instance is nominated on this market, and the instance holds no record of it |
 | `MARKET_NOT_DEPLOYED` | `404` | The lending factory returns no deployment for this address |
