@@ -17,7 +17,7 @@ With Dutch auctions **enabled**, the collateral goes to the market's auction ven
 A market whose lender of record declared `AUCTION` as its realization path is refused with `409 AUCTION_PATH_NOT_ENABLED` while Dutch auctions are off, because the seizure would go to the router for a direct sale instead. Wire the venue with [Wire Auction Module](/endpoints/lending/wire-auction-module) and turn on `useDutchAuction` with [Update Market Config](/endpoints/lending/update-config) first. `readiness.auctionPathMissing` reports this state.
 
 <Warning>
-  The call to the market needs a wallet that holds `LIQUIDATOR_ROLE` on it. A [liquidation bot](/endpoints/lending/connect-bot) connected to the market removes that need. When the wallet in `signerAddress` does not hold the role and a connected, unpaused bot does, the transaction returned calls `liquidate` on the bot. Any wallet may sign it, and `via` reads `BOT`. Pass `signerAddress` to have the answer built for the wallet you intend to use. A `signerAddress` that does not hold the role, on a market no bot covers, is refused with `LIQUIDATOR_ROLE_MISSING`. Without `signerAddress` the call to the market is always returned, because the wallet this API knows about is not necessarily the one that will call. `readiness.liquidatorViaBot` still says whether a connected bot could carry it. That transaction reverts on-chain from a wallet without the role.
+  The call to the market needs a wallet that holds `LIQUIDATOR_ROLE` on it. A [liquidation bot](/endpoints/lending/connect-bot) connected to the market removes that need. When the wallet in `signerAddress` does not hold the role and a connected, unpaused bot does, the transaction returned calls `liquidate` on the bot. Any wallet may sign it, and `via` reads `BOT`. The bot may belong to your instance or to the other instance that holds the same market, for example the lender of record's bot on a market you deployed. Pass `signerAddress` to have the answer built for the wallet you intend to use. A `signerAddress` that does not hold the role is refused with `LIQUIDATION_BOT_PAUSED` when the only connected bot is paused, and with `LIQUIDATOR_ROLE_MISSING` on a market no bot is connected to. Without `signerAddress` the call to the market is always returned, because the wallet this API knows about is not necessarily the one that will call. `readiness.liquidatorViaBot` still says whether a connected bot could carry it. That transaction reverts on-chain from a wallet without the role.
 </Warning>
 
 ## Path Parameters
@@ -38,7 +38,7 @@ A market whose lender of record declared `AUCTION` as its realization path is re
 </ParamField>
 
 <ParamField body="signerAddress" type="string">
-  Wallet you intend to liquidate with. `readiness` is resolved against that address rather than against your instance's primary verified wallet. It also decides what is built. A wallet that holds `LIQUIDATOR_ROLE` gets the call to the market. A wallet without it gets the call to a connected bot when one covers the market, and `LIQUIDATOR_ROLE_MISSING` otherwise. It does not appear in the transaction. On a collateral token whose ERC-1400 `granularity()` is above one base unit it is required: the exact liquidation is simulated from it before the calldata is returned, and without it the call is refused with `COLLATERAL_GRANULARITY_UNCHECKED`. When the granularity or the simulation cannot be read, the calldata is returned and the contract decides. Anything that is not a valid address is ignored.
+  Wallet you intend to liquidate with. `readiness` is resolved against that address rather than against your instance's primary verified wallet. It also decides what is built. A wallet that holds `LIQUIDATOR_ROLE` gets the call to the market. A wallet without it gets the call to a connected bot when one covers the market, `LIQUIDATION_BOT_PAUSED` when the connected bot is paused, and `LIQUIDATOR_ROLE_MISSING` otherwise. It does not appear in the transaction. On a collateral token whose ERC-1400 `granularity()` is above one base unit it is required: the exact liquidation is simulated from it before the calldata is returned, and without it the call is refused with `COLLATERAL_GRANULARITY_UNCHECKED`. When the granularity or the simulation cannot be read, the calldata is returned and the contract decides. Anything that is not a valid address is ignored.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -189,6 +189,9 @@ const { data: liquidation } = await confirmed.json();
       "liquidatorRoleReady": true,
       "liquidatorViaBot": false,
       "liquidatorBotAddress": null,
+      "liquidatorBotOwn": null,
+      "liquidatorBotPaused": false,
+      "pausedBotAddress": null,
       "signerAddress": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
       "collateralTransferChecked": true,
       "collateralTransferAllowed": true,
@@ -384,7 +387,8 @@ Refusals from the readiness, loan, atomic and granularity checks carry the full 
 | `VALIDATION_ERROR` | `400` | A `signedPrice` field has the wrong type, or `txHash` is present but malformed |
 | `INVALID_SIGNED_PRICE` | `400` | The `signedPrice` is malformed, expired, or not signed by an authorized signer of the market's oracle |
 | `PRICE_DEVIATION_TOO_LARGE`, `PRICE_WINDOW_DEVIATION_TOO_LARGE` | `400` | The `signedPrice` moves further from the stored price than the oracle accepts, in one step or within its current hour. `details` carries the band |
-| `LIQUIDATOR_ROLE_MISSING` | `400` | `signerAddress` does not hold `LIQUIDATOR_ROLE` on the market and no connected liquidation bot covers it. The error carries `calldata`, the role grant for the market admin to sign, and `readiness` |
+| `LIQUIDATOR_ROLE_MISSING` | `400` | `signerAddress` does not hold `LIQUIDATOR_ROLE` on the market and no liquidation bot is connected to it. The error carries `calldata`, the role grant for the market admin to sign, and `readiness` |
+| `LIQUIDATION_BOT_PAUSED` | `409` | `signerAddress` does not hold `LIQUIDATOR_ROLE`, and the liquidation bot connected to the market holds it but is paused. `details` carries `botAddress`, `paused` and `own`, which is `false` when the bot belongs to the other instance that holds the market. The bot owner resumes it with [Bot Owner Action](/endpoints/lending/bot-action). No role grant is offered |
 | `ROLE_UNVERIFIABLE` | `503` | The role of `signerAddress` could not be read. Nothing was built. Retry shortly |
 | `LIQUIDATION_NOT_READY` | `400` | The router is not authorized on the market, or the collateral token will not let the router hold the seized tokens. `409` when the router runs atomic mode and the token refuses delivery of this loan's seizure. See [Atomic sale](#atomic-sale) |
 | `COLLATERAL_TRANSFER_RESTRICTED` | `400` | The collateral token's compliance rules block the seizure transfer to the router |
