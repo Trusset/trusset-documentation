@@ -1,0 +1,112 @@
+---
+title: 'Import Market'
+api: 'POST /asset-registers/api/markets/import'
+description: 'Take a lending market into this instance as the asset register of its collateral token'
+---
+
+Imports a lending market into this instance as the asset register of its collateral token and answers `201`. This is a database write: nothing is signed and nothing goes on chain.
+
+The import is read-only. It does three things:
+
+- The market appears in [List Register Markets](/endpoints/asset-register/list-register-markets) and on the Lending Markets page of the Issuer Portal.
+- [List Pledges](/endpoints/asset-register/list-pledges) opens for the market with this instance's key.
+- This instance's [pledge webhooks](/endpoints/asset-register/pledge-webhooks) start to receive the market's pledge events as they are indexed. Pledges that already stand are not sent again, so read them once with List Pledges.
+
+It gives the register no role on the market and no lending write.
+
+<Note>
+  A market can be imported only once its deployer has named this instance as the asset register of the collateral token behind it. Until then the call is refused with `403 REGISTER_NOT_NAMED`, also when the address is a real market.
+</Note>
+
+The address can come from [List Register Queue](/endpoints/asset-register/list-register-queue) or from the deployer directly. Importing a market that was declined earlier turns the answer into an import. Importing an imported market again answers `201` with a new `importedAt` and changes nothing else.
+
+Only an account Trusset approved as an asset register can import. Any other account is refused with `403 REGISTER_NOT_APPROVED`.
+
+## Body Parameters
+
+<ParamField body="marketAddress" type="string" required>
+  The market contract address, `0x` followed by 40 hex characters. Lowercase or correctly checksummed. The market must be recorded on the network and environment of this instance.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="market" type="object">
+      The fields of a [queue item](/endpoints/asset-register/list-register-queue#response-fields) without `assignedAt`, plus the two below.
+      <Expandable>
+        <ResponseField name="importedAt" type="string">When this instance imported the market, ISO 8601.</ResponseField>
+        <ResponseField name="activePledges" type="integer">Always `null` on this response. [List Register Markets](/endpoints/asset-register/list-register-markets) carries the count.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/asset-registers/api/markets/import" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038" }'
+```
+```typescript TypeScript
+const res = await fetch('https://api.trusset.org/asset-registers/api/markets/import', {
+  method: 'POST',
+  headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+  body: JSON.stringify({ marketAddress })
+});
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "market": {
+      "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+      "tokenAddress": "0x39478e924930d7fed1fa3803ecf9b0ddc08ce512",
+      "adapterAddress": "0x5c1d8e3f0a2b47c6913d0e8a7f24b6c5d9031e7a",
+      "collateralTokenName": "ACME Senior Bond 2030",
+      "collateralTokenSymbol": "ACME30",
+      "collateralTokenIsin": "DE000A3E5XK7",
+      "collateralDecimals": 18,
+      "collateralMode": "FREEZE",
+      "borrowAssetSymbol": "EURe",
+      "lenderOfRecord": "0x4e91a7c05d3b62f18a0c94e7db2358f1c60a4e93",
+      "seekingLender": false,
+      "collateralAgent": "0x8b17e4d90c3a25f6e1d09b7c4a3f52e86d1c0b94",
+      "marketActive": true,
+      "registerKind": "OFF_CHAIN",
+      "registerKindLabel": "Off-chain register",
+      "issuer": { "companyName": "ACME Industrial AG", "instanceName": "ACME Production" },
+      "importedAt": "2026-11-18T10:31:07.000Z",
+      "activePledges": null
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-11-18T10:31:07.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "cmwk2r8v10003l80f4t6h9d2e"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `marketAddress` is missing or not `0x` followed by 40 hex characters |
+| `INVALID_ADDRESS` | `400` | `marketAddress` is the zero address, or mixed case with a failing checksum |
+| `AUTH_REQUIRED` | `401` | No `X-API-Key` header |
+| `AUTH_FAILED` | `401` | The key is malformed, unknown, expired, or its instance is archived |
+| `CREDIT_LIMIT_EXCEEDED` | `402` | The instance's monthly credit allowance is exhausted |
+| `REGISTER_NOT_APPROVED` | `403` | Trusset has not approved this account as an asset register |
+| `REGISTER_NOT_NAMED` | `403` | The deployer has not named this instance as the asset register of the token behind this market |
+| `MARKET_NOT_FOUND` | `404` | No lending market with this address is recorded on the network and environment of this instance |
+| `RATE_LIMIT_EXCEEDED` | `429` | More than 10 writes in the minute |
+| `REGISTER_IMPORT_FAILED` | `500` | The import could not be stored |

@@ -1,0 +1,99 @@
+---
+title: "Pledge Webhooks"
+description: "Verify a signed pledge delivery and read it as a typed event"
+---
+
+<Note>
+  Available from `@trusset/sdk` 0.8.0.
+</Note>
+
+This page is for the party that receives pledge webhooks, most often a register provider. After reading it you can verify a delivery and act on each event once.
+
+A pledge webhook is created in the Issuer Portal, on the Webhooks page of the instance. The SDK does not create one. It gives you the two things a receiver needs: the signature check and the event types. [Pledge Webhooks](/endpoints/asset-register/pledge-webhooks) is the reference for the events, the headers and the retry schedule.
+
+## Verify and read a delivery
+
+`readPledgeWebhook` checks the signature and returns the typed event. It throws a `ValidationError` when the signature does not match, when the timestamp is more than five minutes off, and when the body is not a Trusset event.
+
+Pass the body exactly as it arrived. A body that was parsed and serialized again no longer matches its signature, so read the raw bytes before any JSON middleware runs.
+
+```typescript
+import express from 'express'
+import { readPledgeWebhook, ValidationError } from '@trusset/sdk'
+
+const app = express()
+const processed = new Set<string>()
+
+app.post('/hooks/trusset', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    const event = await readPledgeWebhook({
+      payload: req.body,
+      signature: req.header('x-webhook-signature'),
+      timestamp: req.header('x-webhook-timestamp'),
+      secret: process.env.TRUSSET_WEBHOOK_SECRET ?? '',
+    })
+    if (event.type !== 'test' && !processed.has(event.idempotencyKey)) {
+      processed.add(event.idempotencyKey)
+      console.log(event.type, event.data.ref, event.data.holder, event.data.currentAmount)
+    }
+    res.sendStatus(204)
+  } catch (err) {
+    res.sendStatus(err instanceof ValidationError ? 400 : 500)
+  }
+})
+
+app.listen(3000)
+```
+
+The sample keeps the processed keys in memory to stay short. Keep them in your database, because a delivery can arrive more than once and can arrive after a restart.
+
+Answer within 10 seconds. A `2xx` accepts the delivery, a `5xx` is retried, and a `400` fails it for good, which is the right answer to a signature that does not match.
+
+`verifyWebhookSignature` takes the same input and answers `true` or `false` without parsing the body. `toleranceSeconds` changes the five-minute window.
+
+```typescript
+import { verifyWebhookSignature } from '@trusset/sdk'
+
+const genuine = await verifyWebhookSignature({ payload: rawBody, signature, timestamp, secret, toleranceSeconds: 120 })
+```
+
+## Act on an event
+
+`event.type` narrows the event, so the fields of one event type are typed.
+
+```typescript
+import type { PledgeWebhookDelivery } from '@trusset/sdk'
+
+function describe(event: PledgeWebhookDelivery): string {
+  if (event.type === 'test') return event.data.message
+  if (event.type === 'pledge.created') return `enter ${event.data.amount} for ${event.data.holder} in favour of ${event.data.pledgee}`
+  if (event.type === 'pledge.released') return `take the entry for ${event.data.ref} off`
+  if (event.type === 'pledge.enforced') return `${event.data.amount} seized to ${event.data.to}, final: ${event.data.final}`
+  return `${event.type}: ${event.data.currentAmount} still locked under ${event.data.ref}`
+}
+```
+
+| `event.type` | For the register |
+|---|---|
+| `pledge.created` | A new lock. Enter it against the holder's position |
+| `pledge.increased`, `pledge.decreased` | The standing amount changed. `data.currentAmount` is the new figure |
+| `pledge.released` | The pledge ended and the entry can come off |
+| `pledge.enforced` | A seizure. With `data.final: true` the pledge was realized. Otherwise it stands for `data.currentAmount` |
+| `pledge.split` | Part of a pledge moved to a new reference, with the same holder and pledgee |
+| `pledge.shortfall` | A freeze market found less frozen balance than it asked to release. Reconcile the entry |
+
+Amounts are integer strings in the collateral token's base units. Divide by ten to the power of `data.token.decimals` before a figure goes into a register entry. In a `CUSTODY` market the token moved to the adapter, which is a transfer for security and not a pledge. `data.collateralMode` says which one an event describes.
+
+## What a receiver can rely on
+
+- The events of one webhook arrive in chain order. While a delivery waits for its retry, later events of the same webhook wait behind it. Retries run for about 24 hours. After that the webhook pauses and keeps its queue.
+- A delivery can arrive more than once. `idempotencyKey` is the same every time. A replay from the Issuer Portal carries the same key and `replayed: true`.
+- A webhook receives events that happened after it was created. Read the pledges that already stand once with [`lending.pledges.list`](/sdk/lending/pledges).
+- A webhook reports the chain. The register entry stays the register provider's own act, and no delivery writes to a register.
+
+## Methods and endpoints
+
+| Method | Reference |
+|---|---|
+| `readPledgeWebhook` | [Pledge Webhooks](/endpoints/asset-register/pledge-webhooks#verify-a-delivery) |
+| `verifyWebhookSignature` | [Pledge Webhooks](/endpoints/asset-register/pledge-webhooks#headers) |

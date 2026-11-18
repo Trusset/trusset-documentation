@@ -1,29 +1,72 @@
 ---
 title: 'Asset Register'
-description: 'Read the pledges standing against a security token so the register can record them'
+description: 'Name the asset register of a collateral token, and read or receive the pledges standing against it so the register can record them'
 ---
 
 A borrower opens a loan against a security token. The market's collateral adapter locks the collateral and names the collateral agent as pledgee. On chain that lock restricts the balance. It is not the register entry, and on its own it does not create the security interest.
 
 The register entry is the operative act and it stays with the register provider. Trusset holds no register authority, and no endpoint on this surface writes to a register. What the API gives you is the fact pattern the entry needs: who pledged, to whom, how much, in which transaction, and whether the pledge still stands.
 
-This surface is for the register provider. [Keep the register in step](/protocol/guides/open-a-market#7-keep-the-register-in-step) shows where it fits in a market's life.
+This surface has two sides. The deployer is the instance that imported the token and deployed the market. It names the asset register of the collateral token. The register provider takes that market into its own instance, reads the pledge record and receives each change as a signed webhook. The pledge pages and [Pledge Webhooks](/endpoints/asset-register/pledge-webhooks) are written for the register provider. [Keep the register in step](/protocol/guides/open-a-market#7-keep-the-register-in-step) shows where it fits in a market's life.
 
-## Base Path
+## Base Paths
 
 ```
+https://api.trusset.org/asset-registers/api
 https://api.trusset.org/lending-external-securities-v2/api/pledges
 ```
 
 Every request authenticates with an instance API key in the `X-API-Key` header. See [Authentication](/endpoints/authentication).
 
-[List Pledges](/endpoints/asset-register/list-pledges) is the only endpoint here. It takes a market address and returns every pledge that market's adapter has recorded, oldest first.
+| Group | Endpoints | For |
+|---|---|---|
+| Register | [List Asset Registers](/endpoints/asset-register/list-registers), [Get Market Register](/endpoints/asset-register/get-market-register), [Set Market Register](/endpoints/asset-register/set-market-register), [Clear Market Register](/endpoints/asset-register/clear-market-register) | The deployer names the register. A lender of record reads it |
+| Markets | [List Register Queue](/endpoints/asset-register/list-register-queue), [Import Market](/endpoints/asset-register/import-market), [Decline Market](/endpoints/asset-register/decline-market), [List Register Markets](/endpoints/asset-register/list-register-markets) | The register provider |
+| Pledges | [List Pledges](/endpoints/asset-register/list-pledges) | Every instance that can read the market |
+| Webhooks | [Pledge Webhooks](/endpoints/asset-register/pledge-webhooks) | Every instance that can read the market |
+
+## The asset register is not a contract role
+
+A lending market runs on ten roles, and the asset register is none of them. It is a record Trusset keeps beside the market: which register provider the deployer named for the collateral token. Nothing about it is signed and nothing goes on chain. The lending contracts never read it. Naming a register creates no register entry and changes none.
+
+The assignment belongs to the token, not to one market. A deployer names the register once, from any market it deployed on that token, and the assignment covers every market the same instance deployed on that token. Only the instance that deployed the market can set or clear it. A lender of record reads the same record and cannot change it.
+
+Each listed register states whether it keeps its register on chain or off chain in `registerKind`. That describes the provider's own register. It does not change what Trusset records.
+
+## Register accounts
+
+Trusset approves an account as an asset register, the same way it approves an account as a lender of record. An approved account publishes a register profile from the instance settings of the Issuer Portal: it picks `ON_CHAIN` or `OFF_CHAIN` and lists one instance per network and environment. Listed registers are what [List Asset Registers](/endpoints/asset-register/list-registers) returns and what a deployer picks from.
+
+A register account works without the lending service:
+
+- Its key reads [List Pledges](/endpoints/asset-register/list-pledges) for the markets it imported, and the vault reads. Every other lending endpoint is refused.
+- Every lending write is refused with `403 SERVICE_NOT_ENABLED`. An imported market is read-only for the register.
+- The four Markets endpoints answer `403 REGISTER_NOT_APPROVED` to an account Trusset has not approved as a register.
+
+## Take a market into the register
+
+<Steps>
+  <Step title="The deployer names the register">
+    The deployer picks the register in the Roles dialog of the market in the Issuer Portal. Over the API it calls [Set Market Register](/endpoints/asset-register/set-market-register) with an `instanceId` from [List Asset Registers](/endpoints/asset-register/list-registers).
+  </Step>
+  <Step title="The market reaches the register's queue">
+    Every active market of the deployer on that token appears in [List Register Queue](/endpoints/asset-register/list-register-queue). The Queue page of the register's Issuer Portal shows the same markets.
+  </Step>
+  <Step title="The register imports or declines">
+    [Import Market](/endpoints/asset-register/import-market) adds the market to the register's instance, read-only. [Decline Market](/endpoints/asset-register/decline-market) takes it off the queue. The deployer sees the answer as `response` on [Get Market Register](/endpoints/asset-register/get-market-register): `PENDING`, `IMPORTED` or `DECLINED`.
+  </Step>
+  <Step title="Pledge events start to arrive">
+    From the import on, the register's [pledge webhooks](/endpoints/asset-register/pledge-webhooks) receive the market's pledge events. [List Pledges](/endpoints/asset-register/list-pledges) opens for the market at the same time.
+  </Step>
+</Steps>
+
+A register that knows a market's address can skip the queue and call Import Market directly. The call succeeds only when the deployer has named this instance for the token behind the market. Otherwise it is refused with `403 REGISTER_NOT_NAMED`.
 
 ## Record a pledge
 
 <Steps>
   <Step title="Read the market">
-    Call [List Pledges](/endpoints/asset-register/list-pledges) with the market's contract address. Poll it on a schedule, or call it when a loan opens on a token you keep the register for.
+    Subscribe to [pledge webhooks](/endpoints/asset-register/pledge-webhooks) and let each `pledge.created` event start the entry. To reconcile, or without a webhook, call [List Pledges](/endpoints/asset-register/list-pledges) with the market's contract address.
   </Step>
   <Step title="Check the index">
     `index.scannedToBlock` says how far the chain has been read. When it sits well behind the head, the pledges returned are real but the list may be short, so call again. `index.historyTruncatedBeforeBlock` is the one that means pledges are missing for good. It is reported only on the response to the market's first scan, so record it the first time you see it. `index.complete` folds both together, and one more thing besides: read [Reading the index](/endpoints/asset-register/list-pledges#reading-the-index) before you gate on it.
@@ -53,7 +96,7 @@ In a `CUSTODY` market the token moves to the market's collateral adapter. That i
 
 ## Who can read a market
 
-Access is decided per market, not per key. A market opens to the instance that holds its record, and to an instance whose verified wallet is nominated on it. A market left open to any lender of record also opens to an approved bank issuer with a verified wallet. That holds for as long as it is still seeking a lender of record. Every other caller is refused.
+Access is decided per market, not per key. A market opens to the instance that holds its record, and to an instance whose verified wallet is nominated on it. A market left open to any lender of record also opens to an approved bank issuer with a verified wallet. That holds for as long as it is still seeking a lender of record. A market also opens to the register instance that imported it, for as long as the deployer keeps that register named. Every other caller is refused.
 
 The address must belong to a market of the lending factory this instance deploys to. Any other address is refused with `MARKET_NOT_V2` before access is considered.
 
@@ -74,10 +117,10 @@ The address must belong to a market of the lending factory this instance deploys
 
 On failure, `success` is `false`, `data` is `null`, and `error` carries `code` and `message`. `metadata.requestId` equals the `X-Request-Id` response header, so you can quote it when reporting a problem. Always branch on `success` rather than on the HTTP status alone.
 
-Three refusals come from the platform's shared error handler instead, before the pledge record is read: a malformed address or query (`VALIDATION_ERROR`, with `error.details` listing each offending field), `MARKET_NOT_V2`, and `MARKET_VERIFICATION_UNAVAILABLE`. That envelope carries no `data`, adds a top-level `statusCode`, and mints its own `metadata.requestId`, so quote `X-Request-Id` for those.
+On [List Pledges](/endpoints/asset-register/list-pledges), three refusals come from the platform's shared error handler instead, before the pledge record is read: a malformed address or query (`VALIDATION_ERROR`, with `error.details` listing each offending field), `MARKET_NOT_V2`, and `MARKET_VERIFICATION_UNAVAILABLE`. That envelope carries no `data`, adds a top-level `statusCode`, and mints its own `metadata.requestId`, so quote `X-Request-Id` for those.
 
 ## Rate limits and credits
 
-This endpoint draws on a limit of 100 requests per minute, counted per API key across every endpoint that carries it. That sits inside the ceiling of 200 per minute that applies to every request made with the key. Exceeding either returns `429` with code `RATE_LIMIT_EXCEEDED` and a `Retry-After` header in seconds. See [Rate Limits](/endpoints/rate-limits).
+Reads draw on a limit of 100 requests per minute, counted per API key across every endpoint that carries it. The four writes on `/asset-registers/api` (set, clear, import and decline) draw on a limit of 10 per minute. Both sit inside the ceiling of 200 per minute that applies to every request made with the key. Exceeding any of them returns `429` with code `RATE_LIMIT_EXCEEDED` and a `Retry-After` header in seconds. See [Rate Limits](/endpoints/rate-limits).
 
 Requests also draw on the instance's monthly API credit allowance, billed against the lending service. Every response carries `X-Credits-Limit`, `X-Credits-Remaining` and `X-Credits-Reset`. When the allowance is exhausted the request is refused with `402` and code `CREDIT_LIMIT_EXCEEDED`.

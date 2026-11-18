@@ -1,0 +1,108 @@
+---
+title: "Asset Registers"
+description: "Name the asset register of a collateral token, and work a register's queue and markets from TypeScript"
+---
+
+<Note>
+  Available from `@trusset/sdk` 0.8.0.
+</Note>
+
+This page is for two parties: the deployer that names the asset register of a collateral token, and the register provider that takes the market into its own instance. After reading it each of them can run its side from TypeScript.
+
+The asset register is not one of the ten roles of a lending market. It is a record Trusset keeps beside the market: which register provider the deployer named for the collateral token. `trusset.assetRegisters` reads and writes that record. Nothing is signed and nothing goes on chain, so none of these methods takes a signer. The register entry itself stays the register provider's act in its own register, and no SDK method writes one.
+
+## Name the register
+
+The deployer is the instance that imported the token and deployed the market. Only its key can name or clear the register.
+
+```typescript
+const { registers } = await trusset.assetRegisters.directory()
+const register = registers.find(r => r.companyName === 'Elbe Register GmbH')
+if (!register) throw new Error('Register is not listed on this network and environment')
+
+const named = await trusset.assetRegisters.assign(marketAddress, register.instanceId)
+console.log(named.register?.companyName, named.register?.registerKind, named.register?.response)
+```
+
+`directory` lists the register providers that published a profile on the network and environment of the instance. `registerKind` is `ON_CHAIN` or `OFF_CHAIN`, as the provider declared it for its own register.
+
+The assignment is stored per collateral token. It covers every market the instance deployed on that token, also markets deployed later. `assign` with another register replaces it, and `clear` removes it:
+
+```typescript
+const cleared = await trusset.assetRegisters.clear(marketAddress)
+console.log(cleared.register)
+```
+
+A register that loses the assignment loses its import of the market, its access to the pledge record and further webhook events.
+
+## Read the register and its answer
+
+`get` answers for every instance that holds a record of the market: the deployer and the lender of record.
+
+```typescript
+const record = await trusset.assetRegisters.get(marketAddress)
+console.log(record.canEdit, record.register?.response, record.register?.respondedAt)
+```
+
+`canEdit` is `true` for the deployer. A lender of record reads the same record, and its `assign` or `clear` is refused with `REGISTER_ISSUER_ONLY`. `response` is `PENDING` until the register answers for this market, `IMPORTED` once it imported the market and `DECLINED` when it declined it. `IMPORTED` does not say that a register entry exists.
+
+## Work the register's side
+
+These four methods need an account Trusset approved as an asset register. Any other account is refused with `REGISTER_NOT_APPROVED`.
+
+```typescript
+const { items } = await trusset.assetRegisters.queue()
+
+for (const market of items) {
+  console.log(market.marketAddress, market.collateralTokenIsin, market.collateralMode, market.issuer.companyName)
+}
+
+const { market } = await trusset.assetRegisters.importMarket(items[0].marketAddress)
+console.log(market.importedAt)
+```
+
+`queue` returns the markets that name the instance and still wait for an answer. `importMarket` takes one into the instance, read-only. `declineMarket` takes one off the queue, and a later `importMarket` on the same address turns the decline into an import.
+
+`importMarket` also takes an address the deployer passed on directly. It succeeds only when the deployer has named the instance for the token behind the market. Until then it throws `REGISTER_NOT_NAMED`:
+
+```typescript
+import { TrussetError } from '@trusset/sdk'
+
+try {
+  await trusset.assetRegisters.importMarket(marketAddress)
+} catch (err) {
+  if (err instanceof TrussetError && err.code === 'REGISTER_NOT_NAMED') {
+    console.log('The deployer has not named this instance for the token yet')
+  } else {
+    throw err
+  }
+}
+```
+
+## Read the pledges of an imported market
+
+An imported market opens [`lending.pledges.list`](/sdk/lending/pledges) for the register's key.
+
+```typescript
+const { markets } = await trusset.assetRegisters.markets()
+
+for (const market of markets) {
+  const { pledges } = await trusset.lending.pledges.list(market.marketAddress, { includeEnded: false })
+  console.log(market.collateralTokenSymbol, market.activePledges, pledges.filter(p => p.active).length)
+}
+```
+
+A register account works without the lending service. Its key reads `lending.pledges.list` for the markets it imported and the vault reads. Every other lending method is refused with `SERVICE_NOT_ENABLED`. [Pledge webhooks](/sdk/asset-registers/webhooks) deliver each change as it is indexed, so the list is the record to reconcile against, not a feed to poll.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `assetRegisters.directory` | [List Asset Registers](/endpoints/asset-register/list-registers) |
+| `assetRegisters.get` | [Get Market Register](/endpoints/asset-register/get-market-register) |
+| `assetRegisters.assign` | [Set Market Register](/endpoints/asset-register/set-market-register) |
+| `assetRegisters.clear` | [Clear Market Register](/endpoints/asset-register/clear-market-register) |
+| `assetRegisters.queue` | [List Register Queue](/endpoints/asset-register/list-register-queue) |
+| `assetRegisters.importMarket` | [Import Market](/endpoints/asset-register/import-market) |
+| `assetRegisters.declineMarket` | [Decline Market](/endpoints/asset-register/decline-market) |
+| `assetRegisters.markets` | [List Register Markets](/endpoints/asset-register/list-register-markets) |

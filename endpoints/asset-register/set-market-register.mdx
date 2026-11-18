@@ -1,0 +1,98 @@
+---
+title: 'Set Market Register'
+api: 'PUT /asset-registers/api/markets/{marketAddress}/register'
+description: 'Name the asset register of the collateral token behind a market'
+---
+
+Names a listed register provider as the asset register of the collateral token behind this market. This is a database write: nothing is signed and nothing goes on chain. The answer is the same record [Get Market Register](/endpoints/asset-register/get-market-register) returns.
+
+Only the instance that deployed the market can name the register, because the register belongs to the token and not to the loan side. A lender of record is refused with `403 REGISTER_ISSUER_ONLY`.
+
+The assignment is stored per collateral token. It covers every market this instance deployed on that token, including markets deployed later. Each of those markets appears in the register's [queue](/endpoints/asset-register/list-register-queue) until the register imports or declines it.
+
+Naming the register that is already named changes nothing and answers `200`. Naming a different register replaces the assignment. The previous register loses its imports of these markets and its access to their pledge record. Its webhooks receive no further events for them.
+
+## Path Parameters
+
+<ParamField path="marketAddress" type="string" required>
+  A market this instance deployed, `0x` followed by 40 hex characters. Lowercase or correctly checksummed.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="registerInstanceId" type="string" required>
+  The `instanceId` of a register from [List Asset Registers](/endpoints/asset-register/list-registers), 1 to 100 characters. A register that is not listed on the network and environment of this instance is refused with `404 REGISTER_NOT_LISTED`.
+</ParamField>
+
+## Response Fields
+
+The response is the record of [Get Market Register](/endpoints/asset-register/get-market-register#response-fields), with `register.response` reading `PENDING` for a newly named register.
+
+<RequestExample>
+```bash cURL
+curl -X PUT "https://api.trusset.org/asset-registers/api/markets/0x70a0e25c7b768b87e658348b3b577678a173e038/register" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "registerInstanceId": "cmwk2r8v10003l80f4t6h9d2e" }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/asset-registers/api/markets/${marketAddress}/register`,
+  {
+    method: 'PUT',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ registerInstanceId })
+  }
+);
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "marketAddress": "0x70a0e25c7b768b87e658348b3b577678a173e038",
+    "tokenAddress": "0x39478e924930d7fed1fa3803ecf9b0ddc08ce512",
+    "canEdit": true,
+    "appliesTo": "TOKEN",
+    "onChain": false,
+    "register": {
+      "instanceId": "cmwk2r8v10003l80f4t6h9d2e",
+      "instanceName": "Register Production",
+      "companyName": "Elbe Register GmbH",
+      "registerKind": "OFF_CHAIN",
+      "registerKindLabel": "Off-chain register",
+      "response": "PENDING",
+      "respondedAt": null,
+      "assignedAt": "2026-11-18T10:14:52.000Z",
+      "listed": true
+    }
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-11-18T10:14:52.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "cmrz4d1v20000cghx8k6p3m7t"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `marketAddress` is not `0x` followed by 40 hex characters, or `registerInstanceId` is missing or longer than 100 characters |
+| `INVALID_ADDRESS` | `400` | `marketAddress` is the zero address, or mixed case with a failing checksum |
+| `AUTH_REQUIRED` | `401` | No `X-API-Key` header |
+| `AUTH_FAILED` | `401` | The key is malformed, unknown, expired, or its instance is archived |
+| `CREDIT_LIMIT_EXCEEDED` | `402` | The instance's monthly credit allowance is exhausted |
+| `REGISTER_ISSUER_ONLY` | `403` | This instance holds the market as lender of record. Only the instance that deployed it names the register |
+| `MARKET_NOT_FOUND` | `404` | This instance holds no lending market with this address |
+| `REGISTER_NOT_LISTED` | `404` | The register is not published on the network and environment of this instance |
+| `MARKET_TOKEN_UNKNOWN` | `409` | The market records no collateral token, so no register can be named for it |
+| `RATE_LIMIT_EXCEEDED` | `429` | More than 10 writes in the minute |
+| `REGISTER_ASSIGN_FAILED` | `500` | The assignment could not be stored |
