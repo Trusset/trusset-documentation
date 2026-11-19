@@ -1,12 +1,14 @@
 ---
 title: 'Get Trade Readiness'
 api: 'GET /orderbooks/external-securities/api/order-books/{orderBookId}/readiness'
-description: 'Verify the four on-chain prerequisites for a book that already exists'
+description: 'Verify the on-chain prerequisites for a book that already exists'
 ---
 
 Reads the custody contract and the security token live, and reports whether the book can trade. `ready` is true only when `issues` is empty.
 
 This is the post-creation counterpart to the setup steps [Create Order Book](/endpoints/external-securities-trading/create-order-book) returns. A book can become unready after creation without anything on the venue changing: the issuer can deactivate the security, revoke the custody contract's delivery role, de-authorize the settlement asset, or drop the venue operator, all from their own contracts.
+
+`warnings` lists conditions that do not stop trading but need attention. They do not affect `ready`.
 
 If a chain read fails, the report stops and returns `CHAIN_UNAVAILABLE` as an issue rather than reporting the prerequisite as unmet.
 
@@ -43,11 +45,24 @@ If a chain read fails, the report stops and returns `CHAIN_UNAVAILABLE` as an is
     <ResponseField name="tokenAuthorizationScheme" type="integer">
       Which dialect the token uses for the delivery role: `1` for the T-REX agent scheme, `2` for the controller scheme, `0` when neither was detected.
     </ResponseField>
-    <ResponseField name="custodyIsTokenAgent" type="boolean">Whether the custody contract still holds the delivery role.</ResponseField>
+    <ResponseField name="custodyGeneration" type="integer">Generation of the custody contract the book settles through: `1` or `2`.</ResponseField>
+    <ResponseField name="deliveryMode" type="string">`AGENT` or `TRANSFER`. Always `AGENT` on a generation 1 contract.</ResponseField>
+    <ResponseField name="custodyIsTokenAgent" type="boolean">Whether the custody contract holds the delivery role. Only required under `AGENT` delivery.</ResponseField>
     <ResponseField name="quoteAssetAuthorized" type="boolean">Whether the settlement asset is authorized for this security.</ResponseField>
     <ResponseField name="operatorAuthorized" type="boolean">Whether the book's settlement operator is authorized.</ResponseField>
+    <ResponseField name="access" type="object">
+      Generation 2 only. The access gates on chain for the book's settlement operator.
+      <Expandable>
+        <ResponseField name="buyerGate" type="string">Buyer gate, or `null`.</ResponseField>
+        <ResponseField name="sellerGate" type="string">Seller gate, or `null`.</ResponseField>
+        <ResponseField name="inSync" type="boolean">Whether these match the gates saved for the book.</ResponseField>
+      </Expandable>
+    </ResponseField>
     <ResponseField name="issues" type="array">
       Outstanding problems, each with `code` and `message`. Empty when ready.
+    </ResponseField>
+    <ResponseField name="warnings" type="array">
+      Conditions to fix that do not block trading, each with `code` and `message`.
     </ResponseField>
     <ResponseField name="sharedPeers" type="object">
       Peer summary. See [Get Shared Peers](/endpoints/external-securities-trading/get-shared-peers).
@@ -63,11 +78,18 @@ If a chain read fails, the report stops and returns `CHAIN_UNAVAILABLE` as an is
 | `SECURITY_NOT_REGISTERED` | The security is not registered on the custody contract |
 | `SECURITY_INACTIVE` | The issuer has deactivated this security |
 | `ISIN_MISMATCH` | The on-chain identifier no longer matches the one recorded on the book |
-| `CUSTODY_NOT_AUTHORIZED` | The custody contract does not hold the token's delivery role |
+| `CUSTODY_NOT_AUTHORIZED` | The custody contract does not hold the token's delivery role. Reported under `AGENT` delivery only |
+| `BUYER_GATE_REQUIRED` | The security has no identity registry and the settlement operator names no buyer gate, so nobody can buy |
 | `QUOTE_TOKEN_NOT_SUPPORTED` | The settlement asset is not authorized for this security |
 | `SETTLEMENT_OPERATOR_UNAUTHORIZED` | The configured operator is not authorized on this security |
 | `INVALID_CUSTODY_CONTRACT` | The address did not answer as the external securities custody contract |
 | `CHAIN_UNAVAILABLE` | On-chain state could not be read. The report stops here |
+
+## Warning Codes
+
+| Code | Meaning |
+|---|---|
+| `ACCESS_GATES_OUT_OF_SYNC` | The access gates on chain differ from the ones saved for the book. Save the access settings again with [Update Order Book](/endpoints/external-securities-trading/update-order-book) to align them |
 
 <RequestExample>
 ```bash cURL

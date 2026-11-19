@@ -1,0 +1,127 @@
+---
+title: 'Preview Price Feed'
+api: 'POST /orderbooks/external-securities/api/price-feeds/preview'
+description: 'Read a price feed once before you save it on a book'
+---
+
+Reads a price feed once and returns the price it would give, converted into the book's settlement currency where that applies. Nothing is saved. Use it to check a stock ticker, a commodity unit or a custom feed before you set it with `priceFeed` on [Create Order Book](/endpoints/external-securities-trading/create-order-book) or [Update Order Book](/endpoints/external-securities-trading/update-order-book). See [Price feed module](/endpoints/external-securities-trading/introduction#price-feed-module).
+
+The settlement currency comes from `orderBookId` when you name a book, or from `quoteTokenAddress` before a book exists. With neither, the price comes back in the feed's own currency.
+
+## Body Parameters
+
+<ParamField body="priceFeed" type="object" required>
+  The feed to read, in the same shape as on [Create Order Book](/endpoints/external-securities-trading/create-order-book).
+  <Expandable>
+    <ParamField body="source" type="string" required>`MANUAL`, `STOCK`, `COMMODITY` or `CUSTOM`.</ParamField>
+    <ParamField body="symbol" type="string">`STOCK`: a ticker such as `SAP.DE`. `COMMODITY`: `XAU`, `XAG`, `XPT` or `XPD`.</ParamField>
+    <ParamField body="unit" type="string" default="TROY_OUNCE">`COMMODITY` only: `TROY_OUNCE`, `GRAM` or `KILOGRAM`.</ParamField>
+    <ParamField body="url" type="string">`CUSTOM` only: HTTPS feed endpoint on a public host.</ParamField>
+    <ParamField body="path" type="string">`CUSTOM` only: dotted JSON path to the price.</ParamField>
+    <ParamField body="headers" type="string">`CUSTOM` only: request headers as a JSON string. Leave it out on a book you own to use the headers stored for the same feed host.</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="orderBookId" type="string">
+  A book you own or have imported. Its settlement currency is used.
+</ParamField>
+
+<ParamField body="quoteTokenAddress" type="string">
+  The settlement asset of a book you are about to create. Its currency is used.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="source" type="string">What was read: `STOCK_FEED:<symbol>`, `COMMODITY_FEED:<metal>:<unit>`, `EXTERNAL_FEED`, or `MANUAL`.</ResponseField>
+    <ResponseField name="price" type="string">The price per token as a plain decimal, or `null` for `MANUAL`, which has nothing to read.</ResponseField>
+    <ResponseField name="currency" type="string">The currency of `price`, or `null` when it is not known.</ResponseField>
+    <ResponseField name="converted" type="boolean">Whether the feed price was converted between USD and EUR.</ResponseField>
+    <ResponseField name="feedPrice" type="string">Converted reads only. The price as the feed gave it.</ResponseField>
+    <ResponseField name="feedCurrency" type="string">Converted reads only. The feed's own currency.</ResponseField>
+    <ResponseField name="rate" type="number">Converted reads only. The factor applied, from the ECB reference rate.</ResponseField>
+    <ResponseField name="rateDate" type="string">Converted reads only. The ECB reference date of that rate.</ResponseField>
+    <ResponseField name="readAt" type="string">When the feed was read, as an ISO 8601 timestamp. Absent for `MANUAL`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/orderbooks/external-securities/api/price-feeds/preview" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "priceFeed": { "source": "COMMODITY", "symbol": "XAU", "unit": "GRAM" },
+    "quoteTokenAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a"
+  }'
+```
+```typescript TypeScript
+const res = await fetch(
+  'https://api.trusset.org/orderbooks/external-securities/api/price-feeds/preview',
+  {
+    method: 'POST',
+    headers: {
+      'X-API-Key': 'trusset_your_key_here',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      priceFeed: { source: 'STOCK', symbol: 'SAP.DE' },
+      orderBookId
+    })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "source": "COMMODITY_FEED:XAU:GRAM",
+    "price": "102.48",
+    "currency": "EUR",
+    "converted": true,
+    "feedPrice": "110.21",
+    "feedCurrency": "USD",
+    "rate": 0.9298,
+    "rateDate": "2025-06-13",
+    "readAt": "2025-06-15T12:00:00.000Z"
+  }
+}
+```
+```json Error - Currency Cannot Be Converted
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "FEED_CURRENCY_UNSUPPORTED",
+    "message": "The feed quotes in GBP and the order book settles in EUR. Only USD and EUR convert automatically."
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | A field failed schema validation, or an unknown field was sent |
+| `INVALID_CONFIG` | `400` | A `priceFeed` field is invalid. Carries `field` |
+| `INVALID_FEED_URL` | `400` | The custom feed host resolves to an address that is not public |
+| `ORDER_BOOK_NOT_FOUND` | `404` | `orderBookId` names no book reachable from your instance |
+| `SYMBOL_NOT_FOUND` | `422` | The stock data provider does not know the ticker |
+| `FEED_CURRENCY_UNSUPPORTED` | `422` | The feed's currency differs from the settlement currency, and one of them is neither USD nor EUR |
+| `FEED_FETCH_ERROR` | `424` | The custom feed could not be fetched |
+| `FEED_HTTP_ERROR` | `424` | The custom feed answered with an error status |
+| `FEED_TIMEOUT` | `424` | The custom feed did not answer in time |
+| `FEED_RESPONSE_TOO_LARGE` | `424` | The custom feed answered with more than 64 KB |
+| `FEED_PARSE_ERROR` | `424` | No positive price could be read at `path` |
+| `STOCK_FEED_NO_DATA` | `424` | The stock data provider returned no price |
+| `COMMODITY_FEED_NO_DATA` | `424` | No spot price is available for the metal |
+| `FX_RATE_UNAVAILABLE` | `503` | The ECB reference rate is unavailable, so the price cannot be converted |
+| `PROVIDER_UNAVAILABLE` | `503` | The stock data provider is unavailable |
+| `RATE_LIMIT_EXCEEDED` | `429` | More than 10 writes per minute on this key |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

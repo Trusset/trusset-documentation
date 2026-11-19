@@ -67,6 +67,9 @@ The checks run in a fixed order, so the first refusal names the earliest conditi
   <Step title="Signature">
     The order hash is derived from that struct, and the signature must recover to `userAddress` or validate through the wallet's own EIP-1271 check.
   </Step>
+  <Step title="Access">
+    On a book that settles through the current custody contract, the trader must be admitted: a buyer must be verified on the security's identity registry where it has one, and the book's buyer or seller gate must admit the trader where it names one. See [Access module](/endpoints/external-securities-trading/introduction#access-module).
+  </Step>
   <Step title="Book rules">
     Size against `minOrderSize` and `maxOrderSize`, price against `tickSize`, the reference price band where one is configured, any account restriction on which books may be traded, and the post-only check against the eligible peer set.
   </Step>
@@ -80,9 +83,30 @@ The checks run in a fixed order, so the first refusal names the earliest conditi
     On a sell, the token's own compliance layer must permit the delivery. See [Delivery checks](/endpoints/external-securities-trading/introduction#delivery-checks).
   </Step>
   <Step title="Stale depth">
-    Resting orders the incoming order could reach are re-read on chain, and any the chain has retired are cancelled before a trade can be booked against them.
+    Resting orders the incoming order could reach are re-read on chain, and any the chain has retired are cancelled before a trade can be booked against them. Where the book has a gate on the makers' side, a resting order whose wallet that gate no longer admits is cancelled the same way.
   </Step>
 </Steps>
+
+## Access refusals
+
+A wallet the venue does not admit is refused with `403 ACCESS_NOT_ADMITTED` before anything is reserved. `accessCode` names the check:
+
+| `accessCode` | Meaning |
+|---|---|
+| `9` | The buyer is not verified on the security's identity registry |
+| `16` | The book's buyer gate does not admit the wallet |
+| `17` | The book's seller gate does not admit the wallet |
+
+`remedy` tells the trader how to get admitted. It follows the book's onboarding setting and is left out when the book names none.
+
+| `remedy.kind` | Fields | Meaning |
+|---|---|---|
+| `VERIFY_IDENTITY` | `url`, `serviceSlug`, `serviceName`, `profileKey`, `hint` | Verify with the published verification service at `url` |
+| `ONBOARD` | `url` | Onboard on the venue's own page at `url` |
+| `REQUEST_ID_LINK` | none | Ask the venue for a personal ID link |
+| `CONTACT_VENUE` | none | Contact the venue |
+
+`409 BUYER_GATE_REQUIRED` means the security has no identity registry and the book names no buyer gate yet, so nobody can buy until the venue sets one. `503 ACCESS_CHECK_UNAVAILABLE` means a gate or registry could not be read; nothing was decided, so retry.
 
 ## Response Fields
 
@@ -320,6 +344,9 @@ if (data.settlement?.transaction) {
 | `POST_ONLY_WOULD_CROSS` | `409` | A post-only order would have taken liquidity |
 | `DELIVERY_NOT_ALLOWED` | `409` | The token's compliance layer refuses the delivery. Carries `deliveryCode`, and `tokenRestrictionCode` where the token reports its own |
 | `MM_CONFIG_VIOLATION` | `403` | The account is restricted to a set of books that excludes this one |
+| `ACCESS_NOT_ADMITTED` | `403` | The venue does not admit the trader. Carries `accessCode` and, where the book names an onboarding route, `remedy` |
+| `BUYER_GATE_REQUIRED` | `409` | The security has no identity registry and the book names no buyer gate |
+| `ACCESS_CHECK_UNAVAILABLE` | `503` | An access gate or identity registry could not be read. Nothing was submitted |
 | `ORDER_BOOK_NOT_FOUND` | `404` | The book does not exist, or is not reachable from your instance |
 | `SETTLEMENT_NOT_BUILDABLE` | `409` | The fill could not be turned into a settlement transaction |
 | `SETTLEMENT_REJECTED` | `409` | The settlement simulation reverted. Carries `reason` |

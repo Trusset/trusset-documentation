@@ -1,0 +1,114 @@
+---
+title: 'Get Order Book Access'
+api: 'GET /orderbooks/external-securities/api/order-books/{orderBookId}/access'
+description: 'Read who may trade on a book, and whether a wallet is admitted'
+---
+
+Returns the book's access settings: the delivery mode, the buyer and seller gates, and how a refused wallet is onboarded. Name a wallet to learn whether it may buy and sell, and how it gets admitted if not. See [Access module](/endpoints/external-securities-trading/introduction#access-module).
+
+The gates are read live from the custody contract for the book's settlement operator, so the answer is what a settlement would enforce right now. Works on books you own and books you have imported.
+
+## Path Parameters
+
+<ParamField path="orderBookId" type="string" required>Order book ID.</ParamField>
+
+## Query Parameters
+
+<ParamField query="wallet" type="string">
+  Wallet to check. Omit for the settings only.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="orderBookId" type="string">Order book ID.</ResponseField>
+    <ResponseField name="supported" type="boolean">Whether the book's custody contract carries the access module. False on generation 1, where no gates exist and every check reads as admitted.</ResponseField>
+    <ResponseField name="generation" type="integer">Custody contract generation: `1` or `2`.</ResponseField>
+    <ResponseField name="deliveryMode" type="string">`AGENT` or `TRANSFER`, or `null` when the security is not registered.</ResponseField>
+    <ResponseField name="tokenIdentityRegistry" type="string">The security's own identity registry, or `null` when it has none.</ResponseField>
+    <ResponseField name="buyer" type="object">
+      The buyer gate.
+      <Expandable>
+        <ResponseField name="gate" type="string">The gate saved for the book, or the one on chain when none is saved. `null` for none.</ResponseField>
+        <ResponseField name="onChainGate" type="string">The gate on chain for the settlement operator, or `null`.</ResponseField>
+        <ResponseField name="profile" type="object">Owning instance only. The verification profile behind the gate: `key`, `name`, `entityType`, `professionalOnly` and `requirementsHash`, or only `key`. `null` when the gate is not a profile register.</ResponseField>
+        <ResponseField name="accessList" type="object">Owning instance only. The whitelist behind the gate: `id`, `name`, `purpose`, `address`, `ownerWallet` and `own`, or only `id`. `null` when the gate is not a whitelist.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="seller" type="object">The seller gate, same shape as `buyer`.</ResponseField>
+    <ResponseField name="onboarding" type="object">
+      <Expandable>
+        <ResponseField name="mode" type="string">`NONE`, `VERIFICATION_SERVICE`, `ID_LINK` or `INTEGRATION`.</ResponseField>
+        <ResponseField name="url" type="string">The venue's own onboarding page in `INTEGRATION` mode, otherwise `null`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="inSync" type="boolean">Whether the gates on chain match the ones saved for the book. Always true on generation 1.</ResponseField>
+    <ResponseField name="buyerGateRequired" type="boolean">True when the security has no identity registry, so the book needs a buyer gate before anyone can buy.</ResponseField>
+    <ResponseField name="wallet" type="object">
+      Present only when `wallet` was supplied.
+      <Expandable>
+        <ResponseField name="address" type="string">The wallet, lower-cased.</ResponseField>
+        <ResponseField name="buy" type="object">`admitted`, `code` and `reason`. `code` is `0` when admitted, otherwise the check that refused it, as listed on [Submit Order](/endpoints/external-securities-trading/submit-order#access-refusals).</ResponseField>
+        <ResponseField name="sell" type="object">Same shape, for selling.</ResponseField>
+        <ResponseField name="remedy" type="object">How the wallet gets admitted, when it is refused by the identity registry or a gate and the book names an onboarding route. Same shape as on [Submit Order](/endpoints/external-securities-trading/submit-order#access-refusals).</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/orderbooks/external-securities/api/order-books/clx_ob_extsec_001/access?wallet=0xabc7f1093d5e26b804a1c3f78de025916b47c0d3" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/orderbooks/external-securities/api/order-books/${orderBookId}/access?wallet=${wallet}`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { data } = await res.json();
+
+if (!data.wallet.buy.admitted && data.wallet.remedy?.url) {
+  window.open(data.wallet.remedy.url, '_blank', 'noopener');
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "orderBookId": "clx_ob_extsec_001",
+    "supported": true,
+    "generation": 2,
+    "deliveryMode": "AGENT",
+    "tokenIdentityRegistry": "0x2d7f9c3a6b81e05f4ad927c1b36e8f05a4c19d72",
+    "buyer": {
+      "gate": "0x8e3b17ad0c94f25e6b7a1d38c05f92e4b6a73c15",
+      "onChainGate": "0x8e3b17ad0c94f25e6b7a1d38c05f92e4b6a73c15"
+    },
+    "seller": { "gate": null, "onChainGate": null },
+    "onboarding": { "mode": "INTEGRATION", "url": "https://onboarding.example.com/investors" },
+    "inSync": true,
+    "buyerGateRequired": false,
+    "wallet": {
+      "address": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+      "buy": { "admitted": false, "code": 16, "reason": "This wallet is not admitted to buy on this order book." },
+      "sell": { "admitted": true, "code": 0, "reason": null },
+      "remedy": { "kind": "ONBOARD", "url": "https://onboarding.example.com/investors" }
+    }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `wallet` is not an address |
+| `ORDER_BOOK_NOT_FOUND` | `404` | The book does not exist, is not reachable, or is not an external securities book |
+| `CHAIN_UNAVAILABLE` | `503` | The custody contract or the token could not be read |
+| `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |

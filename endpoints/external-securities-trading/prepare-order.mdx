@@ -4,7 +4,9 @@ api: 'POST /orderbooks/external-securities/api/orders/prepare'
 description: 'Build the EIP-712 payload a trader signs, and preview the reservation'
 ---
 
-Builds the exact typed data the custody contract will verify, and tells you whether the trader's tradable balance covers the order. Nothing is created and nothing is reserved: this is a construction step.
+Builds the exact typed data the custody contract will verify, and tells you whether the trader's tradable balance covers the order and which allowance is still missing. Nothing is created and nothing is reserved: this is a construction step.
+
+The trader is checked against the book's access gates first, so a wallet the venue does not admit is refused here, before it signs anything. See [Access module](/endpoints/external-securities-trading/introduction#access-module).
 
 Call it, have the trader sign `order` against `domain` and `types`, then send the signature back with the same `expiry`, `nonce` and `salt` to [Submit Order](/endpoints/external-securities-trading/submit-order). Those three fields are part of the signed struct, so a value that differs from what was signed produces a different hash and the signature fails.
 
@@ -80,11 +82,22 @@ A quantity or price that does not convert cleanly is refused rather than rounded
         <ResponseField name="sufficient" type="boolean">Whether `available` covers `amount`.</ResponseField>
       </Expandable>
     </ResponseField>
+    <ResponseField name="approval" type="object">
+      The allowance the custody contract needs from this trader. Present on every buy, and on a sell of an allowance-delivered security. `null` on a sell of an agent-delivered security, which needs no approval.
+      <Expandable>
+        <ResponseField name="tokenAddress" type="string">The token to approve: the settlement asset on a buy, the security on a sell.</ResponseField>
+        <ResponseField name="spender" type="string">The custody contract.</ResponseField>
+        <ResponseField name="allowance" type="string">The current allowance, in that token's base units.</ResponseField>
+        <ResponseField name="required" type="string">The allowance that covers this order and the trader's existing reservations together, in base units.</ResponseField>
+        <ResponseField name="sufficient" type="boolean">Whether `allowance` covers `required`.</ResponseField>
+        <ResponseField name="endpoint" type="string">The endpoint that builds the approval: `POST /order-books/:orderBookId/quote-approval` or `POST /order-books/:orderBookId/security-approval`.</ResponseField>
+      </Expandable>
+    </ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  `sufficient: false` is a warning, not a refusal. The order is still buildable. Submission is where the balance is enforced, with `INSUFFICIENT_CUSTODY_BALANCE`. On a buy, an insufficient figure usually means the settlement asset allowance is too low rather than the balance; raise it with [Approve Settlement Asset](/endpoints/external-securities-trading/approve-quote-asset).
+  `sufficient: false` is a warning, not a refusal. The order is still buildable. Submission is where the balance is enforced, with `INSUFFICIENT_CUSTODY_BALANCE`. When `approval.sufficient` is false, approve `approval.required` with [Approve Settlement Asset](/endpoints/external-securities-trading/approve-quote-asset) on a buy or [Approve Security](/endpoints/external-securities-trading/approve-security) on a sell before you submit.
 </Note>
 
 <RequestExample>
@@ -172,7 +185,27 @@ const signature = await signer._signTypedData(domain, types, order);
       "onChainAvailable": "50000000000",
       "reserved": "0",
       "sufficient": true
+    },
+    "approval": {
+      "tokenAddress": "0x98ad0ca091552e23c564b41c74282e5343d03e8a",
+      "spender": "0x489aee4ae9546081d55848f157e03192e826988c",
+      "allowance": "50000000000",
+      "required": "1042000000",
+      "sufficient": true,
+      "endpoint": "POST /order-books/:orderBookId/quote-approval"
     }
+  }
+}
+```
+```json Error - Wallet Not Admitted
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ACCESS_NOT_ADMITTED",
+    "message": "This wallet is not admitted to buy on this order book.",
+    "accessCode": 16,
+    "remedy": { "kind": "ONBOARD", "url": "https://onboarding.example.com/investors" }
   }
 }
 ```
@@ -202,4 +235,8 @@ const signature = await signer._signTypedData(domain, types, order);
 | `INVALID_ORDER_SALT` | `400` | `salt` is not a 32-byte hex string |
 | `ORDER_BOOK_INACTIVE` | `400` | The book is `PAUSED` or `CLOSED` |
 | `ORDER_BOOK_NOT_FOUND` | `404` | The book does not exist, is not reachable, or is not an external securities book |
+| `ACCESS_NOT_ADMITTED` | `403` | The trader is not verified on the security's identity registry, or the book's buyer or seller gate does not admit them. Carries `accessCode` and, when the book names an onboarding route, `remedy`. See [Submit Order](/endpoints/external-securities-trading/submit-order#access-refusals) |
+| `BUYER_GATE_REQUIRED` | `409` | The security has no identity registry and the book names no buyer gate, so no buyer can be admitted yet |
+| `ACCESS_CHECK_UNAVAILABLE` | `503` | The access gate or identity registry could not be read. Nothing was decided; retry |
+| `CHAIN_UNAVAILABLE` | `503` | A required chain read did not answer |
 | `SERVICE_NOT_ENABLED` | `403` | The Trading service is not enabled on this instance |
