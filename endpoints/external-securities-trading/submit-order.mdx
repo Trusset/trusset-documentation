@@ -37,7 +37,7 @@ Accepts an optional `Idempotency-Key` header. Sending one is strongly recommende
 <ParamField body="salt" type="string" required>32-byte hex salt from the prepared order.</ParamField>
 
 <ParamField body="signature" type="string" required>
-  The trader's EIP-712 signature over the prepared order. An EOA signature or an EIP-1271 smart contract wallet signature is accepted.
+  The trader's EIP-712 signature over the prepared order. An EOA signature or an EIP-1271 smart contract wallet signature is accepted. A wallet that has contract code, including an EOA with an EIP-7702 delegation, is checked through its own `isValidSignature` only, as the custody contract checks it at settlement, so a plain key signature from such a wallet is refused.
 </ParamField>
 
 <ParamField body="orderType" type="string" default="LIMIT">
@@ -65,10 +65,10 @@ The checks run in a fixed order, so the first refusal names the earliest conditi
     The order struct is rebuilt from your fields. Quantity and price must convert to whole token units, and `expiry`, `nonce` and `salt` must be in range.
   </Step>
   <Step title="Signature">
-    The order hash is derived from that struct, and the signature must recover to `userAddress` or validate through the wallet's own EIP-1271 check.
+    The order hash is derived from that struct. A wallet without contract code must sign it with its key, as a 65-byte low-s signature. A wallet with contract code must accept it through its own EIP-1271 check.
   </Step>
   <Step title="Access">
-    On a book that settles through the current custody contract, the trader must be admitted: a buyer must be verified on the security's identity registry where it has one, and the book's buyer or seller gate must admit the trader where it names one. See [Access module](/endpoints/external-securities-trading/introduction#access-module).
+    The trader must be admitted: a buyer must be verified on the security's identity registry where it has one, on both generations, and on generation 2 the book's buyer or seller gate must admit the trader where it names one. See [Access module](/endpoints/external-securities-trading/introduction#access-module).
   </Step>
   <Step title="Book rules">
     Size against `minOrderSize` and `maxOrderSize`, price against `tickSize`, the reference price band where one is configured, any account restriction on which books may be traded, and the post-only check against the eligible peer set.
@@ -330,7 +330,7 @@ if (data.settlement?.transaction) {
 | `VALIDATION_ERROR` | `400` | A field failed schema validation |
 | `SIGNATURE_REQUIRED` | `400` | `signature` is missing or not hex |
 | `MARKET_ORDER_NOT_SUPPORTED` | `400` | `orderType` is anything other than `LIMIT` |
-| `INVALID_SIGNATURE` | `401` | The signature does not recover to the trading wallet |
+| `INVALID_SIGNATURE` | `401` | The signature does not recover to the trading wallet, or the wallet has contract code and its `isValidSignature` refuses it |
 | `ORDER_TOO_SMALL` | `400` | `quantity` is below the book's `minOrderSize` |
 | `ORDER_TOO_LARGE` | `400` | `quantity` is above the book's `maxOrderSize` |
 | `INVALID_PRICE` | `400` | The price is not a multiple of `tickSize`, or does not convert cleanly |
@@ -339,7 +339,7 @@ if (data.settlement?.transaction) {
 | `INSUFFICIENT_CUSTODY_BALANCE` | `400` | The tradable balance, net of reservations, does not cover the order. Carries `required`, `available` and `tokenAddress` |
 | `ORDER_BOOK_INACTIVE` | `400` | The book is `PAUSED` or `CLOSED` |
 | `WRONG_SETTLEMENT_MODE` | `400` | The book does not settle on chain |
-| `ORDER_NOT_LIVE` | `409` | The signature was cancelled, nonce-invalidated, or already filled on chain. Carries `reason` and sometimes `remainingBase` |
+| `ORDER_NOT_LIVE` | `409` | The signature was cancelled, nonce-invalidated, or already filled on chain, or the trader cancelled the order it was placed as (`reason` `CANCELLED`). Carries `reason` and sometimes `remainingBase` |
 | `DUPLICATE_ORDER` | `409` | The same signature is already resting. Carries `orderId` and `orderHash` |
 | `POST_ONLY_WOULD_CROSS` | `409` | A post-only order would have taken liquidity |
 | `DELIVERY_NOT_ALLOWED` | `409` | The token's compliance layer refuses the delivery. Carries `deliveryCode`, and `tokenRestrictionCode` where the token reports its own |

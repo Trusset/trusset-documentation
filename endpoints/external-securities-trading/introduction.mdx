@@ -3,7 +3,7 @@ title: 'External Securities Trading'
 description: 'Order book trading for security tokens issued outside Trusset'
 ---
 
-External securities trading runs an order book over security tokens that were issued somewhere else and imported into your instance: ERC-3643 (T-REX) tokens of any fork, and on the current custody contract also ERC-1400 tokens through their ERC-20 layer and plain ERC-20 securities. Orders match off-chain in the same engine as the other venues, and settle on-chain in a single atomic transaction that carries both traders' signatures.
+External securities trading runs an order book over security tokens that were issued somewhere else and imported into your instance: ERC-3643 (T-REX) tokens of any fork, and on generation 2 of the custody contract also ERC-1400 tokens through their ERC-20 layer and plain ERC-20 securities. Generation 2 is not deployed on any network yet, see [Contract generations](#contract-generations). Orders match off-chain in the same engine as the other venues, and settle on-chain in a single atomic transaction that carries both traders' signatures.
 
 This is the only Trusset venue where an order book settles on chain today, and the reason is the custody model. Nothing is escrowed and nothing is pooled, so no operator key is needed to move a position into custody: the traders themselves authorize every settlement by signing their orders.
 
@@ -67,7 +67,11 @@ Each security is administered by its own controller, not by Trusset. The securit
 
 The custody contract exists in two generations. Generation 2 adds allowance delivery and the access module, and keeps every generation 1 function and the EIP-712 domain, so a signed order encodes the same on both. `custodyGeneration` on [Get Trade Readiness](/endpoints/external-securities-trading/get-trade-readiness) and `generation` on [Get Order Book Access](/endpoints/external-securities-trading/get-order-book-access) report which one a book settles through.
 
-New books are created on the current custody contract of your network. Books on an earlier contract keep trading as before. Requesting allowance delivery or an access gate on a generation 1 contract is refused with `409 CUSTODY_UPGRADE_REQUIRED`.
+**Today every network that runs external securities trading runs generation 1. Generation 2 is not deployed on any network yet.** Until it is, allowance delivery, access gates and securities without an identity registry (ERC-1400, ERC-1404, ERC-7943 and plain ERC-20 tokens) are not available. Read `generation` on [Get Custody Contract](/endpoints/external-securities-trading/get-custody-contract) before you plan on them. [List Security Tokens](/endpoints/external-securities-trading/list-security-tokens) lists only the tokens the current generation can book.
+
+New books are created on the current custody contract of your network. Books on an earlier contract keep trading as before. Requesting allowance delivery or an access gate, or a security without an identity registry, on a generation 1 contract is refused with `409 CUSTODY_UPGRADE_REQUIRED`. The message says whether generation 2 is missing on the network or only on that book.
+
+On generation 1 the venue still checks every buyer against the security's own identity registry, the check the contract makes at settlement. A buyer it does not verify is refused at prepare and submit with `403 ACCESS_NOT_ADMITTED` and `accessCode` `9`, with the onboarding remedy of the book.
 
 ## Delivery modes
 
@@ -135,7 +139,7 @@ Each book records the real decimals of both its tokens, read from the chain at c
 | `signedQuantity`, `signedPrice` in the EIP-712 order | On-chain base units, at the tokens' own decimals |
 | Balances from the custody reads | On-chain base units |
 
-Fees are integers in basis points, capped at 1000. A fee recorded on a trade is charged as base quantity: `quantity × feeBps / 10000`, in the same order book units.
+Fees are integers in basis points, capped at 1000. Each trade records `makerFee` and `takerFee` as base quantity, `quantity × feeBps / 10000` in order book units, for the venue's own invoicing. Settlement does not deduct them: the custody contract moves the gross amounts, so the buyer receives the full quantity and the seller the full amount of the settlement asset.
 
 ## Custody setup
 
@@ -190,13 +194,13 @@ A book can carry a buyer gate and a seller gate. Each gate is a contract that an
 
 | Source | Field | What it resolves to |
 |---|---|---|
-| A verification profile | `profile` | The eligibility register of that profile on your instance, so only wallets admitted to the profile can trade |
+| A verification profile | `profile` | The [profile gate](/endpoints/customers/introduction#profile-gates) of that profile on your instance ID register, or its eligibility register, so only wallets that meet the profile can trade |
 | A whitelist | `accessList` | A whitelist of your instance, by its ID |
-| Any register | `register` | A contract address, such as the token's own identity registry or the Trusset register |
+| Any register | `register` | A contract address, such as the token's own identity registry or your [instance ID register](/endpoints/customers/introduction#the-instance-id-register) |
 
 The gates are enforced on chain. The settlement operator sets them for itself on the custody contract with `setAccessGates`, which is one more step in the setup flow, and the contract checks both parties against them on every settlement that operator sends. They apply per security and settlement operator, so two books of one operator on the same security share them. A gate that cannot be read refuses rather than admits.
 
-The venue checks the same gates when an order is prepared and submitted, so a wallet that is not admitted gets `403 ACCESS_NOT_ADMITTED` before anything rests. A security without an identity registry can only be bought by a wallet a buyer gate admits, so such a book requires a buyer gate.
+The venue checks the same gates when an order is prepared and submitted, so a wallet that is not admitted gets `403 ACCESS_NOT_ADMITTED` before anything rests. A security without an identity registry can only be bought by a wallet a buyer gate admits, so such a book requires a buyer gate. Gates need generation 2. On generation 1 the one check is the security's identity registry, and `onboarding` applies to the buyers it refuses.
 
 `onboarding` decides what a refused wallet is told, through the `remedy` object on the refusal:
 
@@ -216,11 +220,11 @@ The reference price band reads its price through one interface, `priceFeed`, wit
 | Source | Fields | Reads |
 |---|---|---|
 | `MANUAL` | none | The price you post with [Set Price Reference](/endpoints/external-securities-trading/set-price-reference) |
-| `STOCK` | `symbol` | The quote of a listed stock, such as `SAP.DE` |
+| `STOCK` | `symbol` | The quote of a listed share. Name the listing with its exchange MIC after a colon, such as `SAP:XETR` or `AIR:XPAR`. A bare ticker such as `AAPL` reads the US listing |
 | `COMMODITY` | `symbol`, `unit` | The spot price of `XAU`, `XAG`, `XPT` or `XPD`, per `TROY_OUNCE`, `GRAM` or `KILOGRAM` |
 | `CUSTOM` | `url`, `path`, `headers` | An HTTPS JSON feed on a public host |
 
-Stock and commodity prices are converted into the settlement currency of the book when one quotes in USD and the other settles in EUR, at the ECB reference rate. A stock quoted in another currency cannot be converted, and reading it fails with `FEED_CURRENCY_UNSUPPORTED`. A custom feed is read as quoting in the settlement currency already. [Preview Price Feed](/endpoints/external-securities-trading/preview-price-feed) reads a feed once so you can check it before you save it.
+Stock and commodity prices are converted into the settlement currency of the book when one quotes in USD and the other settles in EUR, at the ECB reference rate. A stock quoted in another currency cannot be converted, and reading it fails with `FEED_CURRENCY_UNSUPPORTED`. A custom feed is never converted: its price is used as it quotes, so point it at a feed that quotes in the settlement currency of the book. A preview reports its `currency` as `null`. [Preview Price Feed](/endpoints/external-securities-trading/preview-price-feed) reads a feed once so you can check it before you save it.
 
 ## Shared liquidity
 

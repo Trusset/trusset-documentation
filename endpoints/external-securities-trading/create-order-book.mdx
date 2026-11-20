@@ -8,12 +8,16 @@ Creates an order book for one imported security token quoted in one settlement a
 
 The book cannot be created until its on-chain prerequisites hold. See [Custody setup](/endpoints/external-securities-trading/introduction#custody-setup). New books are created on the current custody contract of your network.
 
+<Warning>
+  Generation 2 of the custody contract is not deployed on any network yet. Until it is, `deliveryMode` `TRANSFER`, `access` gates and tokens without an identity registry are refused with `409 CUSTODY_UPGRADE_REQUIRED`. Read `generation` on [Get Custody Contract](/endpoints/external-securities-trading/get-custody-contract) first. On generation 1, book an ERC-3643 token and leave `deliveryMode` and the gates out; `access.onboarding` still applies to buyers the security's identity registry refuses.
+</Warning>
+
 One instance may hold a single open book per pair. If an `ACTIVE` or `PAUSED` book already quotes this pair, the request returns `ORDER_BOOK_EXISTS`.
 
 ## Body Parameters
 
 <ParamField body="tokenAddress" type="string" required>
-  The security token. Must be imported into your instance and readable on chain. An ERC-3643 token can use either delivery mode; a token without an identity registry, such as an ERC-1400 or plain ERC-20 security, uses allowance delivery and needs a buyer gate.
+  The security token. Must be imported into your instance and readable on chain. On generation 2 an ERC-3643 token can use either delivery mode, and a token without an identity registry, such as an ERC-1400 or plain ERC-20 security, uses allowance delivery and needs a buyer gate. On generation 1 only an ERC-3643 token with an identity registry can be booked.
 </ParamField>
 
 <ParamField body="quoteTokenAddress" type="string" required>
@@ -47,12 +51,12 @@ One instance may hold a single open book per pair. If an `ACTIVE` or `PAUSED` bo
 </ParamField>
 
 <ParamField body="access" type="object">
-  Who may trade on the book. See [Access module](/endpoints/external-securities-trading/introduction#access-module). Requires the current custody contract.
+  Who may trade on the book. See [Access module](/endpoints/external-securities-trading/introduction#access-module). `buyer` and `seller` gates need custody generation 2; `onboarding` works on both generations.
   <Expandable>
     <ParamField body="buyer" type="object">
       Buyer gate, or `null` for none. Name exactly one source.
       <Expandable>
-        <ParamField body="profile" type="string">Key of a verification profile on your instance, up to 60 characters. Its eligibility register becomes the gate.</ParamField>
+        <ParamField body="profile" type="string">Key of a verification profile on your instance, up to 60 characters. Its eligibility register, or its profile gate on your instance ID register, becomes the gate.</ParamField>
         <ParamField body="accessList" type="string">ID of a whitelist of your instance.</ParamField>
         <ParamField body="register" type="string">Address of any contract that answers `isVerified(address)`.</ParamField>
       </Expandable>
@@ -74,7 +78,7 @@ One instance may hold a single open book per pair. If an `ACTIVE` or `PAUSED` bo
   Where the reference price comes from. See [Price feed module](/endpoints/external-securities-trading/introduction#price-feed-module). When sent, it sets `priceRefMode`, `priceRefFeedUrl`, `priceRefFeedPath` and `priceRefFeedHeaders` for you.
   <Expandable>
     <ParamField body="source" type="string" required>`MANUAL`, `STOCK`, `COMMODITY` or `CUSTOM`.</ParamField>
-    <ParamField body="symbol" type="string">`STOCK`: a ticker such as `SAP.DE` or `AAPL`. `COMMODITY`: `XAU`, `XAG`, `XPT` or `XPD`.</ParamField>
+    <ParamField body="symbol" type="string">`STOCK`: the ticker of the listing, with its exchange MIC after a colon for a listing outside the US, such as `SAP:XETR` or `AIR:XPAR`. A bare ticker such as `AAPL` reads the US listing. `COMMODITY`: `XAU`, `XAG`, `XPT` or `XPD`.</ParamField>
     <ParamField body="unit" type="string" default="TROY_OUNCE">`COMMODITY` only: what one token represents, `TROY_OUNCE`, `GRAM` or `KILOGRAM`.</ParamField>
     <ParamField body="url" type="string">`CUSTOM` only: HTTPS feed endpoint on a public host.</ParamField>
     <ParamField body="path" type="string">`CUSTOM` only: dotted JSON path to the price, such as `data.price`.</ParamField>
@@ -90,9 +94,9 @@ One instance may hold a single open book per pair. If an `ACTIVE` or `PAUSED` bo
   Price increment, in order book units. Enforced when an order is submitted: a price that is not a multiple is refused with `INVALID_PRICE`. [Prepare Order](/endpoints/external-securities-trading/prepare-order) does not check it, so a payload can be built at an off-tick price and then rejected on submission.
 </ParamField>
 
-<ParamField body="makerFeeBps" type="integer" default="0">Maker fee in basis points, 0 to 1000.</ParamField>
+<ParamField body="makerFeeBps" type="integer" default="0">Maker fee in basis points, 0 to 1000. Recorded on each trade for your own invoicing, never deducted at settlement. See [Units and decimals](/endpoints/external-securities-trading/introduction#units-and-decimals).</ParamField>
 
-<ParamField body="takerFeeBps" type="integer" default="0">Taker fee in basis points, 0 to 1000.</ParamField>
+<ParamField body="takerFeeBps" type="integer" default="0">Taker fee in basis points, 0 to 1000. Recorded the same way as `makerFeeBps`.</ParamField>
 
 <ParamField body="mmMakerRebateBps" type="integer">
   Fee applied in place of `makerFeeBps` when the resting side is a market maker account, −1000 to 1000. A negative value pays the market maker.
@@ -361,11 +365,11 @@ if (!body.success && body.error.code === 'CUSTODY_SETUP_REQUIRED') {
 | `PROFILE_NOT_FOUND` | `404` | The named verification profile does not exist on your instance |
 | `ACCESS_LIST_NOT_FOUND` | `404` | The named whitelist is not an active whitelist of your instance on this network |
 | `ACCESS_GATE_INCOMPATIBLE` | `422` | A gate is not a contract, or does not answer `isVerified(address)` |
-| `IDENTITY_REGISTRY_RETIRED` | `422` | A gate is the previous Trusset ID Register, which takes no new identities |
+| `IDENTITY_REGISTRY_RETIRED` | `422` | A gate is an archived Trusset ID Register, which takes no new identities |
 | `BUYER_GATE_REQUIRED` | `409` | The security has no identity registry and the book would have no buyer gate |
 | `ACCESS_GATES_SHARED` | `409` | The settlement operator settles another open book on this security with other gates |
 | `DELIVERY_MODE_MISMATCH` | `409` | The security is registered with another delivery mode than the one requested |
-| `CUSTODY_UPGRADE_REQUIRED` | `409` | Allowance delivery, an access gate, or a token without an identity registry was requested on a generation 1 custody contract |
+| `CUSTODY_UPGRADE_REQUIRED` | `409` | Allowance delivery, an access gate, or a token without an identity registry was requested on a generation 1 custody contract. The message says whether generation 2 is missing on the network or only on that book |
 | `TOKEN_NO_ISIN` | `400` | The security is unregistered and no identifier was supplied, or the registered security has no readable identifier |
 | `ISIN_MISMATCH` | `400` | The declared identifier does not match what is registered on chain |
 | `ORDER_BOOK_EXISTS` | `409` | An `ACTIVE` or `PAUSED` book already quotes this pair |
