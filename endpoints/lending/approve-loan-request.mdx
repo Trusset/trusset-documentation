@@ -1,0 +1,196 @@
+---
+title: 'Approve Loan Request'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/loan-requests/{ref}/approve'
+description: 'Approve a loan request with an on-chain approval'
+---
+
+Builds the `approve` transaction on the market's approvals contract, and confirms it on a second call with `txHash`. Trusset never signs: the market admin or a wallet holding `LOAN_APPROVER_ROLE` signs the calldata.
+
+One approval admits one draw of at most the approved amount until `validUntil`. The draw consumes it.
+
+## Who can call
+
+The lender of record.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>
+  The market's record ID on your instance.
+</ParamField>
+
+<ParamField path="ref" type="string" required>
+  The loan request reference: `lrq_` followed by 20 characters.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="amount" type="string | number">
+  The amount to approve. Defaults to the requested amount and may only be lower.
+</ParamField>
+
+<ParamField body="validHours" type="number" default="72">
+  How long the approval stays valid, from 1 to 696 hours.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The wallet that will sign.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+</ParamField>
+
+## An approval in force is never replaced
+
+While a usable approval is on chain for the request's borrower and loan, the build answers `409 APPROVAL_IN_FORCE`, and `error.details.approved` carries `{ amount, amountRaw, validUntil }` of that approval. Revoke it first with [Revoke Loan Approval](/endpoints/lending/revoke-loan-approval), then approve again. The revoke fails once the borrower drew, so an approval is never changed under a loan that is being opened.
+
+A lapsed approval, one past its `validUntil`, can be replaced directly.
+
+When the request reads `APPROVED` but its approval is no longer on chain, it was used or revoked. The build answers `409 APPROVAL_NOT_ON_CHAIN`, and a further loan needs a new request.
+
+## Confirming
+
+An approval is recorded only on the request it was signed for. The confirm answers `400 TX_NOT_VERIFIED` when the transaction is older than the approval already recorded on the request, or was signed before the request existed.
+
+A mined approval can still be confirmed on a request that was withdrawn, declined or closed in the meantime, as long as that approval is still in force on chain. Otherwise the confirm answers `409 APPROVAL_NOT_ON_CHAIN`. A `USED` or `REVOKED` request takes no approval and answers `409 LOAN_REQUEST_STATE`.
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">`{ to, data }`, the unsigned `approve` call. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`approve`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet that signs. When confirming, the wallet that sent the transaction.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`LOAN_APPROVER_ROLE`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="approval" type="object">What the transaction approves: `{ borrowerWallet, loanId, amount, amountRaw, symbol, validUntil }`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="request" type="object">The loan request. See [Get Loan Request](/endpoints/lending/get-loan-request#response-fields) for every field.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field }`: the call that confirms this transaction, and `txHash` as the body field that carries the hash. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming.</ResponseField>
+    <ResponseField name="blockNumber" type="number">Block the transaction was mined in. Returned when confirming.</ResponseField>
+    <ResponseField name="marketId" type="string">The market's record ID on your instance.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseExample>
+```json 200 Calldata
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x5d2e8c1a7f4b3960e2d1c8a7b6f5e4d3c2b1a098",
+      "data": "0x..."
+    },
+    "functionName": "approve",
+    "signer": "0x7712db30a7b4ffd9c445793089118b60e56d752a",
+    "requiredRole": "LOAN_APPROVER_ROLE",
+    "approval": {
+      "borrowerWallet": "0x7c1e3a5f2b9d4e6a8c0f1b3d5e7a9c2b4d6f8e1a",
+      "loanId": null,
+      "amount": "25000",
+      "amountRaw": "25000000000",
+      "symbol": "USDC",
+      "validUntil": "2026-11-24T16:40:00.000Z"
+    },
+    "request": {
+      "ref": "lrq_k3vx7q2mwd4h5pn6tr2a",
+      "kind": "OPEN",
+      "loanId": null,
+      "status": "REQUESTED",
+      "marketAddress": "0x41b9c4d5dee70a5e3682094462e5065275e728a9",
+      "borrowerWallet": "0x7c1e3a5f2b9d4e6a8c0f1b3d5e7a9c2b4d6f8e1a",
+      "externalReference": "CASE-2026.11_042",
+      "amount": "25000",
+      "amountRaw": "25000000000",
+      "collateralAmount": "40",
+      "symbol": "USDC",
+      "decimals": 6,
+      "approvedAmount": null,
+      "approvedAmountRaw": null,
+      "validUntil": null,
+      "approver": null,
+      "approveTxHash": null,
+      "decidedAt": null,
+      "usedTxHash": null,
+      "usedAt": null,
+      "createdAt": "2026-11-21T16:02:11.000Z",
+      "updatedAt": "2026-11-21T16:02:11.000Z",
+      "requestedByThisInstance": false,
+      "viewerRole": {
+        "bank": true,
+        "borrower": false
+      },
+      "nextStep": "APPROVE_OR_DECLINE"
+    },
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/cmwfk2h7x0003jw9w4q8b2n1c/loan-requests/lrq_k3vx7q2mwd4h5pn6tr2a/approve",
+      "field": "txHash"
+    },
+    "marketId": "cmwfk2h7x0003jw9w4q8b2n1c"
+  },
+  "error": null
+}
+```
+```json 200 Confirmed
+{
+  "success": true,
+  "data": {
+    "request": {
+      "ref": "lrq_k3vx7q2mwd4h5pn6tr2a",
+      "kind": "OPEN",
+      "loanId": null,
+      "status": "APPROVED",
+      "marketAddress": "0x41b9c4d5dee70a5e3682094462e5065275e728a9",
+      "borrowerWallet": "0x7c1e3a5f2b9d4e6a8c0f1b3d5e7a9c2b4d6f8e1a",
+      "externalReference": "CASE-2026.11_042",
+      "amount": "25000",
+      "amountRaw": "25000000000",
+      "collateralAmount": "40",
+      "symbol": "USDC",
+      "decimals": 6,
+      "approvedAmount": "25000",
+      "approvedAmountRaw": "25000000000",
+      "validUntil": "2026-11-24T16:40:00.000Z",
+      "approver": "0x7712db30a7b4ffd9c445793089118b60e56d752a",
+      "approveTxHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+      "decidedAt": "2026-11-21T16:41:07.000Z",
+      "usedTxHash": null,
+      "usedAt": null,
+      "createdAt": "2026-11-21T16:02:11.000Z",
+      "updatedAt": "2026-11-21T16:41:07.000Z",
+      "requestedByThisInstance": false,
+      "viewerRole": {
+        "bank": true,
+        "borrower": false
+      },
+      "nextStep": "WAIT_FOR_BORROWER"
+    },
+    "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
+    "signer": "0x7712db30a7b4ffd9c445793089118b60e56d752a",
+    "blockNumber": 6789012,
+    "marketId": "cmwfk2h7x0003jw9w4q8b2n1c"
+  },
+  "error": null
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `AMOUNT_ABOVE_REQUEST` | `400` | `amount` is above the requested amount. Approve that amount or less |
+| `INVALID_AMOUNT` | `400` | `amount` is zero |
+| `INVALID_VALIDITY` | `400` | `validHours` is not between 1 and 696 |
+| `TX_REVERTED` | `400` | The transaction reverted on chain |
+| `TX_NOT_VERIFIED` | `400` | The transaction emits no `LoanApproved` for this borrower and loan from the market's approvals contract, it is older than the approval already recorded on the request, or it was signed before the request existed |
+| `LOAN_APPROVAL_BANK_ONLY` | `403` | Only the lender of record approves |
+| `SIGNER_NOT_AUTHORIZED` | `403` | `signerAddress` is not a verified wallet of your instance that holds `DEFAULT_ADMIN_ROLE` or `LOAN_APPROVER_ROLE` on the market |
+| `APPROVAL_NOT_INSTANCE_BOUND` | `403` | The approval was signed by a wallet that is not verified for your instance |
+| `TX_NOT_FOUND` | `404` | The transaction is not found or not mined yet |
+| `APPROVAL_IN_FORCE` | `409` | A usable approval is on chain for this borrower and loan. `details.approved` carries `{ amount, amountRaw, validUntil }`. Revoke it first, then approve again |
+| `APPROVAL_NOT_ON_CHAIN` | `409` | On the build call, the request reads `APPROVED` but its approval was used or revoked: a further loan needs a new request. On the confirm call, the approval of a withdrawn, declined or closed request is no longer in force on chain |
+| `LOAN_REQUEST_STATE` | `409` | The build call takes a `REQUESTED`, `APPROVED` or `EXPIRED` request only. On the confirm call, the request is `USED` or `REVOKED` and takes no approval, or it changed in the meantime |
+| `APPROVAL_WOULD_REVERT` | `409` | The approvals contract would refuse this approval as it stands, so nothing was built |
+| `LOAN_APPROVAL_STATE_UNAVAILABLE` | `503` | The approvals of the market could not be read just now, so nothing was decided |

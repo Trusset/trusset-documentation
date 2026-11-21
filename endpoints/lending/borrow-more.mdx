@@ -58,6 +58,16 @@ On a market that draws on vault liquidity, a draw larger than the pool's borrowa
 
 On a market whose bank switched on [loan agreements](/endpoints/lending/loan-agreements), the same check runs here. A `LOAN` agreement bound to this loan covers draws up to its principal. Above it, the borrower needs a new accepted `LOAN` agreement for the new total, which binds to the loan when this draw is confirmed and names the earlier agreement in `supersedes`; a `FRAMEWORK` agreement covers the draw within its remaining limit. In `REQUIRED` mode an uncovered draw is refused with `409 AGREEMENT_REQUIRED` or `409 AGREEMENT_LIMIT_EXCEEDED`. The new agreement's record is staged as `loan-agreement-2` (and `signing-certificate-2`), so the earlier record keeps its place in the registry. A draw on a loan bound to a `FRAMEWORK` agreement is checked at the confirm against the framework's status and remaining limit; outside them the confirm answers `reason: OUTSIDE_FRAMEWORK` with the `differences`. The calldata and the confirm response carry `agreement` as on [Open Loan](/endpoints/lending/open-loan#loan-agreements); with loan agreements off, neither does.
 
+## Loan approvals
+
+On a market that runs [approve-only loans](/endpoints/lending/loan-approvals), every additional draw needs an approval of the lender of record for this loan. Without one that covers the draw, the build is refused with `409 LOAN_APPROVAL_REQUIRED`, and `error.details` carries `approvals`, `readable`, `approved`, `requested`, `loanId`, `marketId` and `request`, as on [Open Loan](/endpoints/lending/open-loan#loan-approvals). Request the approval with [Create Loan Request](/endpoints/lending/create-loan-request), naming the loan in `loanId`.
+
+When an approval covers the draw, the calldata response carries `loanApproval: { approvals, approved: { amount, amountRaw, validUntil } }`. The draw consumes the approval. When the chain could not be read, the build answers `503 LOAN_APPROVAL_STATE_UNAVAILABLE`.
+
+When the market names an approvals contract that the Trusset approvals factory did not build, the build reads it when it can. When it cannot be read, the transaction is returned with `loanApproval: { approvals, readable: false }` and the chain decides. When it reads as not approved, the `LOAN_APPROVAL_REQUIRED` details carry no `request`.
+
+A market created as approve-only whose lender of record has not signed the switch yet answers `409 LOAN_APPROVALS_PENDING`, as on [Open Loan](/endpoints/lending/open-loan#loan-approvals).
+
 ## Response Fields
 
 <ResponseField name="data" type="object">
@@ -70,6 +80,7 @@ On a market whose bank switched on [loan agreements](/endpoints/lending/loan-agr
     <ResponseField name="confirmWith" type="object">`{ endpoint, field, body }`: this route, `txHash` as the field, and a `body` carrying `loanId` with `txHash: null`. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="transactionFee" type="object">The opening fee on this draw, present only when it is not zero. Carries `kind: "OPEN"`, `fee`, `feeRaw`, `borrowed`, `netDisbursed`, `netDisbursedRaw` and `message`.</ResponseField>
     <ResponseField name="warnings" type="array">Present when a preflight found something that does not block the draw. That is the collateral instrument's recorded maturity, or a market whose lender of record has published no terms of use. Same object shape and `kind` values as on [Open Loan](/endpoints/lending/open-loan#warnings). An opening fee adds its message as a plain string.</ResponseField>
+    <ResponseField name="loanApproval" type="object">On an approve-only market, the approval that covers this draw: `{ approvals, approved: { amount, amountRaw, validUntil } }`, or `{ approvals, readable: false }` when the approvals contract could not be read. See [Loan approvals](#loan-approvals). Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="loanId" type="string">Loan ID, echoed back as a string. Returned when confirming with `txHash`.</ResponseField>
     <ResponseField name="additionalBorrow" type="string">The amount the loan's debt grew by, read from the mined transaction. With an opening fee, the wallet paid received this less the fee. Returned when confirming with `txHash`.</ResponseField>
@@ -193,6 +204,9 @@ await fetch(url, {
 | `EXCEEDS_MAX_BORROW` | `400` | The request would take the loan past what its collateral supports, at the signed price when a `signedPrice` is supplied |
 | `AGREEMENT_REQUIRED` | `409` | Loan agreements are required on this market and no accepted agreement covers the new total. Request one with [Create Loan Agreement](/endpoints/lending/create-loan-agreement) |
 | `AGREEMENT_LIMIT_EXCEEDED` | `409` | The borrower's framework agreement has less left than `amount` |
+| `LOAN_APPROVAL_REQUIRED` | `409` | The market runs approve-only loans and no approval covers this draw. `details` carries `approvals`, `readable`, `approved`, `requested`, `loanId`, `marketId` and `request`. See [Loan approvals](#loan-approvals) |
+| `LOAN_APPROVALS_PENDING` | `409` | The market was created as approve-only and its lender of record has not signed the switch yet. Loans open once the market admin signs it (setup step `enableLoanApprovals`), or clears the request by switching approvals off |
+| `LOAN_APPROVAL_STATE_UNAVAILABLE` | `503` | The chain could not be read to check the approval, so nothing was built |
 | `INSUFFICIENT_LIQUIDITY` | `400` | The market draws on no vault liquidity and holds less borrowable liquidity than the request, after its reserve earmark |
 | `INVALID_SIGNED_PRICE` | `400` | The `signedPrice` is malformed, expired, dated in the future or older than the oracle's price age window, or it was signed by a wallet that is not an authorized signer on the market's oracle, which `details.signer` then names. Sign a fresh quote with [Sign Price](/endpoints/lending/sign-price) |
 | `PRICE_DEVIATION_TOO_LARGE` | `400` | The `signedPrice` moves further from the oracle's current price than its `maxDeviationBps` allows |

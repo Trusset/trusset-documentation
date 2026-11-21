@@ -1,0 +1,169 @@
+---
+title: "Loan Approvals"
+description: "Switch approve-only loans on a market, request an approval, and approve, revoke, decline or withdraw a request"
+---
+
+`lending.approvals` works with [approve-only loans](/endpoints/lending/loan-approvals): a market that requires the lender of record's approval for every draw, which means opening a loan and borrowing more. The switch is off by default, and a market that does not use it answers exactly as before. Repayment, closing, collateral moves and liquidation never need an approval.
+
+Trusset never signs. `setMode`, `approve`, `revoke` and `revokeAll` take the three call shapes of the [signing model](/sdk/lending/signing), and `confirmMode`, `confirmApprove`, `confirmRevoke` and `confirmRevokeAll` confirm a transaction you broadcast yourself.
+
+## Who signs
+
+| Method | Signed by |
+|---|---|
+| `setMode` | The market admin (`DEFAULT_ADMIN_ROLE`) |
+| `approve`, `revoke` | The market admin, or a wallet that holds `LOAN_APPROVER_ROLE` |
+| `revokeAll` | The market admin (`DEFAULT_ADMIN_ROLE`) |
+| `request`, `decline`, `withdraw` | No signature |
+
+`LOAN_APPROVER_ROLE` approves and revokes loan approvals, nothing else. The market admin grants and revokes it with the market's own `grantRole`. `getMode` returns the role identifier in `mode.approverRole`.
+
+## Read the mode
+
+```typescript
+const { mode } = await trusset.lending.approvals.getMode(marketId)
+
+console.log(mode.supported, mode.available, mode.enabled, mode.requested, mode.approvals)
+```
+
+`supported: false` means the market runs an implementation from before this feature, and its admin has to upgrade it through the seven-day notice first. `available: false` means the network does not carry the approvals factory yet. `requested: true` means the market's creator asked for approve-only loans at deployment and the lender of record has not switched them on yet. `canonical: false` means the market names an approvals contract that the Trusset approvals factory did not build, which the API cannot read or write.
+
+A market's creator asks for approve-only loans with `approveOnlyLoans: true` on `lending.markets.deploy`. With `{ signer }` the SDK sends the field on the build call and again on the confirm call. When you confirm with `{ txHash }` yourself, pass `approveOnlyLoans: true` again in the input. `lending.markets.deploymentOptions()` says in `loanApprovals.available` whether the network carries them.
+
+## Switch approve-only loans on or off
+
+Switching on takes up to two signatures. The first step, `CREATE_APPROVALS`, builds the market's approvals contract and answers `remaining: 1`. Call again for `SWITCH_ON`.
+
+```typescript
+let result = await trusset.lending.approvals.setMode(marketId, true, {}, { signer: admin })
+
+if (result.remaining === 1) {
+  result = await trusset.lending.approvals.setMode(marketId, true, {}, { signer: admin })
+}
+
+console.log(result.step, result.mode.enabled)
+```
+
+Each call with a signer signs one step and confirms it. Without options, `setMode` returns the unsigned transaction of the next step, and `confirmMode` confirms the one you broadcast.
+
+```typescript
+const prepared = await trusset.lending.approvals.setMode(marketId, true, { signerAddress })
+
+const tx = await admin.sendTransaction(prepared.transaction)
+await tx.wait()
+
+const confirmed = await trusset.lending.approvals.confirmMode(marketId, tx.hash)
+console.log(confirmed.step, confirmed.remaining)
+```
+
+`setMode(marketId, false)` switches approve-only loans off with one signature. If they were only requested at deployment and never switched on, it clears the request without a transaction and answers `action: 'NONE'` with `cleared: true`.
+
+## Request an approval
+
+```typescript
+const { request, replaced } = await trusset.lending.approvals.request(marketId, {
+  borrowerWallet,
+  borrowAmount: '25000',
+  collateralAmount: '40',
+  externalReference: 'CASE-2026.11_042',
+})
+
+console.log(request.ref, request.status, request.nextStep, replaced)
+```
+
+Leave `loanId` out for a new loan. Name an open loan of that borrower in `loanId` to request an additional draw. A new request by the same instance for the same wallet and loan replaces its earlier waiting one, and `replaced` names it. An instance keeps at most 3 waiting requests per wallet and 25 per market, and a further one is refused with `LOAN_REQUEST_LIMIT`.
+
+Amounts are decimal strings. `externalReference` takes 1 to 64 letters, digits, dots, underscores or hyphens, for your own case number. The routes carry no personal data fields, and the SDK refuses an `externalReference` outside that shape before any request.
+
+## Read requests
+
+```typescript
+const { requests, waiting, viewer } = await trusset.lending.approvals.list(marketId, { status: 'REQUESTED' })
+
+const { request } = await trusset.lending.approvals.get(marketId, ref)
+```
+
+The lender of record sees every request of the market. Any other instance sees the requests it made and those naming its verified wallets. `list` also filters by `borrower`.
+
+`list` pages with `limit` (1 to 200, default 200) and `offset` (default 0). The result carries `limit` and `offset` as applied, `total` as the number of requests that match, and `truncated: true` when more match beyond this page. `waiting` counts the `REQUESTED` requests your instance sees, whatever the page. Without a `status` filter, open requests come first: `REQUESTED`, then `APPROVED`, then the rest, newest change first.
+
+```typescript
+const page = await trusset.lending.approvals.list(marketId, { limit: 50, offset: 50 })
+
+console.log(page.requests.length, page.total, page.limit, page.offset, page.truncated)
+```
+
+## Approve, decline or revoke
+
+```typescript
+const approved = await trusset.lending.approvals.approve(marketId, ref, { validHours: 48 }, { signer: admin })
+
+console.log(approved.request.status, approved.request.validUntil)
+```
+
+`amount` defaults to the requested amount and may only be lower. `validHours` runs from 1 to 696 and defaults to 72. One approval admits one draw of at most the approved amount until `validUntil`, and the draw consumes it.
+
+Without options, `approve` returns the unsigned `approve` transaction with `approval`, the borrower, loan, amount and `validUntil` it carries. Confirm one you broadcast yourself with `confirmApprove(marketId, ref, txHash)`.
+
+```typescript
+await trusset.lending.approvals.decline(marketId, ref)
+
+await trusset.lending.approvals.revoke(marketId, ref, {}, { signer: admin })
+```
+
+`decline` ends a request that is still `REQUESTED` and signs nothing. `revoke` takes back an approval that is still on chain, and `confirmRevoke(marketId, ref, txHash)` confirms a revoke you broadcast yourself. When no approval is on chain any more, `revoke` is refused with `APPROVAL_NOT_ON_CHAIN`.
+
+An approval in force is never replaced. While a usable approval is on chain for the borrower and loan, `approve` is refused with `APPROVAL_IN_FORCE`, and the error's `details.approved` carries its `amount`, `amountRaw` and `validUntil`. Call `revoke` first, then `approve` again. A lapsed approval can be replaced directly.
+
+## Revoke all approvals
+
+```typescript
+const result = await trusset.lending.approvals.revokeAll(marketId, {}, { signer: admin })
+
+console.log(result.epoch, result.revoked)
+```
+
+`revokeAll(marketId, input?, options?)` voids every approval of the market that was signed before it, at once and on chain, by raising the approvals contract's epoch. Only the market admin signs it: `LOAN_APPROVER_ROLE` is not enough. Use it when an approver wallet is lost, replaced or removed, because an approval does not name the wallet that signed it. Use it also before switching approvals back on after they were off, because approvals survive a switch off and on. It works while approvals are switched off, as long as the market's approvals contract exists.
+
+The result carries `txHash`, `signer`, `blockNumber`, `approvals`, `epoch` as a string, and `revoked`, the number of approved requests recorded as `REVOKED`. Requests that are still `REQUESTED` are untouched and can be approved afterwards.
+
+Without options, `revokeAll` returns the unsigned `revokeAll` transaction with `signer`, `requiredRole` and `approvals`. `input.signerAddress` names the admin wallet that will sign. Confirm one you broadcast yourself with `confirmRevokeAll(marketId, txHash)`.
+
+```typescript
+const prepared = await trusset.lending.approvals.revokeAll(marketId, { signerAddress })
+
+const tx = await admin.sendTransaction(prepared.transaction)
+await tx.wait()
+
+const confirmed = await trusset.lending.approvals.confirmRevokeAll(marketId, tx.hash)
+console.log(confirmed.epoch, confirmed.revoked)
+```
+
+## Withdraw a request
+
+```typescript
+await trusset.lending.approvals.withdraw(marketId, ref)
+```
+
+The borrower side withdraws a request that is still `REQUESTED`.
+
+## Open the loan
+
+On an approve-only market, `lending.loans.open` and `lending.loans.borrowMore` are refused with `LOAN_APPROVAL_REQUIRED` while no approval covers the draw. The error's `details` carry `approvals`, `readable`, `approved`, `requested`, `loanId`, `marketId` and, when the approvals contract was built by the Trusset approvals factory, `request`. When an approval covers the draw, the prepared response carries `loanApproval` with the approved amount and `validUntil`. The request becomes `USED` when the confirm sees the approval consumed.
+
+A market created with `approveOnlyLoans: true` whose lender of record has not signed the switch yet refuses both with `LOAN_APPROVALS_PENDING`. Loans open once the market admin signs the switch, or clears the request with `setMode(marketId, false)`.
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `approvals.getMode` | [Get Loan Approvals](/endpoints/lending/get-loan-approvals) |
+| `approvals.setMode`, `approvals.confirmMode` | [Set Loan Approvals](/endpoints/lending/set-loan-approvals) |
+| `approvals.request` | [Create Loan Request](/endpoints/lending/create-loan-request) |
+| `approvals.list` | [List Loan Requests](/endpoints/lending/list-loan-requests) |
+| `approvals.get` | [Get Loan Request](/endpoints/lending/get-loan-request) |
+| `approvals.approve`, `approvals.confirmApprove` | [Approve Loan Request](/endpoints/lending/approve-loan-request) |
+| `approvals.revoke`, `approvals.confirmRevoke` | [Revoke Loan Approval](/endpoints/lending/revoke-loan-approval) |
+| `approvals.revokeAll`, `approvals.confirmRevokeAll` | [Revoke All Loan Approvals](/endpoints/lending/revoke-all-loan-approvals) |
+| `approvals.decline` | [Decline Loan Request](/endpoints/lending/decline-loan-request) |
+| `approvals.withdraw` | [Withdraw Loan Request](/endpoints/lending/withdraw-loan-request) |

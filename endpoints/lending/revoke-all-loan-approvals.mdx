@@ -1,0 +1,112 @@
+---
+title: 'Revoke All Loan Approvals'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/loan-approvals/revoke-all'
+description: 'Void every approval of a market at once'
+---
+
+Builds the `revokeAll` transaction on the market's approvals contract, and confirms it on a second call with `txHash`. Trusset never signs: the market admin signs the calldata.
+
+The transaction raises the approvals contract's epoch. Every approval signed before it is void on chain from that block on. Approvals signed afterwards count as usual.
+
+Use it in two cases:
+
+- **An approver wallet is lost, replaced or removed.** An approval does not name the wallet that signed it, so removing an approver from the market does not withdraw what it approved. Revoke all, then approve again what should stand.
+- **Before switching approvals back on after they were off.** Approvals survive a switch off and on. Revoke all first when the earlier approvals should not return with the switch.
+
+The route also works while approvals are switched off, as long as the market's approvals contract exists.
+
+Once confirmed, every `APPROVED` request of the market whose approval was signed before the transaction is recorded as `REVOKED`. Requests that still wait (`REQUESTED`) are untouched and can be approved afterwards. To take back one approval, use [Revoke Loan Approval](/endpoints/lending/revoke-loan-approval).
+
+## Who can call
+
+The market admin only: a verified wallet of your instance has to hold `DEFAULT_ADMIN_ROLE` on the market. `LOAN_APPROVER_ROLE` is not enough.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>
+  The market's record ID on your instance.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="signerAddress" type="string">
+  The wallet that will sign. It has to be a verified wallet of your instance that holds `DEFAULT_ADMIN_ROLE` on the market. Defaults to the first such wallet.
+</ParamField>
+
+<ParamField body="txHash" type="string">
+  Hash of the transaction you broadcast. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="transaction" type="object">`{ to, data }`, the unsigned `revokeAll` call on the approvals contract. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="functionName" type="string">`revokeAll`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="signer" type="string">The wallet that signs. When confirming, the wallet that sent the transaction.</ResponseField>
+    <ResponseField name="requiredRole" type="string">`DEFAULT_ADMIN_ROLE`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="approvals" type="string">The market's approvals contract.</ResponseField>
+    <ResponseField name="confirmWith" type="object">`{ endpoint, field }`: the call that confirms this transaction, and `txHash` as the body field that carries the hash. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming.</ResponseField>
+    <ResponseField name="blockNumber" type="number">Block the transaction was mined in. Returned when confirming.</ResponseField>
+    <ResponseField name="epoch" type="string">The approvals contract's epoch after the transaction. Returned when confirming.</ResponseField>
+    <ResponseField name="revoked" type="number">How many approved requests were recorded as `REVOKED`. Returned when confirming.</ResponseField>
+    <ResponseField name="marketId" type="string">The market's record ID on your instance.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseExample>
+```json 200 Calldata
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TRANSACTION",
+    "transaction": {
+      "to": "0x5d2e8c1a7f4b3960e2d1c8a7b6f5e4d3c2b1a098",
+      "data": "0x..."
+    },
+    "functionName": "revokeAll",
+    "signer": "0x7712db30a7b4ffd9c445793089118b60e56d752a",
+    "requiredRole": "DEFAULT_ADMIN_ROLE",
+    "approvals": "0x5d2e8c1a7f4b3960e2d1c8a7b6f5e4d3c2b1a098",
+    "confirmWith": {
+      "endpoint": "POST /lending-external-securities-v2/api/markets/cmwfk2h7x0003jw9w4q8b2n1c/loan-approvals/revoke-all",
+      "field": "txHash"
+    },
+    "marketId": "cmwfk2h7x0003jw9w4q8b2n1c"
+  },
+  "error": null
+}
+```
+```json 200 Confirmed
+{
+  "success": true,
+  "data": {
+    "txHash": "0x3b7e19c4a6d2058f1e4c7a90b2d6f38e5c1a7049d8b3e62f0a5c9d1e7b4f2a86",
+    "signer": "0x7712db30a7b4ffd9c445793089118b60e56d752a",
+    "blockNumber": 6789230,
+    "approvals": "0x5d2e8c1a7f4b3960e2d1c8a7b6f5e4d3c2b1a098",
+    "epoch": "1",
+    "revoked": 2,
+    "marketId": "cmwfk2h7x0003jw9w4q8b2n1c"
+  },
+  "error": null
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `TX_REVERTED` | `400` | The transaction reverted on chain |
+| `TX_NOT_VERIFIED` | `400` | The transaction emits no `AllLoanApprovalsRevoked` from the approvals contract of this market |
+| `NOT_MARKET_ADMIN` | `403` | No verified wallet of your instance holds `DEFAULT_ADMIN_ROLE` on the market. An approver role is not enough |
+| `SIGNER_NOT_AUTHORIZED` | `403` | `signerAddress` is not a verified wallet of your instance that holds `DEFAULT_ADMIN_ROLE` on the market |
+| `APPROVAL_NOT_INSTANCE_BOUND` | `403` | The transaction was signed by a wallet that is not verified for your instance |
+| `TX_NOT_FOUND` | `404` | The transaction is not found or not mined yet |
+| `LOAN_APPROVAL_NOT_REQUIRED` | `409` | The market has no approvals contract, so there are no approvals to revoke |
+| `LOAN_APPROVALS_CUSTOM` | `409` | The market names an approvals contract that the Trusset approvals factory did not build, which the API cannot read or write |
+| `APPROVAL_WOULD_REVERT` | `409` | The approvals contract would refuse this as it stands, so nothing was built |
+| `CHAIN_UNAVAILABLE` | `503` | The chain could not be read just now |

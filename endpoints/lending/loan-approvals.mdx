@@ -1,0 +1,92 @@
+---
+title: 'Loan Approvals'
+description: 'An optional switch that makes every draw on a market wait for an approval of the lender of record'
+---
+
+Approve-only loans are a switch per market, **off by default**. A market that does not use it answers exactly as before. With the switch on, the market requires the lender of record's approval for every draw: opening a loan and borrowing more.
+
+- The switch lives on chain. The market names a per-market approvals contract, read with `loanApprovals()`. The market admin (`DEFAULT_ADMIN_ROLE`) sets it.
+- Approvals are signed on chain, by the market admin or by a wallet that holds `LOAN_APPROVER_ROLE`.
+- One approval admits one draw of at most the approved amount until `validUntil`. The draw consumes it.
+- Repayment, closing, collateral moves and liquidation never need an approval.
+
+Trusset never signs. Every route that changes the chain returns unsigned calldata, and a second call with `txHash` confirms it.
+
+## Switch it on
+
+The market's creator can ask for approve-only loans at deployment with `approveOnlyLoans` on [Deploy Market](/endpoints/lending/deploy-market). The deployment itself is unchanged on chain. The wish is recorded and becomes the setup step `enableLoanApprovals` for the lender of record after adoption. [Get Loan Approvals](/endpoints/lending/get-loan-approvals) shows it as `requested: true` until the lender of record switches it on.
+
+A market created with `approveOnlyLoans: true` hands out no loan calldata through the API until the lender of record signs the switch. Until then [Open Loan](/endpoints/lending/open-loan) and [Borrow More](/endpoints/lending/borrow-more) answer `409 LOAN_APPROVALS_PENDING`. The market admin can also clear the request by switching approvals off. The contract itself enforces approvals only once the switch is signed.
+
+The market admin switches approve-only loans on or off with [Set Loan Approvals](/endpoints/lending/set-loan-approvals). Switching on takes up to two signatures: the first builds the market's approvals contract, the second names it on the market.
+
+[Get Deployment Options](/endpoints/lending/get-deployment-options) says in `loanApprovals.available` whether the network carries approve-only loans.
+
+## Who approves
+
+| Signer | How it gets the right |
+|---|---|
+| The market admin | Holds `DEFAULT_ADMIN_ROLE` on the market |
+| A loan approver | Holds `LOAN_APPROVER_ROLE` on the market. The role identifier is keccak256 of `LOAN_APPROVER_ROLE`. The market admin grants and revokes it with the market's own `grantRole` |
+
+`LOAN_APPROVER_ROLE` approves and revokes loan approvals, nothing else.
+
+## Flow
+
+1. **Request.** The borrower side asks for an approval with [Create Loan Request](/endpoints/lending/create-loan-request): the wallet, the amount, and the loan when it is an additional draw. A new request by the same instance for the same wallet and loan replaces its earlier waiting one.
+2. **Decide.** The lender of record approves with [Approve Loan Request](/endpoints/lending/approve-loan-request), or declines with [Decline Loan Request](/endpoints/lending/decline-loan-request). It may approve the requested amount or less. While the request is still `REQUESTED`, the borrower side can withdraw it with [Withdraw Loan Request](/endpoints/lending/withdraw-loan-request).
+3. **Draw.** The borrower opens the loan with [Open Loan](/endpoints/lending/open-loan) or draws with [Borrow More](/endpoints/lending/borrow-more). Without a covering approval both answer `409 LOAN_APPROVAL_REQUIRED`. With one, the prepared response carries `loanApproval`.
+4. **Used.** When the open-loan or borrow-more confirm sees the approval consumed, the request becomes `USED`.
+
+The lender of record can take back an approval that is still on chain with [Revoke Loan Approval](/endpoints/lending/revoke-loan-approval).
+
+An approval in force is never replaced. While a usable approval is on chain for a borrower and loan, [Approve Loan Request](/endpoints/lending/approve-loan-request) answers `409 APPROVAL_IN_FORCE`. Revoke it first, then approve again. A lapsed approval can be replaced directly.
+
+## Lost or replaced approver wallet
+
+An approval does not name the wallet that signed it. Removing an approver from the market does not withdraw what it approved. The market admin voids every approval of the market at once with [Revoke All Loan Approvals](/endpoints/lending/revoke-all-loan-approvals). Approvals also survive a switch off and on, so revoke all before switching approvals back on when the earlier ones should not return.
+
+## Validity
+
+An approval is valid until its `validUntil`. Through the API it runs at most 29 days (`validHours` from 1 to 696, default 72). The contract allows at most 30 days.
+
+## States
+
+| Status | Meaning |
+|---|---|
+| `REQUESTED` | The request waits for the lender of record |
+| `APPROVED` | The approval is confirmed on chain |
+| `USED` | The open-loan or borrow-more confirm saw the approval consumed |
+| `DECLINED` | The lender of record declined the request |
+| `WITHDRAWN` | The borrower side withdrew the request |
+| `REVOKED` | The lender of record revoked the approval |
+| `EXPIRED` | The approval is past its `validUntil` |
+| `CLOSED` | The approval is no longer on chain without a recorded use or revoke. It was used or revoked outside the API |
+
+`nextStep` on a request says what your side does next: `APPROVE_OR_DECLINE`, `WAIT_FOR_BANK`, `OPEN_LOAN`, `WAIT_FOR_BORROWER` or `NONE`.
+
+## Limits
+
+Limits are per instance. An instance keeps at most 3 waiting requests per wallet and 25 per market, and a further one is refused with `429 LOAN_REQUEST_LIMIT`. Requests by different instances for the same wallet do not block each other. `409 LOAN_REQUEST_OPEN` only means the same instance made the same request a moment ago.
+
+[List Loan Requests](/endpoints/lending/list-loan-requests) pages the queue with `limit` and `offset`. Open requests come first, so a waiting request is never cut off by newer history.
+
+## What Trusset never receives
+
+- Personal data. The routes carry no personal data fields and refuse them with `PERSONAL_DATA_REFUSED`. `externalReference` takes 1 to 64 letters, digits, dots, underscores or hyphens, for your own case number.
+- A key. Every on-chain write is signed by the wallet that holds the role.
+
+## Routes
+
+| Route | Who |
+|---|---|
+| [Get Loan Approvals](/endpoints/lending/get-loan-approvals) | anyone who holds the market |
+| [Set Loan Approvals](/endpoints/lending/set-loan-approvals) | the market admin |
+| [Create Loan Request](/endpoints/lending/create-loan-request) | anyone who holds the market |
+| [List Loan Requests](/endpoints/lending/list-loan-requests) | the lender of record sees all; others see their own |
+| [Get Loan Request](/endpoints/lending/get-loan-request) | the parties |
+| [Approve Loan Request](/endpoints/lending/approve-loan-request) | the lender of record |
+| [Revoke Loan Approval](/endpoints/lending/revoke-loan-approval) | the lender of record |
+| [Revoke All Loan Approvals](/endpoints/lending/revoke-all-loan-approvals) | the market admin |
+| [Decline Loan Request](/endpoints/lending/decline-loan-request) | the lender of record |
+| [Withdraw Loan Request](/endpoints/lending/withdraw-loan-request) | the borrower side |
