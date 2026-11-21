@@ -1,0 +1,133 @@
+---
+title: 'Create Loan Agreement'
+api: 'POST /lending-external-securities-v2/api/markets/{marketId}/loan-agreements'
+description: 'Request a loan agreement as the borrower, or create one for a wallet as the bank'
+---
+
+Creates a loan agreement on a market whose policy is `OPTIONAL` or `REQUIRED`.
+
+- **As the borrower side**, you request a `LOAN` agreement with the figures you want. It starts `REQUESTED` and the bank issues it, or it is issued at once when the policy has `autoIssue` and the figures are inside the market rules. The same request sent again while it waits returns the existing agreement with `created: false`.
+- **As the bank**, you create a `LOAN` agreement for a wallet, or a `FRAMEWORK` agreement with a credit limit and an end date. It is issued at once: the schedule is frozen and the salt created. This needs the Scale plan.
+
+The figures are checked against the market: the principal or limit at least the market minimum, the collateral within the per-borrower cap, and the principal within what the collateral supports at the current price. A new issued agreement of the same kind for the same wallet supersedes an earlier open one.
+
+The schedule names no person. Send no names and no file: the body is checked for both.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>
+  The market's record ID on your instance.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="borrowerWallet" type="string" required>
+  The wallet that will borrow.
+</ParamField>
+
+<ParamField body="kind" type="string">
+  `LOAN` (default) or `FRAMEWORK`. Only the bank creates a `FRAMEWORK` agreement.
+</ParamField>
+
+<ParamField body="collateralAmount" type="string">
+  `LOAN` only, required. Collateral units as a decimal string.
+</ParamField>
+
+<ParamField body="borrowAmount" type="string">
+  `LOAN` only, required. The principal in the settlement asset, as a decimal string.
+</ParamField>
+
+<ParamField body="limit" type="string">
+  `FRAMEWORK` only, required. The credit limit in the settlement asset.
+</ParamField>
+
+<ParamField body="validUntil" type="string">
+  `FRAMEWORK` only, required. An ISO date or unix seconds, at least one day and at most 1830 days ahead.
+</ParamField>
+
+<ParamField body="payTo" type="string">
+  The wallet that receives the proceeds, if not the borrower.
+</ParamField>
+
+<ParamField body="externalReference" type="string">
+  Your own case or file number: 1 to 64 letters, digits, dots, underscores or hyphens. No personal data.
+</ParamField>
+
+<ParamField body="validityDays" type="number">
+  Bank only. Shortens the offer for this agreement; never longer than the policy.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  Bank only. The admin wallet named as lender in the schedule. Defaults to your first verified admin wallet.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="agreement" type="object">The agreement. See [Get Loan Agreement](/endpoints/lending/get-loan-agreement#response-fields).</ResponseField>
+    <ResponseField name="created" type="boolean">`false` when the same request already waited. HTTP `200` then, `201` otherwise.</ResponseField>
+    <ResponseField name="autoIssue" type="object">When the policy has `autoIssue`: `{ attempted, issued, reason }`. `reason` is `WAITING_FOR_BANK` when it stayed `REQUESTED`; the bank then issues or declines it.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseExample>
+```json 201 Requested
+{
+  "success": true,
+  "data": {
+    "agreement": {
+      "ref": "agr_k3vx7q2mwd4h5pn6tr8a",
+      "kind": "LOAN",
+      "status": "REQUESTED",
+      "marketAddress": "0x41b9c4d5dee70a5e3682094462e5065275e728a9",
+      "chainRef": {
+        "network": "ETHEREUM",
+        "instanceType": "DEVELOPMENT"
+      },
+      "borrowerWallet": "0x7c1e3a5f2b9d4e6a8c0f1b3d5e7a9c2b4d6f8e1a",
+      "externalReference": "CASE-2026.11_042",
+      "scheduleHash": "0x8e2c4a6f1b3d5e7a9c0f2b4d6e8a1c3f5b7d9e0a2c4f6b8d1e3a5c7f9b0d2e4a",
+      "scheduleVersion": "1.0.0",
+      "scheduleFrozen": false,
+      "hashScheme": "SALTED_V1",
+      "documentCommitment": null,
+      "certificateCommitment": null,
+      "copyVerified": null,
+      "nextStep": "ISSUE",
+      "expiresAt": null,
+      "requestedByThisInstance": true,
+      "issuedByThisInstance": false,
+      "viewerRole": {
+        "bank": false,
+        "borrower": true
+      }
+    },
+    "created": true,
+    "marketId": "cmwfk2h7x0003jw9w4q8b2n1c"
+  },
+  "error": null
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `DOCUMENT_CONTENT_REFUSED` | `400` | The body carries file content. Keep the file with you and send only the salted commitment |
+| `PLAIN_HASH_REFUSED` | `400` | The body carries the plain hash of a file (`contentHash`, `sha256` and similar). Send the salted commitment instead |
+| `PERSONAL_DATA_REFUSED` | `400` | The body carries a personal data field such as `name` or `email`. Use wallet addresses and `externalReference` only |
+| `VALIDATION_ERROR` | `400` | A field is missing, has the wrong type, or is not part of this route |
+| `INVALID_WALLET` | `400` | `borrowerWallet` or `payTo` is not an address |
+| `INVALID_EXTERNAL_REFERENCE` | `400` | `externalReference` is not 1 to 64 safe characters |
+| `INVALID_AGREEMENT_FIGURES` | `400` | A required amount is missing for the kind |
+| `INVALID_VALID_UNTIL` | `400` | `validUntil` is not a date at least one day and at most 1830 days ahead |
+| `AGREEMENT_FEATURE_REQUIRED` | `402` | The bank's plan does not include loan agreements |
+| `AGREEMENT_BANK_ONLY` | `403` | Only the bank creates a `FRAMEWORK` agreement |
+| `AGREEMENT_POLICY_OFF` | `409` | Loan agreements are off on this market. Open the loan as today, or ask the bank to switch them on |
+| `AGREEMENT_REQUEST_LIMIT` | `409` | Your instance already has 3 open requests for this wallet, or 25 on this market. Withdraw the requests you no longer need, or wait for the bank |
+| `MARKET_PRICE_UNAVAILABLE` | `409` | The market could not value the collateral just now. Retry once the price is fresh |
+| `AGREEMENT_FIGURES_OUTSIDE_MARKET` | `422` | The figures break a market rule. `details.problems` names each |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `CHAIN_UNAVAILABLE`, `SERVICE_UNAVAILABLE` | `503` | The market or your instance's wallets could not be read just now. Nothing was decided. Retry shortly |
