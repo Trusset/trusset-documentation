@@ -1,0 +1,60 @@
+---
+title: 'Get Liquidation Desk'
+api: 'GET /lending-external-securities-v2/api/liquidations/{marketId}/desk'
+description: 'Everything the liquidation desk of one market needs, in one read'
+---
+
+Returns, in one read, what a lender of record needs to work the market's liquidations: the loans that can be realized now, the loans close to it, the running and ended Dutch auctions, the records awaiting sale, how the records compare with the chain, and whether the lender of record's liquidator is ready. Every figure is read from the chain. A part that could not be read says so; it never reads as an all-clear.
+
+Poll it with the `cursor` the previous read returned. While nothing on the market moved and nothing needs work, the answer is `unchanged: true` with no body, which costs one small batched read. `pollSeconds` says when to read again: `120` on a quiet desk, `30` while anything needs work.
+
+## Path Parameters
+
+<ParamField path="marketId" type="string" required>The market's record ID, as `id` on [List Markets](/endpoints/lending/list-markets), not its contract address. At most 100 characters.</ParamField>
+
+## Query Parameters
+
+<ParamField query="cursor" type="string">The `cursor` of the previous read. Ignored when longer than 64 characters.</ParamField>
+
+<ParamField query="watchBand" type="number" default="1.25">Health factor below which a loan is listed in `loans.watchLoans`, from `1.01` to `3`. Other values fall back to the default.</ParamField>
+
+<ParamField query="graceDays" type="integer" default="7">Days ahead in which a termed loan whose grace period ends is listed in `loans.watchLoans`, from `0` to `90`.</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="unchanged" type="boolean">`true` when the cursor still matches a quiet desk. No other field but `cursor`, `readAt` and `pollSeconds` is sent then.</ResponseField>
+    <ResponseField name="cursor" type="string">Pass it on the next read. `null` when the market could not be read.</ResponseField>
+    <ResponseField name="readAt" type="string">ISO 8601 time of the read.</ResponseField>
+    <ResponseField name="pollSeconds" type="integer">Seconds until the next read is worth making.</ResponseField>
+    <ResponseField name="marketPaused" type="boolean">Whether the market is paused. While it is, bids revert and only a `LIQUIDATOR_ROLE` holder may settle an expired auction. `null` when unread.</ResponseField>
+    <ResponseField name="loans" type="object">The loan book: `liquidatableLoans`, `termedLoans`, `auctionedLoans` (loans an auction is already realizing) and `watchLoans`, with `readFailed` and the completeness of each scan. The shapes match [Get Liquidatable Loans](/endpoints/lending/get-liquidatable-loans).</ResponseField>
+    <ResponseField name="auctions" type="object">Active auctions with `phase`, `expired`, `biddable` and `settleable`, as on [List Auctions](/endpoints/lending/list-auctions), and `readFailed`.</ResponseField>
+    <ResponseField name="pending" type="object">`rows`, `readFailed` and `truncated`: the records awaiting sale, as on [Get Pending Liquidations](/endpoints/lending/get-pending-liquidations).</ResponseField>
+    <ResponseField name="sync" type="object">
+      How the records compare with the chain.
+      <Expandable>
+        <ResponseField name="state" type="string">`CURRENT`, `BEHIND` or `FAILED`. `BEHIND` when the market holds a liquidation no record shows yet, or the reconciliation could not finish.</ResponseField>
+        <ResponseField name="chainHasOpenDebt" type="boolean">Whether the market carries liquidation debt awaiting settlement. `null` when unread.</ResponseField>
+        <ResponseField name="recorded" type="integer">Open records this instance holds.</ResponseField>
+        <ResponseField name="unrecordedOnChain" type="boolean">`true` when the market holds liquidation debt that no record here shows.</ResponseField>
+        <ResponseField name="unrecordedOpen" type="integer">Liquidations the market holds open that no record here shows yet.</ResponseField>
+        <ResponseField name="unresolved" type="integer">Market records not matched to a router record or an auction yet.</ResponseField>
+        <ResponseField name="watchBehind" type="boolean">Whether the background watch reports this market behind.</ResponseField>
+        <ResponseField name="watchGaveUpAt" type="string">ISO 8601 time the background adoption stopped retrying, or `null`.</ResponseField>
+        <ResponseField name="lastSyncedAt" type="string">ISO 8601 time of this comparison.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="lenderOfRecord" type="object">`ready` (whether a wallet or connected bot of the lender of record holds `LIQUIDATOR_ROLE`, `null` when unread), `via` (`WALLET` or `BOT`), `holder`, and `routerAdmin`, the lender-of-record wallet that holds `DEFAULT_ADMIN_ROLE` on the router and signs router-side setup.</ResponseField>
+    <ResponseField name="customers" type="object">Your own instance's customer names for the borrower wallets on the desk, keyed by lowercase address. Never another instance's customers.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address yet |
+| `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `CHAIN_READ_FAILED` | `503` | The desk could not be read, so whether anything is open is unknown. Retry in a moment |

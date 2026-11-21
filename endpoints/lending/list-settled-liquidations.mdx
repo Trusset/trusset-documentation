@@ -6,7 +6,9 @@ description: 'List closed liquidations with what they realized and any collatera
 
 Returns the market's liquidation records that are settled or written off, newest first. Each router record is checked against the router, so the list also shows collateral a settlement left behind on the router, and whether [Reopen Liquidation](/endpoints/lending/reopen-liquidation) can still bring it back.
 
-Before answering, the endpoint re-reads each settled record's figure from the market. A record whose stored `usdcProceeds` understates what the market's record settled over is corrected, in the response and in the stored record.
+Before answering, the endpoint re-reads each record from the chain and corrects what the chain contradicts, in the response and in the stored record: the seized collateral and the debt from the market's own record, the seizure time and transaction, the auction that carried it, the settlement transaction and its block time, and a stored `usdcProceeds` that understates what the market's record settled over. Every instance that holds the market therefore reads the same history, whichever of them confirmed each step.
+
+Filter by settlement date with `from` and `to`, and add `format=csv` for the same records as a CSV statement.
 
 ## Path Parameters
 
@@ -22,6 +24,18 @@ Before answering, the endpoint re-reads each settled record's figure from the ma
   Records to skip, newest first. Page with `offset` until `hasMore` is `false`.
 </ParamField>
 
+<ParamField query="from" type="string">
+  Earliest settlement date, as `YYYY-MM-DD` (from the start of that day, UTC) or an ISO 8601 timestamp with an offset. A record with no settlement date is filtered on its seizure date. The date must exist on the calendar: `2026-02-30` is refused, never rolled over.
+</ParamField>
+
+<ParamField query="to" type="string">
+  Latest settlement date, as `YYYY-MM-DD` (through the end of that day, UTC) or an ISO 8601 timestamp. Must not be before `from`.
+</ParamField>
+
+<ParamField query="format" type="string">
+  `csv` returns the records as a CSV file instead of JSON: one row per record, unit-labelled headers, at most the 1000 newest records in the range, with `X-Total-Count` and `X-Truncated` headers. `limit` and `offset` are ignored. Transaction columns are empty where no transaction is known.
+</ParamField>
+
 ## Response Fields
 
 <ResponseField name="data" type="object">
@@ -30,6 +44,7 @@ Before answering, the endpoint re-reads each settled record's figure from the ma
     <ResponseField name="limit" type="integer">The page size applied.</ResponseField>
     <ResponseField name="offset" type="integer">The records skipped.</ResponseField>
     <ResponseField name="hasMore" type="boolean">`true` while records beyond this page exist.</ResponseField>
+    <ResponseField name="range" type="object">The applied range as ISO 8601 `from` and `to`, or `null` without one.</ResponseField>
     <ResponseField name="settledLiquidations" type="array">
       Ordered by `settledAt`, then `createdAt`, then `id`, newest first.
       <Expandable>
@@ -182,6 +197,7 @@ const toReopen = data.settledLiquidations.filter((l) => l.reopenable === true);
 | Code | HTTP | Cause |
 |---|---|---|
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
+| `INVALID_RANGE` | `400` | `from` or `to` is not a real calendar date in an accepted form, or `from` is after `to` |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
 
 A failed database read answers `500 INTERNAL_ERROR`. A failed chain read never fails the request: the fields that depend on it are left out.
