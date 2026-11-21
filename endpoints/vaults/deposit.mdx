@@ -25,7 +25,7 @@ A vault without a register of its own takes its depositor gate from its markets.
 </ParamField>
 
 <ParamField body="holderAddress" type="string">
-  Wallet that will sign. When it is a `0x` address, the API checks it against the vault's register, the register the vault adopted when it has none of its own, and each market's provider register. It refuses with `DEPOSITOR_NOT_VERIFIED` when the deposit would revert, and with `ELIGIBILITY_REMOVAL_PENDING` when the wallet's admission to one of those registers waits for removal. It also checks that the wallet holds `amount` of the asset, and reads whether the wallet is already bound to a distributor. Omit it to skip these checks; the contract enforces the registers either way. Any other non-empty value is refused with `INVALID_HOLDER_ADDRESS`.
+  Wallet that will sign. When it is a `0x` address, the API checks it against the vault's register, the register the vault adopted when it has none of its own, and each market's provider register. It refuses with `DEPOSITOR_NOT_VERIFIED` when the deposit would revert, and with `ELIGIBILITY_REMOVAL_PENDING` when the wallet's admission to one of those registers waits for removal. It also checks that the wallet holds `amount` of the asset, and reads whether the wallet is already bound to a distributor. Send it. Only then does the deposit step carry a `gasLimit`, as [Gas limit](#gas-limit) describes. Without it, the API skips these checks, and the contract enforces the registers either way. Any other non-empty value is refused with `INVALID_HOLDER_ADDRESS`.
 </ParamField>
 
 ## When the wallet is not verified
@@ -89,12 +89,20 @@ The `attribution` block states what this deposit does:
 
 The binding follows the wallet that signs the deposit, not `holderAddress`. Name the signing wallet, or the checks and the `binding` reading describe the wrong wallet.
 
+## Gas limit
+
+The gas a deposit uses depends on whether the markets the vault has consented to draw for have already accrued interest in the current block. A wallet that estimates in the same block as another deposit sees that accrual done and estimates too little. Its deposit lands in a later block, accrues there, and can run out of gas.
+
+With `holderAddress`, the API waits for a block past those markets' last accrual and simulates the steps from that wallet with `eth_simulateV1`. The deposit step, and any `recordMarketLoss` step, then carries `gasLimit`: the gas it used plus 50 percent. The API simulates again under that limit and raises it where a step falls short. The approval carries no `gasLimit`.
+
+Without `holderAddress`, no step carries `gasLimit`. Neither does a step the node could not simulate or that failed in the simulation, and the wallet falls back to its own estimate. Send `holderAddress`, and sign each step with its `transaction` as handed, `gasLimit` included.
+
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`.</ResponseField>
-    <ResponseField name="steps" type="array">Ordered transactions to sign and broadcast: any `recordMarketLoss` steps, the approval on the asset, then the deposit on the vault. Each step is `{ action, transaction, functionName, description }`, with `transaction` carrying `to`, `data`, `value` (`"0"`) and `chainId`.</ResponseField>
+    <ResponseField name="steps" type="array">Ordered transactions to sign and broadcast: any `recordMarketLoss` steps, the approval on the asset, then the deposit on the vault. Each step is `{ action, transaction, functionName, description }`, with `transaction` carrying `to`, `data`, `value` (`"0"`) and `chainId`. The deposit and `recordMarketLoss` steps also carry `gasLimit` when `holderAddress` was sent. See [Gas limit](#gas-limit).</ResponseField>
     <ResponseField name="functionName" type="string">`deposit`.</ResponseField>
     <ResponseField name="confirmStepIndex" type="integer">Index of the deposit step, the last one. Confirm with its hash.</ResponseField>
     <ResponseField name="recordsWriteOffs" type="array">Present only when `steps` starts with `recordMarketLoss` steps: one `{ marketAddress, amountRaw }` per market whose write-off the vault records first, the amount in the asset's smallest unit.</ResponseField>
@@ -173,6 +181,7 @@ await fetch(`${base}/${vaultId}/confirm-tx`, {
         "transaction": {
           "to": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
           "data": "0x6e553f65...",
+          "gasLimit": "387453",
           "value": "0",
           "chainId": 11155111
         },

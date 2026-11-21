@@ -29,7 +29,7 @@ A market takes no deposit of its own from third parties, so this is how a client
 </ParamField>
 
 <ParamField body="holderAddress" type="string">
-  Wallet that will sign the deposit. When supplied, the API checks it against the vault's own register and refuses with `DEPOSITOR_NOT_VERIFIED` where the register says no. On a vault that supports distributor attribution, it also checks the register the vault adopted when it has none of its own, and the provider register of every market the vault funds or has consented to draw for. A wallet whose admission to any of these registers is waiting for removal is refused with `ELIGIBILITY_REMOVAL_PENDING`. The API then reads whether the wallet is already bound to a distributor, and refuses with `INSUFFICIENT_BALANCE` when it holds less than `amount` of the vault's asset. Omit it to skip these checks. The vault enforces its registers on-chain either way.
+  Wallet that will sign the deposit. When supplied, the API checks it against the vault's own register and refuses with `DEPOSITOR_NOT_VERIFIED` where the register says no. On a vault that supports distributor attribution, it also checks the register the vault adopted when it has none of its own, and the provider register of every market the vault funds or has consented to draw for. A wallet whose admission to any of these registers is waiting for removal is refused with `ELIGIBILITY_REMOVAL_PENDING`. The API then reads whether the wallet is already bound to a distributor, and refuses with `INSUFFICIENT_BALANCE` when it holds less than `amount` of the vault's asset. Send it. Only then does the deposit step carry a `gasLimit`, as [Gas limit](#gas-limit) describes. Without it, the API skips these checks, and the vault enforces its registers on-chain either way.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -50,6 +50,12 @@ The deposit names your instance as the depositor's distributor. It carries your 
 
 When the vault operator has not approved your instance's wallet as a distributor, the API builds a plain `deposit(amount)` instead, so the deposit still goes through unattributed. `attribution.binding` says what this deposit does, with the same values as [Deposit](/endpoints/vaults/deposit#distributor-attribution) on the vault surface. Show `attribution.warning` before the depositor signs.
 
+## Gas limit
+
+A wallet that estimates the deposit in the same block as another deposit into the vault can estimate too little, because the markets the vault has consented to draw for have already accrued interest in that block. The deposit then lands in a later block and can run out of gas.
+
+With `holderAddress`, the API waits for a block past those markets' last accrual, simulates the steps from that wallet with `eth_simulateV1`, and hands the deposit step, and any `recordMarketLoss` step, a `gasLimit` of the gas used plus 50 percent, checked in a second simulation under that limit. Without `holderAddress`, no step carries `gasLimit`. Send `holderAddress`, and sign each step with its `transaction` as handed, `gasLimit` included. See [Gas limit](/endpoints/vaults/deposit#gas-limit) on the vault surface.
+
 ## Confirm the deposit
 
 Broadcast every step in order. Send the hash of the deposit step, at `confirmStepIndex`, back to this same endpoint as `{ "txHash": "0x..." }`, as `confirmWith` names. The approval's hash or a `recordMarketLoss` step's does not confirm the deposit.
@@ -61,7 +67,7 @@ The API verifies the receipt against the vault and reads the amount and the depo
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`. Returned when `txHash` is omitted.</ResponseField>
-    <ResponseField name="steps" type="array">Ordered transactions to sign and broadcast: any `recordMarketLoss` steps, the approval on the vault's asset, then the deposit on the vault. Each step is `{ action, transaction, functionName, description }`, with `transaction` carrying `to`, `data`, `value` (`"0"`) and `chainId`. Returned when `txHash` is omitted.</ResponseField>
+    <ResponseField name="steps" type="array">Ordered transactions to sign and broadcast: any `recordMarketLoss` steps, the approval on the vault's asset, then the deposit on the vault. Each step is `{ action, transaction, functionName, description }`, with `transaction` carrying `to`, `data`, `value` (`"0"`) and `chainId`. The deposit and `recordMarketLoss` steps also carry `gasLimit` when `holderAddress` was sent. See [Gas limit](#gas-limit). Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="functionName" type="string">`deposit`. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="confirmStepIndex" type="integer">Index of the deposit step, the last one. Confirm with its hash. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="recordsWriteOffs" type="array">Present only when `steps` starts with `recordMarketLoss` steps: one `{ marketAddress, amountRaw }` per market whose write-off the vault records first, the amount in the asset's smallest unit.</ResponseField>
@@ -154,6 +160,7 @@ const { data: recorded } = await confirm.json();
         "transaction": {
           "to": "0x4d0cfe39a3431b145d1a1393d901a36d459a1b13",
           "data": "0x6e553f65...",
+          "gasLimit": "387453",
           "chainId": 11155111,
           "value": "0"
         },
