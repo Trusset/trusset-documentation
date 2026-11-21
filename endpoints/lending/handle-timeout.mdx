@@ -9,10 +9,10 @@ Writes off a liquidation the operator was unable to settle. The market clears th
 This is a loss-recognition step, not a recovery step. Use it when collateral proved unsellable within the window, or when a sale realised nothing.
 
 <Warning>
-  Write-off does not touch the liquidation router. The router's record stays open and whatever collateral it still holds stays there. This API then refuses every further action on the record, because `WRITTEN_OFF` is terminal here. Withdraw it first with [Withdraw Collateral for Sale](/endpoints/lending/withdraw-collateral-for-sale). Otherwise it is stranded as far as this API is concerned.
+  Write-off does not touch the liquidation router. The router's record stays open and whatever collateral it still holds stays there. The record moves to `WRITTEN_OFF` here, but while its router record is open this API still accepts [Withdraw Collateral for Sale](/endpoints/lending/withdraw-collateral-for-sale), [Sell Pending Liquidation](/endpoints/lending/sell-pending-liquidation), [Report Partial Sale](/endpoints/lending/report-partial-sale), [Settle Liquidation](/endpoints/lending/settle-liquidation) and [Close Liquidation](/endpoints/lending/close-liquidation) on it. [Get Pending Liquidations](/endpoints/lending/get-pending-liquidations) keeps listing it with `writtenOff: true`.
 </Warning>
 
-On-chain the router's record remains settleable by its operator, so late proceeds can still reach the market directly. The market applies them to the pool's loss first and then to what the insurance fund advanced.
+Proceeds of a later sale reach the market as late proceeds. The market applies them to the pool's loss first and then to what the insurance fund advanced. The record keeps `WRITTEN_OFF` throughout.
 
 ## Path Parameters
 
@@ -28,6 +28,8 @@ On-chain the router's record remains settleable by its operator, so late proceed
 
 <ParamField body="txHash" type="string">
   Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata. A value that is not `0x` followed by 64 hex characters is refused with `400 VALIDATION_ERROR` and nothing is built or recorded. `null` or an empty string counts as omitted.
+
+  A confirm call is accepted even when the record already reads `WRITTEN_OFF`. A background sync may record the write-off before your confirm arrives, and the confirm still verifies and records it.
 </ParamField>
 
 ## Response Fields
@@ -49,7 +51,7 @@ On-chain the router's record remains settleable by its operator, so late proceed
 
 The clock starts at the seizure, when the market opened its pending liquidation record. For a liquidation seized straight to the router, that is when the router received the collateral: `onChainData.timestamp` on [Get Pending Liquidations](/endpoints/lending/get-pending-liquidations). For the remainder of an expired auction the clock started earlier, at the seizure into the auction.
 
-The write-off is possible only once the window has fully elapsed. Calling before then is refused with `LIQUIDATION_NOT_TIMED_OUT`, and the error carries `eligibleAt`, the moment after which a retry succeeds.
+The write-off is possible only once the window has fully elapsed. Calling before then is refused with `LIQUIDATION_NOT_TIMED_OUT`, and the error carries `eligibleAt`, the moment after which a retry succeeds. `writeOff.writeOffFrom` on [Get Pending Liquidations](/endpoints/lending/get-pending-liquidations) shows it in advance as the first accepted second, one second past `eligibleAt`.
 
 ## What the Write-Off Does
 
@@ -159,7 +161,7 @@ if (error?.code === 'LIQUIDATION_NOT_TIMED_OUT') {
 |---|---|---|
 | `VALIDATION_ERROR` | `400` | `txHash` is present but malformed. Nothing was built or recorded |
 | `AMBIGUOUS_LIQUIDATION_ID` | `400` | This ID exists on more than one market in your instance. The error carries `candidates`; resend with `marketId` |
-| `ALREADY_SETTLED` | `400` | The liquidation is already settled or written off, here or on the market |
+| `ALREADY_SETTLED` | `400` | The liquidation is already settled or written off, here or on the market. A confirm call with `txHash` skips the check here |
 | `LIQUIDATION_NOT_FOUND` | `400` | The market holds no pending liquidation under the resolved market-local ID |
 | `LIQUIDATION_NOT_TIMED_OUT` | `400` | The window has not elapsed. The error carries `eligibleAt` |
 | `WALLET_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance to resolve the signer against |

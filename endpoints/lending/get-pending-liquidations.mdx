@@ -4,9 +4,11 @@ api: 'GET /lending-external-securities-v2/api/liquidations/{marketId}/pending-li
 description: 'List liquidations awaiting settlement'
 ---
 
-Returns the market's liquidation records that are neither settled nor written off. Most are router records whose collateral sits at the router awaiting the manual settlement workflow. A record whose Dutch auction is still open appears too, under a `venue-` ID, until the auction sells out or hands its remainder to the router.
+Returns the market's liquidation records that are still open. Most are router records whose collateral sits at the router awaiting the manual settlement workflow. A record whose Dutch auction is still open appears too, under a `venue-` ID, until the auction sells out or hands its remainder to the router.
 
-Before reading, the endpoint reconciles against the chain. It adopts any record on the market's router the backend has not recorded, so a liquidation triggered outside this API still appears here once its collateral reaches the router. It also closes records the router has settled since, including atomic sales, when the confirm call for that settlement never arrived.
+The list also carries records the market wrote off after its 7 day timeout while their router record is still open. They read `status: WRITTEN_OFF` and `writtenOff: true`. Their collateral can still be withdrawn, sold and settled, and the proceeds reach the pool as late proceeds. Do not call [Handle Liquidation Timeout](/endpoints/lending/handle-timeout) on such a row: the market has already written it off, and the call is refused with `ALREADY_SETTLED`.
+
+Before reading, the endpoint reconciles against the chain. It adopts any record on the market's router the backend has not recorded, so a liquidation triggered outside this API still appears here once its collateral reaches the router. It also closes records the router has settled since, including atomic sales, when the confirm call for that settlement never arrived. `sync` reports how that went. The router records, the market's records and the auction cash are then read in one batched call.
 
 ## Path Parameters
 
@@ -16,7 +18,18 @@ Before reading, the endpoint reconciles against the chain. It adopts any record 
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="totalCount" type="integer">Number of records returned. Capped at 100, newest first.</ResponseField>
+    <ResponseField name="totalCount" type="integer">Number of records returned, written-off rows included. Open records come first, newest first, at most 100. Written-off rows follow, drawn from the 200 most recent write-offs.</ResponseField>
+    <ResponseField name="truncated" type="boolean">`true` when either cap was reached, so older records may be missing.</ResponseField>
+    <ResponseField name="readFailed" type="boolean">`true` when part of the chain state could not be read: the router could not be resolved, the batched read failed, or written-off records could not be checked against the router and may be missing.</ResponseField>
+    <ResponseField name="sync" type="object">
+      The chain reconciliation that ran before the read.
+      <Expandable>
+        <ResponseField name="failed" type="boolean">The reconciliation failed. The list may lag the chain.</ResponseField>
+        <ResponseField name="incomplete" type="boolean">Some router records could not be adopted this time, or the router could not be resolved. A later read retries.</ResponseField>
+        <ResponseField name="unresolved" type="integer">Market records whose router record could not be matched yet.</ResponseField>
+        <ResponseField name="adopted" type="integer">Router records adopted by this read.</ResponseField>
+      </Expandable>
+    </ResponseField>
     <ResponseField name="liquidationRouterAddress" type="string">Router holding the collateral for this market, or `null` when it could not be resolved.</ResponseField>
     <ResponseField name="pendingLiquidations" type="array">
       <Expandable>
@@ -32,15 +45,27 @@ Before reading, the endpoint reconciles against the chain. It adopts any record 
         <ResponseField name="termRealization" type="boolean">`true` when the loan was realized on its expired term rather than on its health.</ResponseField>
         <ResponseField name="auctionId" type="string">The Dutch auction that sold or is selling this collateral, or `null` on the router path.</ResponseField>
         <ResponseField name="txHash" type="string">Liquidation transaction hash. Reads `chain-adopted` when the record was reconstructed from chain state and the original transaction could not be located.</ResponseField>
-        <ResponseField name="status" type="string">`PENDING` for every record in this list.</ResponseField>
+        <ResponseField name="status" type="string">`PENDING`, or `WRITTEN_OFF` on a record the market wrote off while its router record is still open.</ResponseField>
+        <ResponseField name="writtenOff" type="boolean">`true` on a written-off record. Never call [Handle Liquidation Timeout](/endpoints/lending/handle-timeout) on it.</ResponseField>
         <ResponseField name="realization" type="string">How the collateral is being realized: `ROUTER` for a record on the router, `VENUE` while its auction runs. `null` when the record does not state it.</ResponseField>
         <ResponseField name="settledTxHash" type="string">`null`, except on a record the router administrator reopened after a settlement, where it keeps that settlement's hash.</ResponseField>
         <ResponseField name="createdAt" type="string">ISO 8601 timestamp of the seizure. Adopted records are backdated to the time the router received the collateral.</ResponseField>
-        <ResponseField name="onChainData" type="object">Live router state, or `null` when the read failed and on every `venue-` record.</ResponseField>
+        <ResponseField name="onChainData" type="object">Live router state. `null` when the router record cannot be read or does not exist, and on every `venue-` record.</ResponseField>
+        <ResponseField name="routerReadFailed" type="boolean">`true` when the router record could not be read. `onChainData` is then `null` for that reason, not because the record is missing.</ResponseField>
         <ResponseField name="proceedsHeld" type="string">Cash the auction venue forwarded for this record that the market holds until the record settles, in borrow asset units. `null` when unknown.</ResponseField>
         <ResponseField name="proceedsForwarded" type="string">Cash the auction venue has forwarded for this record's auction in total. `null` without an auction.</ResponseField>
         <ResponseField name="heldOnMarket" type="boolean">`true` when `proceedsHeld` is above zero. Such a record can settle at zero proceeds over the held cash.</ResponseField>
-        <ResponseField name="marketSettled" type="boolean">Whether the market has already settled or written off its own record. `null` when unknown.</ResponseField>
+        <ResponseField name="marketSettled" type="boolean">Whether the market has already settled or written off its own record. `true` on every written-off row. `null` when unknown.</ResponseField>
+        <ResponseField name="writeOff" type="object">
+          When the market's 7 day write-off opens. `null` on a written-off row, on a row the market has settled, and when no timestamp could be read.
+          <Expandable>
+            <ResponseField name="openedAt" type="string">ISO 8601 time the market opened its record. Falls back to the router's `timestamp` when the market record cannot be read.</ResponseField>
+            <ResponseField name="writeOffFrom" type="string">ISO 8601 time from which [Handle Liquidation Timeout](/endpoints/lending/handle-timeout) accepts the record: one second past `openedAt` plus 7 days.</ResponseField>
+            <ResponseField name="eligible" type="boolean">Whether `writeOffFrom` has passed.</ResponseField>
+            <ResponseField name="secondsLeft" type="integer">Seconds until `writeOffFrom`. `0` once eligible.</ResponseField>
+            <ResponseField name="deadlineSoon" type="boolean">`true` when the write-off opens within 24 hours.</ResponseField>
+          </Expandable>
+        </ResponseField>
       </Expandable>
     </ResponseField>
   </Expandable>
@@ -66,12 +91,12 @@ Before reading, the endpoint reconciles against the chain. It adopts any record 
   </Expandable>
 </ResponseField>
 
-<Warning>
-  A router query for a liquidation ID that does not exist returns a zero-filled object rather than null. Treat `onChainData.timestamp === 0` as "not found", not as a valid timestamp.
-</Warning>
+`onChainData: null` with `routerReadFailed: true` means the router record could not be read. With `routerReadFailed: false` on a response whose `readFailed` is `false`, it means the router has no such record.
+
+Written-off rows also carry the router figures read when the list was built: `routerAddress`, `collateralRemaining`, `proceedsCollected`, `routerSettled`, `collateralStranded`, `reopenable`, `collateralAfterWriteOff` and `routerOpenAfterWriteOff`.
 
 <Note>
-  Track progress with `collateralRemaining` and `proceedsCollected` rather than `status`. Withdrawing collateral for sale and reporting partial sales both leave `status` at `PENDING`. Only settlement, a router close or a write-off changes it.
+  Track progress with `collateralRemaining` and `proceedsCollected` rather than `status`. Withdrawing collateral for sale and reporting partial sales both leave `status` at `PENDING`. Only settlement, a router close or a write-off changes it. A written-off row keeps `WRITTEN_OFF` through a later sale and settlement, and leaves this list once its router record closes.
 </Note>
 
 <RequestExample>
@@ -84,16 +109,15 @@ const res = await fetch(
   `https://api.trusset.org/lending-external-securities-v2/api/liquidations/${marketId}/pending-liquidations`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
-const { data } = await res.json();
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
 
-const overdue = data.pendingLiquidations.filter(l => {
-  const t = l.onChainData?.timestamp;
-  return t && Date.now() / 1000 - t > 7 * 86400;
-});
+const dueForWriteOff = data.pendingLiquidations.filter((row) => !row.writtenOff && row.writeOff?.eligible);
+const stillToSell = data.pendingLiquidations.filter((row) => row.writtenOff);
 ```
 </RequestExample>
 
-The filter above reads the router's clock, which can start later than the market's for an auction remainder. The `eligibleAt` that [Handle Liquidation Timeout](/endpoints/lending/handle-timeout) returns when it refuses is exact.
+`writeOff` runs on the market's own clock, which for an auction remainder started before the router received the collateral. When the market record cannot be read, it falls back to the router's clock, which starts later. The `eligibleAt` that [Handle Liquidation Timeout](/endpoints/lending/handle-timeout) returns when it refuses is exact.
 
 <ResponseExample>
 ```json Response
@@ -136,14 +160,40 @@ The filter above reads the router's clock, which can start later than the market
           "settled": false,
           "marketLiquidationId": "14"
         },
+        "routerReadFailed": false,
         "proceedsHeld": "0.0",
         "proceedsForwarded": null,
         "heldOnMarket": false,
-        "marketSettled": false
+        "marketSettled": false,
+        "writtenOff": false,
+        "writeOff": {
+          "openedAt": "2026-06-14T09:12:00.000Z",
+          "writeOffFrom": "2026-06-21T09:12:01.000Z",
+          "eligible": false,
+          "secondsLeft": 172800,
+          "deadlineSoon": false
+        }
       }
     ],
     "totalCount": 1,
+    "truncated": false,
+    "readFailed": false,
+    "sync": {
+      "failed": false,
+      "incomplete": false,
+      "unresolved": 0,
+      "adopted": 0
+    },
     "liquidationRouterAddress": "0x067a3feea46649adad8e31c33b3a4d8774b8d8cf"
+  }
+}
+```
+```json Error - Read Failed
+{
+  "success": false,
+  "error": {
+    "code": "PENDING_READ_FAILED",
+    "message": "The pending liquidations could not be read, so whether any collateral awaits sale is unknown. Retry in a moment."
   }
 }
 ```
@@ -155,5 +205,6 @@ The filter above reads the router's clock, which can start later than the market
 |---|---|---|
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `PENDING_READ_FAILED` | `503` | The records could not be read and there is nothing to show. Retry shortly |
 
-A failed database read answers `200` with an empty list rather than an error.
+A partial failure with rows to show answers `200` with `readFailed: true` instead.

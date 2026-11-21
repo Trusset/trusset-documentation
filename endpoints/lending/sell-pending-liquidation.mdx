@@ -8,6 +8,12 @@ Builds the router's `sellPending` call. It sells all the collateral of an open l
 
 The sale is priced at the oracle price times the bid. The payment goes through the market's settlement waterfall like any settlement. It repays the pool, draws on the insurance fund for a shortfall, and returns any surplus to the borrower. The record is recorded as `SETTLED` with `realization: ATOMIC` and the sale recipient as `buyer`.
 
+Before it returns the calldata, the endpoint waits for a block past the market's last interest accrual. This can add up to one block of latency.
+
+<Note>
+  A record the market wrote off after its 7 day timeout is still accepted while its router record is open. [Get Pending Liquidations](/endpoints/lending/get-pending-liquidations) lists it with `writtenOff: true`. The payment reaches the pool as late proceeds, and the stored record keeps `WRITTEN_OFF`, though the confirm response reads `status: SETTLED`. A settled record, or a written-off record whose router record is closed, is refused with `ALREADY_SETTLED`. When the router record cannot be read, the answer is `503 ROUTER_UNREADABLE`. A confirm call with `txHash` skips this check.
+</Note>
+
 ## When a sale is refused
 
 The atomic sale is offered only on a market priced from a live market price (`MARKET`) whose lender of record declared `EXCHANGE_SALE` as its realization mode. Any other market is refused with `409 ATOMIC_SALE_UNAVAILABLE`, `details.reasonCode` `PRICE_SOURCE_NOT_MARKET` or `REALIZATION_PATH_NOT_EXCHANGE_SALE`, and settles the two-step way through [Withdraw Collateral for Sale](/endpoints/lending/withdraw-collateral-for-sale) and [Settle Liquidation](/endpoints/lending/settle-liquidation). When the price source, or the realization path a `MARKET` market declared, cannot be read, the call answers `503 MARKET_STATE_UNAVAILABLE`.
@@ -66,7 +72,7 @@ The confirmed response:
   <Expandable>
     <ResponseField name="liquidationId" type="string">The router record.</ResponseField>
     <ResponseField name="marketId" type="string">The market's record ID.</ResponseField>
-    <ResponseField name="status" type="string">`SETTLED`.</ResponseField>
+    <ResponseField name="status" type="string">`SETTLED`, also on a written-off record, which keeps `WRITTEN_OFF` in storage.</ResponseField>
     <ResponseField name="realization" type="string">`ATOMIC`.</ResponseField>
     <ResponseField name="usdcProceeds" type="string">What the market received, in borrow asset units.</ResponseField>
     <ResponseField name="buyer" type="string">The sale recipient that bought, lowercased.</ResponseField>
@@ -172,7 +178,7 @@ const { data: sale } = await confirmed.json();
 |---|---|---|
 | `VALIDATION_ERROR` | `400` | `marketId` is longer than 100 characters, or an address or hash is malformed |
 | `AMBIGUOUS_LIQUIDATION_ID` | `400` | This ID exists on more than one of your markets. The error carries `candidates`; resend with `marketId` |
-| `ALREADY_SETTLED` | `400` | The record is already settled or written off, here or on the router |
+| `ALREADY_SETTLED` | `400` | The record is already settled here or on the router, or it is written off and its router record is closed |
 | `ROUTER_OPERATOR_ROLE_MISSING` | `400` | The signer lacks `OPERATOR_ROLE` on the router. The error carries grant `calldata`. When the simulated sale is what the router refuses for the role, the same code answers `403` |
 | `WALLET_NOT_CONFIGURED` | `400` | No `signerAddress` was sent and your instance has no verified wallet |
 | `TX_NOT_VERIFIED` | `400` | The confirmed transaction sells a different liquidation, or carries no atomic sale of this one |
@@ -186,7 +192,7 @@ const { data: sale } = await confirmed.json();
 | `LIQUIDATION_ON_VENUE` | `409` | The record's Dutch auction is still open, so the router holds none of its collateral |
 | `TX_WOULD_REVERT` | `409` | The simulated sale reverts for a reason no other code covers. `details.revert` names it |
 | `MARKET_STATE_UNAVAILABLE` | `503` | The market's price source, its declared realization path or its oracle could not be read. Nothing was signed. Retry shortly |
-| `ROUTER_UNREADABLE` | `503` | The router, the bid, the price or the buyer's funds could not be read, or the sale could not be simulated. Retry shortly |
+| `ROUTER_UNREADABLE` | `503` | The router, the bid, the price or the buyer's funds could not be read, the sale could not be simulated, or the record is written off and whether its router record is still open could not be read. Retry shortly |
 | `ROUTER_UNRESOLVED` | `503` | The market's liquidation router could not be read. Retry shortly |
 | `ROLE_UNVERIFIABLE` | `503` | The signer's role on the router could not be read. Retry shortly |
 

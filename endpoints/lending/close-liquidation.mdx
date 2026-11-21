@@ -10,13 +10,13 @@ Close is not a settlement. It moves no collateral and no cash, and it books no l
 
 ## When It Applies
 
-A router record stays open until something closes it on the router side. When the market's own record is already closed, the router record collected nothing, and it holds no collateral, there is nothing left to settle. The typical case is a record the router administrator reopened, whose collateral then left the router without a sale being reported.
+A router record stays open until something closes it on the router side. When the market's own record is already closed, the router record collected nothing, and it holds no collateral, there is nothing left to settle. Two cases are typical. One is a record the router administrator reopened, whose collateral then left the router without a sale being reported. The other is a record the market wrote off after its 7 day timeout, whose router record is still open with nothing on it.
 
 Each condition below must hold, and each is checked before any calldata is built. The second column names the refusal when it does not.
 
 | Condition | Refused with |
 |---|---|
-| The record reads neither `SETTLED` nor `WRITTEN_OFF` here | `ALREADY_SETTLED` |
+| The record does not read `SETTLED` here. A `WRITTEN_OFF` record passes while its router record is open | `ALREADY_SETTLED` |
 | The router has not closed the record yet | `ALREADY_SETTLED` |
 | The router collected no proceeds for it | `PROCEEDS_COLLECTED`. Settle it instead, so the cash reaches the market |
 | No collateral remains on the router | `COLLATERAL_UNSOLD`. Withdraw it for sale first |
@@ -24,7 +24,7 @@ Each condition below must hold, and each is checked before any calldata is built
 | Your instance's primary verified wallet holds `DEFAULT_ADMIN_ROLE` on the router | `ROUTER_ADMIN_ROLE_MISSING` |
 
 <Note>
-  A record this API has marked `WRITTEN_OFF` is refused with `ALREADY_SETTLED`, even when its router record is still open. That router record then stays open through this API.
+  A record the market wrote off after its 7 day timeout is accepted while its router record is open. [Get Pending Liquidations](/endpoints/lending/get-pending-liquidations) lists it with `writtenOff: true`. A settled record, or a written-off record whose router record is closed, is refused with `ALREADY_SETTLED`. When the router record cannot be read, the answer is `503 ROUTER_UNREADABLE`. A confirm call with `txHash` skips this check.
 </Note>
 
 ## Path Parameters
@@ -54,11 +54,11 @@ Each condition below must hold, and each is checked before any calldata is built
     <ResponseField name="functionName" type="string">`writeOffLiquidation`. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="confirmWith" type="object">How to record the mined transaction: `endpoint` is this route, `field` is `txHash`, and `body` carries `marketId` with a `txHash` to fill in. Returned when `txHash` is omitted.</ResponseField>
     <ResponseField name="txHash" type="string">Transaction hash. Returned when confirming with `txHash`.</ResponseField>
-    <ResponseField name="status" type="string">`SETTLED`, the record's status after the close. Returned when confirming with `txHash`.</ResponseField>
+    <ResponseField name="status" type="string">`SETTLED`, the record's status after the close. A written-off record keeps `WRITTEN_OFF` in storage. Returned when confirming with `txHash`.</ResponseField>
   </Expandable>
 </ResponseField>
 
-Confirming moves every open record under this ID on the market to `SETTLED`. A reopened record keeps the hash of its earlier settlement in `settledTxHash`.
+Confirming moves every open record under this ID on the market to `SETTLED`. A reopened record keeps the hash of its earlier settlement in `settledTxHash`. A written-off record keeps `WRITTEN_OFF`, though the confirm response reads `status: SETTLED`.
 
 <RequestExample>
 ```bash cURL
@@ -152,7 +152,7 @@ await fetch(url, {
 |---|---|---|
 | `VALIDATION_ERROR` | `400` | `txHash` is present but malformed. Nothing was built or recorded |
 | `AMBIGUOUS_LIQUIDATION_ID` | `400` | This ID exists on more than one market in your instance. The error carries `candidates`; resend with `marketId` |
-| `ALREADY_SETTLED` | `400` | The record is settled or written off here, or the router has already closed it |
+| `ALREADY_SETTLED` | `400` | The record is settled here, or the router has already closed it |
 | `WALLET_NOT_CONFIGURED` | `400` | No verified wallet is registered on this instance to resolve the signer against |
 | `ROUTER_ADMIN_ROLE_MISSING` | `400` | Your instance's primary verified wallet lacks `DEFAULT_ADMIN_ROLE` on the router. No grant calldata is offered |
 | `TX_NOT_VERIFIED` | `400` | The confirmed transaction closes a different liquidation |
@@ -165,6 +165,6 @@ await fetch(url, {
 | `MARKET_SETTLEMENT_PENDING` | `409` | The market has not settled or written off its own record yet |
 | `LIQUIDATION_ON_VENUE` | `409` | The record belongs to a Dutch auction, and the router holds none of its collateral |
 | `ROUTER_UNRESOLVED` | `503` | The market's liquidation router could not be read. Retry shortly |
-| `ROUTER_UNREADABLE` | `503` | The router's record could not be read, so nothing was built. Retry shortly |
+| `ROUTER_UNREADABLE` | `503` | The router's record could not be read, so nothing was built. On a written-off record this means whether it is still open is unknown. Retry shortly |
 
 Confirming with `txHash` can also return any [transaction verification error](/endpoints/introduction#confirm-a-transaction). A close that reverted on-chain is refused there with `TX_REVERTED`.

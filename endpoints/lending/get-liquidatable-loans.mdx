@@ -9,7 +9,7 @@ Scans the market's active loans and returns every loan that [Liquidate Loan](/en
 The first scan reads every loan the market has ever opened. Later scans read only the loans still known to be active plus any opened since, so the cost grows with the active book. Poll it on a schedule rather than per page view.
 
 <Warning>
-  A failed chain read is not reported as an error. If the market's loan counter cannot be read, the response carries `totalActiveLoans: 0` and empty lists. A loan whose own read fails is left out, and when the term reads fail, loans that qualify only on their term are missing too. An empty `liquidatableLoans` is therefore not proof that the book is healthy. `onChainError` appears only when composing the response fails after the reads.
+  Check `readFailed` before you trust an empty list. The scan reads the loans, their terms and the auction venue, and `complete` says which of the three were read in full. If the market's loan counter cannot be read, `totalActiveLoans` is `null` and the lists are empty. A loan whose own read failed is left out. When the term reads fail, loans that qualify only on their term can be missing. When the auction scan fails, every listed loan carries `auctionStateUnknown: true`, because it may have an auction open that [Liquidate Loan](/endpoints/lending/liquidate) would refuse. An empty `liquidatableLoans` proves a healthy book only when `readFailed` is `false`. If the read fails outright, the call answers `503 CHAIN_READ_FAILED` instead of an empty list.
 </Warning>
 
 ## Path Parameters
@@ -20,7 +20,7 @@ The first scan reads every loan the market has ever opened. Later scans read onl
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="totalActiveLoans" type="integer">Active loans scanned.</ResponseField>
+    <ResponseField name="totalActiveLoans" type="integer | null">Active loans scanned. `null` when the loan scan was incomplete, so the count is unknown.</ResponseField>
     <ResponseField name="liquidatableLoans" type="array">
       Loans that qualify now on either trigger. A loan with an open auction, running or expired but not yet settled, is listed under `auctionedLoans` instead.
       <Expandable>
@@ -29,9 +29,11 @@ The first scan reads every loan the market has ever opened. Later scans read onl
         <ResponseField name="collateralAmount" type="string">Collateral pledged, in collateral token units.</ResponseField>
         <ResponseField name="principal" type="string">Outstanding principal, in borrow asset units.</ResponseField>
         <ResponseField name="accruedInterest" type="string">Accrued unpaid interest, in borrow asset units.</ResponseField>
+        <ResponseField name="debt" type="string">`principal` plus `accruedInterest`, in borrow asset units.</ResponseField>
         <ResponseField name="healthFactor" type="string">Health factor at 18 decimal places. At or above `1.0` when the loan qualifies on its term alone.</ResponseField>
         <ResponseField name="trigger" type="string">`HEALTH`, `TERM` or `HEALTH_AND_TERM`. A loan realized on its term, whatever its health, is realized whole at the term penalty.</ResponseField>
         <ResponseField name="term" type="object">The loan's term, present when it carries one. Same fields as the entries of `termedLoans`.</ResponseField>
+        <ResponseField name="auctionStateUnknown" type="boolean">`true` on every listed loan when the auction scan was incomplete. The loan may have an auction open. Absent when the auction scan was complete.</ResponseField>
       </Expandable>
     </ResponseField>
     <ResponseField name="termedLoans" type="array">
@@ -59,7 +61,15 @@ The first scan reads every loan the market has ever opened. Later scans read onl
         <ResponseField name="reason" type="string">Why the loan is not offered for liquidation, in words.</ResponseField>
       </Expandable>
     </ResponseField>
-    <ResponseField name="onChainError" type="string">Present only when composing the response failed. The counter then reads `0` and `liquidatableLoans` is empty. See the warning above.</ResponseField>
+    <ResponseField name="readFailed" type="boolean">`true` when any of the three scans was incomplete. The lists then show only what was read. See the warning above.</ResponseField>
+    <ResponseField name="complete" type="object">
+      Which scans were read in full.
+      <Expandable>
+        <ResponseField name="loans" type="boolean">Every active loan was read.</ResponseField>
+        <ResponseField name="terms" type="boolean">Every loan term was read.</ResponseField>
+        <ResponseField name="auctions" type="boolean">The auction venue was read in full.</ResponseField>
+      </Expandable>
+    </ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -77,8 +87,9 @@ const res = await fetch(
   `https://api.trusset.org/lending-external-securities-v2/api/liquidations/${marketId}/liquidatable-loans`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
-const { data } = await res.json();
-if (data.onChainError) throw new Error(`Scan failed: ${data.onChainError}`);
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+if (data.readFailed) console.warn('Partial scan', data.complete);
 const onTerm = data.liquidatableLoans.filter((loan) => loan.trigger !== 'HEALTH');
 ```
 </RequestExample>
@@ -96,6 +107,7 @@ const onTerm = data.liquidatableLoans.filter((loan) => loan.trigger !== 'HEALTH'
         "collateralAmount": "500.0",
         "principal": "42000.0",
         "accruedInterest": "318.4",
+        "debt": "42318.4",
         "healthFactor": "0.942",
         "trigger": "HEALTH"
       },
@@ -105,6 +117,7 @@ const onTerm = data.liquidatableLoans.filter((loan) => loan.trigger !== 'HEALTH'
         "collateralAmount": "220.0",
         "principal": "15000.0",
         "accruedInterest": "96.25",
+        "debt": "15096.25",
         "healthFactor": "1.61",
         "trigger": "TERM",
         "term": {
@@ -125,18 +138,51 @@ const onTerm = data.liquidatableLoans.filter((loan) => loan.trigger !== 'HEALTH'
         "enforceable": true
       }
     ],
-    "auctionedLoans": []
+    "auctionedLoans": [],
+    "readFailed": false,
+    "complete": {
+      "loans": true,
+      "terms": true,
+      "auctions": true
+    }
   }
 }
 ```
-```json Response - Nothing Read
+```json Response - Auction Scan Incomplete
 {
   "success": true,
   "data": {
-    "totalActiveLoans": 0,
-    "liquidatableLoans": [],
+    "totalActiveLoans": 12,
+    "liquidatableLoans": [
+      {
+        "loanId": "7",
+        "borrower": "0xabc7f1093d5e26b804a1c3f78de025916b47c0d3",
+        "collateralAmount": "500.0",
+        "principal": "42000.0",
+        "accruedInterest": "318.4",
+        "debt": "42318.4",
+        "healthFactor": "0.942",
+        "trigger": "HEALTH",
+        "auctionStateUnknown": true
+      }
+    ],
     "termedLoans": [],
-    "auctionedLoans": []
+    "auctionedLoans": [],
+    "readFailed": true,
+    "complete": {
+      "loans": true,
+      "terms": true,
+      "auctions": false
+    }
+  }
+}
+```
+```json Error - Chain Read Failed
+{
+  "success": false,
+  "error": {
+    "code": "CHAIN_READ_FAILED",
+    "message": "The loans could not be read from the chain, so whether any loan is realizable is unknown. could not detect network"
   }
 }
 ```
@@ -149,3 +195,4 @@ const onTerm = data.liquidatableLoans.filter((loan) => loan.trigger !== 'HEALTH'
 | `MISSING_MARKET_ID` | `400` | `marketId` is longer than 100 characters |
 | `NO_MARKET_ADDRESS` | `400` | The market has no on-chain address recorded |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `CHAIN_READ_FAILED` | `503` | The read failed outright, so whether any loan is realizable is unknown. Retry shortly |
