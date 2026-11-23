@@ -5,11 +5,11 @@ description: 'An optional add-on that binds the contract a bank signs in its own
 
 E-Signatures are an add-on per market, **off by default**. A bank switches them on when it wants the contract it already signs in its own e-signature tool bound to the loan on chain:
 
-- Trusset issues a **loan schedule** with the market's figures: JSON plus a one-page PDF annex. It names no person.
+- Trusset issues a **loan schedule** with the market's figures, including how repaid interest is split (Trusset's infrastructure fee, the operator and distributor shares and the insurance fund rate): JSON plus a one-page PDF annex. It names no person.
 - The bank writes its own contract, attaches the schedule and runs the signing in its own tool.
 - The bank reports the signed file as a **salted commitment** it computes on its side. Trusset never sees the file or its plain hash.
 - The borrower checks its own copy against that commitment and **accepts with its wallet** (an EIP-712 signature).
-- When the loan opens, the open confirm **binds** the agreement to the loan id and stages the commitment.
+- When the loan opens, the open confirm **binds** the agreement to the loan id and stages the commitment. If the confirm never arrives, the next position sweep binds it.
 - The bank **records** it on chain with its admin wallet through the existing [document registry](/endpoints/lending/introduction#documents) calls.
 
 Trusset is not a party to the contract and drafts no clause. The contract is the bank's template; the schedule is an annex with figures only.
@@ -22,7 +22,7 @@ The bank sets the mode per market with [Set Agreement Policy](/endpoints/lending
 |---|---|
 | `OFF` | The default. Nothing changes: every read, build and confirm answers exactly as without the add-on. |
 | `OPTIONAL` | Borrowers may request an agreement. A loan opens with or without one. The open build names the agreement it would bind, or warns that none covers the loan. |
-| `REQUIRED` | The open and borrow-more builds refuse a loan that no accepted agreement covers (`AGREEMENT_REQUIRED`, `AGREEMENT_LIMIT_EXCEEDED`). |
+| `REQUIRED` | The open and borrow-more builds refuse a loan that no accepted agreement covers (`AGREEMENT_REQUIRED`, `AGREEMENT_LIMIT_EXCEEDED`), and a loan that would fall due earlier than the signed schedule allows (`AGREEMENT_TERM_CHANGED`). |
 
 Three optional rules sit next to the mode:
 
@@ -46,33 +46,33 @@ The remaining limit is the limit minus the open principal of the wallet's loans 
 ## Flow
 
 1. **Request.** The borrower requests a `LOAN` agreement with [Create Loan Agreement](/endpoints/lending/create-loan-agreement), or the bank creates a `LOAN` or `FRAMEWORK` agreement for a wallet, which is issued at once.
-2. **Issue.** The bank issues the request with [Issue Loan Agreement](/endpoints/lending/issue-loan-agreement). This freezes the schedule and creates the salt. The bank may lower the amounts or shorten the validity, never raise them past the market rules. With `autoIssue` on, a request inside the market rules is issued at once. Issuing a request replaces only the earlier open requests and issued agreements of the same requester for that wallet; it never replaces a signed or accepted agreement. An agreement the bank creates itself replaces the wallet's open agreements of the same kind. An instance keeps at most 3 open requests per wallet and 25 per market.
+2. **Issue.** The bank issues the request with [Issue Loan Agreement](/endpoints/lending/issue-loan-agreement). This freezes the schedule and creates the salt. The bank may lower the amounts or shorten the validity, never raise them past the market rules. With `autoIssue` on, a request inside the market rules is issued at once. Issuing a request replaces only the open requests and issued agreements of the same requester for that wallet that were created earlier and carry the same `externalReference` (or none, when it has none); it never replaces a newer request, another case or a signed or accepted agreement. Give each request its own `externalReference` to keep several open for one wallet, for example two tranches or two end clients of an omnibus wallet. A `LOAN` agreement the bank creates itself replaces the bank's own open `LOAN` agreements for that wallet with the same `externalReference`; a `FRAMEWORK` agreement replaces the wallet's open framework. The answer lists every replaced reference in `agreement.superseded`. An instance keeps at most 3 open requests per wallet and 25 per market.
 3. **Sign.** The bank downloads the schedule with [Get Loan Schedule](/endpoints/lending/get-loan-schedule), attaches it to its contract and runs the signing in its own tool.
 4. **Report.** The bank reports the signed file with [Report Signed Agreement](/endpoints/lending/report-signed-agreement): only the salted commitment of the contract and, optionally, of the signing certificate. It may report again until the borrower accepts.
 5. **Accept.** The borrower checks its own copy against the commitment and accepts with [Accept Loan Agreement](/endpoints/lending/accept-loan-agreement), signing the typed data that [Get Loan Agreement](/endpoints/lending/get-loan-agreement) returns. If its copy differs, it can tell the bank with [Report Copy Mismatch](/endpoints/lending/report-copy-mismatch).
-6. **Open.** The borrower opens the loan as usual. In `REQUIRED` mode the build checks the accepted agreement and the figures.
-7. **Bind.** The open confirm binds the agreement to the loan id and stages `loan-agreement` (or `framework-agreement`) and, when reported, `signing-certificate` with the commitment. A later agreement on the same loan stages as `loan-agreement-2`, `signing-certificate-2` and so on. A `LOAN` agreement binds to one loan only: when two loans confirm at once, the second answers `AGREEMENT_NO_LONGER_ACCEPTED`. A staged agreement record cannot be replaced through [Stage Loan Document](/endpoints/lending/stage-loan-document). The confirm answer carries `agreement: { bound, ref, matched, differences, reason }`. Paperwork never fails a confirm: the loan is already on chain.
+6. **Open.** The borrower opens the loan as usual. The build names the agreement it will bind and compares the loan with the signed schedule: `agreement.matched`, `agreement.differences` and a `warning` show every difference the bind will record (collateral amount, principal, payee, due date). In `REQUIRED` mode the build refuses a loan that would fall due earlier than the schedule allows, because the market's term changed after signing (`AGREEMENT_TERM_CHANGED`); other differences are recorded, not refused.
+7. **Bind.** The open confirm binds the agreement to the loan id and stages `loan-agreement` (or `framework-agreement`) and, when reported, `signing-certificate` with the commitment. A later agreement on the same loan stages as `loan-agreement-2`, `signing-certificate-2` and so on. A `LOAN` agreement binds to one loan only: when two loans confirm at once, the second answers `AGREEMENT_NO_LONGER_ACCEPTED`. A staged agreement record cannot be replaced through [Stage Loan Document](/endpoints/lending/stage-loan-document). The confirm answer carries `agreement: { bound, ref, matched, differences, reason }`. Paperwork never fails a confirm: the loan is already on chain. A loan whose confirm never arrives is bound by the next position sweep, which the open and borrow-more builds also run when the wallet holds a loan Trusset has not recorded yet, so an agreement that a loan already used is not offered again. Only an agreement accepted before the loan opened binds to it.
 8. **Record.** The bank records the staged documents with one signature through [Record Staged Document](/endpoints/lending/record-staged-document). The registry confirm marks the agreement `RECORDED`.
 
 A `FRAMEWORK` agreement runs steps 2 to 5 once. Each later loan within the limit binds at step 7 and is recorded at step 8.
 
-A borrow-more above a `LOAN` agreement's principal needs a new `LOAN` agreement for the new total. It binds to the same loan when the borrow-more is confirmed and names the earlier agreement in `supersedes`.
+A borrow-more above a `LOAN` agreement's principal needs a new `LOAN` agreement for the new total. The refusal names the loan, the agreement bound to it and the total the new agreement has to cover. It binds to the same loan when the borrow-more is confirmed and names the earlier agreement in `supersedes`.
 
 ## States
 
 | Status | Set by | Next |
 |---|---|---|
-| `REQUESTED` | the borrower's request | `ISSUED`, `DECLINED`, `WITHDRAWN` |
-| `ISSUED` | the bank's issue, or `autoIssue` | `SIGNED`, `DECLINED`, `WITHDRAWN`, `EXPIRED`, `STALE` |
-| `SIGNED` | the bank's report, repeatable until accepted | `ACCEPTED`, `DECLINED`, `EXPIRED`, `STALE` |
-| `ACCEPTED` | the borrower's wallet | `BOUND` (`LOAN`), stays `ACCEPTED` (`FRAMEWORK`), `EXPIRED`, `REVOKED` |
+| `REQUESTED` | the borrower's request | `ISSUED`, `DECLINED`, `WITHDRAWN`, `SUPERSEDED` |
+| `ISSUED` | the bank's issue, or `autoIssue` | `SIGNED`, `DECLINED`, `WITHDRAWN`, `EXPIRED`, `STALE`, `SUPERSEDED` |
+| `SIGNED` | the bank's report, repeatable until accepted | `ACCEPTED`, `DECLINED`, `EXPIRED`, `STALE`, `SUPERSEDED` |
+| `ACCEPTED` | the borrower's wallet | `BOUND` (`LOAN`), stays `ACCEPTED` (`FRAMEWORK`), `EXPIRED`, `REVOKED` (`FRAMEWORK`), `SUPERSEDED` |
 | `BOUND` | the open confirm (`LOAN`) | `RECORDED` |
 | `RECORDED` | the registry confirm (`LOAN`) | final |
 | `DECLINED`, `WITHDRAWN`, `EXPIRED`, `REVOKED`, `SUPERSEDED` | as named | final |
 | `STALE` | the published terms of use changed between issue and acceptance | final; the borrower requests again |
 
 - `EXPIRED` is read from `expiresAt` on every read, so it never lags. A `LOAN` agreement's offer runs for the policy's `validityDays` from its issue; a `FRAMEWORK` agreement runs until its `validUntil`.
-- A new agreement of the same kind for the same borrower and market, issued while an earlier one is still open (`REQUESTED`, `ISSUED`, `SIGNED` or `ACCEPTED`), sets the earlier one to `SUPERSEDED`. A `LOAN` and a `FRAMEWORK` agreement can stand side by side.
+- `SUPERSEDED` comes from two places. Issuing a request supersedes the same requester's earlier `REQUESTED` and `ISSUED` rows of the same case (step 2). An agreement the bank creates supersedes its own open `LOAN` agreements of the same case, or the wallet's open `FRAMEWORK`, whatever their status (`REQUESTED`, `ISSUED`, `SIGNED` or `ACCEPTED`). A `LOAN` and a `FRAMEWORK` agreement can stand side by side.
 
 ## Salted commitment
 
@@ -86,7 +86,7 @@ commitment  = SHA-256( utf8("trusset.loan-document.v1") || salt || fileSha256 )
 
 A leaked contract file alone cannot be found or linked on chain, because linking needs the salt. The parties prove the record at any time with the file and the salt.
 
-**Who holds the salt.** Trusset keeps it for the life of the agreement and returns it only to the bank and to the borrower side: the instance that requested the agreement, or an instance holding the borrower wallet as a verified wallet. The bank also receives it in its `loan.agreement.recorded` webhook, so it can archive it with the original and never depend on Trusset for the proof.
+**Who holds the salt.** Trusset keeps it for the life of the agreement and returns it only to the bank and to the borrower side: the instance that requested the agreement, an instance holding the borrower wallet as a verified wallet, or, for an agreement the bank created, an instance on the same market whose verified customer holds the borrower wallet. The bank also receives it in its `loan.agreement.recorded` webhook, so it can archive it with the original and never depend on Trusset for the proof.
 
 **Verify a file with its salt.** On a Mac or Linux, with the salt as 64 hex characters without `0x`:
 
@@ -101,7 +101,7 @@ The result equals the recorded `documentHash` without its `0x`. The SDK computes
 [Get Documents](/endpoints/lending/get-legal-documents) marks a registry record that came from an agreement with `hashScheme: SALTED_V1` and its `agreementRef`, and gives the parties the salt. Records written through the manual document path keep plain SHA-256.
 
 <Note>
-E-signature tools can produce a new file on each download, so the borrower's copy can differ byte for byte from the bank's original. The borrower then asks the bank for its original file, or accepts with `copyVerified: false`, which the bank sees. A mismatch report notifies the bank, and the bank may report again until the borrower accepts.
+E-signature tools can produce a new file on each download, so the borrower's copy can differ byte for byte from the bank's original. The borrower then asks the bank for its original file, or accepts with `copyVerified: false`, which the bank sees. A mismatch report is stored on the agreement (`copyMismatchReported: true`, `copyVerified: false`) and shown to the bank in every read until it reports the signed file again, and it is sent to the hooks. The bank may report again until the borrower accepts.
 </Note>
 
 ## Acceptance
@@ -129,21 +129,21 @@ LoanAgreementAcceptance {
 A [standing policy](/endpoints/operators/create-standing-policy) can carry `agreementPolicy: { mode, validityDays, autoIssue, autoIssueMaxAmount, frameworkValidityDays, requestAccess }`. Saving one with a mode other than `OFF` needs the Scale plan. Each change stamps `agreementPolicySetAt`.
 
 - **At adoption.** When the bank confirms an adoption, the matching standing policy (deployer first, then collateral token) creates the market's agreement policy with `source: STANDING_POLICY`, only if the market has none yet. The confirm answer carries `agreementPolicyApplied` and `agreementPolicyApplyError` when a standing policy carried agreement settings.
-- **On read.** When a market has no agreement policy, the policy read and the open build look up the bank's adopted market and its matching standing policy, and apply it only when the policy is on, the market was adopted at or after `agreementPolicySetAt`, and the bank's plan includes loan agreements. This covers an adoption whose confirm answer was lost after the transaction mined.
+- **On read.** When a market has no agreement policy, the policy read and the open build look up the bank's adopted market and its matching standing policy, and apply it only when the policy is on, the market was adopted at or after `agreementPolicySetAt`, and the bank's plan includes E-Signatures. This covers an adoption whose confirm answer was lost after the transaction mined.
 
 What this cannot do:
 
 1. **Not retroactive.** Markets adopted before the standing policy carried agreement settings are never touched. Set those per market.
 2. **No propagation.** Editing a standing policy does not change markets already adopted, as with terms.
 3. **No confirm, no lookup.** An adoption that never reached any confirm leg leaves no adoption record, so the lookup cannot find it and the market stays `OFF`. A market imported as a controller is not an adoption either; set its policy per market.
-4. **Plan upgrades apply later.** If the bank's plan did not include loan agreements at adoption, the policy applies on the first read after an upgrade. The policy read shows `source` and `standingPolicyId`, so this is visible.
+4. **Plan upgrades apply later.** If the bank's plan did not include E-Signatures at adoption, the policy applies on the first read after an upgrade. The policy read shows `source` and `standingPolicyId`, so this is visible.
 5. **A setting made on the market always wins.** A standing policy never overwrites a market's own policy.
 
 ## Webhooks
 
-Create a hook with `hookType: loanAgreement` and a `webhookUrl` on the market with [Create Hook](/endpoints/lending/create-hook). It receives `loan.agreement.requested`, `issued`, `declined`, `withdrawn`, `signed`, `copy_mismatch`, `accepted`, `bound`, `recorded`, `expired`, `revoked` and `superseded`, signed like the other hooks. Each event goes only to hooks of the bank and of the requesting instance on that market.
+Create a hook with `hookType: loanAgreement` and a `webhookUrl` on the market with [Create Hook](/endpoints/lending/create-hook). It receives `loan.agreement.requested`, `issued`, `declined`, `withdrawn`, `signed`, `copy_mismatch`, `accepted`, `bound`, `recorded`, `expired`, `revoked` and `superseded`, signed like the other hooks. Each event goes only to hooks of the bank and of the requesting instance on that market; for an agreement the bank created, also to every instance on that market whose verified customer holds the borrower wallet.
 
-The payload carries `ref`, `marketAddress`, `chainRef`, `kind`, `status`, `borrowerWallet`, `scheduleHash`, `documentCommitment`, `copyVerified`, `loanId`, `txHash` and `at`. The bank's hooks also receive `salt` on `recorded`, and only while a verified wallet of the bank's instance still holds the market admin role, read on the chain at delivery. A former bank receives no further events.
+The payload carries `ref`, `marketAddress`, `chainRef`, `kind`, `status`, `borrowerWallet`, `scheduleHash`, `documentCommitment`, `copyVerified`, `loanId`, `txHash` and `at`. `bound` also carries `action` (`OPEN` or `BORROW_MORE`), `matched` and `differences`, the same fields the confirm answer and the stored link hold, so a bank sees at once when a loan was bound on other figures than signed. The bank's hooks also receive `salt` on `recorded`, and only while a verified wallet of the bank's instance still holds the market admin role, read on the chain at delivery. A former bank receives no further events.
 
 ## What Trusset never receives
 
@@ -153,7 +153,9 @@ The payload carries `ref`, `marketAddress`, `chainRef`, `kind`, `status`, `borro
 
 ## Plan and credits
 
-E-Signatures are part of the Scale plan. The check runs on the bank's plan only: when it sets a policy other than `OFF`, issues an agreement, or saves a standing policy with agreement settings. A borrower is never blocked by its own plan. Each call on the key face counts as one credit, like every other lending route.
+E-Signatures are part of the Scale plan. The check runs on the bank's plan only: when it sets a policy other than `OFF`, issues an agreement, or saves a standing policy with agreement settings. A borrower is never blocked by its own plan.
+
+When the bank's plan ends, a market policy stays as it was: a `REQUIRED` market keeps refusing loans that no accepted agreement covers, so no loan opens without the contract the bank asked for. Accepted agreements still cover loans. The policy read shows `issuing: UNAVAILABLE` with a `notice`, new requests answer `AGREEMENT_ISSUING_UNAVAILABLE`, and the open refusal says that only the bank can act (`details.issuing: UNAVAILABLE`, no request path). The bank renews its plan, or sets the policy to `OFF`, which needs no plan. Each call on the key face counts as one credit, like every other lending route.
 
 ## Routes
 
@@ -173,4 +175,4 @@ E-Signatures are part of the Scale plan. The check runs on the bank's plan only:
 | [Accept Loan Agreement](/endpoints/lending/accept-loan-agreement) | the borrower side |
 | [Revoke Loan Agreement](/endpoints/lending/revoke-loan-agreement) | the bank |
 
-The bank is any instance with a verified wallet that holds `DEFAULT_ADMIN_ROLE` on the market. The borrower side is the instance that requested the agreement, or an instance that holds the borrower wallet as a verified wallet. Every route exists on the Issuer Portal face as well, under `/lending-external-securities-v2/markets/{marketId}/...`.
+The bank is any instance with a verified wallet that holds `DEFAULT_ADMIN_ROLE` on the market. The borrower side is the instance that requested the agreement, an instance that holds the borrower wallet as a verified wallet, or, for an agreement the bank created, an instance on the same market whose verified customer holds the borrower wallet. The bank is never the borrower side of an agreement it created, unless the borrower wallet is one of its own wallets or belongs to one of its verified customers. Refusals that point to a next route name it in `details.request.path` with the full path of the face that answered. Every route exists on the Issuer Portal face as well, under `/lending-external-securities-v2/markets/{marketId}/...`.

@@ -8,7 +8,10 @@ Creates a loan request on a market that runs [approve-only loans](/endpoints/len
 
 Limits and replacement are per instance:
 
-- A new request for the same wallet and loan replaces your instance's own waiting request. The answer names the replaced request in `replaced`.
+- A new request for the same wallet, loan and `externalReference` replaces your instance's own waiting request. The answer names the replaced request in `replaced`.
+- Requests for the same wallet and loan with a different `externalReference` stay open side by side, so an omnibus wallet can carry one request per end client. The answer lists the others in `sharesWalletWith`, with a `notice`. Only one approval can be in force for a wallet and loan at a time, so the lender of record approves them one after another, and the next loan the wallet opens uses the approval in force.
+- The chain holds one approval per wallet and loan, not per reference. While one is in force the bank cannot approve the next request of that wallet (`409 APPROVAL_IN_FORCE` names it in `details.heldBy`), and the first loan the wallet opens consumes it, whatever end client the loan is for. An approval can only be recorded on a request it does not exceed. Send each end client's open-loan only for the request that was approved.
+- A request for a new loan below the market's minimum borrow amount is refused with `400 BELOW_MIN_BORROW`, since that loan could never open.
 - Your instance keeps at most 3 waiting requests per wallet and 25 per market. Beyond that the route answers `429 LOAN_REQUEST_LIMIT`. Only `REQUESTED` requests count, and the one being replaced does not.
 - Requests by different instances for the same wallet do not block each other.
 
@@ -50,7 +53,9 @@ Answers `201`.
   <Expandable>
     <ResponseField name="request" type="object">The loan request. See [Get Loan Request](/endpoints/lending/get-loan-request#response-fields) for every field.</ResponseField>
     <ResponseField name="created" type="boolean">`true`.</ResponseField>
-    <ResponseField name="replaced" type="string | null">The reference of your instance's earlier waiting request this one replaced, or `null`.</ResponseField>
+    <ResponseField name="replaced" type="string | null">The reference of your instance's earlier waiting request for the same wallet, loan and `externalReference` that this one replaced, or `null`.</ResponseField>
+    <ResponseField name="sharesWalletWith" type="string[]">Present when your instance keeps other waiting requests for the same wallet and loan under a different `externalReference`. Their references.</ResponseField>
+    <ResponseField name="notice" type="string">Present with `sharesWalletWith`. Says that the requests stay open and are approved one after another.</ResponseField>
     <ResponseField name="marketId" type="string">The market's record ID on your instance.</ResponseField>
   </Expandable>
 </ResponseField>
@@ -106,10 +111,11 @@ Answers `201`.
 | `INVALID_WALLET` | `400` | `borrowerWallet` is not an address |
 | `INVALID_LOAN_ID` | `400` | `loanId` is not a loan ID |
 | `INVALID_AMOUNT` | `400` | An amount is not valid |
+| `BELOW_MIN_BORROW` | `400` | `borrowAmount` of a new loan is below the market's minimum borrow amount. `details.minBorrowAmount` names it |
 | `INVALID_EXTERNAL_REFERENCE` | `400` | `externalReference` is not 1 to 64 letters, digits, dots, underscores or hyphens |
 | `PERSONAL_DATA_REFUSED` | `400` | The body carries a personal data field. The routes carry none |
 | `LOAN_NOT_FOUND` | `404` | `loanId` names no open loan of that borrower |
 | `LOAN_APPROVAL_NOT_REQUIRED` | `409` | The market does not require approvals. Open the loan directly |
 | `LOAN_APPROVALS_CUSTOM` | `409` | The market names an approvals contract that the Trusset approvals factory did not build, which the API cannot read or write |
-| `LOAN_REQUEST_OPEN` | `409` | Your instance made the same request a moment ago, and that request stands. This is a concurrent duplicate. Read the loan requests to find it |
+| `LOAN_REQUEST_OPEN` | `409` | Your instance made the same request, for the same wallet, loan and `externalReference`, a moment ago, and that request stands. This is a concurrent duplicate. Read the loan requests to find it |
 | `LOAN_REQUEST_LIMIT` | `429` | Your instance already keeps 3 waiting requests for this wallet, or 25 waiting requests on this market. Withdraw one or wait for the lender of record to decide |

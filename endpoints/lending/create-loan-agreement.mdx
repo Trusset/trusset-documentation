@@ -7,9 +7,9 @@ description: 'Request a loan agreement as the borrower, or create one for a wall
 Creates a loan agreement on a market whose policy is `OPTIONAL` or `REQUIRED`.
 
 - **As the borrower side**, you request a `LOAN` agreement with the figures you want. It starts `REQUESTED` and the bank issues it, or it is issued at once when the policy has `autoIssue`, the figures are inside the market rules and the borrow amount is within `autoIssueMaxAmount`. On a market whose policy has `requestAccess: BANK_ONLY`, only the bank creates agreements and a request answers `403 AGREEMENT_REQUESTS_CLOSED`. The same request sent again while it waits returns the existing agreement with `created: false`.
-- **As the bank**, you create a `LOAN` agreement for a wallet, or a `FRAMEWORK` agreement with a credit limit and an end date. It is issued at once: the schedule is frozen and the salt created. This needs the Scale plan.
+- **As the bank**, you create a `LOAN` agreement for a wallet, or a `FRAMEWORK` agreement with a credit limit and an end date. It is issued at once: the schedule is frozen and the salt created. This needs the Scale plan. The bank stays the bank on it: the borrower side is an instance holding the wallet as a verified wallet, or an instance on the same market whose verified customer holds the wallet. That platform sees the agreement in its list, verifies its copy and accepts with the borrower wallet; the bank does not get the borrower's steps.
 
-The figures are checked against the market: the principal or limit at least the market minimum, the collateral within the per-borrower cap, and the principal within what the collateral supports at the current price. A new issued agreement of the same kind for the same wallet supersedes an earlier open one.
+The figures are checked against the market: the principal or limit at least the market minimum, the collateral within the per-borrower cap, and the principal within what the collateral supports at the current price. A `LOAN` agreement the bank creates supersedes the bank's own earlier open `LOAN` agreements for that wallet with the same `externalReference`; a `FRAMEWORK` agreement supersedes the wallet's open framework. Requests are never superseded on creation; see [Issue Loan Agreement](/endpoints/lending/issue-loan-agreement) for what issuing a request replaces. `agreement.superseded` lists every reference this call replaced.
 
 The schedule names no person. Send no names and no file: the body is checked for both.
 
@@ -88,13 +88,15 @@ The schedule names no person. Send no names and no file: the body is checked for
       "borrowerWallet": "0x7c1e3a5f2b9d4e6a8c0f1b3d5e7a9c2b4d6f8e1a",
       "externalReference": "CASE-2026.11_042",
       "scheduleHash": "0x8e2c4a6f1b3d5e7a9c0f2b4d6e8a1c3f5b7d9e0a2c4f6b8d1e3a5c7f9b0d2e4a",
-      "scheduleVersion": "1.0.0",
+      "scheduleVersion": "1.1.0",
       "scheduleFrozen": false,
       "hashScheme": "SALTED_V1",
       "documentCommitment": null,
       "certificateCommitment": null,
       "copyVerified": null,
-      "nextStep": "ISSUE",
+      "copyVerifiedIsBorrowerStatement": true,
+      "copyMismatchReported": false,
+      "nextStep": "WAIT_FOR_BANK",
       "expiresAt": null,
       "requestedByThisInstance": true,
       "issuedByThisInstance": false,
@@ -123,12 +125,17 @@ The schedule names no person. Send no names and no file: the body is checked for
 | `INVALID_EXTERNAL_REFERENCE` | `400` | `externalReference` is not 1 to 64 safe characters |
 | `INVALID_AGREEMENT_FIGURES` | `400` | A required amount is missing for the kind |
 | `INVALID_VALID_UNTIL` | `400` | `validUntil` is not a date at least one day and at most 1830 days ahead |
-| `AGREEMENT_FEATURE_REQUIRED` | `402` | The bank's plan does not include loan agreements |
+| `INVALID_AGREEMENT_POLICY` | `400` | Bank only: `validityDays` is outside 1 to 365 |
+| `AGREEMENT_FEATURE_REQUIRED` | `402` | Your plan does not include E-Signatures (when your instance is the bank) |
 | `AGREEMENT_BANK_ONLY` | `403` | Only the bank creates a `FRAMEWORK` agreement |
+| `SIGNER_NOT_MARKET_ADMIN` | `403` | Bank only: `signerAddress` is not one of your verified admin wallets |
 | `AGREEMENT_POLICY_OFF` | `409` | E-Signatures are off on this market. Open the loan as today, or ask the bank to switch them on |
 | `AGREEMENT_REQUESTS_CLOSED` | `403` | The market's policy has `requestAccess: BANK_ONLY`, so only its bank creates agreements. Ask the bank to issue one |
+| `AGREEMENT_ISSUING_UNAVAILABLE` | `409` | The bank's plan no longer includes E-Signatures, so it cannot issue the request. Nothing was filed. Ask the bank: it can renew its plan or switch the policy off |
 | `AGREEMENT_REQUEST_LIMIT` | `409` | Your instance already has 3 open requests for this wallet, or 25 on this market. Withdraw the requests you no longer need, or wait for the bank |
 | `MARKET_PRICE_UNAVAILABLE` | `409` | The market could not value the collateral just now. Retry once the price is fresh |
 | `AGREEMENT_FIGURES_OUTSIDE_MARKET` | `422` | The figures break a market rule. `details.problems` names each |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `RATE_LIMIT_EXCEEDED` | `429` | Too many writes in a short time. Retry after the interval in `Retry-After` |
+| `AGREEMENT_POLICY_UNREADABLE` | `503` | The market's E-Signatures policy could not be read just now. Nothing was decided. Retry shortly |
 | `CHAIN_UNAVAILABLE`, `SERVICE_UNAVAILABLE` | `503` | The market or your instance's wallets could not be read just now. Nothing was decided. Retry shortly |

@@ -31,21 +31,35 @@ Returns one agreement to a party: the bank, or the borrower side. Anyone else ge
     <ResponseField name="status" type="string">See [States](/endpoints/lending/loan-agreements#states). `EXPIRED` is read from `expiresAt`.</ResponseField>
     <ResponseField name="borrowerWallet" type="string">The borrowing wallet.</ResponseField>
     <ResponseField name="externalReference" type="string | null">Your own case number, if given.</ResponseField>
-    <ResponseField name="schedule" type="object">The loan schedule: `ref`, `kind`, `chainId`, `network`, `marketAddress`, `lender.adminWallet`, `borrower.{wallet, payTo}`, `collateral.{token, symbol, decimals, amount, amountRaw}`, `principal.{asset, symbol, decimals}` with `amount` (`LOAN`) or `limit` (`FRAMEWORK`), `rate`, `term`, `risk`, `realization`, `fees`, `termsOfUse`, `issuedAt`, `expiresAt`, `validUntil`. The field names double as merge fields for an e-signature template.</ResponseField>
+    <ResponseField name="schedule" type="object">The loan schedule: `schemaVersion`, `ref`, `kind`, `chainId`, `network`, `marketAddress`, `lender.adminWallet`, `borrower.{wallet, payTo}`, `collateral.{token, symbol, decimals, amount, amountRaw}`, `principal.{asset, symbol, decimals}` with `amount` (`LOAN`) or `limit` (`FRAMEWORK`), `rate`, `term`, `risk`, `realization`, `fees`, `termsOfUse`, `issuedAt`, `expiresAt`, `validUntil`. See [Get Loan Schedule](/endpoints/lending/get-loan-schedule) for `fees`. The field names double as merge fields for an e-signature template.</ResponseField>
     <ResponseField name="scheduleHash" type="string">keccak256 over the UTF-8 bytes of the canonical schedule JSON (keys sorted, no whitespace).</ResponseField>
+    <ResponseField name="scheduleVersion" type="string">The schema of the schedule: `1.1.0` since 2026-11-23, `1.0.0` before.</ResponseField>
     <ResponseField name="scheduleFrozen" type="boolean">`false` while `REQUESTED`: the bank may still lower the figures when it issues.</ResponseField>
     <ResponseField name="termsOfUse" type="object | null">The published terms version and hash the agreement was issued against. A change before acceptance makes it `STALE`.</ResponseField>
     <ResponseField name="hashScheme" type="string">Always `SALTED_V1`.</ResponseField>
     <ResponseField name="documentCommitment" type="string | null">The salted commitment of the signed contract, once reported.</ResponseField>
     <ResponseField name="certificateCommitment" type="string | null">The salted commitment of the signing certificate, when reported.</ResponseField>
-    <ResponseField name="copyVerified" type="boolean | null">The borrower's own signed statement that its copy matched. Trusset cannot check it.</ResponseField>
+    <ResponseField name="copyVerified" type="boolean | null">After acceptance: the borrower's own signed statement that its copy matched. Trusset cannot check it. While `SIGNED`: `false` when the borrower side reported that its copy does not match, else `null`.</ResponseField>
+    <ResponseField name="copyVerifiedIsBorrowerStatement" type="boolean">Always `true`: `copyVerified` is the borrower's statement, never a Trusset check.</ResponseField>
+    <ResponseField name="copyMismatchReported" type="boolean">`true` while `SIGNED` after the borrower side reported a copy mismatch and before the bank reports the signed file again.</ResponseField>
     <ResponseField name="acceptance" type="string | null">The borrower's acceptance signature.</ResponseField>
     <ResponseField name="salt" type="string">32 bytes, once issued. Keep it with the signed file: file plus salt proves the record.</ResponseField>
+    <ResponseField name="issuedAt" type="string | null">When the bank issued it.</ResponseField>
+    <ResponseField name="signedAt" type="string | null">When the bank last reported the signed file.</ResponseField>
+    <ResponseField name="acceptedAt" type="string | null">When the borrower accepted.</ResponseField>
+    <ResponseField name="expiresAt" type="string | null">When the offer (`LOAN`) or the framework (`FRAMEWORK`) ends.</ResponseField>
+    <ResponseField name="supersedes" type="string | null">The reference of the agreement this one replaced, if any.</ResponseField>
+    <ResponseField name="createdAt" type="string">When the request or agreement was created.</ResponseField>
+    <ResponseField name="updatedAt" type="string">The last change.</ResponseField>
+    <ResponseField name="requestedByThisInstance" type="boolean">Your instance created the request or, as the bank, the agreement.</ResponseField>
+    <ResponseField name="issuedByThisInstance" type="boolean">Your instance issued it as the bank.</ResponseField>
     <ResponseField name="links" type="object[]">The loans it is bound to: `{ loanId, openTxHash, matched, differences, recordedTxHash, recordedAt }`. `differences` lists `{ field, expected, actual }` where the opened loan differs from the schedule.</ResponseField>
     <ResponseField name="remainingLimit" type="string">`FRAMEWORK` in force: the limit minus the open principal of the wallet's loans in this market.</ResponseField>
+    <ResponseField name="remainingLimitRaw" type="string">The same in the settlement asset's base units.</ResponseField>
+    <ResponseField name="openLoans" type="number">`FRAMEWORK` in force: how many open loans of the wallet count against the limit.</ResponseField>
     <ResponseField name="acceptTypedData" type="object">While `SIGNED`: the EIP-712 typed data the borrower signs. See [Acceptance](/endpoints/lending/loan-agreements#acceptance).</ResponseField>
     <ResponseField name="viewerRole" type="object">`{ bank, borrower }` for your instance.</ResponseField>
-    <ResponseField name="nextStep" type="string">What your side does next: `ISSUE`, `REPORT_SIGNED`, `VERIFY_AND_ACCEPT`, `OPEN_LOAN`, `RECORD`, `IN_FORCE`, `DONE` and similar.</ResponseField>
+    <ResponseField name="nextStep" type="string">What your side does next. The bank sees `ISSUE` (`REQUESTED`), `REPORT_SIGNED` (`ISSUED`), `WAIT_FOR_ACCEPTANCE` (`SIGNED`), `WAIT_FOR_LOAN` (`ACCEPTED` loan agreement) and `RECORD` (`BOUND`). The borrower side sees `WAIT_FOR_BANK` (`REQUESTED`), `SIGN_IN_BANK_TOOL` (`ISSUED`), `VERIFY_AND_ACCEPT` (`SIGNED`), `OPEN_LOAN` (`ACCEPTED` loan agreement) and `WAIT_FOR_RECORD` (`BOUND`). Both see `IN_FORCE` for an accepted framework, `DONE` once `RECORDED` and `NONE` in a final state. An instance that is both bank and borrower side sees the bank's step, except `VERIFY_AND_ACCEPT` and `OPEN_LOAN`.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -66,12 +80,14 @@ Returns one agreement to a party: the bank, or the borrower side. Anyone else ge
       "borrowerWallet": "0x7c1e3a5f2b9d4e6a8c0f1b3d5e7a9c2b4d6f8e1a",
       "externalReference": "CASE-2026.11_042",
       "scheduleHash": "0x8e2c4a6f1b3d5e7a9c0f2b4d6e8a1c3f5b7d9e0a2c4f6b8d1e3a5c7f9b0d2e4a",
-      "scheduleVersion": "1.0.0",
+      "scheduleVersion": "1.1.0",
       "scheduleFrozen": true,
       "hashScheme": "SALTED_V1",
       "documentCommitment": "0x3a7f9c2e5b1d8a4f6c0e2b9d7a3f1c5e8b4d2a6f0c9e7b3d1a5f8c2e6b4d0a9f",
       "certificateCommitment": null,
       "copyVerified": null,
+      "copyVerifiedIsBorrowerStatement": true,
+      "copyMismatchReported": false,
       "nextStep": "VERIFY_AND_ACCEPT",
       "expiresAt": "2026-12-21T16:02:11.000Z",
       "salt": "0x9f3c2a7d1e5b8c4a6f0d2e9b7c3a1f5e8d4b2c6a0e9f7d3b1c5a8e2f6d4b0c9a",
@@ -146,7 +162,8 @@ Returns one agreement to a party: the bank, or the borrower side. Anyone else ge
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `INVALID_AGREEMENT_FILTER` | `400` | `copyVerified` is neither `true` nor `false` |
+| `VALIDATION_ERROR` | `400` | `copyVerified` is neither `true` nor `false` |
 | `AGREEMENT_NOT_FOUND` | `404` | No agreement with this reference on this market, or your instance is not a party to it. List the agreements to find it |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `RATE_LIMIT_EXCEEDED` | `429` | Too many reads in a short time. Retry after the interval in `Retry-After` |
 | `CHAIN_UNAVAILABLE`, `SERVICE_UNAVAILABLE` | `503` | The market or your instance's wallets could not be read just now. Nothing was decided. Retry shortly |

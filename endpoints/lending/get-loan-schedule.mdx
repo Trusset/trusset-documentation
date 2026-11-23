@@ -4,7 +4,26 @@ api: 'GET /lending-external-securities-v2/api/markets/{marketId}/loan-agreements
 description: 'Download the loan schedule annex as a PDF'
 ---
 
-Returns the loan schedule as a one-page PDF annex for the bank's contract. It shows the agreement reference and the `scheduleHash` on every page, and carries no name and no salt. A `REQUESTED` agreement returns its provisional figures; the frozen schedule exists once the bank issues it.
+Returns the loan schedule as a one-page PDF annex for the bank's contract. It shows the agreement reference and the `scheduleHash` in its footer, and carries no name and no salt. A `REQUESTED` agreement returns its provisional figures; the frozen schedule exists once the bank issues it.
+
+The answer is never cached, by a browser or on the way: every response of the agreement routes, errors included, carries `Cache-Control: private, no-store`.
+
+## Fees
+
+The fee section lists what the market charges, read from the contracts when the schedule is frozen. Schedules issued from 2026-11-23 (`schemaVersion` `1.1.0`) carry `fees.interestSplit`, one entry per share of repaid interest:
+
+| `key` | `ofBase` | Meaning |
+|---|---|---|
+| `INFRASTRUCTURE` | `REPAID_INTEREST` | Trusset's infrastructure fee as the market's contracts charge it: 20 percent of repaid interest on markets of the generation released on 2026-11-11, 15 percent on markets of earlier generations. |
+| `OPERATOR` | `AFTER_INFRASTRUCTURE` | The operator's fixed share of the interest left after the infrastructure fee. |
+| `DISTRIBUTOR` | `AFTER_INFRASTRUCTURE` | The liquidity distributor's fixed share of the same remainder. |
+| `INSURANCE_FUND` | `AFTER_SHARES` | The market's insurance fund rate (`protocolFeeRate`) on what is left after the three entries above. |
+
+Each entry has `rateBps`, read from the market, its interest model and the factory when the schedule is frozen. The rest goes to the lenders. When the split cannot be read, nothing is frozen and the call answers `503 CHAIN_UNAVAILABLE`. `fees` also carries `openFee`, `repayFee` (fixed transaction fees in the settlement asset) and `transactionFeeCapBps`.
+
+<Warning>
+Schedules frozen before 2026-11-23 (`schemaVersion` `1.0.0`) carry `fees.interestShareBps` instead. That value is the market's insurance fund rate, not Trusset's share, although earlier annexes printed it as the infrastructure's share of repaid interest. The schedule hash of those agreements cannot change. The annex now prints the value under its real name and states that the other shares are not listed in that schedule. If a signed contract relies on that line, issue a new agreement, which freezes a `1.1.0` schedule.
+</Warning>
 
 The answer is `application/pdf` with a `Content-Disposition` of `Loan-Schedule-{ref}.pdf`.
 
@@ -24,4 +43,5 @@ The answer is `application/pdf` with a `Content-Disposition` of `Loan-Schedule-{
 |---|---|---|
 | `AGREEMENT_NOT_FOUND` | `404` | No agreement with this reference on this market, or your instance is not a party to it. List the agreements to find it |
 | `MARKET_NOT_FOUND` | `404` | No market with this ID on your instance |
+| `RATE_LIMIT_EXCEEDED` | `429` | Too many reads in a short time. Retry after the interval in `Retry-After` |
 | `CHAIN_UNAVAILABLE`, `SERVICE_UNAVAILABLE` | `503` | The market or your instance's wallets could not be read just now. Nothing was decided. Retry shortly |
