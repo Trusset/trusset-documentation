@@ -7,7 +7,7 @@ Identity Terms are a document an issuer or a platform publishes about the invest
 
 - **Who performs the KYC** and stands behind it: the obliged entity, its licence and supervisor, and the basis on which a lender may rely on it.
 - **What a lending bank receives** about an investor, within how many days, and through which channel.
-- **Which investor requirements apply**, and which gate or which party enforces each one.
+- **Which investor requirements apply**, and whether the borrower gate or a member enforces each one.
 - **Which organisations take part**, and in which role.
 
 The organisations named in a version sign it with their wallets. The issuer attaches a published version to a market's [asset data](/endpoints/lending/get-asset-data), where the lender of record reads it before it acknowledges the bundle. From then on every read of the market compares what the terms claim with the gates on chain.
@@ -19,6 +19,7 @@ The organisations named in a version sign it with their wallets. The issuer atta
 ## What they are not
 
 - **They are not a gate.** Terms never install, change or remove a register. The gates enforce; the terms describe. The check compares the two and says where they differ.
+- **They name no collateral.** Terms say nothing about a token, a market or a price source, so attaching them never checks a token list.
 - **A signature is a declaration.** A member's wallet signature records which version that organisation declared. It allocates no liability by itself.
 - **The reliance agreement makes them binding.** The agreement between the lender and the KYC provider cites the core hash of the version it relies on. Reliance and its liability stay in that agreement, and the lender stays responsible for its own due diligence.
 - **Trusset is not a party.** Trusset supplies the template, the schema checks and the comparison with the chain. It signs nothing.
@@ -32,7 +33,7 @@ The organisations named in a version sign it with their wallets. The issuer atta
     [Create Identity Terms](/endpoints/lending/create-identity-terms) opens a draft, and [Update Identity Terms](/endpoints/lending/update-identity-terms) saves it as it grows. A draft may be incomplete. [Get Identity Terms](/endpoints/lending/get-identity-terms) lists what is still missing in `draftProblems`.
   </Step>
   <Step title="Check">
-    [Check Identity Terms](/endpoints/lending/check-identity-terms) validates the draft and judges each claim. Without a market it judges only what no gate could ever back. Name the registers a deployment will use, or a market, to judge every claim against real gates.
+    [Check Identity Terms](/endpoints/lending/check-identity-terms) validates the draft and judges each claim. Without a borrower gate it judges only what no gate could ever back. Name a borrower gate to judge every gate claim against it.
   </Step>
   <Step title="Publish">
     [Publish Identity Terms](/endpoints/lending/publish-identity-terms) validates the whole document, refuses a claim no gate can ever back, and freezes it as version N with its core hash. The draft is cleared.
@@ -41,7 +42,7 @@ The organisations named in a version sign it with their wallets. The issuer atta
     [Create Invite](/endpoints/lending/create-identity-terms-invite) returns a one-time signing link per member. You send it to the member yourself. The member opens it with [Read Signing Link](/endpoints/lending/read-identity-terms-invite), signs with its wallet through [Sign Identity Terms](/endpoints/lending/sign-identity-terms), or declines with a reason through [Decline Identity Terms](/endpoints/lending/decline-identity-terms).
   </Step>
   <Step title="Attach">
-    Name the published version as `identityTerms: { id, version }` on [Deploy Market](/endpoints/lending/deploy-market), or later on [Attest Asset Data](/endpoints/lending/attest-asset-data). Each attach judges the terms against the gates the market has, or will have, and refuses a claim they do not back. [Preview Asset Data](/endpoints/lending/preview-asset-data) runs the same check before anything is built.
+    Name the published version as `identityTerms: { id, version }` on [Deploy Market](/endpoints/lending/deploy-market), or later on [Attest Asset Data](/endpoints/lending/attest-asset-data). Each attach judges the terms against the borrower gate the market has, or will have, and refuses a claim it does not back. [Preview Asset Data](/endpoints/lending/preview-asset-data) runs the same check before anything is built.
   </Step>
   <Step title="Acknowledge">
     The lender of record reads the terms in the bundle, then acknowledges it: at adoption with `assetDataHash` on [Accept Lender Role](/endpoints/operators/accept-lender-role), or later with [Acknowledge Asset Data](/endpoints/lending/acknowledge-asset-data).
@@ -108,7 +109,6 @@ Schema `trusset.identity-terms/1.0.0`. A draft holds these fields as far as they
 | `validFrom` | Required. `YYYY-MM-DD` |
 | `validTo` | Optional. `YYYY-MM-DD`, on or after `validFrom`. A version past this date cannot be attached (`IDENTITY_TERMS_EXPIRED`) |
 | `governingLaw` | Required. ISO 3166-1 alpha-2 country code, such as `DE` |
-| `scope` | Optional. `{ tokens }`: 1 to 50 token addresses the terms are limited to. Leave it out to cover every token of the instance. A market on another token is refused with `IDENTITY_TERMS_OUT_OF_SCOPE` |
 | `members` | Required. 2 to 12 organisations. See [Members](#members) |
 | `reliance` | Required. See [Reliance](#reliance) |
 | `evidence` | Required. What the KYC provider's statement about an investor rests on: `KYC_STARK_ROOT` (the root of a [KYC-STARKs](/tools/kyc-starks/overview) proof bundle), `REGISTER_ATTESTATION` (an attestation on an identity register) or `OFFCHAIN_RECORD` (a record kept off chain) |
@@ -187,9 +187,10 @@ A member with the `KYC_PROVIDER` role needs an `lei` or a `registerId`, and `rel
 
 | `by` | Meaning |
 |---|---|
-| `BORROWER_GATE` | The market's borrower register enforces the rule on chain |
-| `TOKEN_REGISTER` | The collateral token's own identity registry enforces it on chain |
+| `BORROWER_GATE` | The market's borrower gate enforces the rule on chain |
 | `MEMBER` | The member named in `member` checks it off chain |
+
+Any other `by` is refused with `IDENTITY_TERMS_FIELD_INVALID`.
 
 ```json
 {
@@ -201,7 +202,7 @@ A member with the `KYC_PROVIDER` role needs an `lei` or a `registerId`, and `rel
 }
 ```
 
-A claim that a gate enforces a rule is checked against the gate. See [Checks and verdicts](#checks-and-verdicts).
+A claim that the borrower gate enforces a rule is checked against that gate. See [Checks and verdicts](#checks-and-verdicts).
 
 ### Requirements extension
 
@@ -220,7 +221,6 @@ Saving a draft already refuses control characters, personal data, a text longer 
 | Limit | Value |
 |---|---|
 | Members | 2 to 12 |
-| Tokens in `scope` | 1 to 50 |
 | Saved draft | 64 KB |
 | Requirements extension | 256 KB |
 | Terms documents per instance | 50 |
@@ -237,7 +237,7 @@ coreHash = keccak256( utf8( RFC8785( prune(core) ) ) )
 
 - `prune` drops `null`, empty strings, empty lists and empty objects, recursively.
 - RFC 8785 (JSON Canonicalization Scheme) sorts the members of every object and writes no white space.
-- A published core is already normalized, so it hashes to the same value wherever it is re-serialized: set-like lists stand in a fixed order (the enum order of the schema, countries and scope tokens sorted), addresses are lower case, the LEI is upper case, and `author: true` appears on the author alone.
+- A published core is already normalized, so it hashes to the same value wherever it is re-serialized: set-like lists stand in a fixed order (the enum order of the schema, countries sorted), addresses are lower case, the LEI is upper case, and `author: true` appears on the author alone.
 
 The same rule hashes the asset data bundle, so one implementation serves both.
 
@@ -375,20 +375,20 @@ const coreHash = utils.keccak256(utils.toUtf8Bytes(canonical(prune(core))));
 
 ## Checks and verdicts
 
-A check judges each of the five rules. A rule enforced by a member is never checked on chain. A rule enforced by a gate is judged against that gate.
+A check judges each of the five rules. A rule enforced by a member is never checked on chain. A rule enforced by `BORROWER_GATE` is judged against the borrower gate.
 
 | Verdict | Meaning |
 |---|---|
 | `ENFORCED_ON_CHAIN` | The gate enforces the rule as the terms state it |
 | `CHECKED_BY_MEMBER` | The terms name a member that checks the rule off chain. Nothing on chain is compared |
-| `CLAIM_NOT_BACKED` | The terms say a gate enforces the rule, and the gate does not |
+| `CLAIM_NOT_BACKED` | The terms say the borrower gate enforces the rule, and the gate does not |
 | `GATE_UNREADABLE` | The gate could not be read, or its profile is inactive and admits nobody, so the verdict is not known |
 
-Each verdict carries `rule`, `by`, `member` for a member, `gate` (`borrower` or `tokenRegister`), `gateKind` and `gateAddress` for a gate, a plain `reason`, and a `remedy` on `CLAIM_NOT_BACKED`.
+Each verdict carries `rule`, `by`, `member` for a member, `gate` (always `borrower`), `gateKind` and `gateAddress` for the borrower gate, a plain `reason`, and a `remedy` on `CLAIM_NOT_BACKED`.
 
 ### Gate kinds
 
-The check reads the market's borrower register and the collateral token's own `identityRegistry()`, then works out what each one is.
+The check reads the borrower gate, then works out what it is. That is the register named on [Check Identity Terms](/endpoints/lending/check-identity-terms), the borrower register a deployment installs, or the one the market carries.
 
 | Kind | What it is | What it can back |
 |---|---|---|
@@ -403,7 +403,7 @@ An address that answers like a profile gate but is not the gate of a profile on 
 
 ### How each rule is judged
 
-A rule claimed for `TOKEN_REGISTER`, or for a borrower gate that is a T-REX registry, is backed only when it is `checks` and lists `KYC_DONE` alone. On a profile gate or an instance register:
+A borrower gate that is a T-REX registry backs a rule only when it is `checks` and lists `KYC_DONE` alone. On a profile gate or an instance register:
 
 | Rule | Backed on chain when |
 |---|---|
@@ -419,23 +419,24 @@ An instance register is read with investor class 0 and no maximum age, so it nev
 
 | Where | Against | What happens to `CLAIM_NOT_BACKED` |
 |---|---|---|
-| [Check Identity Terms](/endpoints/lending/check-identity-terms) without registers | No gate: only what no gate of that kind can ever back | Reported. Other gate claims read `verdict: null` |
+| [Check Identity Terms](/endpoints/lending/check-identity-terms) without a borrower gate | No gate: only what no gate of that kind can ever back | Reported. Other `BORROWER_GATE` rules read `verdict: null` |
+| [Check Identity Terms](/endpoints/lending/check-identity-terms) with a borrower gate | That gate, read with `readAt.block` 0 | Reported. `notBacked` counts them |
 | [Publish Identity Terms](/endpoints/lending/publish-identity-terms) | The same static check | Refused with `409 IDENTITY_TERMS_CLAIM_NOT_BACKED`. `details.verdicts` holds only the claims no gate can back |
-| [Preview Asset Data](/endpoints/lending/preview-asset-data) and [Deploy Market](/endpoints/lending/deploy-market) | The registers the deployment installs, read with `readAt.block` 0 | Refused with `409 IDENTITY_TERMS_CLAIM_NOT_BACKED`. `details.verdicts` holds all five verdicts |
-| [Attest Asset Data](/endpoints/lending/attest-asset-data) | The market's gates at the current block | Refused with `409 IDENTITY_TERMS_CLAIM_NOT_BACKED`. `details.verdicts` holds all five verdicts |
-| [Get Asset Data](/endpoints/lending/get-asset-data) and [Get Queued Market](/endpoints/operators/get-queued-market) | The market's live gates, cached for 60 seconds per market | Reported. `notBacked` counts them |
+| [Preview Asset Data](/endpoints/lending/preview-asset-data) and [Deploy Market](/endpoints/lending/deploy-market) | The borrower register the deployment installs, read with `readAt.block` 0 | Refused with `409 IDENTITY_TERMS_CLAIM_NOT_BACKED`. `details.verdicts` holds all five verdicts |
+| [Attest Asset Data](/endpoints/lending/attest-asset-data) | The market's borrower register at the current block | Refused with `409 IDENTITY_TERMS_CLAIM_NOT_BACKED`. `details.verdicts` holds all five verdicts |
+| [Get Asset Data](/endpoints/lending/get-asset-data) and [Get Queued Market](/endpoints/operators/get-queued-market) | The market's live borrower register, cached for 60 seconds per market | Reported. `notBacked` counts them |
 
-A verdict of `GATE_UNREADABLE` from an inactive profile is shown and never refused. A gate that cannot be read at all refuses an attach with `503 IDENTITY_TERMS_GATES_UNREADABLE`. Retry it.
+A verdict of `GATE_UNREADABLE` from an inactive profile is shown and never refused. A gate that cannot be read at all refuses an attach with `503 IDENTITY_TERMS_GATES_UNREADABLE`. Retry it. On Check Identity Terms it is no error: `gatesReadable` reads `false` and the verdicts `GATE_UNREADABLE`.
 
 ## Warnings
 
-A check, an attach and every read carry `warnings`, each `{ code, message }`. A warning never stops a call.
+A check, an attach and every read carry `warnings`, each `{ code, message }`. A warning never stops a call. A check knows no market, so it carries only `KYC_PROVIDER_UNSIGNED` and `TERMS_WITHDRAWN`.
 
 | Code | When |
 |---|---|
-| `RETAIL_ON_MARKET_PRICE` | The terms admit `RETAIL` investors on a market priced from a live market price. Its free-hand realization path is open against professional borrowers only. See [Borrower register on a MARKET market](/endpoints/lending/deploy-market#borrower-register-on-a-market-market) |
+| `RETAIL_ON_MARKET_PRICE` | Attach and reads only, where the market's price source is known. The terms admit `RETAIL` investors on a market priced from a live market price. Its free-hand realization path is open against professional borrowers only. See [Borrower register on a MARKET market](/endpoints/lending/deploy-market#borrower-register-on-a-market-market) |
 | `KYC_PROVIDER_UNSIGNED` | The obliged entity has not signed this version |
-| `GATES_CHANGED` | Reads only. A gate on chain differs in kind or address from the gate recorded when the terms were attached. `slots` names the gates |
+| `GATES_CHANGED` | Reads only. A gate on chain differs in kind or address from the gate recorded when the terms were attached. `slots` names the gates: `borrower`, `provider` or both |
 | `TERMS_WITHDRAWN` | The author withdrew the terms. The market keeps the copy it attested |
 | `LENDER_MEMBER_MISMATCH` | Reads only. A member with the `LENDER_OF_RECORD` role names a wallet that is not the lender's. `members` lists the indices. Before adoption, the reading instance's wallets count as the lender's |
 
@@ -498,7 +499,6 @@ An attached version becomes the `identity` member of the market's asset data bun
   "gates": {
     "borrower": { "address": "0x7d3a91c4e05b28f6a1c9d0e7b4f2a86c3e5d1b09", "kind": "PROFILE_GATE" },
     "provider": { "kind": "NONE" },
-    "tokenRegister": { "address": "0x2b8f6d4a1c9e7053b2d8f1a6c4e9b7d05a3f8c1e", "kind": "TREX_REGISTRY" },
     "readAt": { "chainId": 11155111, "block": 0 }
   }
 }
@@ -509,7 +509,7 @@ An attached version becomes the `identity` member of the market's asset data bun
 | `terms` | The whole published core, as signed. Shortened above, as is the signature |
 | `coreHash` | Its core hash. A bundle whose `terms` do not hash to it is refused |
 | `signatures` | The signatures on record when the bundle was built, sorted by member, each `{ member, wallet, kind, signature, signedAt }`. `signedAt` is UTC in whole seconds. Left out when nobody has signed |
-| `gates` | The gates read when the terms were attached: `borrower`, `provider` and `tokenRegister`, each `{ address, kind }` or `{ kind: "NONE" }`, and `readAt: { chainId, block }`. Before deployment the gates come from the deployment parameters and `block` is `0`, so the preview and the deployment produce the same bytes while no member signs in between. The signatures on record at that moment are part of the member, so a later signature changes the hash, and the Issuer Portal previews again |
+| `gates` | The gates read when the terms were attached: `borrower` and `provider`, each `{ address, kind }` or `{ kind: "NONE" }`, and `readAt: { chainId, block }`. Before deployment the borrower gate comes from the deployment parameters, `provider` is recorded as `{ kind: "NONE" }` and `block` is `0`, so the preview and the deployment produce the same bytes while no member signs in between. The signatures on record at that moment are part of the member, so a later signature changes the hash, and the Issuer Portal previews again |
 
 `provider` is recorded so that a later change shows, and no rule is judged against it.
 
@@ -521,7 +521,7 @@ An attached version becomes the `identity` member of the market's asset data bun
 |---|---|
 | Left out | The standing member is carried over byte for byte, as documents are |
 | `null` | The member is removed |
-| `{ id, version }` | That version is attached, checked against the market's gates at the current block |
+| `{ id, version }` | That version is attached, checked against the market's borrower register at the current block |
 
 A re-attest of the same version whose gates and signatures have not changed reuses the standing member, so `ATTESTATION_CURRENT` still answers a re-attest that would change nothing. `identityChanges` in the answer names what moves before anything is signed.
 

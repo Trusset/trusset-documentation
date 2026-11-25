@@ -3,7 +3,7 @@ title: "Identity Terms"
 description: "Draft, check, publish and sign identity terms, and attach them to a market's asset data with the SDK"
 ---
 
-[Identity terms](/endpoints/lending/identity-terms) state how the investors of your tokens are identified: who performs the KYC and stands behind it, on which basis a lender may rely on it, and which gate or member enforces each investor rule. A published version is frozen under its core hash, the organisations it names sign it with their wallets, and a market carries it in its [asset data](/sdk/lending/asset-data), where the lender of record reads it before it acknowledges.
+[Identity terms](/endpoints/lending/identity-terms) state how the investors of your tokens are identified: who performs the KYC and stands behind it, on which basis a lender may rely on it, and whether the borrower gate or a member enforces each investor rule. A published version is frozen under its core hash, the organisations it names sign it with their wallets, and a market carries it in its [asset data](/sdk/lending/asset-data), where the lender of record reads it before it acknowledges.
 
 `trusset.lending.identityTerms` has ten methods. None of them signs anything: they are API reads and writes. The attachment to a market travels in an asset data attestation or a deployment, which follow the [signing model](/sdk/lending/signing). Terms describe gates and never install one.
 
@@ -32,25 +32,20 @@ Rules longer than the schema holds go in `requirementsExtJson`, the extension as
 
 ## Check the claims
 
-`check` validates the draft, or the published version named in `version`, and judges each of the five rules. What it judges against depends on the input. See [Checks and verdicts](/endpoints/lending/identity-terms#checks-and-verdicts).
+`check` validates the draft, or the published version named in `version`, and judges each of the five rules against a borrower gate. It reads no market, no collateral token and no price source. See [Checks and verdicts](/endpoints/lending/identity-terms#checks-and-verdicts).
 
 ```typescript
-const check = await trusset.lending.identityTerms.check(termsId, {
-  borrowerRegistryProfile: 'professional-de',
-  collateralTokenAddress: tokenAddress,
-  priceSource: 'NAV',
-})
+const check = await trusset.lending.identityTerms.check(termsId, { borrowerRegistry })
 
 for (const verdict of check.verdicts ?? []) console.log(verdict.rule, verdict.verdict, verdict.reason)
 ```
 
 | Input | Judged against |
 |---|---|
-| Nothing, or `version` alone | No gate: only claims no gate of that kind can ever back. Other gate claims read `verdict: null` |
-| `borrowerRegistry`, `borrowerRegistryProfile`, `borrowerRegistryAccessList`, `providerRegistry`, `collateralTokenAddress` | The registers a deployment would install, as [Deploy Market](/endpoints/lending/deploy-market) judges them |
-| `market` | The market's gates and its collateral token's registry at the current block |
+| Nothing, or `version` alone | No gate. Member rules read `CHECKED_BY_MEMBER`, a claim no borrower gate can ever back reads `CLAIM_NOT_BACKED`, and other `BORROWER_GATE` rules read `verdict: null` |
+| `borrowerRegistry`, `borrowerRegistryProfile` or `borrowerRegistryAccessList` | That borrower gate, as [Deploy Market](/endpoints/lending/deploy-market) judges its borrower register. `gates` is `{ borrower, readAt }` |
 
-With `market` the gates are read from the market itself, so the SDK refuses the register fields beside it. `priceSource` is accepted with `market` and ignored there: the market's own price source counts. A draft that is not complete yet answers `valid: false` with `version: null` and no verdicts.
+The SDK refuses any other input, and `borrowerRegistryProfile` beside `borrowerRegistryAccessList`, before any request. `warnings` holds only `KYC_PROVIDER_UNSIGNED` and `TERMS_WITHDRAWN`. A draft that is not complete yet answers `valid: false` with `version: null` and no verdicts.
 
 ## Publish, revise and withdraw
 
@@ -95,7 +90,7 @@ The member opens the link and signs with its own wallet through the public [sign
 
 ## Attach the terms to a market
 
-A deployment attaches a published version with `identityTerms: { id, version }` on [`markets.deploy`](/sdk/lending/markets#deploy-a-market). `assetData.preview` judges the same version against the registers the deployment will install. It posts as soon as `identityTerms` or a register field is present. Register fields without `identityTerms` are accepted and ignored.
+A deployment attaches a published version with `identityTerms: { id, version }` on [`markets.deploy`](/sdk/lending/markets#deploy-a-market). `assetData.preview` judges the same version against the borrower register the deployment will install. It posts as soon as `identityTerms` or a register field is present. Register fields without `identityTerms` are accepted and ignored.
 
 ```typescript
 const preview = await trusset.lending.assetData.preview({
@@ -122,7 +117,7 @@ const attested = await trusset.lending.assetData.attest(marketAddress, { identit
 |---|---|
 | `identityTerms` left out | The standing terms are carried over byte for byte |
 | `identityTerms: null` | The terms are removed |
-| `identityTerms: { id, version }` | The latest published version is attached, judged against the market's gates at the current block |
+| `identityTerms: { id, version }` | The latest published version is attached, judged against the market's borrower register at the current block |
 | `documents` left out | The standing documents are carried over |
 | `documents: [...]` | The complete new list, at most 20 entries, sent unchanged. `[]` removes every document |
 

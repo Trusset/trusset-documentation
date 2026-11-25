@@ -1,20 +1,19 @@
 ---
 title: 'Check Identity Terms'
 api: 'POST /lending-external-securities-v2/api/identity-terms/{id}/check'
-description: 'Validate identity terms and judge each claim against the gates of a market or a planned deployment'
+description: 'Validate identity terms and judge each claim against a borrower gate'
 ---
 
 Validates the draft or a published version of an [identity terms](/endpoints/lending/identity-terms) document and judges each of its five rules. Nothing is stored, and the call counts as a read.
 
-What it judges against depends on the body:
+The check judges the terms against a borrower gate. It reads no market, no collateral token and no price source. What it judges against depends on the body:
 
 | Body | Judged against | `staticOnly` |
 |---|---|---|
-| Empty, or `version` alone | No gate. Only claims no gate of that kind can ever back are judged, the same check [Publish Identity Terms](/endpoints/lending/publish-identity-terms) runs. Other gate claims read `verdict: null` | `true` |
-| `borrowerRegistry`, `providerRegistry` or `collateralTokenAddress` | The registers a deployment would install, and the token's own identity registry, read with `readAt.block` 0. [Deploy Market](/endpoints/lending/deploy-market) judges the same way | `false` |
-| `market` | The market's gates and its collateral token's registry at the current block. The market's own price source is used, and a `priceSource` sent with it is ignored | `false` |
+| Empty, or `version` alone | No gate. A rule a member enforces reads `CHECKED_BY_MEMBER`. A claim no borrower gate can ever back reads `CLAIM_NOT_BACKED`, the same check [Publish Identity Terms](/endpoints/lending/publish-identity-terms) runs. Every other `BORROWER_GATE` rule reads `verdict: null`, with the reason "Name a borrower gate to judge this rule against it." | `true` |
+| `borrowerRegistry`, `borrowerRegistryProfile` or `borrowerRegistryAccessList` | That borrower gate, read with `readAt.block` 0. [Deploy Market](/endpoints/lending/deploy-market) judges its borrower register the same way | `false` |
 
-See [Checks and verdicts](/endpoints/lending/identity-terms#checks-and-verdicts) for how each rule is judged. A market check needs the access described on [Get Asset Data](/endpoints/lending/get-asset-data#who-can-read-it).
+See [Checks and verdicts](/endpoints/lending/identity-terms#checks-and-verdicts) for how each rule is judged. A market judges the terms against its own gates when it attaches them, on [Preview Asset Data](/endpoints/lending/preview-asset-data), [Deploy Market](/endpoints/lending/deploy-market) and [Attest Asset Data](/endpoints/lending/attest-asset-data).
 
 Which text it checks: the version named in `version`; otherwise the open draft; otherwise the latest version. A draft that is not yet complete answers `valid: false` with its `problems`, `version: null`, `coreHash: null`, `verdicts: null`, `gates: null`, `hub: null` and `staticOnly: true`. That answer carries no `notBacked` and no `gatesReadable` key, and no gate is read.
 
@@ -30,33 +29,19 @@ Which text it checks: the version named in `version`; otherwise the open draft; 
   A published version to check instead of the draft.
 </ParamField>
 
-<ParamField body="market" type="string">
-  A market contract address of the lending factory, `0x` and 40 hex characters.
-</ParamField>
-
 <ParamField body="borrowerRegistry" type="string">
-  The borrower register a planned deployment would install.
+  The borrower gate to judge against, `0x` and 40 hex characters: the borrower register a deployment would install, or the one a market carries. The zero address stands for no gate, so every `BORROWER_GATE` rule reads `CLAIM_NOT_BACKED`.
 </ParamField>
 
 <ParamField body="borrowerRegistryProfile" type="string">
-  A [verification profile](/endpoints/customers/list-verification-profiles) key whose eligibility register or profile gate is used as `borrowerRegistry`, as on Deploy Market.
+  A [verification profile](/endpoints/customers/list-verification-profiles) key whose eligibility register or profile gate is used as `borrowerRegistry`, as on Deploy Market. Sent with `borrowerRegistry`, both must name the same address.
 </ParamField>
 
 <ParamField body="borrowerRegistryAccessList" type="string">
-  The ID of a whitelist of your instance used as `borrowerRegistry`.
+  The ID of a whitelist of your instance used as `borrowerRegistry`. Not accepted beside `borrowerRegistryProfile`.
 </ParamField>
 
-<ParamField body="providerRegistry" type="string">
-  The provider register a planned deployment would propose. It is recorded in `gates` and no rule is judged against it.
-</ParamField>
-
-<ParamField body="collateralTokenAddress" type="string">
-  The collateral token of a planned deployment. Its `identityRegistry()` is read as the token register.
-</ParamField>
-
-<ParamField body="priceSource" type="string">
-  `MARKET`, `NAV`, `ORACLE` or `FIXED`, for the `RETAIL_ON_MARKET_PRICE` warning. Accepted with `market` and ignored there: the market's own price source counts.
-</ParamField>
+The body takes these four fields and no other. Any other field answers `400 VALIDATION_ERROR`.
 
 ## Response Fields
 
@@ -67,11 +52,11 @@ Which text it checks: the version named in `version`; otherwise the open draft; 
     <ResponseField name="valid" type="boolean">`true` when the text has no problem and no claim is `CLAIM_NOT_BACKED`.</ResponseField>
     <ResponseField name="coreHash" type="string">The core hash of what was checked. For a draft, the hash it would publish under. `null` when the draft is not complete.</ResponseField>
     <ResponseField name="problems" type="array">The validation problems of the draft, each `{ code, field, message, remedy }`. Always empty for a published version. Publishing refuses each of them, and in addition a claim no gate can back (`IDENTITY_TERMS_CLAIM_NOT_BACKED`, reported here in `verdicts`) and a draft that states exactly what the latest version states (`IDENTITY_TERMS_UNCHANGED`).</ResponseField>
-    <ResponseField name="verdicts" type="array">One entry per rule: `rule`, `by`, `member`, `gate`, `gateKind`, `gateAddress`, `verdict`, `reason` and, on `CLAIM_NOT_BACKED`, `remedy`. `null` when the draft is not complete.</ResponseField>
+    <ResponseField name="verdicts" type="array">One entry per rule: `rule`, `by`, `member` for a member, `gate` (always `borrower`), `gateKind` and `gateAddress` for the borrower gate, `verdict`, `reason` and, on `CLAIM_NOT_BACKED`, `remedy`. `null` when the draft is not complete.</ResponseField>
     <ResponseField name="notBacked" type="integer">How many verdicts are `CLAIM_NOT_BACKED`. Left out when the draft is not complete.</ResponseField>
-    <ResponseField name="warnings" type="array">`{ code, message }` entries. See [Warnings](/endpoints/lending/identity-terms#warnings).</ResponseField>
-    <ResponseField name="gates" type="object">The gates judged against: `borrower`, `provider` and `tokenRegister`, each `{ address, kind }` or `{ kind: "NONE" }`, and `readAt: { chainId, block }`. `null` on a static check.</ResponseField>
-    <ResponseField name="gatesReadable" type="boolean">`false` when one of the gates could not be read; its verdicts then read `GATE_UNREADABLE`. `null` on a static check. Left out when the draft is not complete.</ResponseField>
+    <ResponseField name="warnings" type="array">`{ code, message }` entries: `KYC_PROVIDER_UNSIGNED` or `TERMS_WITHDRAWN`. See [Warnings](/endpoints/lending/identity-terms#warnings).</ResponseField>
+    <ResponseField name="gates" type="object">The borrower gate judged against: `borrower`, as `{ address, kind }` or `{ kind: "NONE" }`, and `readAt: { chainId, block }` with `block` 0. `null` on a static check.</ResponseField>
+    <ResponseField name="gatesReadable" type="boolean">`false` when the borrower gate could not be read; its verdicts then read `GATE_UNREADABLE`. `null` on a static check. Left out when the draft is not complete.</ResponseField>
     <ResponseField name="hub" type="object">The [hub cross-check](/endpoints/lending/identity-terms#hub-cross-check), `{ hub, member, wallet, result, readable }`, or `null`.</ResponseField>
     <ResponseField name="staticOnly" type="boolean">`true` when no gate was read.</ResponseField>
   </Expandable>
@@ -83,9 +68,8 @@ curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/identit
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
   -d '{
-    "borrowerRegistry": "0x7d3a91c4e05b28f6a1c9d0e7b4f2a86c3e5d1b09",
-    "collateralTokenAddress": "0x9f8c1d4b2e7a3056c1b8f4d29e0a7c3518b6d24f",
-    "priceSource": "NAV"
+    "version": 1,
+    "borrowerRegistry": "0x7d3a91c4e05b28f6a1c9d0e7b4f2a86c3e5d1b09"
   }'
 ```
 ```typescript TypeScript
@@ -94,7 +78,7 @@ const res = await fetch(
   {
     method: 'POST',
     headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ market: marketAddress })
+    body: JSON.stringify({ borrowerRegistryProfile: 'professional-de' })
   }
 );
 const { success, data, error } = await res.json();
@@ -104,7 +88,7 @@ for (const v of data.verdicts ?? []) console.log(v.rule, v.verdict, v.reason);
 </RequestExample>
 
 <ResponseExample>
-```json Response - Before Deployment
+```json Response - Borrower Gate
 {
   "success": true,
   "data": {
@@ -165,8 +149,6 @@ for (const v of data.verdicts ?? []) console.log(v.rule, v.verdict, v.reason);
     ],
     "gates": {
       "borrower": { "address": "0x7d3a91c4e05b28f6a1c9d0e7b4f2a86c3e5d1b09", "kind": "PROFILE_GATE" },
-      "provider": { "kind": "NONE" },
-      "tokenRegister": { "address": "0x2b8f6d4a1c9e7053b2d8f1a6c4e9b7d05a3f8c1e", "kind": "TREX_REGISTRY" },
       "readAt": { "chainId": 11155111, "block": 0 }
     },
     "gatesReadable": true,
@@ -222,14 +204,12 @@ The second example shows one verdict of five.
 
 ## Error Codes
 
-A `market` also answers the access codes of [Get Asset Data](/endpoints/lending/get-asset-data#error-codes). A register named by profile or whitelist also answers the profile and whitelist codes of [Deploy Market](/endpoints/lending/deploy-market#error-codes).
+A borrower gate named by profile or whitelist also answers the profile and whitelist codes of [Deploy Market](/endpoints/lending/deploy-market#error-codes), `GATE_SOURCE_CONFLICT` among them. A borrower gate that cannot be read is no error: `gatesReadable` reads `false` and its verdicts `GATE_UNREADABLE`.
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | A body field is malformed or not part of this route |
+| `VALIDATION_ERROR` | `400` | A body field is malformed or not one of `version`, `borrowerRegistry`, `borrowerRegistryProfile` and `borrowerRegistryAccessList` |
 | `IDENTITY_TERMS_NOT_FOUND` | `404` | No terms with this id exist in your instance |
 | `IDENTITY_TERMS_VERSION_NOT_FOUND` | `404` | `version` names no published version of these terms |
-| `MARKET_NOT_V2` | `404` | `market` is not a market of the lending factory this instance deploys to |
 | `RATE_LIMIT_EXCEEDED` | `429` | More than 100 reads in a minute. Retry after the interval in `Retry-After` |
 | `IDENTITY_TERMS_CHECK_FAILED` | `500` | The check could not run for a reason that carries no code of its own. Retry, or contact support with the request ID |
-| `IDENTITY_TERMS_GATES_UNREADABLE` | `503` | The market's registers, the current block, or the collateral token's registry could not be read. Retry shortly |
