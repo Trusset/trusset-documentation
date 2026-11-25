@@ -1,10 +1,12 @@
 ---
 title: 'List Proofs'
 api: 'GET /customers/api/identity/proofs/{walletAddress}'
-description: 'The claim slots on an identity and which proof backs each one'
+description: 'The claims on an identity and which proof backs each one'
 ---
 
-Returns the subject's on-chain root and every active claim slot, joined with the ledger row that records which proof filed it. It answers the question a reviewer asks: what does this identity assert, and where did each assertion come from.
+Returns the subject's on-chain root and every active claim, joined with the ledger row that records which proof filed it. It answers the question a reviewer asks: what does this identity assert, and where did each assertion come from.
+
+On the [instance ID register](/endpoints/customers/introduction#the-instance-id-register) a claim is a [predicate](/endpoints/customers/introduction#predicates) of the attestation the register resolves for the wallet, and there is one entry per predicate of the hub's standard table. Predicates an attester defines itself, bits 64 to 127, are not listed. Every entry carries the attestation's root, attester, issue time and hard expiry. The leaf hash behind a predicate is not on chain: it comes from Trusset's proof ledger.
 
 ## Path Parameters
 
@@ -15,35 +17,38 @@ Returns the subject's on-chain root and every active claim slot, joined with the
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="walletAddress" type="string">The subject, checksummed.</ResponseField>
-    <ResponseField name="rootHash" type="string">The root the registry holds for this identity, lowercased, or `null` when there is none.</ResponseField>
-    <ResponseField name="verified" type="boolean">Whether the registry holds a verified identity.</ResponseField>
-    <ResponseField name="frozen" type="boolean">Whether the identity is frozen. Always `false` on an ERC-3643 register, which keeps no freeze.</ResponseField>
+    <ResponseField name="rootHash" type="string">The root the register holds for this identity, lowercased, or `null` when there is none.</ResponseField>
+    <ResponseField name="verified" type="boolean">Whether the register reports the wallet as verified.</ResponseField>
+    <ResponseField name="frozen" type="boolean">Whether the wallet is frozen. On the instance ID register the freeze list belongs to your register. Always `false` on an ERC-3643 register, which keeps no freeze.</ResponseField>
     <ResponseField name="chainUnavailable" type="boolean">`true` when the identity could not be read. The rest of the response is then not a statement about the identity. A failed read of the claims alone is not flagged, and `proofs` then comes back empty.</ResponseField>
     <ResponseField name="ledgerUnavailable" type="boolean">`true` when the proof ledger could not be read.</ResponseField>
-    <ResponseField name="proofs" type="array">One entry per active claim slot on chain. See below.</ResponseField>
+    <ResponseField name="proofs" type="array">One entry per active claim on chain. See below.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <ResponseField name="proofs" type="array">
   <Expandable>
-    <ResponseField name="claimType" type="integer">Slot index, 0 to 7.</ResponseField>
-    <ResponseField name="claimTypeLabel" type="string">Its name, for example `RESIDENCY`.</ResponseField>
+    <ResponseField name="claimType" type="integer">The claim type, 0 to 7. On the instance ID register a predicate with no claim type of its own reads as 100 plus its bit, for example `104` for `ADULT`.</ResponseField>
+    <ResponseField name="claimTypeLabel" type="string">Its name, for example `RESIDENCY`, or the predicate name, for example `ADULT`.</ResponseField>
+    <ResponseField name="predicate" type="string">Instance ID register only. The predicate, for example `RESIDENCY_ON_FILE`.</ResponseField>
     <ResponseField name="fieldName" type="string">The bundle field that filed it, or `null` when no ledger row matches this claim's hash.</ResponseField>
     <ResponseField name="circuit" type="string">The circuit that proved it, or `null`.</ResponseField>
     <ResponseField name="proofDigest" type="string">Digest of the STARK behind it, or `null`.</ResponseField>
     <ResponseField name="bundleRoot" type="string">The root of the bundle that filed it, or `null`.</ResponseField>
     <ResponseField name="rootCurrent" type="boolean">Whether that bundle's root is still the one on chain. `false` means the claim was filed from a bundle the identity has since rotated away from, or that no ledger row matches.</ResponseField>
-    <ResponseField name="source" type="string">`proof` when a ledger row with this hash backs it, `manual` when none does, `null` when the ledger could not be read. Only [Attest Proofs](/endpoints/customers/attest-proofs) writes ledger rows. A claim filed by [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) or [Add Claim](/endpoints/customers/add-claim) shows as `manual`.</ResponseField>
-    <ResponseField name="dataHash" type="string">The hash the claim carries on chain, lowercased.</ResponseField>
-    <ResponseField name="issuer" type="string">Who wrote the claim on chain. On an ERC-3643 register, the trusted issuer contract that signed it.</ResponseField>
+    <ResponseField name="source" type="string">`proof` when a ledger row backs it, `manual` when none does, `null` when the ledger could not be read. [Attest Proofs](/endpoints/customers/attest-proofs) and [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) write ledger rows. A claim filed by [Add Claim](/endpoints/customers/add-claim) shows as `manual`. On the instance ID register a row matches when its bundle root is the attestation's root. On a register of your own it matches when its leaf hash is the claim's hash.</ResponseField>
+    <ResponseField name="dataHash" type="string">The hash the claim carries, lowercased. On the instance ID register, the leaf hash from the matching ledger row, or the attestation's root when no row matches.</ResponseField>
+    <ResponseField name="issuer" type="string">Who wrote the claim on chain: on the instance ID register, the attester the register resolves. On an ERC-3643 register, the trusted issuer contract that signed it.</ResponseField>
     <ResponseField name="issuedAt" type="integer">Unix seconds. `0` on an ERC-3643 register.</ResponseField>
-    <ResponseField name="expiry" type="integer">Unix seconds, or `0` for no expiry. Always `0` on an ERC-3643 register.</ResponseField>
+    <ResponseField name="expiry" type="integer">Unix seconds, or `0` for no expiry. On the instance ID register, the attestation's hard expiry. Always `0` on an ERC-3643 register.</ResponseField>
     <ResponseField name="txHash" type="string">The transaction that filed it, from the ledger, or `null`.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Warning>
-  `rootCurrent: false` on a `source: "proof"` entry is the one to watch. The claim is still on chain and still readable by a token contract. But the bundle it came from no longer matches the identity's root, so the proof behind it can no longer be checked against the chain. Re-attest from the current bundle.
+  `rootCurrent: false` on a `source: "proof"` entry is the one to watch on a register of your own. The claim is still on chain and still readable by a token contract. But the bundle it came from no longer matches the identity's root, so the proof behind it can no longer be checked against the chain. Re-attest from the current bundle.
+
+  On the instance ID register a ledger row matches only while its bundle root is the attestation's root. After a rotation, a predicate that no proof from the current bundle backs reads `source: manual`. The predicate is still on the attestation.
 </Warning>
 
 <Note>
@@ -62,7 +67,7 @@ const res = await fetch(`https://api.trusset.org/customers/api/identity/proofs/$
 });
 const { data } = await res.json();
 
-if (data.chainUnavailable) throw new Error('Registry unreadable, retry later');
+if (data.chainUnavailable) throw new Error('Register unreadable, retry later');
 
 const stale = data.proofs.filter((p: any) => p.source === 'proof' && !p.rootCurrent);
 ```
@@ -81,6 +86,22 @@ const stale = data.proofs.filter((p: any) => p.source === 'proof' && !p.rootCurr
     "ledgerUnavailable": false,
     "proofs": [
       {
+        "claimType": 0,
+        "claimTypeLabel": "KYC",
+        "fieldName": "kycHash",
+        "circuit": "merkle_root",
+        "proofDigest": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
+        "bundleRoot": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
+        "rootCurrent": true,
+        "source": "proof",
+        "dataHash": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
+        "issuer": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
+        "issuedAt": 1788696000,
+        "expiry": 1820246400,
+        "txHash": "0x3b5e0a91c7d24f68e1b0c35a9d7f2e4608b1c9d3e5f7a2b4c6d8e0f1a3b5c7d9",
+        "predicate": "KYC_DONE"
+      },
+      {
         "claimType": 3,
         "claimTypeLabel": "RESIDENCY",
         "fieldName": "country",
@@ -93,14 +114,31 @@ const stale = data.proofs.filter((p: any) => p.source === 'proof' && !p.rootCurr
         "issuer": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
         "issuedAt": 1788696000,
         "expiry": 1820246400,
-        "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b"
+        "txHash": "0x3b5e0a91c7d24f68e1b0c35a9d7f2e4608b1c9d3e5f7a2b4c6d8e0f1a3b5c7d9",
+        "predicate": "RESIDENCY_ON_FILE"
+      },
+      {
+        "claimType": 105,
+        "claimTypeLabel": "EEA_RESIDENT",
+        "fieldName": null,
+        "circuit": null,
+        "proofDigest": null,
+        "bundleRoot": null,
+        "rootCurrent": false,
+        "source": "manual",
+        "dataHash": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
+        "issuer": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
+        "issuedAt": 1788696000,
+        "expiry": 1820246400,
+        "txHash": null,
+        "predicate": "EEA_RESIDENT"
       }
     ]
   },
   "error": null,
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2026-09-06T12:00:00.000Z"
+    "timestamp": "2026-11-19T12:00:00.000Z"
   }
 }
 ```
@@ -112,5 +150,6 @@ const stale = data.proofs.filter((p: any) => p.source === 'proof' && !p.rootCurr
 |---|---|---|
 | `INVALID_ADDRESS` | `400` | `walletAddress` is not a valid address |
 | `INSTANCE_NOT_FOUND` | `404` | The instance behind your key no longer exists |
+| `INSTANCE_REGISTER_REQUIRED` | `409` | Your instance has no instance ID register yet. It is created in the issuer app, under Settings |
 | `OWN_REGISTRY_NOT_CONFIGURED` | `409` | The instance is bound to its own register but has no valid register address |
 | `PROOFS_FAILED` | `500` | The proof tree could not be assembled |

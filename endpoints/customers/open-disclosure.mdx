@@ -1,0 +1,172 @@
+---
+title: 'Open Disclosure'
+api: 'POST /customers/api/disclosure-requests/{id}/open'
+description: 'Prove that a disclosure was decrypted, so Trusset deletes its ciphertext'
+---
+
+Acknowledges that you decrypted and stored a disclosure. The proof is `openProof`, a random value the holder's browser placed inside the plaintext. Trusset holds only its SHA-256 hash, the header's `openCommitment`, so only someone who decrypted the envelope can send the matching value.
+
+Your [local tool](/tools/kyc-courier/overview) calls this once every check below has passed and the result is on your disk. A disclosure that fails a check is refused with [Reject Disclosure](/endpoints/customers/reject-disclosure) instead. You call this yourself only when you open disclosures with your own implementation.
+
+<Warning>
+  When the proof matches, Trusset deletes the ciphertext and `envelope.status` becomes `OPENED`. The envelope cannot be downloaded again, and getting the facts again takes a new request. Store the decrypted disclosure first and acknowledge second, as the tool does.
+</Warning>
+
+## What your tool checks first
+
+Before it acknowledges, the tool works through the envelope from [Download Disclosure Envelope](/endpoints/customers/get-disclosure-envelope) in this order:
+
+1. The header decodes, and its `requestId`, `walletAddress`, `recipientKeyId`, `scope` and `predicates` equal the request.
+2. It recomputes `envelopeDigest`, rebuilds the consent typed data from the request with that digest, and checks that the stored signature recovers to the request wallet.
+3. It decrypts with the record key whose ID is `recipientKeyId`. A failure is `UNDECRYPTABLE`.
+4. The SHA-256 of the plaintext equals `payloadDigest`, and the SHA-256 of `openProof` equals `openCommitment`. Otherwise `DIGEST_MISMATCH`.
+5. The plaintext parses strictly, with the right `version`, `requestId` and `wallet`.
+6. Each disclosure is version `3.1.0` and names the request wallet, and passes `verify_disclosure` of the [KYC STARK tool](/tools/kyc-starks/verification#a-single-disclosed-leaf) 3.1 under the operator key the identity hub publishes for its attester and key ID. The wallet's attestation by that attester on the hub must have the disclosure's root. A failure is `PROOF_INVALID`.
+7. The disclosures answer the scope, as set out on [Create Disclosure Request](/endpoints/customers/create-disclosure-request#scopes). Otherwise `INCOMPLETE`.
+
+Only then does it store the result and send `openProof`. What you hold after that is the value each proof shows, such as a date of birth or a country, under your own data protection duties.
+
+## What opening does
+
+- `envelope.status` becomes `OPENED`, `held` becomes `false`, and `openedAt` and `purgedAt` are set.
+- Trusset deletes `enc` and the ciphertext. The header, the digests, the size, the consent and the dates stay.
+- The opening is written to the customer audit log as `DISCLOSURE_OPENED`, with `envelopeDigest`.
+
+Sending the proof again for an envelope that is already `OPENED` changes nothing and answers with the request, so a retry after a lost response is safe. Nothing is written on chain, no customer record changes, and no webhook is sent.
+
+## Path Parameters
+
+<ParamField path="id" type="string" required>
+  The request `id`. Letters and digits only, at most 100 characters.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="openProof" type="string" required>
+  The `openProof` field of the decrypted plaintext: 32 bytes as 64 lowercase hex characters.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="request" type="object">The request after the call, as on [Get Disclosure Request](/endpoints/customers/get-disclosure-request#response-fields), with `consent`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/disclosure-requests/cmi6q2x8v0004l50c7k3d9m1r/open" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "openProof": "8be87e514c32de93aa599631fa8d71949ae9fbedd031c64eb2b50a6604e1b318" }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/customers/api/disclosure-requests/${requestId}/open`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ openProof: plaintext.openProof })
+  }
+);
+const { data } = await res.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "request": {
+      "id": "cmi6q2x8v0004l50c7k3d9m1r",
+      "walletAddress": "0x4b7250ae316D20Ea2c1d74Ece6414F4f192cF002",
+      "scope": "COUNTRY",
+      "scopeLabel": "Reveal country",
+      "predicates": ["EEA_RESIDENT", "RESIDENCY_ON_FILE"],
+      "referenceUrl": "https://acme-capital.example/onboarding/4711",
+      "message": "Please confirm your country of residence for your account opening",
+      "status": "APPROVED",
+      "environment": "DEV",
+      "createdAt": "2026-11-20T09:30:00.000Z",
+      "expiresAt": "2026-12-04T09:30:00.000Z",
+      "respondedAt": "2026-11-21T14:05:12.406Z",
+      "proofLevel": "ENCRYPTED_DISCLOSURE",
+      "recipientKeyId": "84566958631088a4",
+      "envelope": {
+        "status": "OPENED",
+        "held": false,
+        "sealedBytes": 68216,
+        "envelopeDigest": "0xeb6b31ad295cd93c10b4cdc19ba1a136b767e17aa2e04b178c97903007f09548",
+        "sealedDigest": "2390d876c1b953300cce3b02ae4ed21bfaaa535fb180090aa80f2acc6459af08",
+        "payloadDigest": "1106bc283c1d27067961bafb282991917bff7e5018ddf705658486a94a64b0d1",
+        "collectBy": null,
+        "openedAt": "2026-11-21T15:12:40.221Z",
+        "rejectedAt": null,
+        "rejectReason": null,
+        "purgedAt": "2026-11-21T15:12:40.221Z"
+      },
+      "consent": {
+        "typedData": {
+          "domain": { "name": "Trusset Verify", "version": "2", "chainId": 11155111 },
+          "types": {
+            "DisclosureConsent": [
+              { "name": "requestId", "type": "string" },
+              { "name": "wallet", "type": "address" },
+              { "name": "requestor", "type": "string" },
+              { "name": "scope", "type": "string" },
+              { "name": "reference", "type": "string" },
+              { "name": "expiresAt", "type": "uint256" },
+              { "name": "envelopeDigest", "type": "bytes32" }
+            ]
+          },
+          "primaryType": "DisclosureConsent",
+          "message": {
+            "requestId": "cmi6q2x8v0004l50c7k3d9m1r",
+            "wallet": "0x4b7250ae316D20Ea2c1d74Ece6414F4f192cF002",
+            "requestor": "ACME Capital AG",
+            "scope": "COUNTRY",
+            "reference": "https://acme-capital.example/onboarding/4711",
+            "expiresAt": 1796376600,
+            "envelopeDigest": "0xeb6b31ad295cd93c10b4cdc19ba1a136b767e17aa2e04b178c97903007f09548"
+          }
+        },
+        "signature": "0x910b3bcd38af731efdc606bcb83474e0edcaf2ebf57f7b8ab8bf2d1b3c93d35764c33bd02b0f0605e3cad76a110a5cb65b23a61365669cfd5b686fc6704df6b71c",
+        "signedAt": "2026-11-21T14:05:12.406Z"
+      }
+    }
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-21T15:12:40.250Z"
+  }
+}
+```
+```json Error - Proof Mismatch
+{
+  "success": false,
+  "error": {
+    "code": "OPEN_PROOF_MISMATCH",
+    "message": "openProof does not match this disclosure. It is the value inside the decrypted payload, so only the holder of the record key can supply it.",
+    "details": { "field": "openProof" }
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-21T15:12:40.250Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `id` contains characters other than letters and digits, or is longer than 100 characters |
+| `OPEN_PROOF_MISMATCH` | `400` | `openProof` is missing, is not 64 lowercase hex characters, or does not hash to the header's `openCommitment`. Checked before the envelope's status |
+| `NOT_FOUND` | `404` | No request with this ID was made by your instance |
+| `ENVELOPE_NOT_FOUND` | `404` | The request carries no envelope |
+| `ENVELOPE_NOT_OPENABLE` | `409` | The envelope is `REJECTED` or `UNCLAIMED`. `details.envelopeStatus` is its status |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 disclosure request changes per minute |
+| `OPEN_DISCLOSURE_FAILED` | `500` | The opening could not be recorded |

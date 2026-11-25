@@ -1,25 +1,43 @@
 ---
 title: 'Inspect Manifest'
 api: 'POST /customers/api/identity/manifest/inspect'
-description: 'Read a proof bundle and see which leaves can be attested'
+description: 'Check a 3.1 proof bundle against its signed header and see which leaves can be attested'
 ---
 
-Reads a manifest, checks its signature and recomputes its Merkle root, then reports every leaf and whether it can be filed as a claim. Nothing is written and no chain read happens.
+Checks a [KYC-STARKs](/tools/kyc-starks/overview) 3.1 manifest against its signed header, then reports every leaf and whether it can be filed. Nothing is written. Trusset reads the attester's operator key from the identity hub and checks that your instance trusts the attester, but does not compare the root with the one the register holds for the wallet.
 
-Call it before [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) to build a selection screen. A leaf that comes back with `attestable: false` cannot be filed there either, and `blockedReason` says why in words you can show.
+Call it before [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) or [Attest Proofs](/endpoints/customers/attest-proofs) to build a selection screen. A leaf that comes back with `attestable: false` cannot be filed there either, and `blockedReason` says why in words you can show.
+
+<Warning>
+  Trusset never receives proof bytes. A 3.1 proof reveals the value it is about: an age proof the date of birth, a set-membership proof the country, a tier proof the investor class. Verify the proofs on your side with the tool or the SDK, and send the manifest and its signed header only. A body that carries `proofs`, `proof`, `proofBytes` or `zk` is refused with `400 PROOFS_NOT_ACCEPTED`, and a 2.x or 3.0 manifest, which carries the country and the investor type in clear text, with `400 PERSONAL_DATA_IN_MANIFEST`.
+</Warning>
+
+The header signature is checked against the operator key the identity hub publishes for the header's attester and key id. When the attester has published no key on the hub, the key registered with [Set Operator Key](/endpoints/customers/set-operator-key) is used, and `operatorKey.source` reads `instance`. [What Trusset checks](/endpoints/customers/add-claims-from-proof#what-trusset-checks) lists every check.
 
 <Note>
-  Inspect Manifest, Add Claims from Proof and [Attest Proofs](/endpoints/customers/attest-proofs) share one rate limit per instance: 30 requests in a 60-second window. Past it, they answer `429 RATE_LIMITED` with a `Retry-After` header in seconds.
+  Inspect Manifest, Add Claims from Proof and Attest Proofs share one rate limit per instance: 30 requests in a 60-second window. Past it, they answer `429 RATE_LIMITED` with a `Retry-After` header in seconds.
 </Note>
 
 ## Body Parameters
 
 <ParamField body="manifest" type="object" required>
-  The `manifest.json` from the bundle directory the proof tool wrote, parsed as JSON. At most 64 KiB serialized and 32 leaves.
+  The `manifest.json` from the bundle directory the tool wrote, parsed as JSON, version `3.1.0`. At most 64 KiB serialized and 32 leaves.
 </ParamField>
 
-<ParamField body="manifestSig" type="string">
-  The 64 raw bytes of `manifest.sig`, base64-encoded. It is the ed25519 signature over a canonical view of the manifest, verified against the key from [Set Operator Key](/endpoints/customers/set-operator-key). Required whenever a key is registered. Without one, an instance that enforces proofs refuses the bundle and any other instance skips the check.
+<ParamField body="header" type="object" required>
+  The bundle's `header.json`, parsed.
+</ParamField>
+
+<ParamField body="headerSignature" type="string" required>
+  The bundle's `header.sig`, the 64-byte ed25519 signature, as `0x` followed by 128 lowercase hex characters.
+</ParamField>
+
+<ParamField body="walletAddress" type="string">
+  The customer you expect. When sent, the header must name this wallet, or the call answers `WALLET_MISMATCH`.
+</ParamField>
+
+<ParamField body="signerAddress" type="string">
+  The wallet you will sign with. When sent, it must be the attester the header names, or the call answers `ATTESTER_MISMATCH`.
 </ParamField>
 
 ## Response Fields
@@ -27,14 +45,21 @@ Call it before [Add Claims from Proof](/endpoints/customers/add-claims-from-proo
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="ok" type="boolean">Always `true` on a `200`. A bundle that does not hold together is an error response, not `ok: false`.</ResponseField>
-    <ResponseField name="kycHash" type="string">The Merkle root recomputed from the leaves, lowercased. It equals the manifest's own `kycHash`, or the call fails with `ROOT_MISMATCH`. It is the value to register on chain as the identity's `kycHash`.</ResponseField>
-    <ResponseField name="walletAddress" type="string">The subject the bundle is for, checksummed.</ResponseField>
-    <ResponseField name="epochDays" type="integer">The pinned batch date the bundle was proved against, in days. Every per-leaf commitment derives from it.</ResponseField>
-    <ResponseField name="mode" type="string">`production` or `stub`. A `stub` bundle carries no real STARKs and is refused outright on a production instance.</ResponseField>
-    <ResponseField name="signature" type="string">`verified` when the signature checked out against the registered key. `skipped-dev` when no key is registered and proofs are not enforced.</ResponseField>
-    <ResponseField name="verifierVersion" type="string">The verifier that produced this reading, as `trusset-verifier@<tool commit>/<wasm hash prefix>`. It is recorded on every verification report so an old result stays interpretable.</ResponseField>
-    <ResponseField name="assignableClaimTypes" type="array">The four slots a non-canonical leaf may be filed under: `AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK`, `PEP_CHECK`.</ResponseField>
-    <ResponseField name="passthrough" type="object">`country`, `investorType`, `softExpiryDays` and `hardExpiryDays` as the tool carried them through. These are plain values, not proved facts, and each is `null` when absent.</ResponseField>
+    <ResponseField name="version" type="string">`3.1.0`.</ResponseField>
+    <ResponseField name="kycHash" type="string">The Merkle root recomputed from the leaves, lowercased. It equals the root the header signs, or the call fails with `ROOT_MISMATCH`. It is the root of the wallet's attestation on the instance ID register, or the `kycHash` on a register of your own.</ResponseField>
+    <ResponseField name="walletAddress" type="string">The subject the header names, checksummed.</ResponseField>
+    <ResponseField name="epochDays" type="integer">The pinned batch date the bundle was proved against, in days.</ResponseField>
+    <ResponseField name="mode" type="string">`production` or `stub`. A `stub` bundle carries no real proofs and is refused outright on a production instance.</ResponseField>
+    <ResponseField name="signature" type="string">`header-verified`: the header signature checked out under the operator key.</ResponseField>
+    <ResponseField name="verifierVersion" type="string">The verifier that produced this reading, as `trusset-verifier@<tool commit>/<wasm hash prefix>`.</ResponseField>
+    <ResponseField name="attester" type="string">The attester the header names, checksummed. The wallet that signs the plan.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain the header names.</ResponseField>
+    <ResponseField name="hub" type="string">The identity hub the header names, checksummed.</ResponseField>
+    <ResponseField name="keyId" type="integer">The hub key id the header names.</ResponseField>
+    <ResponseField name="operatorKey" type="object">The key the header was checked against: `source` (`hub` or `instance`), `keyId`, `publicKey`, and with `source: instance` a `message` asking you to publish the key on the hub.</ResponseField>
+    <ResponseField name="attestation" type="object">The attestation derived from the manifest: `version`, `subject`, `root`, `investorClass`, `predicates`, `predicateNames`, `softExpiry`, `hardExpiry`, `attester`, `chainId`, `hub` and `keyId`. This is what filing every leaf would attest.</ResponseField>
+    <ResponseField name="assignableClaimTypes" type="array">The four slots a leaf with no canonical slot may be filed under on a register of your own: `AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK`, `PEP_CHECK`.</ResponseField>
+    <ResponseField name="passthrough" type="object">`softExpiryDays` and `hardExpiryDays` as the tool carried them, each `null` when absent. A 3.1 manifest carries nothing else outside its leaves.</ResponseField>
     <ResponseField name="leaves" type="array">One entry per leaf. See below.</ResponseField>
   </Expandable>
 </ResponseField>
@@ -43,16 +68,22 @@ Call it before [Add Claims from Proof](/endpoints/customers/add-claims-from-proo
 
 <ResponseField name="leaves" type="array">
   <Expandable>
-    <ResponseField name="fieldName" type="string">The field this leaf commits to, for example `country` or `dateOfBirth@7665d`.</ResponseField>
+    <ResponseField name="fieldName" type="string">The leaf name, for example `country` or `country@country_allowlist`.</ResponseField>
     <ResponseField name="circuit" type="string">`age_threshold`, `set_membership`, `tier_threshold` or `preimage_knowledge`. A commitment-only leaf carries `preimage_knowledge`.</ResponseField>
     <ResponseField name="circuitId" type="integer">Its numeric id, 1 to 4, which is bound into the leaf hash.</ResponseField>
-    <ResponseField name="leafHash" type="string">The leaf hash. This is what is written on chain as the claim's `dataHash`.</ResponseField>
-    <ResponseField name="commitment" type="string">The hiding commitment over the value.</ResponseField>
-    <ResponseField name="proofDigest" type="string">Digest of the STARK bytes, so the proof file can be tied to this leaf.</ResponseField>
+    <ResponseField name="predicate" type="string">The hub predicate the leaf proves, from its `binding.predicate`, or `null`.</ResponseField>
+    <ResponseField name="predicateBit" type="integer">That predicate's bit on the identity hub, or `null`. `INVESTOR_CLASS` has none.</ResponseField>
+    <ResponseField name="listId" type="string">For a `set_membership` leaf, the list it was proved against, or `null`.</ResponseField>
+    <ResponseField name="listVersion" type="integer">The version of that list, or `null`.</ResponseField>
+    <ResponseField name="validity" type="object">`from`, `until` (or `null`) and `basisAsOf`, in days, as the leaf records them.</ResponseField>
+    <ResponseField name="leafHash" type="string">The leaf hash. On a register of your own it is written on chain as the claim's `dataHash`. On the instance ID register it stays in Trusset's proof ledger, and the chain holds the root and the predicate bit.</ResponseField>
+    <ResponseField name="commitment" type="string">The commitment over the value.</ResponseField>
+    <ResponseField name="proofDigest" type="string">The digest of the proof bytes the attester hashed. Trusset never sees the bytes.</ResponseField>
     <ResponseField name="publicDigest" type="string">Digest of the public inputs.</ResponseField>
-    <ResponseField name="proofPath" type="string">Where the proof file sits in the bundle, or `null`.</ResponseField>
-    <ResponseField name="canonicalClaimType" type="string">The reserved slot this field must occupy, or `null` when the field has no canonical meaning and you choose a slot. A canonical field proved with the wrong circuit is also `null`, and cannot be filed at all.</ResponseField>
-    <ResponseField name="commitmentOnly" type="boolean">`true` when the leaf is a commitment with no STARK behind it, which shows as a `proofDigest` equal to the digest of an empty proof.</ResponseField>
+    <ResponseField name="proofPath" type="string">Where the proof file sits in the bundle.</ResponseField>
+    <ResponseField name="canonicalClaimType" type="string">The claim this leaf files as. On the instance ID register the claim of its predicate, such as `RESIDENCY` or `ADULT`. On a register of your own its reserved slot, or `null` when it has none and you choose one with Attest Proofs.</ResponseField>
+    <ResponseField name="commitmentOnly" type="boolean">`true` for a `commitment_only` leaf, which carries no proof.</ResponseField>
+    <ResponseField name="classOnly" type="boolean">`true` for the `INVESTOR_CLASS` leaf on the instance ID register. It sets the investor class of the attestation and is not a predicate of its own.</ResponseField>
     <ResponseField name="attestable" type="boolean">Whether this leaf can be filed as a claim right now.</ResponseField>
     <ResponseField name="blockedReason" type="string">Why not, in one sentence. `null` when attestable.</ResponseField>
   </Expandable>
@@ -60,13 +91,17 @@ Call it before [Add Claims from Proof](/endpoints/customers/add-claims-from-proo
 
 ## Why a leaf is blocked
 
-Three things block a leaf, and each blocks only that leaf. The rest of the bundle stays usable.
+Four things block a leaf, and each blocks only that leaf. The rest of the bundle stays usable.
 
-**The predicate parameters are outside policy.** A trust anchor decides which thresholds and which allowlists this network accepts. A leaf proving an age floor nobody approved is reported rather than failing the whole bundle.
+**It carries no predicate.** A `commitment_only` leaf, or a proving leaf without a `binding.predicate` such as `documentIssuingCountry`, proves nothing the hub can record.
 
-**A canonical field was proved with the wrong circuit.** `country` must be proved with `set_membership`, `nationality` likewise, `investorType` with `tier_threshold`. A `country` leaf proved with `preimage_knowledge` is not filed anywhere, because filing it elsewhere would let it pass as an unrelated attestation.
+**Its parameters or list are outside policy.** The trust anchors decide which thresholds, which lists and which list contents this network accepts. A leaf proving an age floor nobody approved is reported here rather than failing the whole bundle.
 
-**It is commitment-only and proofs are enforced.** There is no STARK to check, so under enforcement there is nothing to verify.
+**It is outside its validity window.** The leaf's `until` has passed, or its `from` is still ahead.
+
+**It sets the investor class.** On the instance ID register the `INVESTOR_CLASS` leaf comes back `classOnly`. Its class goes into every attestation from this bundle.
+
+The `INVESTOR_CLASS` leaf itself must not be blocked by policy or by its window: the whole call then fails with that leaf's code.
 
 <RequestExample>
 ```bash cURL
@@ -75,21 +110,26 @@ BUNDLE=output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01
 curl -X POST "https://api.trusset.org/customers/api/identity/manifest/inspect" \
   -H "X-API-Key: trusset_your_key_here" \
   -H "Content-Type: application/json" \
-  -d "{\"manifest\": $(cat "$BUNDLE/manifest.json"), \"manifestSig\": \"$(base64 < "$BUNDLE/manifest.sig" | tr -d '\n')\"}"
+  -d "{
+    \"manifest\": $(cat "$BUNDLE/manifest.json"),
+    \"header\": $(cat "$BUNDLE/header.json"),
+    \"headerSignature\": \"0x$(xxd -p -c 64 "$BUNDLE/header.sig")\"
+  }"
 ```
 ```typescript TypeScript
 import { readFile } from 'node:fs/promises';
 
 const bundle = 'output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01';
 const manifest = JSON.parse(await readFile(`${bundle}/manifest.json`, 'utf8'));
-const manifestSig = (await readFile(`${bundle}/manifest.sig`)).toString('base64');
+const header = JSON.parse(await readFile(`${bundle}/header.json`, 'utf8'));
+const headerSignature = '0x' + (await readFile(`${bundle}/header.sig`)).toString('hex');
 
 const res = await fetch(
   'https://api.trusset.org/customers/api/identity/manifest/inspect',
   {
     method: 'POST',
     headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ manifest, manifestSig })
+    body: JSON.stringify({ manifest, header, headerSignature })
   }
 );
 const { data } = await res.json();
@@ -106,31 +146,59 @@ for (const leaf of data.leaves.filter((l: any) => !l.attestable)) {
   "success": true,
   "data": {
     "ok": true,
-    "kycHash": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
+    "kycHash": "0xf2240e2fc453da2ce40b3ab3363ed18a959722fc35c92767837f2c79b44f181f",
     "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
-    "epochDays": 20689,
+    "epochDays": 20776,
     "mode": "production",
-    "signature": "verified",
-    "verifierVersion": "trusset-verifier@e146dac/c065d261b49d",
+    "signature": "header-verified",
+    "verifierVersion": "trusset-verifier@9cd3ce4/11a7f0767b4a",
     "assignableClaimTypes": ["AML", "TAX_RESIDENCY", "SANCTIONS_CHECK", "PEP_CHECK"],
     "passthrough": {
-      "country": "DEU",
-      "investorType": "PROFESSIONAL",
       "softExpiryDays": 365,
       "hardExpiryDays": 730
+    },
+    "version": "3.1.0",
+    "attester": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
+    "chainId": 11155111,
+    "hub": "0x5A1d0c7E3f9B2a48C6e1D05b7F3a92c8E4d61B07",
+    "keyId": 1,
+    "operatorKey": {
+      "source": "hub",
+      "keyId": 1,
+      "publicKey": "9c9dddc50bab5a103e218498604469ea9470318578b414615b9cb6c3ecf18cc2"
+    },
+    "attestation": {
+      "version": "3.1.0",
+      "subject": "0xabcdef0123456789abcdef0123456789abcdef01",
+      "root": "0xf2240e2fc453da2ce40b3ab3363ed18a959722fc35c92767837f2c79b44f181f",
+      "investorClass": 2,
+      "predicates": "817",
+      "predicateNames": ["KYC_DONE", "ADULT", "EEA_RESIDENT", "RESIDENCY_ON_FILE", "CITIZENSHIP_ON_FILE"],
+      "softExpiry": 1826582400,
+      "hardExpiry": 1858118400,
+      "attester": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "chainId": 11155111,
+      "hub": "0x5a1d0c7e3f9b2a48c6e1d05b7f3a92c8e4d61b07",
+      "keyId": 1
     },
     "leaves": [
       {
         "fieldName": "country",
         "circuit": "set_membership",
         "circuitId": 2,
-        "leafHash": "0x41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b9f2c",
-        "commitment": "0x9c1e4b70a2d5f836c04e7b91d3a608f52c7e4091bd6a37f0e8c25419b7d3a6e2",
-        "proofDigest": "0x2f74c8a1b09d3e6754108bfa2c9d70e3b5148af6209c73de815b40a92c6ef31d",
-        "publicDigest": "0x5c1980fe3b47a2091d6e8fc0453b71a29d84e6f5027cab3819740de6b25fa3c1",
+        "leafHash": "0xb243ad330db44c7539253c46a21615e23cd51bb07a00106c1b78c59b2081e39a",
+        "commitment": "0x00799bfe1c29f245716cf30fa69ecced312462082919f7faff0dbbb5d4f2f99a",
+        "proofDigest": "0xcd062ee005657d10b0230881ade8b6c47e807b5d652e7ee069077bb5b6a4a49c",
+        "publicDigest": "0xbf4cac26fbe6734bccdf7bc2831f97bba930e247bc7e937cdcf2fe7cda69978a",
         "proofPath": "proofs/country.bin",
-        "canonicalClaimType": "RESIDENCY",
+        "predicate": "EEA_RESIDENT",
+        "predicateBit": 5,
+        "listId": "eea",
+        "listVersion": 1,
+        "validity": { "from": 20776, "until": 21140, "basisAsOf": 20666 },
+        "canonicalClaimType": "EEA_RESIDENT",
         "commitmentOnly": false,
+        "classOnly": false,
         "attestable": true,
         "blockedReason": null
       },
@@ -138,22 +206,28 @@ for (const leaf of data.leaves.filter((l: any) => !l.attestable)) {
         "fieldName": "lastName",
         "circuit": "preimage_knowledge",
         "circuitId": 4,
-        "leafHash": "0xd402612bae9f7c3018d5a64b0f9e28c7135ad60897e4b2f150c3a8e6d7b409f1",
-        "commitment": "0x6b8c0a2d7f1b3c9e5a4d3f8b1c7e2a9d5f4b6c8e0a2d7f1b3c9e5a4d6b8c0a2d",
+        "leafHash": "0xd7afd0b8caa42ef8f98e0cc5750d3acb02e5e5f54ce999471e5de80d5a6fb20c",
+        "commitment": "0x9a4699fdd50e6fa751498d0128820c79c356b1e74c7d6f641d06c9a0e724be82",
         "proofDigest": "0x9f217d54845fd6a91843c3a56eacb50f9cd105f4eea6f59123f8bd2d963fc400",
-        "publicDigest": "0x2f2918749c89318b3a3e864f1b23e06641cd69b3ddb0572d2e82deef16a96069",
+        "publicDigest": "0x1317ca50de5574630197c341e8661d6326f23dcbc8f0cf3ce4b13cc6f166e6b6",
         "proofPath": "proofs/lastName.bin",
+        "predicate": null,
+        "predicateBit": null,
+        "listId": null,
+        "listVersion": null,
+        "validity": { "from": 20776, "until": 21140, "basisAsOf": 20666 },
         "canonicalClaimType": null,
         "commitmentOnly": true,
+        "classOnly": false,
         "attestable": false,
-        "blockedReason": "\"lastName\" is commitment-only, and the bundle carries no zk proof for it"
+        "blockedReason": "\"lastName\" carries no predicate, so it proves nothing that can be attested"
       }
     ]
   },
   "error": null,
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2026-09-06T12:00:00.000Z"
+    "timestamp": "2026-11-19T12:00:00.000Z"
   }
 }
 ```
@@ -161,23 +235,38 @@ for (const leaf of data.leaves.filter((l: any) => !l.attestable)) {
 
 ## Error Codes
 
-Every failure below except the last three means the bundle did not hold together. Each code means what it means on [Add Claims from Proof](/endpoints/customers/add-claims-from-proof#verification-failures), which has further codes of its own.
+Every failure below except the last seven means the bundle did not hold together or does not bind to your instance. Each code means what it means on [Add Claims from Proof](/endpoints/customers/add-claims-from-proof#verification-failures).
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `INVALID_MANIFEST` | `400` | The manifest is missing or malformed, or its `epochDays` is missing or in the future |
+| `PROOFS_NOT_ACCEPTED` | `400` | The body carries `proofs`, `proof`, `proofBytes` or `zk` |
+| `PERSONAL_DATA_IN_MANIFEST` | `400` | The manifest carries clear-text personal values. Re-issue it with tool 3.1 |
+| `INVALID_MANIFEST` | `400` | The manifest is missing, malformed or outside the 3.1.0 format, or its `epochDays` is missing or in the future |
 | `PROOF_TOO_LARGE` | `413` | The manifest is over 64 KiB |
 | `TOO_MANY_LEAVES` | `413` | The manifest carries more than 32 leaves |
-| `UNSUPPORTED_VERSION` | `400` | The manifest version, circuits version or STARK library is not one this verifier accepts, or the security level is below 100 bits |
+| `UNSUPPORTED_VERSION` | `400` | The manifest version, STARK library or security level is not one this verifier accepts |
 | `UNSUPPORTED_CIRCUIT` | `400` | A leaf names a circuit this verifier does not know |
-| `COMMITMENT_MISMATCH` | `400` | A leaf's `publicInputs.commitment` differs from its `commitment` |
 | `STUB_NOT_ALLOWED` | `400` | A `stub` bundle was sent to a production instance, or to a development instance on which proof verification is enforced |
-| `INVALID_SIGNATURE` | `400` | The signature is not 64 bytes, or does not verify under the registered key |
-| `UNREGISTERED_OPERATOR_KEY` | `400` | No operator key is registered and proofs are enforced. Set one first |
+| `HEADER_REQUIRED` | `400` | `header` or `headerSignature` is missing |
+| `INVALID_HEADER` | `400` | The header is malformed or not version `3.1.0` |
+| `HEADER_MISMATCH` | `400` | The header and the manifest disagree |
+| `WALLET_MISMATCH` | `400` | The header names a different wallet than `walletAddress` |
+| `CHAIN_MISMATCH` | `400` | The header names a chain your instance does not write to |
+| `HUB_MISMATCH` | `400` | The header names an identity hub your instance does not use |
+| `ATTESTER_NOT_TRUSTED` | `403` | The header's attester is not trusted by your register |
+| `ATTESTER_MISMATCH` | `400` | `signerAddress` is not the attester the header names |
+| `OPERATOR_KEY_UNKNOWN` | `400` | The hub holds no operator key under the header's key id for this attester |
+| `UNREGISTERED_OPERATOR_KEY` | `400` | No operator key on the hub and none registered on this instance |
+| `INVALID_HEADER_SIGNATURE` | `400` | The header signature is malformed or does not verify |
 | `PROOF_STALE` | `400` | The batch date is older than the staleness bound |
-| `PROOF_INVALID` | `400` | A leaf's `publicDigest` does not recompute from its public inputs |
-| `LEAF_HASH_MISMATCH` | `400` | A leaf hash does not recompute from its own components |
-| `ROOT_MISMATCH` | `400` | The root recomputed from the leaves does not equal the one the manifest states |
+| `LEAF_INVALID` | `400` | A leaf's digests, parameters, list version or predicate do not hold |
+| `LEAF_HASH_MISMATCH` | `400` | A leaf hash or binding digest does not recompute |
+| `ROOT_MISMATCH` | `400` | The leaves do not recompute to the root the header signs |
+| `UNAPPROVED_PARAMS`, `UNAPPROVED_LIST`, `LEAF_LAPSED` | `400` | The `INVESTOR_CLASS` leaf is outside policy or its window |
+| `INVALID_ADDRESS` | `400` | `walletAddress` is malformed |
 | `INSTANCE_NOT_FOUND` | `404` | The instance behind your key no longer exists |
+| `INSTANCE_REGISTER_REQUIRED` | `409` | Your instance has no instance ID register yet |
 | `RATE_LIMITED` | `429` | More than 30 proof requests from this instance in the current 60-second window |
+| `IDENTITY_HUB_NOT_CONFIGURED` | `501` | The identity hub is not deployed on your instance's network |
+| `CHAIN_UNAVAILABLE` | `503` | The identity hub or your register could not be read |
 | `INSPECT_FAILED` | `500` | The bundle could not be read |

@@ -8,13 +8,15 @@ Lists the KYC approvals your instance has not yet put on chain. When a customer 
 
 Work the queue in two steps. [Build Pending Registration](/endpoints/customers/build-pending-registration) returns the transactions, and [Confirm Pending Registration](/endpoints/customers/confirm-pending-registration) records them once mined. [Dismiss Pending Verification](/endpoints/customers/dismiss-pending-verification) closes a row without registering it.
 
+On the [instance ID register](/endpoints/customers/introduction#the-instance-id-register) the customer can also submit the attestation from their own wallet. You sign one batch, and each customer claims their row on verify.trusset.org and pays the gas. See [Holder claims](/endpoints/customers/introduction#holder-claims) and [Build Holder Batch](/endpoints/customers/build-holder-batch). Your own batch transaction stays the default.
+
 ## Where rows come from
 
 | `source` | Queued when | `sourceRef` |
 |---|---|---|
 | `SUMSUB` | Sumsub approves the customer of an ID link that names a wallet, and the wallet is not yet verified on your register | The ID link `id` |
 | `VERIFICATION_SERVICE` | Sumsub approves a customer who checked out through a hosted verification service | The checkout `id` |
-| `REGISTER_SWITCH` | Your instance moved to a different register. Every verified customer that is not archived and has a `kycHash` is queued for the new one | Your instance `id` |
+| `REGISTER_SWITCH` | Your instance moved to a different register, or created its instance ID register. Every verified customer that is not archived and has a `kycHash` is queued for the new one | Your instance `id` |
 
 A Sumsub approval from a country that the customer's verification profile blocks is refused and never queued. `REGISTER_SWITCH` rows are not checked until the build.
 
@@ -52,8 +54,8 @@ A row also closes when its wallet is verified through [Verify Identity](/endpoin
     <ResponseField name="id" type="string">The row. Pass it to Build, Confirm and Dismiss.</ResponseField>
     <ResponseField name="instanceId" type="string">Your instance.</ResponseField>
     <ResponseField name="walletAddress" type="string">The customer's wallet, lowercased.</ResponseField>
-    <ResponseField name="investorType" type="integer">The investor type to register, as the register's number: `1` retail, `2` professional, `3` eligible counterparty. It comes from the customer's verification profile.</ResponseField>
-    <ResponseField name="kycHash" type="string">The hash to register, computed at approval, or `null`.</ResponseField>
+    <ResponseField name="investorType" type="integer">The investor type to register, as the register's number: `1` retail, `2` professional, `3` eligible counterparty. It comes from the customer's verification profile. On the instance ID register it is the attestation's investor class.</ResponseField>
+    <ResponseField name="kycHash" type="string">The hash to register, computed at approval, or `null`. On the instance ID register it becomes the attestation's root, and a row without one cannot be built.</ResponseField>
     <ResponseField name="softExpiry" type="string">ISO 8601, or `null`.</ResponseField>
     <ResponseField name="hardExpiry" type="string">ISO 8601, or `null`.</ResponseField>
     <ResponseField name="source" type="string">`SUMSUB`, `VERIFICATION_SERVICE` or `REGISTER_SWITCH`.</ResponseField>
@@ -71,16 +73,20 @@ A row also closes when its wallet is verified through [Verify Identity](/endpoin
 
 <ResponseField name="metadata" type="object">
   <Expandable>
-    <ResponseField name="country" type="string">The customer's country, normally ISO 3166-1 alpha-3. The build checks it against the verification profile's blocked countries, and an ERC-3643 register stores it.</ResponseField>
+    <ResponseField name="country" type="string">The customer's country, normally ISO 3166-1 alpha-3. The build checks it against the verification profile's blocked countries, and an ERC-3643 register stores it. The instance ID register never stores it: an EEA country sets the `EEA_RESIDENT` predicate instead.</ResponseField>
     <ResponseField name="investorTypeName" type="string">The verification profile key, such as `RETAIL`. A customer record that the confirm creates takes it as its investor type.</ResponseField>
-    <ResponseField name="residencyClaim" type="object">`dataHash` and `expiry`, in Unix seconds, of the `RESIDENCY` claim to file. Present on `SUMSUB` and `VERIFICATION_SERVICE` rows that carried a country.</ResponseField>
+    <ResponseField name="residencyClaim" type="object">`dataHash` and `expiry`, in Unix seconds, of the `RESIDENCY` claim to file. On the instance ID register it sets the `RESIDENCY_ON_FILE` predicate instead. Present on `SUMSUB` and `VERIFICATION_SERVICE` rows that carried a country.</ResponseField>
     <ResponseField name="onchainId" type="string">The customer's ONCHAINID on an ERC-3643 register, once recorded by [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid).</ResponseField>
-    <ResponseField name="notifyEmail" type="string">Where the customer is told that the registration completed. `SUMSUB` and `VERIFICATION_SERVICE` rows only.</ResponseField>
+    <ResponseField name="holderBatch" type="object">Instance ID register only. The row's leaf of a holder batch built with [Build Holder Batch](/endpoints/customers/build-holder-batch) and not yet signed: `attester`, `batchRoot`, `issuedAt`, `deadline`, `input`, `nonce` and `proof`.</ResponseField>
+    <ResponseField name="holderClaim" type="object">Instance ID register only. The signed claim the customer can submit, stored by [Store Holder Signature](/endpoints/customers/store-holder-signature): `input`, `proof`, `nonce`, `batch` with the attester's signature, `signatureCheck` and `signedAt`.</ResponseField>
+    <ResponseField name="predicates" type="string">Instance ID register only, on a confirmed row. The predicates the mined attestation carries, as a decimal string.</ResponseField>
     <ResponseField name="resolvedBy" type="string">`DIRECT_VERIFY` or `BATCH_VERIFY` when another endpoint closed the row.</ResponseField>
   </Expandable>
 </ResponseField>
 
-Other keys, such as `applicantId`, `idLinkId`, `checkoutId` and `name`, describe where the approval came from. A confirm uses them to fill in a customer record it creates, and to run its follow-ups.
+Other keys, such as `applicantId`, `idLinkId`, `checkoutId` and `issuerName`, describe where the approval came from. A confirm uses them to fill in a customer record it creates, and to run its follow-ups.
+
+A row carries no name, email, phone, date of birth or address. Trusset strips them when the row is queued and whenever it changes. The confirm emails the customer at the address its ID link or checkout still holds. Rows queued by earlier versions can still carry `name` or `notifyEmail`.
 
 <RequestExample>
 ```bash cURL
@@ -125,7 +131,6 @@ for (const row of data.rows) {
           "idLinkId": "cmg1u6x0d0002l80h8r4v2k9q",
           "country": "DEU",
           "investorTypeName": "RETAIL",
-          "notifyEmail": "investor@example.com",
           "issuerName": "Example Issuer AG",
           "residencyClaim": {
             "dataHash": "0xbd549c840e3415871bfba8d089cfbf49b7529d3c767c211b623552e15a0e669c",

@@ -1,13 +1,15 @@
 ---
 title: 'List Claims'
 api: 'GET /customers/api/identity/claims/{walletAddress}'
-description: 'Every claim on an identity, read from the registry'
+description: 'Every claim on an identity, read from the register'
 ---
 
-Returns the active claims the registry holds for a wallet. This is the raw chain read. For the same claims joined with the proof that filed each one, use [List Proofs](/endpoints/customers/list-proofs).
+Returns the active claims the register holds for a wallet. This is the raw chain read. For the same claims joined with the proof that filed each one, use [List Proofs](/endpoints/customers/list-proofs).
+
+On the instance ID register a claim is a predicate bit of an attestation, not a stored hash. The list is built from the attestation the register resolves for the wallet: one entry for each standard predicate bit the register accepts from its attester. See [Claims](/endpoints/customers/introduction#claims).
 
 <Warning>
-  A failed chain read returns an empty `claims` array with a `200`, not an error. An empty list does not prove the wallet holds no claims. Retry before acting on one.
+  A failed chain read returns an empty `claims` array with a `200`, not an error. On the instance ID register so does an instance that has not created its register yet, and a wallet no trusted attester verifies, an expired or revoked one included. An empty list does not prove the wallet holds no claims. Retry before acting on one.
 </Warning>
 
 ## Path Parameters
@@ -19,12 +21,18 @@ Returns the active claims the registry holds for a wallet. This is the raw chain
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="walletAddress" type="string">The subject, checksummed.</ResponseField>
-    <ResponseField name="claims" type="array">One entry per active claim, each with its `claimType` index, `claimTypeLabel`, `dataHash`, `issuer`, `issuedAt`, `expiry` and `active`, which is always `true`. Revoked claims are not returned. On an ERC-3643 register, `issuer` is the trusted issuer contract, `issuedAt` and `expiry` are `0`, and each entry adds `topic`, `claimId` and `onchainId`. On a T-REX 5 register `issuedAt` is the claim's issue time, and a claim whose digest is revoked is not returned.</ResponseField>
+    <ResponseField name="claims" type="array">
+      One entry per active claim, each with its `claimType` index, `claimTypeLabel`, `dataHash`, `issuer`, `issuedAt`, `expiry` and `active`, which is always `true`. Revoked claims are not returned.
+
+      On the instance ID register `dataHash` is the root of the attestation, the same for every entry, `issuer` is its attester, `issuedAt` its issue time and `expiry` its hard expiry. Each entry adds `predicate`, the bit's name, and `predicates`, the names of every bit the attestation carries. Bits `0` to `7` keep their claim type: `KYC_DONE` is `0` (`KYC`), `AML_CLEAR` `1` (`AML`), `ACCREDITED` `2` (`ACCREDITATION`), `RESIDENCY_ON_FILE` `3` (`RESIDENCY`), `CITIZENSHIP_ON_FILE` `4` (`CITIZENSHIP`), `TAX_RESIDENCY_ON_FILE` `5` (`TAX_RESIDENCY`), `SANCTIONS_CLEAR` `6` (`SANCTIONS_CHECK`) and `PEP_CLEAR` `7` (`PEP_CHECK`). Any other standard bit comes back as `100` plus its bit number with the predicate name as label, such as `105` and `EEA_RESIDENT`. Bits outside the standard table, such as those an attester defines, are not listed.
+
+      On an ERC-3643 register, `issuer` is the trusted issuer contract, `issuedAt` and `expiry` are `0`, and each entry adds `topic`, `claimId` and `onchainId`. On a T-REX 5 register `issuedAt` is the claim's issue time, and a claim whose digest is revoked is not returned.
+    </ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  A claim's `dataHash` is the leaf hash from the bundle that filed it when it came from a proof, or the root itself for the `KYC` claim. That is what ties an on-chain claim back to a specific leaf in a specific bundle, and it is why the hash is worth recording alongside the bundle.
+  On an ERC-3643 register or a Trusset-compatible register, a claim's `dataHash` is the leaf hash from the bundle that filed it when it came from a proof, or the root itself for the `KYC` claim. On the instance ID register every `dataHash` is the root, and [List Proofs](/endpoints/customers/list-proofs) gives the leaf behind each proved bit from your proof ledger.
 </Note>
 
 <RequestExample>
@@ -39,7 +47,7 @@ const res = await fetch(`https://api.trusset.org/customers/api/identity/claims/$
 });
 const { data } = await res.json();
 
-const residency = data.claims.find((c: any) => c.claimTypeLabel === 'RESIDENCY');
+const eeaResident = data.claims.some((c: any) => c.predicate === 'EEA_RESIDENT');
 ```
 </RequestExample>
 
@@ -51,13 +59,37 @@ const residency = data.claims.find((c: any) => c.claimTypeLabel === 'RESIDENCY')
     "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
     "claims": [
       {
+        "claimType": 0,
+        "claimTypeLabel": "KYC",
+        "dataHash": "0x41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b9f2c",
+        "issuer": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
+        "issuedAt": 1788696000,
+        "expiry": 1820246400,
+        "active": true,
+        "predicate": "KYC_DONE",
+        "predicates": ["KYC_DONE", "EEA_RESIDENT", "RESIDENCY_ON_FILE"]
+      },
+      {
         "claimType": 3,
         "claimTypeLabel": "RESIDENCY",
         "dataHash": "0x41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b9f2c",
         "issuer": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
         "issuedAt": 1788696000,
         "expiry": 1820246400,
-        "active": true
+        "active": true,
+        "predicate": "RESIDENCY_ON_FILE",
+        "predicates": ["KYC_DONE", "EEA_RESIDENT", "RESIDENCY_ON_FILE"]
+      },
+      {
+        "claimType": 105,
+        "claimTypeLabel": "EEA_RESIDENT",
+        "dataHash": "0x41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b9f2c",
+        "issuer": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
+        "issuedAt": 1788696000,
+        "expiry": 1820246400,
+        "active": true,
+        "predicate": "EEA_RESIDENT",
+        "predicates": ["KYC_DONE", "EEA_RESIDENT", "RESIDENCY_ON_FILE"]
       }
     ]
   },

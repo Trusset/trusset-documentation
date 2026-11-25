@@ -6,6 +6,8 @@ description: 'The verification levels configured for your instance'
 
 Returns the verification profiles your instance runs. A profile ties a verification level to the investor type it results in, the documents it requires, the countries it refuses, and who it admits: individuals or companies, and whether only professional clients.
 
+On an instance that keeps its customers on its [instance ID register](/endpoints/customers/introduction#the-instance-id-register), a profile can also be put on chain, where it gets a [profile gate](#profile-gates).
+
 That lets a hosted [ID Link](/endpoints/customers/create-id-link) be issued against a named level rather than an ad-hoc set of requirements.
 
 ## Response Fields
@@ -32,8 +34,8 @@ That lets a hosted [ID Link](/endpoints/customers/create-id-link) be issued agai
     <ResponseField name="isPreset" type="boolean">Whether this is a Trusset preset rather than one your instance defined.</ResponseField>
     <ResponseField name="enabled" type="boolean">Whether the profile takes new links, new customer records and new wallets. A disabled profile keeps its records: customers already under it can be updated and verified again.</ResponseField>
     <ResponseField name="entityType" type="string">Who the profile admits: `INDIVIDUAL` for natural persons (KYC) or `COMPANY` for legal entities (KYB). See [Who a profile admits](#who-a-profile-admits).</ResponseField>
-    <ResponseField name="professionalOnly" type="boolean">Whether the profile is limited to professional clients. The `PROFESSIONAL` and `ELIGIBLE_COUNTERPARTY` presets always are and `RETAIL` never is. A custom profile sets it in the Issuer Portal, and cannot change it while it has an eligibility register. A profile limited to professional clients registers its investors as Professional (`2`) or Eligible Counterparty (`3`), never as Retail.</ResponseField>
-    <ResponseField name="reverifyDays" type="integer">Days an admission to the profile's eligibility register stays valid, from 30 to 1825, or `null` for no re-verification period.</ResponseField>
+    <ResponseField name="professionalOnly" type="boolean">Whether the profile is limited to professional clients. The `PROFESSIONAL` and `ELIGIBLE_COUNTERPARTY` presets always are and `RETAIL` never is. A custom profile sets it in the Issuer Portal, and cannot change it while it has an eligibility register. A profile limited to professional clients registers its investors as Professional (`2`) or Eligible Counterparty (`3`), never as Retail. On chain, its gate refuses every wallet below investor class `2`.</ResponseField>
+    <ResponseField name="reverifyDays" type="integer">Days an admission to the profile's eligibility register stays valid, from 30 to 1825, or `null` for no re-verification period. On a profile gate it is the maximum age of an attestation, counted from the day it was issued.</ResponseField>
     <ResponseField name="requirementsHash" type="string">keccak256 of the profile's requirements, as a `0x` hex string. See [Requirements hash](#requirements-hash).</ResponseField>
     <ResponseField name="eligibilityRegister" type="object">
       The profile's eligibility register, or `null` when it has none.
@@ -45,6 +47,8 @@ That lets a hosted [ID Link](/endpoints/customers/create-id-link) be issued agai
         <ResponseField name="txHash" type="string">The transaction that deployed the register, or `null` for a bound one.</ResponseField>
       </Expandable>
     </ResponseField>
+    <ResponseField name="onChainProfileId" type="integer">The profile's number on your instance ID register, or `null` when it is not on chain. See [Profile gates](#profile-gates).</ResponseField>
+    <ResponseField name="gateAddress" type="string">The profile gate on your instance ID register, checksummed, or `null` when the profile is not on chain. Markets, vaults and profile-restricted tokens point at this address.</ResponseField>
     <ResponseField name="createdAt" type="string">ISO 8601.</ResponseField>
     <ResponseField name="updatedAt" type="string">ISO 8601.</ResponseField>
     <ResponseField name="usage" type="object">
@@ -70,21 +74,42 @@ That lets a hosted [ID Link](/endpoints/customers/create-id-link) be issued agai
 
 `entityType` decides which applicant the identity check runs for. An [ID link](/endpoints/customers/create-id-link) under a `COMPANY` profile creates a company applicant, and a review of the other kind of applicant is refused. A wallet is admitted to the profile's eligibility register only when the customer record holding it has the same `customerType`.
 
-`professionalOnly` matters to lending. A market that prices its collateral from a live market price (`MARKET`) lends to professional borrowers only, so its borrower gate must be a register admitted to only by profiles with `professionalOnly: true` in the `REGISTER` mode, at least one of them. Profiles of other instances bound to the same register count too, and a profile in the `EXTERNAL` mode does not. See [Set Identity Gates](/endpoints/lending/set-identity-gates#professional-borrowers).
+`professionalOnly` matters to lending. A market that prices its collateral from a live market price (`MARKET`) lends to professional borrowers only. Its borrower gate must be either the profile gate of a profile limited to professional clients, whose minimum investor class is `2` and which is active, or a register admitted to only by profiles with `professionalOnly: true` in the `REGISTER` mode, at least one of them. Profiles of other instances bound to the same register count too, and a profile in the `EXTERNAL` mode does not. See [Set Identity Gates](/endpoints/lending/set-identity-gates#professional-borrowers).
 
-`reverifyDays` limits how long an admission lasts. Once that many days have passed since a wallet was admitted or its customer was last verified, the admission lapses and its removal from the register is queued. An ID link under the profile also queues its on-chain registration with a hard expiry of `reverifyDays`, and a soft expiry of 180 days or `reverifyDays`, whichever is shorter.
+`entityType` is not written on chain. A profile gate cannot tell an individual from a company, so that rule is applied when customers onboard, not by the gate.
+
+`reverifyDays` limits how long an admission lasts. Once that many days have passed since a wallet was admitted or its customer was last verified, the admission lapses and its removal from the register is queued. On a profile gate the same number of days is the maximum age of an attestation: once it has passed since the attestation was issued, the gate stops admitting the wallet until it is attested again. An ID link under the profile also queues its on-chain registration with a hard expiry of `reverifyDays`, and a soft expiry of 180 days or `reverifyDays`, whichever is shorter.
+
+## Profile gates
+
+On an instance that keeps its customers on its instance ID register, a profile does not take an eligibility register. It is put on the register instead, in the Issuer Portal under Customers, Configure, with a transaction your register admin wallet signs. The register then creates the profile's gate, and `onChainProfileId` and `gateAddress` are filled. The gate answers `isVerified(address)` for that profile only, from the attestations the register trusts, so a wallet is eligible as soon as its attestation meets the rules. Nothing is admitted or removed per wallet.
+
+The rules on chain come from the profile:
+
+| On chain | From |
+|---|---|
+| Required predicates | `KYC_DONE`, plus `RESIDENCY_ON_FILE` when the profile requires a `PROOF_OF_RESIDENCE` document |
+| Blocked predicates | None |
+| Minimum investor class | `2` when `professionalOnly` is `true`, otherwise none |
+| Maximum attestation age | `reverifyDays` in seconds, or none |
+
+See [Predicates](/endpoints/customers/introduction#predicates). Blocked countries, required documents and `entityType` never go on chain. They stay enforced off chain, on every path a customer onboards through.
+
+A disabled profile is deactivated on the register, and its gate then admits nobody. A profile on chain cannot be deleted: disable it instead. Changing a profile that is on chain, or disabling it, returns the register transactions to sign in the Issuer Portal. A change that would stop a market whose borrower gate is the profile's gate from taking new loans, such as lifting `professionalOnly` or disabling the profile, has to be acknowledged there first.
+
+An instance bound to its own ERC-3643 identity register keeps using [eligibility registers](#eligibility-registers), and its profiles have no gate.
 
 ## Eligibility registers
 
-A profile with an eligibility register is what lending markets and vaults can gate on. The register is an on-chain identity register that holds exactly the wallets admitted under the profile, so a gate that reads it admits the customers of that profile and nobody else.
+A profile with an eligibility register or a profile gate is what lending markets and vaults can gate on. An eligibility register is an on-chain identity register that holds exactly the wallets admitted under the profile, so a gate that reads it admits the customers of that profile and nobody else.
 
-Name the profile by its key wherever a market or vault takes a register: `identityRegistryProfile` and `providerRegistryProfile` on [Deploy Market](/endpoints/lending/deploy-market) and [Accept Lender Role](/endpoints/operators/accept-lender-role), and `borrowerProfile` and `providerProfile` on [Set Identity Gates](/endpoints/lending/set-identity-gates). [Get Deployment Options](/endpoints/lending/get-deployment-options) lists the profiles that have one.
+Name the profile by its key wherever a market or vault takes a register: `identityRegistryProfile` and `providerRegistryProfile` on [Deploy Market](/endpoints/lending/deploy-market) and [Accept Lender Role](/endpoints/operators/accept-lender-role), and `borrowerProfile` and `providerProfile` on [Set Identity Gates](/endpoints/lending/set-identity-gates). The key resolves to the profile's gate when the profile is on your instance ID register, and to its eligibility register otherwise. [Get Deployment Options](/endpoints/lending/get-deployment-options) lists the profiles that have one.
 
-A register is deployed for a profile, or an existing one bound to it, in the Issuer Portal. One register stands for one profile of your instance, and a profile limited to professional clients takes only a register in the `REGISTER` mode. Who is on it is managed through [Eligibility registers](/endpoints/customers/introduction#eligibility-registers).
+A register is deployed for a profile, or an existing one bound to it, in the Issuer Portal, on an instance bound to its own ERC-3643 identity register. One register stands for one profile of your instance, and a profile limited to professional clients takes only a register in the `REGISTER` mode. Who is on it is managed through [Eligibility registers](/endpoints/customers/introduction#eligibility-registers). On an instance that keeps its customers on its instance ID register, binding an eligibility register is refused with `ELIGIBILITY_USES_PROFILE_GATE`: put the profile on chain instead.
 
 ## Usage
 
-`usage` shows how far a change to the profile would reach. The Issuer Portal decides by the same counts. A profile with customer records, open links, pending registrations or admitted wallets cannot be deleted, and a change to its classification (its on-chain investor type, `professionalOnly` or `entityType`) has to be confirmed before it applies to all of them. Its key cannot change once a customer record, link, pending registration or admission names it.
+`usage` shows how far a change to the profile would reach. The Issuer Portal decides by the same counts. A profile with customer records, open links, pending registrations or admitted wallets cannot be deleted, and neither can a profile that is on chain. A change to its classification (its on-chain investor type, `professionalOnly` or `entityType`) has to be confirmed before it applies to all of them. Its key cannot change once a customer record, link, pending registration or admission names it.
 
 ## Requirements hash
 
@@ -99,6 +124,8 @@ A customer from a country on `blockedCountries` is refused with `403 COUNTRY_BLO
 [Verify Identity](/endpoints/customers/verify-identity) and [Batch Verify](/endpoints/customers/batch-verify) check the profile whose key matches the request's `investorType`, preset or custom.
 
 Changing a profile's list in the Issuer Portal also queues the removal of every wallet on its eligibility register whose customer's country the new list blocks.
+
+Countries never go on chain, so a [profile gate](#profile-gates) cannot refuse a wallet by its country. On an instance ID register the list works off chain only: it stops a customer from that country from being onboarded or registered under the profile.
 
 <RequestExample>
 ```bash cURL
@@ -142,6 +169,8 @@ const gateable = profiles.filter(
       "reverifyDays": null,
       "requirementsHash": "0x0898d40218bb23e08b12b0261dd235eacdbf02f8463ca93381a3eb55e9112f7c",
       "eligibilityRegister": null,
+      "onChainProfileId": null,
+      "gateAddress": null,
       "createdAt": "2026-06-01T09:00:00.000Z",
       "updatedAt": "2026-09-23T18:12:00.000Z",
       "usage": { "customers": 412, "archivedCustomers": 9, "links": 530, "openLinks": 14, "pendingRegistrations": 3, "admissions": 0, "admittedWallets": 0 }
@@ -172,6 +201,8 @@ const gateable = profiles.filter(
         "setAt": "2026-10-05T08:41:17.000Z",
         "txHash": "0x5d996833e3132ae37bb5c5b5a922987c36644f38c6128f29b396bd8b60b8867b"
       },
+      "onChainProfileId": null,
+      "gateAddress": null,
       "createdAt": "2026-06-01T09:00:00.000Z",
       "updatedAt": "2026-10-05T08:41:17.000Z",
       "usage": { "customers": 37, "archivedCustomers": 1, "links": 52, "openLinks": 4, "pendingRegistrations": 1, "admissions": 31, "admittedWallets": 29 }
@@ -197,6 +228,8 @@ const gateable = profiles.filter(
       "reverifyDays": null,
       "requirementsHash": "0x2f66d1a9d0d9493144e9722df38507e0fa4a80b6fa1be1b76335396b782a2b5d",
       "eligibilityRegister": null,
+      "onChainProfileId": null,
+      "gateAddress": null,
       "createdAt": "2026-06-01T09:00:00.000Z",
       "updatedAt": "2026-10-07T12:00:00.000Z",
       "usage": { "customers": 0, "archivedCustomers": 0, "links": 0, "openLinks": 0, "pendingRegistrations": 0, "admissions": 0, "admittedWallets": 0 }
@@ -225,6 +258,8 @@ const gateable = profiles.filter(
         "setAt": "2026-10-04T15:20:03.000Z",
         "txHash": null
       },
+      "onChainProfileId": null,
+      "gateAddress": null,
       "createdAt": "2026-10-04T15:12:40.000Z",
       "updatedAt": "2026-10-04T15:20:03.000Z",
       "usage": { "customers": 6, "archivedCustomers": 0, "links": 8, "openLinks": 2, "pendingRegistrations": 0, "admissions": 5, "admittedWallets": 5 }
@@ -233,6 +268,43 @@ const gateable = profiles.filter(
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
     "timestamp": "2026-10-05T12:00:00.000Z"
+  }
+}
+```
+```json Response - Instance ID register
+{
+  "success": true,
+  "data": [
+    {
+      "id": "cmi3k7d2a0002l708h4c9n1q5",
+      "key": "PROFESSIONAL",
+      "name": "Professional",
+      "description": "Professional investor",
+      "onChainInvestorType": 2,
+      "sumsubLevelName": "basic-kyc-level",
+      "requiredFields": [
+        { "id": "identity", "idDocSetType": "IDENTITY", "types": ["PASSPORT", "ID_CARD", "DRIVERS"], "required": true, "label": "Government ID" },
+        { "id": "selfie", "idDocSetType": "SELFIE", "types": ["SELFIE"], "required": true, "label": "Selfie / liveness" },
+        { "id": "residence", "idDocSetType": "PROOF_OF_RESIDENCE", "types": ["UTILITY_BILL", "BANK_STATEMENT"], "required": true, "label": "Proof of address" }
+      ],
+      "blockedCountries": ["IRN", "PRK"],
+      "isPreset": true,
+      "enabled": true,
+      "entityType": "INDIVIDUAL",
+      "professionalOnly": true,
+      "reverifyDays": 365,
+      "requirementsHash": "0x8919ea37bac1f44ea0e8a37529be970cb49e9779ebd4c4e98490cfd754e9d390",
+      "eligibilityRegister": null,
+      "onChainProfileId": 1,
+      "gateAddress": "0x7B3e1C94a20D58f6E0b2A9c4d17F8e35C6a0D2b9",
+      "createdAt": "2026-11-19T09:00:00.000Z",
+      "updatedAt": "2026-11-19T10:12:44.000Z",
+      "usage": { "customers": 12, "archivedCustomers": 0, "links": 15, "openLinks": 3, "pendingRegistrations": 2, "admissions": 0, "admittedWallets": 0 }
+    }
+  ],
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-19T12:00:00.000Z"
   }
 }
 ```

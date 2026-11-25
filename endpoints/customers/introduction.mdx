@@ -1,15 +1,15 @@
 ---
 title: 'Customers'
-description: 'Customer records, on-chain identity, and zk-proof backed KYC claims'
+description: 'Customer records, on-chain identity, and proof-backed KYC claims'
 ---
 
-A customer here is two things kept apart: a record your instance holds, and an identity on a registry contract. The record carries who they are to you. The registry carries what a token contract can check before it moves.
+A customer here is two things kept apart: a record your instance holds, and an identity on a register contract. The record carries who they are to you. The register carries what a token contract, a lending market or a vault can check before it moves.
 
-The wallet is what joins the two. [Create Customer](/endpoints/customers/create) and [Link Wallet](/endpoints/customers/link-wallet) read the registry, and a wallet it already shows as verified starts the record as `verified`. On the Trusset ID Register, that holds only when one of your instance's registered wallets did the verifying. Confirming [Verify Identity](/endpoints/customers/verify-identity) creates or updates the record for the wallet it verified.
+The wallet is what joins the two. [Create Customer](/endpoints/customers/create) and [Link Wallet](/endpoints/customers/link-wallet) read the register, and a wallet it already shows as verified starts the record as `verified`. On your [instance ID register](#the-instance-id-register), that holds only when an attester your register trusts vouches for the wallet. Confirming [Verify Identity](/endpoints/customers/verify-identity) creates or updates the record for the wallet it verified.
 
-Beyond that the two do not follow each other. A record's `status` is what was last recorded, not a live registry read, and archiving a record leaves the identity on the registry. Read the registry's own answer with [Identity Status](/endpoints/customers/identity-status).
+Beyond that the two do not follow each other. A record's `status` is what was last recorded, not a live register read, and archiving a record leaves the attestation on chain. Read the register's own answer with [Identity Status](/endpoints/customers/identity-status).
 
-Fintechs onboard their clients here before those clients deposit or borrow: see [Onboarding and access](/protocol/concepts/onboarding). To onboard a customer inside your own app through one path, start with [Onboarding](/endpoints/customers/onboarding). Banks gate their markets and vaults on the eligibility registers of verification profiles: see [Decide who borrows and who funds](/protocol/guides/launch-a-credit-line#4-decide-who-borrows-and-who-funds).
+Fintechs onboard their clients here before those clients deposit or borrow: see [Onboarding and access](/protocol/concepts/onboarding). To onboard a customer inside your own app through one path, start with [Onboarding](/endpoints/customers/onboarding). Banks gate their markets and vaults on the [profile gates](#profile-gates) of their verification profiles, or on eligibility registers when they run their own ERC-3643 register: see [Decide who borrows and who funds](/protocol/guides/launch-a-credit-line#4-decide-who-borrows-and-who-funds).
 
 ## Base Path
 
@@ -27,7 +27,7 @@ Every request authenticates with an instance API key in the `X-API-Key` header. 
 | `/id-links` | Hosted verification links you send to a customer |
 | `/verification-profiles` | The verification levels configured for your instance |
 | `/eligibility` | Admissions to and removals from the eligibility registers of your verification profiles |
-| `/disclosure-requests` | Requests asking a wallet holder to disclose a verified fact |
+| `/disclosure-requests` | Requests asking a wallet holder to disclose facts from their KYC proof bundle, and the encrypted answers |
 | `/kyc-sources` | The verifiers you accept sealed KYC records from |
 | `/kyc-records` | Your record key and the sealed KYC records your sources delivered |
 
@@ -35,19 +35,104 @@ Customer records need the `customers` service. Everything under `/identity`, `/o
 
 ## Which register you write to
 
-An instance writes to the Trusset ID Register by default, or to its own register when it is bound to one. Its own register is either a Trusset identity register or an ERC-3643 identity registry (Tokeny T-REX with ONCHAINID). Every identity call resolves the register automatically, and no endpoint takes a registry address. Calldata responses name the kind in `registerKind`: `TRUSSET` or `TREX`.
+An instance writes to its own instance ID register by default. This is Trusset register mode: the register is a contract your wallets own, and it reads its identities from the shared identity hub. An instance can instead be bound to a register of its own: an ERC-3643 identity registry (Tokeny T-REX with ONCHAINID), or a register that answers the Trusset register interface. Every identity call resolves the register automatically, and no endpoint takes a registry address. Calldata responses name the kind in `registerKind`: `INSTANCE` for the instance ID register, `TREX` for an ERC-3643 registry, and `TRUSSET` for a Trusset-compatible register of your own.
 
 Customer registration supports ERC-3643 T-REX 4 registers with ONCHAINID 2 identities and T-REX 5 registers with ONCHAINID 3 identities. Either can be bound as your instance's own register in the Issuer Portal, and calldata responses from an ERC-3643 register carry `trexVersion`, `4` or `5`. [T-REX 5 registers](#t-rex-5-registers) sets out what differs on the newer version.
 
-The request is the same on both kinds, but the work behind it is not. On a Trusset register, each write is one transaction from a wallet holding `KYC_PROVIDER_ROLE`, or `REGISTER_OPERATOR_ROLE` to revoke an identity. On an ERC-3643 registry, registering a wallet can take three rounds: deploying its ONCHAINID, signing each claim as a message, then adding the claims and registering the identity. On a T-REX 5 register the identity factory creates the ONCHAINID instead, and each claim is signed as EIP-712 typed data. [Verify Identity](/endpoints/customers/verify-identity) sets out which key signs each step.
+The request is the same on every kind, but the work behind it is not. On the instance ID register, each write is one transaction to the identity hub from a wallet your register trusts as an attester. On a Trusset-compatible register of your own, each write is one transaction from a wallet holding `KYC_PROVIDER_ROLE`, or `REGISTER_OPERATOR_ROLE` to revoke an identity. On an ERC-3643 registry, registering a wallet can take three rounds: deploying its ONCHAINID, signing each claim as a message, then adding the claims and registering the identity. On a T-REX 5 register the identity factory creates the ONCHAINID instead, and each claim is signed as EIP-712 typed data. [Verify Identity](/endpoints/customers/verify-identity) sets out which key signs each step.
 
-When none of your instance's wallets holds the role a write needs, the write is refused before any calldata is handed out. A Trusset register answers `403 KYC_PROVIDER_ROLE_MISSING`, `403 REGISTER_OPERATOR_ROLE_MISSING` for a revocation or `403 COMPLIANCE_ROLE_MISSING` for a freeze, and an ERC-3643 registry `403 REGISTRY_AGENT_MISSING`. The check is skipped when the instance has no registered wallet or the role cannot be read, and a write without the role then reverts on chain.
+When none of your instance's wallets can sign a write, the write is refused before any calldata is handed out:
 
-On the Trusset ID Register, Trusset grants all three roles to a registered, verified wallet of your instance: open the wallet page of the issuer app and press **Grant on-chain roles** on the wallet card, which lists the roles the wallet is missing. The grant is part of the issuer app (`POST /issuer-wallets/wallets/:instanceId/:walletId/grant-roles` with the issuer app login), not of the API key. A refusal can outlast a new grant by up to a minute. On your instance's own register, the register owner grants the roles.
+| Register | Code | Cause |
+|---|---|---|
+| Instance ID register | `409 INSTANCE_REGISTER_REQUIRED` | Your instance has no instance ID register yet |
+| Instance ID register | `403 ATTESTER_MISSING` | None of your registered wallets is a trusted attester of the register |
+| Instance ID register | `403 COMPLIANCE_ROLE_MISSING` | A freeze, and none of your registered wallets is an admin or compliance officer of the register |
+| Trusset-compatible register of your own | `403 KYC_PROVIDER_ROLE_MISSING`, `403 REGISTER_OPERATOR_ROLE_MISSING`, `403 COMPLIANCE_ROLE_MISSING` | None of your wallets holds the role the write needs |
+| ERC-3643 registry | `403 REGISTRY_AGENT_MISSING` | None of your wallets is an agent of the registry |
 
-The Trusset ID Register is shared by every instance without a register of its own, so it holds one identity per wallet. Your instance revokes and freezes only identities one of its own wallets registered, and is refused with `403 IDENTITY_HELD_BY_ANOTHER_ISSUER` for an identity another issuer's wallet wrote. An identity the copy into the current register carried over counts for the wallet that first registered it, and one the Trusset platform wrote before issuer wallets signed counts as yours when the wallet belongs to one of your customers.
+The check is skipped when the instance has no registered wallet or the role cannot be read, and a write without the role then reverts on chain, or on the identity hub writes an attestation your register does not read. On a register of your own, the register owner grants the roles. Trusset grants no role on any register.
+
+### The instance ID register
+
+Three contracts carry identity for an instance in Trusset register mode. Trusset holds no role and no key on any of them.
+
+| Contract | One per | Owned by | What it does |
+|---|---|---|---|
+| Identity hub | Chain | Nobody | Stores attestations. Any wallet can attest about any wallet, but only under its own address. It has no owner, no upgrade and no pause |
+| Instance ID register | Instance | Your instance's wallets | Chooses which attesters it trusts and for which predicates, holds your verification profiles, a freeze list for your instance only, and compliance modules. Answers `isVerified`, `getIdentity` and `canTransfer` for your tokens and markets |
+| Profile gate | Verification profile | Its register | Answers `isVerified` for one profile only. See [Profile gates](#profile-gates) |
+
+An attestation on the hub belongs to the wallet that wrote it, the attester, and is about one wallet, the subject. It holds the root of the customer's KYC bundle, the investor class (`1` retail, `2` professional, `3` eligible counterparty), the [predicates](#predicates), the issue time, a soft and a hard expiry, and a status. It holds no name, no country, no date of birth and no document. See [Data Storage](/protocol/infrastructure/data-storage).
+
+Your instance creates its register in the Issuer Portal, under Settings, Identity Register, with Create ID register. The register is cloned from a factory anyone can call, and the transaction that creates it is signed by one of your instance's verified wallets. That wallet may be a Safe or a 4337 smart account: the confirm reads the creation from the factory's `RegisterCreated` event, whose creator must be a verified wallet of your instance. Every role goes to your wallets inside that transaction:
+
+- Every verified wallet of your instance becomes an admin.
+- The creating wallet and the next seven become trusted attesters, each trusted for every predicate and for its investor class.
+- No wallet is a compliance officer yet. Admins can freeze, and an admin can make a wallet a compliance officer later.
+- The register reports a wallet as verified when a trusted attester's attestation carries `KYC_DONE` and the wallet is not frozen.
+
+Creating the register is refused while on-chain registrations still wait in the [pending queue](#pending-approvals) (`409 PENDING_VERIFICATIONS_OPEN`). Once it is confirmed, every customer your instance verified on its earlier register is queued again as a `REGISTER_SWITCH` row, so your wallet can attest them on the new register. The row carries a fresh root, a hash over a random salt that names no person, not the hash the earlier register held, because Trusset cannot tell how that one was made. A customer whose KYC proof bundle should stay tied to its attestation gets its bundle root back with [Attest Proofs](/endpoints/customers/attest-proofs).
+
+Until the register exists, identity writes, [Identity Status](/endpoints/customers/identity-status) and [Check Transfer Compliance](/endpoints/customers/can-transfer) answer `409 INSTANCE_REGISTER_REQUIRED`, and [List Claims](/endpoints/customers/list-claims) answers an empty list. On a network where the identity hub is not deployed yet, identity calls answer `501 IDENTITY_HUB_NOT_CONFIGURED`, and the Issuer Portal refuses Trusset register mode with `409 TRUSSET_REGISTRY_UNAVAILABLE`. Bind an identity register you control instead: own register mode works on every EVM network. [Networks](/protocol/infrastructure/networks) lists where the hub runs.
+
+The earlier shared Trusset ID Register is archived. Nothing is written to it, and binding it as your own register is refused with `400 REGISTRY_IS_PLATFORM`. An instance ID register is never bound as your own register either (`400 REGISTRY_IS_INSTANCE_REGISTER`): it is bound by the transaction that created it.
+
+### Attesters and trust
+
+A wallet that writes an attestation is its attester. It can attest, suspend, revoke and erase only its own entries, so no institution can change what another one wrote. [Erase Identity](/endpoints/customers/erase-identity) builds the erasure for the attester you name.
+
+Your register decides whose attestations count. It trusts at most eight attesters, and for each one it records the predicates it accepts from it and whether it accepts its investor class. An attester whose class is not accepted counts as retail. Your own wallets are attesters, and a register admin can also trust the wallet of another bank or KYC source your instance chooses to rely on, for some predicates or for all of them. That reliance is your instance's decision, made by your admin wallet's signature. Trusset makes no such choice and holds no role that could make it for you.
+
+Trust is changed in the Issuer Portal on the wallet page. Registering a new wallet offers a `setAttester` transaction for a register admin to sign, removing one offers `removeAttester`, and each wallet's admin and compliance officer seats are switched there too. These are issuer app actions, not API key routes. A refusal can outlast a new trust by up to a minute.
+
+When a token, a market or a gate asks about a wallet, the register reads the trusted attesters in order:
+
+- An attestation counts when it is active, before its hard expiry, carries the required predicates the register accepts from that attester, and meets the minimum investor class.
+- An attestation from any trusted attester that carries a blocked predicate blocks the wallet.
+- A wallet on the register's freeze list is not verified, whatever it holds.
+
+A revoke or a suspension withdraws only the attester's own statement. When another trusted attester still vouches for the wallet, it stays verified. To stop a wallet for your whole instance, an admin or compliance officer freezes it on the register in the Issuer Portal.
+
+### Predicates
+
+Predicates are yes or no facts, one bit each in a 128-bit field. The values behind them never go on chain: an attestation can say a customer lives in the EEA, but not where.
+
+| Bit | Predicate | Set by Trusset when |
+|---|---|---|
+| 0 | `KYC_DONE` | Every verification. A register created from the Issuer Portal requires it |
+| 1 | `AML_CLEAR` | [Add Claim](/endpoints/customers/add-claim) with `AML` |
+| 2 | `SANCTIONS_CLEAR` | Add Claim with `SANCTIONS_CHECK` |
+| 3 | `PEP_CLEAR` | Add Claim with `PEP_CHECK` |
+| 4 | `ADULT` | An `ADULT` leaf of a [proof bundle](#kyc-proofs) |
+| 5 | `EEA_RESIDENT` | A verification whose country is in the EEA, or an `EEA_RESIDENT` leaf of a proof bundle |
+| 6 | `NOT_US_PERSON` | Never. Reserved for attesters that prove it |
+| 7 | `CONTRACT_HOLDER` | Never. Marks a contract that holds collateral |
+| 8 | `RESIDENCY_ON_FILE` | [Verify Identity](/endpoints/customers/verify-identity), [Batch Verify](/endpoints/customers/batch-verify), a pending row with a residency claim, or a `RESIDENCY_ON_FILE` leaf |
+| 9 | `CITIZENSHIP_ON_FILE` | A `CITIZENSHIP_ON_FILE` leaf |
+| 10 | `TAX_RESIDENCY_ON_FILE` | Add Claim with `TAX_RESIDENCY`, or a `TAX_RESIDENCY_ON_FILE` leaf |
+| 11 | `ACCREDITED` | An `ACCREDITED` leaf. A bundle's `INVESTOR_CLASS` leaf sets the investor class |
+
+Bits 12 to 63 belong to the same public table and are not assigned yet. Bits 64 to 127 are defined by each attester, which publishes what they mean. Responses carry the field as a decimal string in `predicates`, and as names in `predicateNames` where a route lists them.
+
+[Claims](#claims) map the claim types of this API onto these bits.
+
+### Profile gates
+
+A [verification profile](/endpoints/customers/list-verification-profiles) is put on your register in the Issuer Portal, under Customers, Configure, with a transaction your admin wallet signs. The register then creates the profile's gate, and the profile reads back with `onChainProfileId` and `gateAddress`.
+
+| Rule on chain | Taken from the profile |
+|---|---|
+| Required predicates | `KYC_DONE`, plus `RESIDENCY_ON_FILE` when the profile requires a proof of residence |
+| Minimum investor class | `2` when the profile is limited to professional clients |
+| Maximum attestation age | `reverifyDays` |
+
+A profile's blocked countries stay off chain, because no country is on chain to check. Trusset keeps enforcing them on every onboarding path, as before.
+
+The gate's address is what a lending market, a vault or a profile-restricted token points at. A wallet is eligible as soon as its attestation meets the profile's rules, so nothing is admitted or removed per wallet. A disabled profile deactivates its gate, which then admits nobody, and a profile on chain cannot be deleted.
 
 ### T-REX 5 registers
+
 
 A T-REX 5 suite grants write access through its AccessManager and names an identity factory that creates the ONCHAINIDs. Before your instance is bound to one, the Issuer Portal checks it against your instance's registered wallets (`POST /instances/app/{instanceId}/identity-registry/check` with the issuer app login). The answer carries `trexVersion`, `identityFactory`, `identityCreatable`, and `roles`, which reports for each role below whether one of your wallets holds it (`held`) and which ones do (`holders`).
 
@@ -77,35 +162,48 @@ Three more things differ from T-REX 4:
 - A wallet counts as verified when its ONCHAINID from the identity factory holds valid claims for the required topics. The plan registers the wallet on the register as well, but the contract does not require that. [Identity Status](/endpoints/customers/identity-status) answers `trexVersion: 5`.
 - [Revoke Identity](/endpoints/customers/revoke-identity) revokes the wallet's KYC claim with `revokeClaimByDigest`, which a new verification reverses. `deleteIdentity` is never used there, because it would bar the wallet for good.
 
-### The Trusset ID Register
-
-On Sepolia, for Ethereum development instances, the Trusset ID Register is `0xEf244c4Bd4d71Bd9A30EDF6Edef7CCC72642291a`. The previous address, `0xE9114c40934f6fB6BB317935156b731f7A86D006`, was retired on 10 October 2026 and takes no new identities. On Polygon, for Polygon production instances, it is `0x7AacF15EBbe3cDb829ef2027a4825011dA2A19c9`, administered by the governance Safe `0x65FF3a731366472d40CF458332457403168c2BEA`.
-
-No other network and instance type runs the Trusset ID Register yet; [Networks](/protocol/infrastructure/networks) lists them. There, an instance in Trusset register mode answers identity calls with `501 IDENTITY_REGISTRY_NOT_CONFIGURED`, and the Issuer Portal refuses to set Trusset register mode with `409 TRUSSET_REGISTRY_UNAVAILABLE`. Bind an identity register you control instead: own register mode works on every EVM network.
-
-The 25 identities verified on the previous register were copied to the current one with their `kycHash`, investor type, expiries and claims. An identity past its hard expiry was not copied. A soft expiry that had already passed was moved to one hour after the copy. On the current register each copy names the migration key as `kycProvider` and the copy time, 10 October 2026, as `timestamp`. [Identity Status](/endpoints/customers/identity-status) returns the original verifier and date in `onChain.migration`.
-
-Lending markets and vaults whose gate still reads the previous register admit only wallets verified before the move. A market's admin moves the gate with [Set Identity Gates](/endpoints/lending/set-identity-gates#the-previous-trusset-id-register). A vault keeps its register for life and cannot be moved, so a customer verified since deposits through a vault gated on the current register.
-
-Binding either Trusset register as your instance's own register in the Issuer Portal is refused with `400 REGISTRY_IS_PLATFORM`. Select Trusset there to write to the current register.
-
 ## Writes return calldata
 
-Every write that changes the registry returns unsigned calldata for a wallet you control to sign and broadcast. Nothing is submitted on your behalf. Call the endpoint once without `txHash` to get the transaction, then again with the hash to have the receipt verified and the result recorded.
+Every write that changes a register returns unsigned calldata for a wallet you control to sign and broadcast. Nothing is submitted on your behalf. Call the endpoint once without `txHash` to get the transaction, then again with the hash to have the receipt verified and the result recorded.
+
+On the instance ID register, the transaction goes to the identity hub, and the confirm reads the hub's events from the receipt. It records the write only when the attester is one your register trusts (`403 UNTRUSTED_ATTESTER` otherwise), and only for what the mined attestation really carries: its root, its predicates and its investor class.
 
 Some writes vary that shape. [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) and [Attest Proofs](/endpoints/customers/attest-proofs) confirm several receipts in one call with `txResults`. The pending queue and ONCHAINID deployments confirm on their own endpoints. On an ERC-3643 registry, a write can first answer with messages to sign, which the next call sends back as `claimSignatures`. On a T-REX 5 register each signature goes back with the `issuedAt` its message carried. When a plan holds several transactions, `confirmStepIndex` names the one to confirm.
 
 ## Pending approvals
 
-When a customer passes KYC through an [ID link](/endpoints/customers/create-id-link) or a hosted verification service, the approval does not reach the register on its own. It waits in a queue with the `kycHash`, investor type, expiries and residency claim Trusset computed, until your wallet signs it.
+When a customer passes KYC through an [ID link](/endpoints/customers/create-id-link) or a hosted verification service, the approval does not reach the register on its own. It waits in a queue with the `kycHash`, investor type, expiries and residency flag Trusset computed, until a wallet signs it. Queue rows carry no name and no email. The `kycHash` of such a row is a hash over a random salt and a reference to the link or checkout, never over the customer's data, and the salt is discarded.
 
 Work the queue with [List Pending Verifications](/endpoints/customers/list-pending-verifications), [Build Pending Registration](/endpoints/customers/build-pending-registration) and [Confirm Pending Registration](/endpoints/customers/confirm-pending-registration). [Dismiss Pending Verification](/endpoints/customers/dismiss-pending-verification) closes a row for good.
 
 On an ERC-3643 registry a wallet needs an ONCHAINID before it can be registered. Build Pending Registration asks for one in its first phase when the wallet has none. [Deploy ONCHAINID](/endpoints/customers/deploy-onchainid) and [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid) deploy one ahead of time. On a T-REX 5 register that phase is `CREATE_IDENTITY`: the identity factory creates the ONCHAINID and links it to the wallet, so it needs no confirm.
 
+### Holder claims
+
+On the instance ID register a row can reach the chain in two ways. By default your attester wallet sends one `attestBatch` transaction for the rows you pick and pays its gas: that is [Build Pending Registration](/endpoints/customers/build-pending-registration). Instead, your attester can sign one EIP-712 message for the whole batch, and each customer then submits their own attestation from their own wallet and pays its gas.
+
+<Steps>
+  <Step title="Build the batch">
+    [Build Holder Batch](/endpoints/customers/build-holder-batch) turns up to 200 rows into one Merkle tree of attestations and returns the `AttestationBatch` typed data for your attester to sign.
+  </Step>
+  <Step title="Store the signature">
+    [Store Holder Signature](/endpoints/customers/store-holder-signature) checks the signature and stores one claim per row, with the transaction the customer sends.
+  </Step>
+  <Step title="The customer claims">
+    On verify.trusset.org the customer who completed an ID link sees a Claim step. Their wallet sends one `attestWithSig` transaction to the identity hub, and the app records it. For a row that did not come from an ID link, hand the customer the `transaction` from Store Holder Signature yourself. The hub accepts it only from the customer's own wallet, so the transaction is also the customer's consent.
+  </Step>
+  <Step title="Record the claim">
+    [Confirm Holder Claim](/endpoints/customers/confirm-holder-claim) records a claim from its transaction hash, for a claim sent outside verify.trusset.org or not yet recorded.
+  </Step>
+</Steps>
+
+The attestation is written under your attester's address, with the issue time your attester signed, so a late claim never looks fresher than it is. A claim lapses at its `deadline`, 30 days after the batch was built, and any later write by your attester about the same wallet, such as the issuer batch for that row, voids it. Dismissing the row returns the hub's `invalidate` for the wallet, which voids the claim without writing an attestation. See [Dismiss Pending Verification](/endpoints/customers/dismiss-pending-verification).
+
 ## Eligibility registers
 
-A [verification profile](/endpoints/customers/list-verification-profiles) can carry an eligibility register: an on-chain identity register that holds exactly the wallets admitted under that profile. Lending markets and vaults read it as a gate, so a market can lend only to the customers of one profile and a vault can take deposits only from them. A register is deployed for a profile, or an existing one bound to it, in the Issuer Portal. A deployed register extends your instance's own ERC-3643 identity register, so an instance that writes to the Trusset ID Register cannot deploy one (`409 ELIGIBILITY_REQUIRES_OWN_REGISTER`). It can still bind an existing ERC-3643 register to a profile that is not limited to professional clients (`PUT /customers/verification-profiles/{id}/eligibility-register`). That register is read only here, in the `EXTERNAL` mode below. Only a profile limited to professional clients needs your instance's own ERC-3643 register first. A profile without a register named as a market or vault gate answers `409 ELIGIBILITY_REGISTER_NOT_SET`, and its message gives the remedy that fits the profile. Both codes carry `details.registryMode: TRUSSET` on such an instance. This API manages who is on it.
+On the instance ID register, a verification profile is checked by its [profile gate](#profile-gates), and nothing in this section applies: eligibility is computed from each wallet's attestation. [Request Admission](/endpoints/customers/request-admission) answers `mode: GATE` without queueing anything, and [Request Removal](/endpoints/customers/request-removal), [Build Admission](/endpoints/customers/build-admission) and [Build Removal](/endpoints/customers/build-removal) answer `409 ELIGIBILITY_COMPUTED` for a profile that has a gate. Deploying an eligibility register for a profile is refused with `409 ELIGIBILITY_REQUIRES_OWN_REGISTER`, and binding one with `409 ELIGIBILITY_USES_PROFILE_GATE`. A profile with neither a gate nor a register, named as a market or vault gate, answers `409 ELIGIBILITY_REGISTER_NOT_SET`, and its message tells you to put the profile on chain. These codes carry `details.registryMode: TRUSSET`.
+
+On an instance bound to its own ERC-3643 register, a [verification profile](/endpoints/customers/list-verification-profiles) can carry an eligibility register: an on-chain identity register that holds exactly the wallets admitted under that profile. Lending markets and vaults read it as a gate, so a market can lend only to the customers of one profile and a vault can take deposits only from them. A register is deployed for a profile, or an existing one bound to it, in the Issuer Portal. A deployed register extends your instance's own ERC-3643 identity register. A profile without a register named as a market or vault gate answers `409 ELIGIBILITY_REGISTER_NOT_SET`, and its message gives the remedy that fits the profile. This API manages who is on it.
 
 One register stands for one profile of an instance. The Issuer Portal refuses to bind a register that another profile of the instance already uses (`ELIGIBILITY_REGISTER_IN_USE`), or one that keeps its identities in the same identity storage as another profile's register (`ELIGIBILITY_STORAGE_IN_USE`). A profile limited to professional clients takes only a register in the `REGISTER` or `CLAIM` mode below, whose admissions your instance signs (`PROFESSIONAL_REGISTER_REQUIRED`), because lending markets rely on it to admit professional clients only. A bound profile's `professionalOnly` setting cannot change until the register is unbound.
 
@@ -175,51 +273,69 @@ Eligibility registers are available on Ethereum instances only. A customer webho
 
 ## Claims
 
-The registry holds eight claim slots per identity. Four of them mean something fixed and four are yours to assign.
+This API names eight claim types. On the instance ID register a claim is not stored on its own: it is a [predicate](#predicates) bit of the wallet's attestation, under the attestation's root and expiries.
 
-| Slot | Index | How it is filled |
-|---|---|---|
-| `KYC` | 0 | From a proof, over the bundle root |
-| `AML` | 1 | Manually |
-| `ACCREDITATION` | 2 | From a proof, over `investorType` |
-| `RESIDENCY` | 3 | From a proof, over `country`, or from the pending queue |
-| `CITIZENSHIP` | 4 | From a proof, over `nationality` |
-| `TAX_RESIDENCY` | 5 | Manually |
-| `SANCTIONS_CHECK` | 6 | Manually |
-| `PEP_CHECK` | 7 | Manually |
+| Claim type | Index | Predicate | How it is filled |
+|---|---|---|---|
+| `KYC` | 0 | `KYC_DONE` | Every verification, or a proof bundle's root |
+| `AML` | 1 | `AML_CLEAR` | Manually |
+| `ACCREDITATION` | 2 | `ACCREDITED` | An `ACCREDITED` leaf |
+| `RESIDENCY` | 3 | `RESIDENCY_ON_FILE` | [Verify Identity](/endpoints/customers/verify-identity) and [Batch Verify](/endpoints/customers/batch-verify), a pending row with a residency claim, or a `RESIDENCY_ON_FILE` leaf |
+| `CITIZENSHIP` | 4 | `CITIZENSHIP_ON_FILE` | A `CITIZENSHIP_ON_FILE` leaf |
+| `TAX_RESIDENCY` | 5 | `TAX_RESIDENCY_ON_FILE` | Manually, or a `TAX_RESIDENCY_ON_FILE` leaf |
+| `SANCTIONS_CHECK` | 6 | `SANCTIONS_CLEAR` | Manually |
+| `PEP_CHECK` | 7 | `PEP_CLEAR` | Manually |
 
-The four canonical slots are reserved on this API. [Add Claim](/endpoints/customers/add-claim) refuses them with `PROOF_REQUIRED`, because a residency attestation that anyone could write by hand would not be worth reading. [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) can file all four from a verified bundle, and [Attest Proofs](/endpoints/customers/attest-proofs) any of them except `KYC`. A Trusset register does not enforce the reservation itself: any wallet holding `KYC_PROVIDER_ROLE` can write any slot directly.
+A predicate without a claim type, such as `ADULT` or `EEA_RESIDENT`, is listed as claim type `100` plus its bit, so `ADULT` is `104`, and [Revoke Proof](/endpoints/customers/revoke-proof) takes that number. [List Claims](/endpoints/customers/list-claims) and [List Proofs](/endpoints/customers/list-proofs) report each claim with its `predicate`.
 
-The four assignable slots take a hash you supply. What they mean is your convention, and a proof for a field with no canonical meaning can be filed in one of them.
+[Add Claim](/endpoints/customers/add-claim) and [Revoke Claim](/endpoints/customers/revoke-claim) attest the wallet again with one bit set or cleared, keeping the root, the expiries and the investor class. The four proof-backed types are reserved on this API: Add Claim refuses `KYC`, `ACCREDITATION`, `RESIDENCY` and `CITIZENSHIP` with `PROOF_REQUIRED`, because a residency fact that anyone could set by hand would not be worth reading. [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) and [Attest Proofs](/endpoints/customers/attest-proofs) set them from a bundle whose signed header checks out. `KYC_DONE` carries the verification itself, so revoking it is refused with `BASE_PREDICATE_REQUIRED`: revoke the identity instead.
 
-On an ERC-3643 registry the claims live on the wallet's ONCHAINID instead. Each slot except `KYC` becomes the topic `uint256(keccak256(name))`, where `name` is the slot name such as `RESIDENCY`. A `KYC` claim takes the register's first required claim topic that one of your wallets can sign for. A CLAIM key of the registry's trusted issuer signs each claim. On a T-REX 5 register a CLAIM_SIGNER key of the trusted issuer signs each claim as EIP-712 typed data, and a MANAGEMENT key of that issuer identity writes it onto the ONCHAINID with `addClaimTo`.
+On a Trusset-compatible register of your own, the eight claim types are slots of that register, each with its own data hash, issuer and expiry. The four assignable slots (`AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK`, `PEP_CHECK`) take a hash you supply, and an `ADULT` leaf, which has no slot of its own, is filed in one of them. That register does not enforce the reservation itself: any wallet holding `KYC_PROVIDER_ROLE` there can write any slot directly.
+
+On an ERC-3643 registry the claims live on the wallet's ONCHAINID instead. Each claim type except `KYC` becomes the topic `uint256(keccak256(name))`, where `name` is the claim type such as `RESIDENCY`. A `KYC` claim takes the register's first required claim topic that one of your wallets can sign for. A CLAIM key of the registry's trusted issuer signs each claim. On a T-REX 5 register a CLAIM_SIGNER key of the trusted issuer signs each claim as EIP-712 typed data, and a MANAGEMENT key of that issuer identity writes it onto the ONCHAINID with `addClaimTo`.
 
 ## KYC proofs
 
-Claims backed by proofs come from the [Trusset KYC zk-Proof Tool](https://github.com/Trusset/trusset-kyc-zk-proofs), which runs entirely on your own machines.
+Claims backed by proofs come from [KYC-STARKs](/tools/kyc-starks/overview), a tool that runs entirely on your own machines.
 
-It takes your KYC records and produces three things per subject: a Merkle root to publish on chain, one zk-STARK per proved field, and a manifest signed with your operator key. The manifest says what was asserted, under which rule, on what evidence, and for how long.
+Version 3.1 of the tool takes your KYC records and writes, per subject, a Merkle root over salted commitments, one STARK per proved field, a manifest, a header signed with your operator key that binds the root to the wallet, your attester wallet, the chain and the identity hub, and an `attestation.json`. Each proving leaf names the hub predicate it proves. No personal value appears in clear text in the bundle files.
 
-Trusset never sees the underlying data. What reaches this API is the manifest, the signature, and the proof bytes. The date of birth, the nationality and the documents stay with you.
+<Warning>
+  The proofs are not zero-knowledge. A proof reveals the value it is about to whoever holds it: an age proof the date of birth, a set-membership proof the country, a tier proof the investor class. Share a proof only with a party entitled to that value.
+</Warning>
+
+Trusset never receives proof bytes. You verify the proofs on your side with the tool or the SDK, and send the manifest and its signed header. Trusset checks the header signature against the operator key the identity hub publishes for your attester, and every leaf and the root against that header, then returns the `attest` transaction. A request that carries proof bytes is refused with `PROOFS_NOT_ACCEPTED`. No STARK is verified on chain: the identity hub stores the bundle root as the attestation root, the bundle's investor class, and the facts the leaves prove as predicate bits. See [KYC-STARKs](/tools/kyc-starks/overview#from-a-bundle-to-an-attestation) for how a bundle maps onto an attestation.
 
 <Steps>
-  <Step title="Register your operator key">
-    [Set Operator Key](/endpoints/customers/set-operator-key) records the ed25519 public key the tool prints. Bundles are verified against it.
+  <Step title="Publish your operator key">
+    Send the `setAttesterProfile` calldata that `npm run key -- show` prints from your attester wallet, so the identity hub publishes your key. [Set Operator Key](/endpoints/customers/set-operator-key) records a fallback key on your instance, used only while the hub holds none for your attester.
   </Step>
   <Step title="Verify the identity">
-    [Verify Identity](/endpoints/customers/verify-identity) puts the subject on the registry with their `kycHash`, which is the bundle's Merkle root.
+    [Verify Identity](/endpoints/customers/verify-identity) attests the subject with their `kycHash`, which is the bundle's Merkle root.
+  </Step>
+  <Step title="Verify the proofs locally">
+    Run the tool's verifier, or the SDK, on the bundle. Trusset does not see the proofs and does not run them.
   </Step>
   <Step title="Read the bundle">
-    [Inspect Manifest](/endpoints/customers/inspect-manifest) reports what the bundle contains and which leaves can be attested, without writing anything.
+    [Inspect Manifest](/endpoints/customers/inspect-manifest) checks the signed header and reports which leaves can be attested, without writing anything.
   </Step>
   <Step title="File the claims">
-    [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) verifies the bundle and returns the calldata for each claim it backs.
+    [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) returns one `attest` transaction that carries the predicates the leaves prove. [Attest Proofs](/endpoints/customers/attest-proofs) files chosen leaves and rotates the root to a newer bundle.
   </Step>
 </Steps>
 
-<Note>
-  A leaf can be a hiding commitment with no zk proof behind it, which the tool uses for fields like a surname where there is no predicate worth proving. Those leaves are marked `commitmentOnly` and are not attestable while proof verification is enforced.
-</Note>
+On the instance ID register a leaf maps to the predicate its `binding.predicate` names, which is inside its leaf hash:
+
+| Leaf | Predicate |
+|---|---|
+| The bundle root | `KYC_DONE` |
+| `age_threshold` with `minAgeDays` at least 6570 | `ADULT` |
+| `set_membership` on the `eea` list | `EEA_RESIDENT` |
+| `set_membership` on an approved list | `RESIDENCY_ON_FILE`, `CITIZENSHIP_ON_FILE` or `TAX_RESIDENCY_ON_FILE` |
+| `tier_threshold` with `minTier` at least 2 | `ACCREDITED` |
+| `tier_threshold` with `minTier` equal to the subject's class | `INVESTOR_CLASS`: no bit, it sets the attestation's investor class |
+
+A leaf with no predicate, such as a `commitment_only` leaf for a surname or a document number, backs no claim. Its value is committed in the root and stays hidden.
 
 ## Sealed KYC records
 
@@ -323,9 +439,13 @@ Whether you may rely on a verifier's KYC, and how personal data passes between y
 
 ## Disclosure requests
 
-A disclosure request asks the holder of a wallet to disclose one verified fact to your instance. The fact is age over 18 (`AGE`), country of residence (`COUNTRY`), or the complete on-chain verification (`FULL_KYC`).
+A disclosure request asks the holder of a wallet to disclose facts from their KYC proof bundle to your instance: their age (`AGE`), their country of residence (`COUNTRY`) or every leaf of the bundle (`FULL_KYC`). The holder approves on verify.trusset.org, and their browser encrypts the proofs to your [record key](/endpoints/customers/set-kyc-record-key). Trusset relays the ciphertext and cannot read it. [Disclosures from a holder](/protocol/infrastructure/sealed-kyc-records#disclosures-from-a-holder) explains the flow and what each proof reveals.
 
-The holder answers on verify.trusset.org with a consent the wallet signs and, for some facts, a zk-STARK proof from their bundle. Creating a request sends the holder nothing, and no webhook reports the answer, so read it back with [Get Disclosure Request](/endpoints/customers/get-disclosure-request).
+1. [Create Disclosure Request](/endpoints/customers/create-disclosure-request) for the wallet and the scope. Your instance needs an active record key.
+2. Read it back with [Get Disclosure Request](/endpoints/customers/get-disclosure-request) or [List Disclosure Requests](/endpoints/customers/list-disclosure-requests). Creating a request sends the holder nothing, and no webhook reports the answer. An approved request shows `envelope.status: HELD`.
+3. Your [courier](/tools/kyc-courier/overview) downloads the envelope with [Download Disclosure Envelope](/endpoints/customers/get-disclosure-envelope), opens and verifies it on your machine, then calls [Open Disclosure](/endpoints/customers/open-disclosure) or [Reject Disclosure](/endpoints/customers/reject-disclosure). Both delete the ciphertext. An envelope nobody collects is deleted 30 days after the holder answered.
+
+Only a call with your API key downloads an envelope. The Issuer Portal never downloads or opens one. On a production instance, disclosures stay off until Trusset enables them for your organisation with the same switch as sealed KYC records, and creating a request answers `409 ENCRYPTED_DISCLOSURES_NOT_ENABLED` until then.
 
 ## Response envelope
 

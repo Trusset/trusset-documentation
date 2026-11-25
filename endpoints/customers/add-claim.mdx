@@ -1,19 +1,21 @@
 ---
 title: 'Add Claim'
 api: 'POST /customers/api/identity/add-claim'
-description: 'File a claim into one of the four assignable slots'
+description: 'File one of the four manual claims on an identity'
 ---
 
-Writes a claim to the registry from a hash you supply. It covers the four slots that are not backed by a proof.
+Files one of the four claims that are not backed by a proof: `AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK` or `PEP_CHECK`.
+
+On the instance ID register a claim is a predicate bit of the wallet's attestation on the identity hub: `AML_CLEAR`, `TAX_RESIDENCY_ON_FILE`, `SANCTIONS_CLEAR` or `PEP_CLEAR`. The calldata attests the wallet again with the same root, investor class and expiries, and that one bit added. The hash you supply is not written on chain. See [Claims](/endpoints/customers/introduction#claims). On a Trusset-compatible register of your own, and on an ERC-3643 register, the claim is written with the hash you supply.
 
 <Warning>
-  The registry keeps one claim per slot. Filing a slot replaces the claim already there, whoever wrote it. The API does not check that the wallet holds an active identity, and the register reverts `addClaim` for one that does not.
+  On a Trusset-compatible register of your own the register keeps one claim per slot, and filing a slot replaces the claim already there, whoever wrote it. The API does not check there that the wallet holds an active identity, and the register reverts `addClaim` for one that does not.
 </Warning>
 
 <Warning>
-  `KYC`, `ACCREDITATION`, `RESIDENCY` and `CITIZENSHIP` are refused here with `PROOF_REQUIRED`. Those four slots are reserved on this API for claims filed from a proof bundle. File them with [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) or [Attest Proofs](/endpoints/customers/attest-proofs). The one exception is the `RESIDENCY` claim that [Build Pending Registration](/endpoints/customers/build-pending-registration) files with a queued approval.
+  `KYC`, `ACCREDITATION`, `RESIDENCY` and `CITIZENSHIP` are refused here with `PROOF_REQUIRED`. Those four are reserved on this API for claims filed from a proof bundle. File them with [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) or [Attest Proofs](/endpoints/customers/attest-proofs). The one exception is the `RESIDENCY` claim that [Build Pending Registration](/endpoints/customers/build-pending-registration) files with a queued approval.
 
-  The register does not enforce the reservation. A wallet holding `KYC_PROVIDER_ROLE` can write any slot by calling the register directly.
+  The contracts do not enforce the reservation. On the instance ID register any attester can attest any predicate bits about a wallet under its own name by calling the identity hub directly, and your register decides which bits it accepts from which attester. On a Trusset-compatible register a wallet holding `KYC_PROVIDER_ROLE` can write any slot.
 </Warning>
 
 ## Body Parameters
@@ -25,17 +27,17 @@ Writes a claim to the registry from a hash you supply. It covers the four slots 
 </ParamField>
 
 <ParamField body="dataHash" type="string">
-  The claim's payload as a 32-byte hex hash, `0x` and 64 hex characters. What it commits to is your convention. When both fields are sent, a valid `dataHash` wins.
+  The claim's payload as a 32-byte hex hash, `0x` and 64 hex characters. What it commits to is your convention. When both fields are sent, a valid `dataHash` wins. On the instance ID register it is not written on chain: it is kept in your instance's verification history with the claim.
 </ParamField>
 
 <ParamField body="dataInput" type="string">
-  A string to derive the hash from instead. The hash is `keccak256` over the UTF-8 JSON `{"claimType":"<name>","data":"<input>","wallet":"<wallet>"}`, with the input trimmed and the wallet lowercased. The same input under a different slot or subject therefore gives a different hash.
+  On a register of your own, a string to derive the hash from instead. The hash is `keccak256` over the UTF-8 JSON `{"claimType":"<name>","data":"<input>","wallet":"<wallet>"}`, with the input trimmed and the wallet lowercased. It has no salt, so do not put personal data here. Supply this or `dataHash`.
 
-  Supply this or `dataHash`.
+  The instance ID register refuses it with `400 DATA_HASH_REQUIRED`, because claim data never goes to Trusset. Send `dataHash`, your own salted commitment.
 </ParamField>
 
 <ParamField body="expiryDays" type="integer">
-  Days until the claim expires, between 0 and 36500. `0` or omitted means no expiry.
+  Days until the claim expires, between 0 and 36500. `0` or omitted means no expiry. The instance ID register does not use it: the bit lasts as long as the attestation, whose expiries stay as they are.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -51,16 +53,37 @@ Writes a claim to the registry from a hash you supply. It covers the four slots 
 </ParamField>
 
 <ParamField body="signerAddress" type="string">
-  ERC-3643 register only. The instance wallet that signs the claim. It must hold a CLAIM key on the register's trusted issuer.
+  On the instance ID register, the wallet you will sign with. When it holds an active or suspended attestation about the wallet, the calldata updates that one. Otherwise it copies the attestation the register resolves for the wallet. See [Sign and confirm](#sign-and-confirm).
+
+  On an ERC-3643 register, the instance wallet that signs the claim. It must hold a CLAIM key on the register's trusted issuer.
 
   On a T-REX 5 register it names the wallet you will sign the current answer with: a CLAIM_SIGNER key for the message, a MANAGEMENT key of the trusted issuer identity for the `addClaimTo` step. Lacking that key, the call answers `403 SIGNER_ROLE_MISSING`.
 </ParamField>
 
 ## Sign and confirm
 
-On the Trusset register the calldata calls `addClaim` on the register, which needs a wallet holding `KYC_PROVIDER_ROLE`. Before handing it out, the API checks that one of your instance's registered wallets holds that role, and refuses with `KYC_PROVIDER_ROLE_MISSING` otherwise. It skips the check when the instance has no registered wallet or the role cannot be read. On the Trusset ID Register, which instances without a register of their own share, it also refuses with `403 IDENTITY_HELD_BY_ANOTHER_ISSUER` when the wallet's identity was registered by a wallet that is not one of your instance's, and with `409 IDENTITY_NOT_REGISTERED` when the wallet holds no active identity, which the register would refuse.
+### On the instance ID register
 
-The confirm leg requires a mined, successful `addClaim` on this instance's register that targets this wallet. It reads the slot, hash and expiry back out of the transaction and reports them, rather than comparing them with your request. On the Trusset ID Register the transaction must be signed by a verified wallet of your instance (`UNAUTHORIZED_SIGNER` otherwise). It records the claim once in your instance's verification history as an `ADD_CLAIM` entry with the claim type, hash, expiry, transaction and signer; confirming the same `txHash` again writes no second entry.
+The calldata calls `attest` on the identity hub. It copies an existing attestation and adds the claim's predicate bit: the attestation of `signerAddress` when that wallet holds an active or suspended one about the subject, otherwise the attestation the register resolves for the wallet. `attester` in the answer names the wallet whose attestation was copied. Sign with that wallet to update its attestation. The hub writes under the address that signs, so another trusted attester signing it writes an attestation of its own with the same root, class and expiries.
+
+Before handing out calldata, the API refuses with:
+
+- `409 INSTANCE_REGISTER_REQUIRED` when your instance has not created its register yet
+- `403 ATTESTER_MISSING` when it can read that the register trusts none of your instance's registered wallets as an attester. A register admin trusts a wallet on the wallet page of the issuer app. See [Attesters and trust](/endpoints/customers/introduction#attesters-and-trust)
+- `409 IDENTITY_NOT_REGISTERED` when the register reports no unrevoked identity for the wallet, and `409 IDENTITY_NOT_ACTIVE` when no active attestation can be found to copy
+- `409 IDENTITY_SUSPENDED`, `IDENTITY_EXPIRED` or `IDENTITY_SOFT_EXPIRED` when the attestation to copy is suspended, past its hard expiry or past its soft expiry. Verify the wallet again with [Verify Identity](/endpoints/customers/verify-identity) first
+
+The confirm leg requires a mined, successful `attest` on the hub for this wallet whose attestation carries the claim's bit (`TX_PREDICATES_MISMATCH` otherwise), signed by a trusted attester of your register (`403 UNTRUSTED_ATTESTER` otherwise). It reports the mined `predicates` and `root`.
+
+### On a Trusset-compatible register of your own
+
+The calldata calls `addClaim` on the register, which needs a wallet holding `KYC_PROVIDER_ROLE`. Before handing it out, the API checks that one of your instance's registered wallets holds that role, and refuses with `KYC_PROVIDER_ROLE_MISSING` otherwise. It skips the check when the instance has no registered wallet or the role cannot be read.
+
+The confirm leg requires a mined, successful `addClaim` on this instance's register that targets this wallet. It reads the slot, hash and expiry back out of the transaction and reports them, rather than comparing them with your request. The signer is logged, not checked.
+
+### Every register
+
+The claim is recorded once in your instance's verification history as an `ADD_CLAIM` entry with the claim type, hash, expiry, transaction and signer, and on the instance ID register also the mined predicates, root and attester. Confirming the same `txHash` again writes no second entry.
 
 ## On an ERC-3643 register
 
@@ -99,15 +122,20 @@ A wallet with no ONCHAINID on the register's identity factory yet is refused wit
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`. On an ERC-3643 register, `SIGN_MESSAGES` and then `SIGN_TRANSACTIONS`. Calldata leg only.</ResponseField>
-    <ResponseField name="transaction" type="object">The unsigned registry call. Trusset register, calldata leg only.</ResponseField>
-    <ResponseField name="functionName" type="string">`addClaim`. Trusset register, calldata leg only.</ResponseField>
-    <ResponseField name="registerKind" type="string">`TRUSSET` or `TREX`. Calldata leg only.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain the identity hub runs on. Instance ID register, calldata leg only.</ResponseField>
+    <ResponseField name="transaction" type="object">The unsigned call: `attest` on the identity hub on the instance ID register, `addClaim` on the register on a Trusset-compatible register. Calldata leg only.</ResponseField>
+    <ResponseField name="functionName" type="string">`addClaim`. Instance ID register and Trusset-compatible register, calldata leg only.</ResponseField>
+    <ResponseField name="contractFunction" type="string">`attest`, the hub function the transaction calls. Instance ID register, calldata leg only.</ResponseField>
+    <ResponseField name="attester" type="string">The attester whose attestation the calldata copies. Instance ID register, calldata leg only.</ResponseField>
+    <ResponseField name="registerKind" type="string">`INSTANCE`, `TRUSSET` or `TREX`. Calldata leg only.</ResponseField>
     <ResponseField name="messages" type="array">ERC-3643 register only: the claim message to sign, with `messageHash`, `claimType`, `identity`, `topic` and `claimIssuer`. On a T-REX 5 register it adds `scheme: eip712`, `typedData` and `issuedAt`.</ResponseField>
     <ResponseField name="steps" type="array">ERC-3643 register only: the `addClaim` transaction to the ONCHAINID, once the signature is in. On a T-REX 5 register, the `addClaimTo` transaction to the trusted issuer identity, with `signer`.</ResponseField>
     <ResponseField name="walletAddress" type="string">The subject, checksummed.</ResponseField>
-    <ResponseField name="claimType" type="string">The slot, by name. On the confirm leg it is read back from the mined transaction, not echoed.</ResponseField>
-    <ResponseField name="dataHash" type="string">The hash written, lowercased. On the confirm leg it is read back from the mined transaction.</ResponseField>
-    <ResponseField name="expiry" type="integer">Unix seconds, or `0`. On the confirm leg it is read back from the mined transaction.</ResponseField>
+    <ResponseField name="claimType" type="string">The claim, by name. On the confirm leg it is read back from the mined transaction, not echoed, except on the instance ID register, where the confirm checks the bit and echoes the request.</ResponseField>
+    <ResponseField name="dataHash" type="string">The hash, lowercased. On the confirm leg it is read back from the mined transaction. On the instance ID register it is the hash of your request, which the chain does not hold.</ResponseField>
+    <ResponseField name="expiry" type="integer">Unix seconds, or `0`. On the confirm leg it is read back from the mined transaction. On the instance ID register the confirm reports the hard expiry of the mined attestation.</ResponseField>
+    <ResponseField name="predicates" type="string">The predicate bits as a decimal string of the 128-bit mask: the bits the calldata attests, and on the confirm leg the bits mined. Instance ID register only.</ResponseField>
+    <ResponseField name="root" type="string">The root of the mined attestation. Instance ID register, confirm leg only.</ResponseField>
     <ResponseField name="txHash" type="string">The confirmed transaction. Confirm leg only.</ResponseField>
     <ResponseField name="gasUsed" type="string">Gas used. Confirm leg only.</ResponseField>
     <ResponseField name="confirmWith" type="object">`{ endpoint, field: "txHash" }`. Calldata leg only.</ResponseField>
@@ -155,10 +183,14 @@ const confirmed = await fetch(url, {
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTION",
-    "transaction": { "to": "0xEf244c4Bd4d71Bd9A30EDF6Edef7CCC72642291a", "data": "0x..." },
+    "chainId": 11155111,
+    "transaction": { "to": "0x3B8e1F6a0D4c2E9b7A5f8C1d3E6a9B2c4D7f0E15", "data": "0x0ca298af..." },
     "functionName": "addClaim",
+    "contractFunction": "attest",
+    "registerKind": "INSTANCE",
     "description": "Add SANCTIONS_CHECK claim for 0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
-    "registerKind": "TRUSSET",
+    "predicates": "293",
+    "attester": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
     "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
     "claimType": "SANCTIONS_CHECK",
     "dataHash": "0x365036c53705a570a416a0e41030d84e9a1fd21928878bb7bddef2f372d7bd54",
@@ -182,9 +214,11 @@ const confirmed = await fetch(url, {
     "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
     "claimType": "SANCTIONS_CHECK",
     "dataHash": "0x365036c53705a570a416a0e41030d84e9a1fd21928878bb7bddef2f372d7bd54",
-    "expiry": 1796472000,
+    "expiry": 1820246400,
     "txHash": "0x6e2b9d41c07a35f8e1d4b20c9a7f63e5d8c1b0a4f7e2d9c6b3a0f5e8d1c4b7a2",
-    "gasUsed": "74388"
+    "gasUsed": "38214",
+    "predicates": "293",
+    "root": "0x41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b9f2c"
   },
   "error": null,
   "metadata": {
@@ -214,19 +248,28 @@ const confirmed = await fetch(url, {
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_ADDRESS` | `400` | `walletAddress` is missing or malformed |
-| `INVALID_CLAIM_TYPE` | `400` | `claimType` is not a slot name or an index from 0 to 7 |
-| `PROOF_REQUIRED` | `400` | One of the four reserved slots was named |
+| `INVALID_CLAIM_TYPE` | `400` | `claimType` is not a claim name or an index from 0 to 7 |
+| `PROOF_REQUIRED` | `400` | One of the four reserved claims was named |
 | `INVALID_HASH` | `400` | Neither a valid `dataHash` nor a non-empty `dataInput` was supplied |
+| `DATA_HASH_REQUIRED` | `400` | Instance ID register: the request carries `dataInput`. Send `dataHash` instead |
 | `INVALID_EXPIRY` | `400` | `expiryDays` is outside 0 to 36500 |
 | `INVALID_TX` | `400` | `txHash` is not a 32-byte hex hash |
 | `TX_REVERTED` | `400` | The transaction reverted |
-| `TX_WRONG_TARGET` | `400` | The transaction was not sent to this instance's register |
-| `TX_WRONG_FUNCTION` | `400` | The transaction does not call `addClaim` |
-| `TX_TARGET_MISMATCH` | `400` | The confirmed transaction targets a different wallet |
-| `KYC_PROVIDER_ROLE_MISSING` | `403` | None of your instance's wallets holds `KYC_PROVIDER_ROLE` on the register. Calldata leg only |
-| `IDENTITY_HELD_BY_ANOTHER_ISSUER` | `403` | Trusset ID Register: the identity was registered by a wallet that is not one of your instance's. Calldata leg only |
-| `IDENTITY_NOT_REGISTERED` | `409` | Trusset ID Register: the wallet holds no active identity to add a claim to. Calldata leg only |
-| `UNAUTHORIZED_SIGNER` | `403` | Trusset ID Register, confirm leg: the transaction was not signed by a verified wallet of your instance |
+| `TX_WRONG_TARGET` | `400` | The transaction was not sent to the identity hub or this instance's register |
+| `TX_WRONG_FUNCTION` | `400` | The transaction does not call `attest` on the hub or `addClaim` on the register |
+| `TX_TARGET_MISMATCH` | `400` | The confirmed transaction targets a different wallet, or attests nothing about it |
+| `TX_PREDICATES_MISMATCH` | `400` | Instance ID register: the mined attestation does not carry the claim's predicate bit |
+| `INSTANCE_REGISTER_REQUIRED` | `409` | Your instance is in Trusset mode and has not created its instance ID register yet |
+| `ATTESTER_MISSING` | `403` | Instance ID register: none of your instance's registered wallets is a trusted attester of the register. Calldata leg only |
+| `IDENTITY_NOT_REGISTERED` | `409` | Instance ID register: the register reports no unrevoked identity for the wallet. Calldata leg only |
+| `IDENTITY_NOT_ACTIVE` | `409` | Instance ID register: no active attestation about the wallet can be found to add the claim to. Calldata leg only |
+| `IDENTITY_SUSPENDED` | `409` | Instance ID register: the attestation is suspended. Calldata leg only |
+| `IDENTITY_EXPIRED` | `409` | Instance ID register: the attestation is past its hard expiry. Verify the wallet again. Calldata leg only |
+| `IDENTITY_SOFT_EXPIRED` | `409` | Instance ID register: the attestation is past its soft expiry. Verify the wallet again. Calldata leg only |
+| `IDENTITY_HUB_NOT_CONFIGURED` | `501` | The identity hub is not deployed on your instance's network |
+| `UNTRUSTED_ATTESTER` | `403` | Instance ID register, confirm leg: the transaction was signed by a wallet the register does not trust as an attester |
+| `KYC_PROVIDER_ROLE_MISSING` | `403` | Trusset-compatible register of your own: none of your instance's wallets holds `KYC_PROVIDER_ROLE` on the register. Calldata leg only |
+| `CHAIN_UNAVAILABLE` | `503` | Instance ID register: the register could not be read to check the wallet. Retry |
 | `TX_NOT_FOUND` | `404` | The transaction is not mined yet |
 | `OWN_REGISTRY_NOT_CONFIGURED` | `409` | The instance is bound to its own register but has no valid register address |
 | `REGISTRY_PROBE_FAILED` | `503` | The instance's own register, or its trusted issuer, could not be read |

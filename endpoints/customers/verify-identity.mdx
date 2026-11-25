@@ -14,7 +14,8 @@ What you sign depends on the register. Every calldata response names it in `regi
 
 | `registerKind` | Register | The calldata leg returns |
 |---|---|---|
-| `TRUSSET` | The Trusset ID Register, or your own deployment of the same contract | One transaction, `verifyIdentity` or `updateIdentity` |
+| `INSTANCE` | Your [instance ID register](/endpoints/customers/introduction#the-instance-id-register), reading attestations on the identity hub. The register of every instance in Trusset mode | One transaction, `attest` on the identity hub |
+| `TRUSSET` | A register of your own that answers the Trusset register interface | One transaction, `verifyIdentity` or `updateIdentity` |
 | `TREX` | Your own ERC-3643 (T-REX) identity registry, with ONCHAINID identities | A plan in up to three phases, one call per phase |
 
 An ERC-3643 plan also carries `trexVersion`: `4` for a T-REX 4 register with ONCHAINID 2 identities, `5` for a T-REX 5 register with ONCHAINID 3 identities. The two versions differ in their first two phases. See [Verify on an ERC-3643 register](#verify-on-an-erc-3643-register) and [Verify on an ERC-3643 T-REX 5 register](#verify-on-an-erc-3643-t-rex-5-register).
@@ -26,7 +27,9 @@ An ERC-3643 plan also carries `trexVersion`: `4` for a T-REX 4 register with ONC
 </ParamField>
 
 <ParamField body="country" type="string" required>
-  ISO 3166-1 code as alpha-2 (`DE`), alpha-3 (`DEU`) or numeric (`276`). Stored in alpha-3 form. An ERC-3643 register also receives it, as the numeric code. A T-REX 5 register records no country: it stays on the customer record only, and the plan's `warnings` carries `{ code: 'COUNTRY_NOT_ON_REGISTER' }`.
+  ISO 3166-1 code as alpha-2 (`DE`), alpha-3 (`DEU`) or numeric (`276`). Stored on the customer record in alpha-3 form.
+
+  On the instance ID register the country never goes on chain. It decides one predicate: `EEA_RESIDENT` is set when the country is in the EEA. `RESIDENCY_ON_FILE` is always set, because a country is always given. An ERC-3643 register receives the country as the numeric code. A T-REX 5 register records no country: it stays on the customer record only, and the plan's `warnings` carries `{ code: 'COUNTRY_NOT_ON_REGISTER' }`.
 
   Refused with `COUNTRY_BLOCKED` when it is on the blocked list of the [verification profile](/endpoints/customers/list-verification-profiles) named after `investorType`.
 </ParamField>
@@ -34,25 +37,27 @@ An ERC-3643 plan also carries `trexVersion`: `4` for a T-REX 4 register with ONC
 <ParamField body="investorType" type="string" default="RETAIL">
   `RETAIL`, `PROFESSIONAL` or `ELIGIBLE_COUNTERPARTY` in any letter case, or the key of one of your custom [verification profiles](/endpoints/customers/list-verification-profiles), also in any letter case. A custom key registers with that profile's on-chain investor type. Omitted, `null` or an empty string reads as `RETAIL`. A disabled profile is refused with `INVALID_INVESTOR_TYPE` on the build call unless the wallet's customer record is already under it, so a customer of a disabled profile can still be verified again. The confirm call records what was signed. Anything else, a number included, is refused with `INVALID_INVESTOR_TYPE`.
 
-  A Trusset register stores the type on chain as `1`, `2` or `3`. An ERC-3643 register has no investor type, so there it is kept on the customer record only. The record keeps the profile key as the profile spells it, so `professional` is stored as `PROFESSIONAL`.
+  The instance ID register writes it into the attestation as the investor class `1`, `2` or `3`. A Trusset-compatible register of your own stores it as the investor type. An ERC-3643 register has no investor type, so there it is kept on the customer record only. The record keeps the profile key as the profile spells it, so `professional` is stored as `PROFESSIONAL`.
 </ParamField>
 
 <ParamField body="softExpiryDays" type="integer">
-  Days until the identity is soft-expired. `0` or omitted sets none. Trusset register only: an ERC-3643 register does not store it.
+  Days until the identity is soft-expired. `0` or omitted sets none. An ERC-3643 register does not store it.
 </ParamField>
 
 <ParamField body="hardExpiryDays" type="integer">
-  Days until the identity is hard-expired and stops counting as verified. `0` or omitted sets none. Trusset register only.
+  Days until the identity is hard-expired and stops counting as verified. `0` or omitted sets none. An ERC-3643 register does not store it.
 
-  The API does not check either expiry. A Trusset register reverts the transaction when the soft expiry is not earlier than the hard expiry, or when either lies in the past.
+  On the instance ID register the API checks both before it builds, and refuses with `400 INVALID_EXPIRY` when either lies in the past or the soft expiry is not earlier than the hard expiry. On a Trusset-compatible register of your own the API does not check them, and the register reverts such a transaction.
 </ParamField>
 
 <ParamField body="kycHash" type="string">
-  The KYC hash to register, as 32-byte hex (`0x` and 64 hex characters). Stored lowercased. For a KYC proof bundle this is its Merkle root. On an ERC-3643 register it becomes the data of the KYC claim.
+  The KYC hash to register, as 32-byte hex (`0x` and 64 hex characters). Stored lowercased. On the instance ID register it is the root of the attestation and required on the calldata leg: send the root of the customer's KYC proof bundle, built over salted commitments, or your own salted commitment. Without it, the call is refused with `400 KYC_HASH_REQUIRED`, and an all-zero hash with `400 INVALID_KYC_HASH`. On an ERC-3643 register it becomes the data of the KYC claim.
 </ParamField>
 
 <ParamField body="kycData" type="object">
-  Data to derive the hash from when `kycHash` is omitted: the keccak256 of its JSON serialisation. With neither, the hash covers the wallet, the country and the current time, so it changes on every call.
+  On the instance ID register this field is refused on both legs with `400 KYC_HASH_REQUIRED`: KYC data never goes to Trusset, so hash it yourself, with a secret salt, and send `kycHash`.
+
+  On a register of your own, data to derive the hash from when `kycHash` is omitted: the keccak256 of its JSON serialisation, with no salt. With neither field, the hash is a random 32-byte value over no personal data, so it changes on every call. See the warning below before you send anything here.
 </ParamField>
 
 <ParamField body="claimSignatures" type="array">
@@ -70,7 +75,9 @@ An ERC-3643 plan also carries `trexVersion`: `4` for a T-REX 4 register with ONC
 </ParamField>
 
 <ParamField body="signerAddress" type="string">
-  ERC-3643 only. The wallet that will sign the claim. Refused with `CLAIM_SIGNER_NOT_TRUSTED` when it holds no claim key on the register's trusted issuer. Defaults to the first of your instance's wallets, primary first, that holds one.
+  On the instance ID register, the wallet you will sign the attestation with. It decides what an update keeps: see [Verify on the instance ID register](#verify-on-the-instance-id-register). The calldata leg does not check that it is a trusted attester. The confirm leg does.
+
+  On an ERC-3643 register, the wallet that will sign the claim. Refused with `CLAIM_SIGNER_NOT_TRUSTED` when it holds no claim key on the register's trusted issuer. Defaults to the first of your instance's wallets, primary first, that holds one.
 
   It also becomes the management key of any ONCHAINID the plan deploys. Name a wallet registered to your instance, because [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid) refuses any other management key.
 
@@ -84,17 +91,26 @@ An ERC-3643 plan also carries `trexVersion`: `4` for a T-REX 4 register with ONC
 ## Response Fields
 
 <ResponseField name="data" type="object">
-  <Expandable title="Calldata leg, both registers">
-    <ResponseField name="registerKind" type="string">`TRUSSET` or `TREX`.</ResponseField>
+  <Expandable title="Calldata leg, every register">
+    <ResponseField name="registerKind" type="string">`INSTANCE`, `TRUSSET` or `TREX`.</ResponseField>
     <ResponseField name="walletAddress" type="string">The wallet, checksummed.</ResponseField>
     <ResponseField name="kycHash" type="string">The hash this call used. Send it back on every later call for the same registration.</ResponseField>
-    <ResponseField name="investorType" type="integer">`1`, `2` or `3`. Not written to an ERC-3643 register.</ResponseField>
+    <ResponseField name="investorType" type="integer">`1`, `2` or `3`. On the instance ID register, the investor class of the attestation. Not written to an ERC-3643 register.</ResponseField>
     <ResponseField name="softExpiry" type="integer">Unix seconds, or `0`. Not written to an ERC-3643 register.</ResponseField>
     <ResponseField name="hardExpiry" type="integer">Unix seconds, or `0`. Not written to an ERC-3643 register.</ResponseField>
-    <ResponseField name="operation" type="string">`update` when the wallet already holds an unrevoked identity on a Trusset register, or is already on an ERC-3643 register. `verify` otherwise.</ResponseField>
+    <ResponseField name="operation" type="string">`update` when the register already reports an identity for the wallet that is not revoked, expired ones included, or the wallet is already on an ERC-3643 register. `verify` otherwise.</ResponseField>
     <ResponseField name="confirmWith" type="object">`{ endpoint: "POST /customers/api/identity/verify", field: "txHash" }`. It names this endpoint in every phase, including `DEPLOY_IDENTITY`, where the deployments are confirmed elsewhere, and `CREATE_IDENTITY`, which needs no confirm.</ResponseField>
   </Expandable>
-  <Expandable title="Calldata leg, Trusset register">
+  <Expandable title="Calldata leg, instance ID register">
+    <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain the identity hub runs on.</ResponseField>
+    <ResponseField name="transaction" type="object">`{ to, data }`, where `to` is the identity hub.</ResponseField>
+    <ResponseField name="functionName" type="string">`verifyIdentity`, or `updateIdentity` when the register already reports an unrevoked identity. Both call the same hub function.</ResponseField>
+    <ResponseField name="contractFunction" type="string">`attest`, the hub function the transaction calls.</ResponseField>
+    <ResponseField name="predicates" type="string">The predicate bits the attestation carries, as a decimal string of the 128-bit mask. See [Predicates](/endpoints/customers/introduction#predicates).</ResponseField>
+    <ResponseField name="description" type="string">What the transaction does.</ResponseField>
+  </Expandable>
+  <Expandable title="Calldata leg, Trusset-compatible register of your own">
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
     <ResponseField name="transaction" type="object">`{ to, data }`, where `to` is the register.</ResponseField>
     <ResponseField name="functionName" type="string">`verifyIdentity`, or `updateIdentity` when the wallet already holds an unrevoked identity.</ResponseField>
@@ -121,24 +137,45 @@ An ERC-3643 plan also carries `trexVersion`: `4` for a T-REX 4 register with ONC
   <Expandable title="Confirm leg">
     <ResponseField name="walletAddress" type="string">The wallet, checksummed.</ResponseField>
     <ResponseField name="status" type="string">Always `verified`.</ResponseField>
-    <ResponseField name="operation" type="string">`verify` or `update`, from the mined function. On an ERC-3643 register it is `verify` for every step the plan builds.</ResponseField>
+    <ResponseField name="operation" type="string">`verify` or `update`, from the mined function. On the instance ID register it is always `verify`, because both legs mine the same `attest`. On an ERC-3643 register it is `verify` for every step the plan builds.</ResponseField>
     <ResponseField name="txHash" type="string">The confirmed transaction.</ResponseField>
     <ResponseField name="gasUsed" type="string">Gas used.</ResponseField>
-    <ResponseField name="kycHash" type="string">Read from the chain, not from your request: the mined hash on a Trusset register, the KYC claim's data on an ERC-3643 register.</ResponseField>
+    <ResponseField name="kycHash" type="string">Read from the chain, not from your request: the root of the mined attestation on the instance ID register, the mined hash on a Trusset-compatible register, the KYC claim's data on an ERC-3643 register.</ResponseField>
+    <ResponseField name="alreadyRecorded" type="boolean">Present, and `true`, when this transaction was confirmed before. Nothing is written again.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Warning>
-  With neither `kycHash` nor `kycData`, each call derives a new hash from the current time. Send the `kycHash` from the first response on every later call. On an ERC-3643 register this is required: the claim signature covers the hash, and a new hash makes it fail with `CLAIM_SIGNER_NOT_TRUSTED`.
+  On a register of your own, with neither `kycHash` nor `kycData`, each call picks a new random hash. Send the `kycHash` from the first response on every later call. On an ERC-3643 register this is required: the claim signature covers the hash, and a new hash makes it fail with `CLAIM_SIGNER_NOT_TRUSTED`.
 </Warning>
 
-## Verify on a Trusset register
+<Warning>
+  On a register of your own, a hash derived from `kycData` is a plain keccak256 of its JSON, with no salt, and it is written on your register where anyone can read it. Do not put personal data in `kycData`: send a salted root as `kycHash` instead, such as the root of a [KYC proof bundle](/endpoints/customers/introduction#kyc-proofs). The instance ID register refuses `kycData` outright.
+</Warning>
 
-Call once without `txHash` and send `transaction` from a wallet that holds `KYC_PROVIDER_ROLE` on the register. Then send the same body again with `txHash` added.
+## Verify on the instance ID register
+
+Call once without `txHash` and send `transaction` from a wallet your instance ID register trusts as an attester. Then send the same body again with `txHash` added.
+
+The transaction calls `attest` on the identity hub. The hub writes the attestation under the address that sends it, so a wallet can only ever attest in its own name. The attestation carries the `kycHash` as its root, the investor class, both expiries and the predicate bits: `KYC_DONE` and `RESIDENCY_ON_FILE`, plus `EEA_RESIDENT` when `country` is in the EEA. Names, the country itself and other personal data are not written. See [Predicates](/endpoints/customers/introduction#predicates).
+
+The endpoint answers `updateIdentity` when the register already reports an identity for the wallet that is not revoked, expired ones included, and `verifyIdentity` otherwise. Both build the same `attest`. An update keeps the other predicate bits, such as `AML_CLEAR`, of the attestation it replaces: the one `signerAddress` already holds about the wallet, or with `signerAddress` omitted, the one the register resolves. `EEA_RESIDENT` is always set again from `country`. When `signerAddress` holds no attestation about the wallet and is not the attester the register resolves, it writes a new attestation of its own and nothing is carried over. If the register cannot be read, the endpoint answers `verifyIdentity`.
+
+Before handing out calldata, the API checks the register:
+
+- An instance in Trusset mode without its own register yet is refused with `409 INSTANCE_REGISTER_REQUIRED`. Create the register in the issuer app under Settings, Identity Register. See [The instance ID register](/endpoints/customers/introduction#the-instance-id-register).
+- It refuses with `403 ATTESTER_MISSING` when it can read every registered wallet of your instance and the register trusts none of them as an attester. With no wallet registered, or when the read fails, it lets the call through. The verdict is cached for 60 seconds, so a refusal can outlast a new trust by up to a minute. A register admin trusts a wallet on the wallet page of the issuer app. Trusset never does. See [Attesters and trust](/endpoints/customers/introduction#attesters-and-trust).
+- It refuses with `501 IDENTITY_HUB_NOT_CONFIGURED` when the identity hub is not deployed on your instance's network.
+
+The confirm leg decodes the `Attested` event the hub emitted for the wallet. It refuses with `403 UNTRUSTED_ATTESTER` when the signing wallet is not a trusted attester of your register, and with `409 NOT_VERIFIED_ON_REGISTER` when the register still does not resolve the wallet as verified afterwards, for example because it does not accept `KYC_DONE` from that attester.
+
+## Verify on a Trusset-compatible register of your own
+
+Call once without `txHash` and send `transaction` from a wallet that holds `KYC_PROVIDER_ROLE` on your register. Then send the same body again with `txHash` added.
 
 The endpoint picks `updateIdentity` when the wallet already holds an identity that is not revoked, expired ones included. It picks `verifyIdentity` when the wallet has none or was revoked. If the register cannot be read, it falls back to `verifyIdentity`, which reverts for a wallet that already holds an unrevoked identity.
 
-When the wallet already holds an active identity, the calldata calls `updateIdentity` instead. On the Trusset ID Register, which instances without a register of their own share, that update is refused with `403 IDENTITY_HELD_BY_ANOTHER_ISSUER` when the identity was registered by a wallet that is not one of your instance's and has not expired. Before handing out calldata, the API checks that one of your instance's wallets holds `KYC_PROVIDER_ROLE`. It refuses with `KYC_PROVIDER_ROLE_MISSING` only when it can read every wallet and none holds the role. With no wallet registered, or when the read fails, it lets the call through. The verdict is cached for 60 seconds, so a refusal can outlast a new role grant by up to a minute.
+Before handing out calldata, the API checks that one of your instance's wallets holds `KYC_PROVIDER_ROLE`. It refuses with `KYC_PROVIDER_ROLE_MISSING` only when it can read every wallet and none holds the role. With no wallet registered, or when the read fails, it lets the call through. The verdict is cached for 60 seconds. Your register's owner grants the role.
 
 ## Verify on an ERC-3643 register
 
@@ -212,15 +249,16 @@ The T-REX 5 example sends everything from one `wallet` that holds every role abo
 
 The confirm leg reads the mined transaction and refuses it before writing anything when:
 
-- it is not mined, reverted, or is not a register or ONCHAINID write this endpoint confirms (`TX_WRONG_TARGET`, `TX_WRONG_FUNCTION`)
+- it is not mined, reverted, or is not a hub, register or ONCHAINID write this endpoint confirms (`TX_WRONG_TARGET`, `TX_WRONG_FUNCTION`)
 - it targets a different wallet, or an ONCHAINID that is not this wallet's (`TX_TARGET_MISMATCH`)
-- on the Trusset ID Register, it was not signed by one of your instance's verified wallets (`UNAUTHORIZED_SIGNER`). On your own register the signer is logged, not checked
-- on a Trusset register, the mined investor type differs from this request's (`TX_INVESTOR_TYPE_MISMATCH`)
-- on an ERC-3643 register, the register does not yet report the wallet as verified (`NOT_VERIFIED_ON_REGISTER`)
+- on the instance ID register, it was signed by a wallet the register does not trust as an attester (`UNTRUSTED_ATTESTER`), or the mined attestation lacks `KYC_DONE` (`TX_PREDICATES_MISMATCH`)
+- on a Trusset-compatible register of your own, the signer is logged, not checked
+- on the instance ID register or a Trusset-compatible register, the mined investor type differs from this request's (`TX_INVESTOR_TYPE_MISMATCH`)
+- on the instance ID register or an ERC-3643 register, the register does not report the wallet as verified afterwards (`NOT_VERIFIED_ON_REGISTER`)
 
 On a T-REX 5 register the confirmed transaction may call `registerIdentity` on the register, or `addClaimTo` or `revokeClaimByDigest` on one of its trusted issuers, sent directly or through a smart-account wallet. One that calls none of them is refused with `TX_WRONG_FUNCTION`, and a claim written onto another wallet's ONCHAINID with `TX_TARGET_MISMATCH`.
 
-Then it writes the customer record with `country`, the profile key `investorType` resolved to, `status: "verified"`, `verifiedAt` and the `kycHash` read from the chain, and records the write in your instance's verification history as a `VERIFY_DIRECT` entry with the operation (`verify` or `update`), the mined investor type, the transaction and its signer. A reclassification through this endpoint therefore shows in the history like one made in the issuer app. When the profile `investorType` names has an eligibility register, the wallet's admission to it is queued for your wallet to sign. See [Eligibility registers](/endpoints/customers/introduction#eligibility-registers).
+Then it writes the customer record with `country`, the profile key `investorType` resolved to, `status: "verified"`, `verifiedAt` and the `kycHash` read from the chain, and records the write in your instance's verification history as a `VERIFY_DIRECT` entry with the operation (`verify` or `update`), the mined investor type, the transaction and its signer. A reclassification through this endpoint therefore shows in the history like one made in the issuer app. When the profile `investorType` names has an eligibility register, the wallet's admission to it is queued for your wallet to sign. See [Eligibility registers](/endpoints/customers/introduction#eligibility-registers). On the instance ID register a profile is checked by its [profile gate](/endpoints/customers/introduction#profile-gates) instead, which reads the attestation itself, so nothing is queued.
 
 <Note>
   Confirming also settles any [pending verification](/endpoints/customers/list-pending-verifications) for the same wallet. Its row is marked confirmed with this transaction, so the queue does not ask for the signature again.
@@ -375,18 +413,21 @@ const confirmed = await post('/verify', { ...request, txHash: hashes[plan.confir
 </RequestExample>
 
 <ResponseExample>
-```json Calldata Response - Trusset
+```json Calldata Response - Instance ID Register
 {
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTION",
+    "chainId": 11155111,
     "transaction": {
-      "to": "0xEf244c4Bd4d71Bd9A30EDF6Edef7CCC72642291a",
-      "data": "0x05bd97c8..."
+      "to": "0x3B8e1F6a0D4c2E9b7A5f8C1d3E6a9B2c4D7f0E15",
+      "data": "0x0ca298af..."
     },
     "functionName": "verifyIdentity",
+    "contractFunction": "attest",
+    "registerKind": "INSTANCE",
     "description": "Verify 0xaBc123DEf456789012345678901234567890aBCD on the identity registry",
-    "registerKind": "TRUSSET",
+    "predicates": "289",
     "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
     "kycHash": "0xffb1f8c219725bd62205597cd7247c85cafeca20ac0a59f8ec6a7b979eaf672c",
     "investorType": 2,
@@ -548,6 +589,20 @@ const confirmed = await post('/verify', { ...request, txHash: hashes[plan.confir
   }
 }
 ```
+```json Error - No Trusted Attester
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ATTESTER_MISSING",
+    "message": "None of this instance's registered wallets is a trusted attester on its ID register. The identity hub would accept what such a wallet signs, but it would not count for this instance. Trust the wallet on the wallet page (API: POST /issuer-wallets/wallets/cmrz4d1v20000cghx8k6p3m7t/:walletId/grant-roles with the issuer app login), sign that with a register admin wallet, then sign again."
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T12:00:00.000Z"
+  }
+}
+```
 </ResponseExample>
 
 ## Error Codes
@@ -560,8 +615,13 @@ const confirmed = await post('/verify', { ...request, txHash: hashes[plan.confir
 | `INVALID_HASH` | `400` | `kycHash` is not 32-byte hex |
 | `INVALID_INVESTOR_TYPE` | `400` | `investorType` names neither a preset nor one of your verification profiles, or is not a string. The message lists the accepted values. Also a disabled profile, on the build call, for a wallet whose customer is not already under it |
 | `COUNTRY_BLOCKED` | `403` | `country` is blocked on the verification profile named after `investorType` |
-| `KYC_PROVIDER_ROLE_MISSING` | `403` | Trusset register: none of your instance's wallets holds `KYC_PROVIDER_ROLE` |
-| `IDENTITY_HELD_BY_ANOTHER_ISSUER` | `403` | Trusset ID Register: the wallet holds a valid identity another issuer registered, so this instance cannot update it |
+| `INVALID_EXPIRY` | `400` | Instance ID register: an expiry lies in the past, or the soft expiry is not earlier than the hard expiry |
+| `KYC_HASH_REQUIRED` | `400` | Instance ID register: the request carries `kycData`, or the calldata leg carries no `kycHash`. Send your bundle root or your own salted commitment |
+| `INVALID_KYC_HASH` | `400` | Instance ID register: `kycHash` is all zeros |
+| `INSTANCE_REGISTER_REQUIRED` | `409` | Your instance is in Trusset mode and has not created its instance ID register yet |
+| `ATTESTER_MISSING` | `403` | Instance ID register: none of your instance's registered wallets is a trusted attester of the register |
+| `IDENTITY_HUB_NOT_CONFIGURED` | `501` | The identity hub is not deployed on your instance's network |
+| `KYC_PROVIDER_ROLE_MISSING` | `403` | Trusset-compatible register of your own: none of your instance's wallets holds `KYC_PROVIDER_ROLE` |
 | `REGISTRY_AGENT_MISSING` | `403` | ERC-3643: none of your instance's wallets is an agent of the register |
 | `CLAIM_SIGNER_MISSING` | `403` | ERC-3643: none of your instance's wallets holds a claim key on the trusted issuer |
 | `CLAIM_SIGNER_NOT_TRUSTED` | `403` | ERC-3643: `signerAddress`, or the wallet a claim signature recovers to, holds no claim key on the trusted issuer |
@@ -582,11 +642,12 @@ const confirmed = await post('/verify', { ...request, txHash: hashes[plan.confir
 | `INVALID_TX` | `400` | `txHash` is not 32-byte hex |
 | `TX_NOT_FOUND` | `404` | The transaction is not mined yet |
 | `TX_REVERTED` | `400` | The transaction reverted |
-| `TX_WRONG_TARGET` | `400` | The transaction does not write to the register, or it deployed a contract |
+| `TX_WRONG_TARGET` | `400` | The transaction does not write to the identity hub or the register, or it deployed a contract |
 | `TX_WRONG_FUNCTION` | `400` | The transaction calls a function this endpoint does not confirm |
-| `TX_TARGET_MISMATCH` | `400` | The transaction targets a different wallet, or an ONCHAINID that is not this wallet's |
-| `UNAUTHORIZED_SIGNER` | `403` | Trusset ID Register: the transaction was not signed by one of your instance's verified wallets |
-| `TX_INVESTOR_TYPE_MISMATCH` | `400` | Trusset register: the mined investor type differs from `investorType` in this request |
-| `NOT_VERIFIED_ON_REGISTER` | `409` | ERC-3643: the register does not report the wallet as verified yet |
+| `TX_TARGET_MISMATCH` | `400` | The transaction targets a different wallet, or an ONCHAINID that is not this wallet's. On the instance ID register, also a transaction that attests nothing about this wallet |
+| `TX_PREDICATES_MISMATCH` | `400` | Instance ID register: the mined attestation does not carry `KYC_DONE` |
+| `UNTRUSTED_ATTESTER` | `403` | Instance ID register: the transaction was signed by a wallet the register does not trust as an attester |
+| `TX_INVESTOR_TYPE_MISMATCH` | `400` | Instance ID register or Trusset-compatible register: the mined investor type differs from `investorType` in this request |
+| `NOT_VERIFIED_ON_REGISTER` | `409` | Instance ID register or ERC-3643: the register does not report the wallet as verified yet |
 | `CHAIN_UNAVAILABLE` | `503` | ERC-3643: the transaction or the register could not be read |
 | `VERIFY_FAILED` | `400`, `500` | Any other failure. `400` when a chain call or the transaction encoding failed |

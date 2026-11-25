@@ -1,90 +1,85 @@
 ---
 title: "Data Storage"
-description: "Instance-based encrypted storage with zero Trusset access"
+description: "What lives on chain, what Trusset keeps off chain, and how personal data stays out of both"
 ---
 
-Trusset provides infrastructure for encrypting your instance data while you maintain complete control over encryption keys. We have zero access to your encrypted data - if you lose your key, data becomes permanently unrecoverable.
+Personal data stays with the institution that collected it. The chain holds facts about a wallet, never who the person is, and Trusset keeps only what its routes need to work: wallet addresses, classifications, statuses and the hashes that tie them to evidence you hold.
 
-## Encryption architecture
+## On chain
 
-<CardGroup cols={2}>
-    <Card title="AES-256 Encryption" icon="lock">
-        Military-grade encryption standard protecting all instance data at rest
-    </Card>
-    <Card title="Client-Side Keys" icon="key">
-        Encryption keys never leave your control - Trusset cannot decrypt your data
-    </Card>
-    <Card title="Instance Isolation" icon="shield">
-        Each instance encrypts data separately - no cross-instance data access possible
-    </Card>
-    <Card title="Public Data Control" icon="eye">
-        Mark specific datasets as public for controlled third-party access
-    </Card>
-</CardGroup>
+Everything on chain is public, and anyone can read it by wallet address. What an identity register keeps depends on the register your instance writes to.
 
-## Data categories
+### Your instance ID register
 
-Trusset manages three distinct data categories with different storage approaches:
+An instance in Trusset register mode keeps its customers on its own instance ID register, which reads attestations from the shared identity hub. See [The instance ID register](/endpoints/customers/introduction#the-instance-id-register).
 
-- **Private Instance Data:** Customer records, internal documents, compliance files - encrypted with your instance key, stored in Trusset infrastructure, inaccessible to Trusset.
+Each attestation on the hub holds only these fields:
 
-- **Public Data:** Token metadata, pricing information, public documents - encrypted but marked for controlled sharing via REST endpoints when needed.
+| Field | What it is |
+|---|---|
+| Wallet | The customer's wallet, the subject |
+| Attester | The wallet that wrote the attestation |
+| Root | The root of the customer's KYC bundle: a hash over salted commitments, which reveals nothing without the secrets the attester keeps |
+| Investor class | `1` retail, `2` professional or `3` eligible counterparty |
+| Predicate bits | Yes or no facts, such as `KYC_DONE` or `EEA_RESIDENT`. See [Predicates](/endpoints/customers/introduction#predicates) |
+| Dates | The issue time, the soft expiry and the hard expiry |
+| Status | Active, suspended or revoked |
 
-- **On-Chain Data:** Smart contract state, transaction history, public blockchain records - stored on blockchain, publicly readable by design.
+No name, no country, no date of birth, no document and no unsalted hash of a personal value goes on chain. A fact such as residency in the EEA is a single bit, so the chain can say that a customer lives in the EEA but not where.
 
-## Manage encryption keys
+The root is yours to supply. [Verify Identity](/endpoints/customers/verify-identity) and [Batch Verify](/endpoints/customers/batch-verify) take only a 32-byte `kycHash`, your bundle root or your own salted commitment, and refuse `kycData` with `400 KYC_HASH_REQUIRED`, so KYC data never reaches Trusset. Where Trusset itself queues a root, after an identity check through an ID link or a hosted verification service, or when your instance moves onto its register, it is a hash over a random 32-byte salt and a reference that names no person, and the salt is discarded at once. Such a root links to nothing.
 
-<Warning>
-CRITICAL: Losing your encryption key means permanent data loss. Trusset cannot recover lost keys or decrypt data without them. Back up keys securely immediately after instance creation.
-</Warning>
+A contract that holds collateral, such as a custody adapter, a liquidation router or an auction venue, is attested like a customer, by an attester your register trusts: its root is `keccak256("trusset:contract-holder:" + chainId + ":" + contract)`, with the address lowercased, it carries `KYC_DONE` and `CONTRACT_HOLDER`, class `2` and no expiry. Nothing personal goes into it.
 
-**Current Approach:** You manage encryption keys independently using your preferred secrets management system.
+The register itself holds your instance's decisions, not personal data: which attesters it trusts and for which predicates, your verification profiles and their rules, the wallets frozen for your instance, and the admins and compliance officers who change them. Each profile's gate holds no data of its own.
 
-**Coming Soon:** Integrated key management options including hardware security modules (HSM), multi-signature key recovery, and encrypted key backup services.
+### Your own ERC-3643 register
 
-## On-chain data strategy
+An ERC-3643 register stores the investor country by design, as its ISO 3166-1 numeric code (a T-REX 5 register records none). A residency claim on the investor's ONCHAINID carries the keccak256 hash of the three-letter country code, which anyone can match by hashing each code. Both are written under your signature, on a register you chose.
 
-Personal information stays off-chain, except what an identity register keeps for each verified wallet. That record is public and anyone can read it by wallet address. What it holds depends on the register your instance writes to:
+### Everything else
 
-- **Your instance's own ERC-3643 register:** the investor country, which the register stores by design as its ISO 3166-1 numeric code, and a residency claim hash on the investor's ONCHAINID, the keccak256 hash of the three-letter country code, which anyone can match by hashing each code. Both are written under your signature.
-- **The Trusset ID Register**, used by an instance without a register of its own: the wallet's investor type (its MiFID classification as a number from 0 to 3), a hash of the verification, the wallet of the verifier that wrote it, the verification time and the expiry times, and whether the record is active or frozen. It also keeps every claim written for the wallet (KYC, AML, accreditation, residency, citizenship, tax residency, sanctions check or PEP check): the claim type, a hash of its data, the wallet that issued it, when it was issued, when it expires and whether it is active. Anyone can list them with `getClaims`. A claim entered as a short value, such as a country code or a yes or no answer, is hashed without a salt, so it can be matched by hashing each possible value. See [Investor Profiles](/protocol/infrastructure/investor-profiles).
+Smart contracts store what they need to work: token balances, loans, collateral, configuration and roles. Documents and metadata are stored on IPFS with content addressing, and only their hashes go on chain.
 
-Everything else is kept off-chain or reduced to what the contracts need:
+## Erasure
 
-- **Zero-Knowledge Proofs:** Users prove identity attributes (age, accreditation, citizenship) without revealing underlying data. {/* TODO: link to identity proofs page once learn tab paths are finalized */}
+An attestation belongs to its attester, and only the attester can remove it. Its `erase` call on the identity hub deletes the attestation from the hub's storage. [Erase Identity](/endpoints/customers/erase-identity) builds that call for the attester you name, and [Confirm Erase Identity](/endpoints/customers/confirm-erase-identity) records it: it reads the hub's `Erased` event for that attester and wallet, sets the customer record to `revoked` with `metadata.erasedAt` and `metadata.erasedAttester`, and writes an `ERASE` entry to the audit log.
 
-- **IPFS Storage:** Documents, metadata, and public files store on IPFS with content addressing. Only document hashes record on-chain, linking to off-chain content.
+The hub's events keep what was written: the salted root, the investor class, the predicate bits and the dates, under the attester's and the wallet's addresses. Once the attester also deletes the bundle's secrets, the root links to nothing. Records the attester must keep for anti-money-laundering purposes stay with the attester, off chain.
 
-- **Sealed KYC Records:** A KYC file that a verifier you designate sends you passes through Trusset as ciphertext, sealed to a key whose private half exists only in your local tool. Trusset stores the ciphertext and a clear header with the wallet address, the source, the profile key, dates and digests, and deletes the ciphertext once you open the record. See [Sealed KYC Records](/protocol/infrastructure/sealed-kyc-records).
+A revoke is not an erasure. It marks the attestation revoked and keeps it in storage.
 
-- **Minimal On-Chain State:** Smart contracts only store essential information - token balances, ownership records, configuration parameters. Everything else lives off-chain.
+A holder claim your attester signed but the customer has not sent yet is not on chain, so there is nothing to erase. When you dismiss its queue row, [Dismiss Pending Verification](/endpoints/customers/dismiss-pending-verification) returns an `invalidate` transaction for the same attester, which voids the signature on the hub.
 
-## Public data endpoints (coming soon)
+## Off chain
 
-Mark datasets as "public" to enable controlled sharing with partners, auditors, or service providers:
+Trusset stores records off chain so its routes can answer quickly and recover from the chain. Trusset no longer writes a name or an email from an identity check into any of them.
 
-<Accordion title="Public Data Configuration">
-Configure which data categories to make accessible:
+| Record | What it holds |
+|---|---|
+| Customer record | The wallet, the country, the investor type, the status, the KYC root and the identity check's applicant ID. A display name or an external ID only when you set one |
+| Pending queue row | The wallet, the KYC root, the investor type, the expiries, the country and whether a residency claim is due. Any name, phone or email is stripped when the row is written, and no hash of the country is kept |
+| Proof ledger | The leaf hashes, commitments, circuits and proof digests of the claims you attested, so the attested facts can be traced back to your bundle. Never a proof |
+| Verification report | Per bundle check: the wallet, the manifest digest, the root, the operator key used, the claim types and the outcome. Not the manifest itself |
+| ID link | The recipient's contact details, the profile and the review outcome |
+| [Sealed KYC record](/protocol/infrastructure/sealed-kyc-records) | Ciphertext Trusset cannot open, deleted once you open the record, and a clear header with the wallet address, the source, the profile key, the dates and the digests |
+| [Disclosure request](/protocol/infrastructure/sealed-kyc-records#disclosures-from-a-holder) | The wallet, the scope, your message and link, and the ID of your record key. Once the holder approves: ciphertext Trusset cannot open, deleted when you open or reject it or after 30 days, a clear header with the wallet address, the scope, the digests and the date, and the consent the wallet signed |
+| Audit log | What changed, when, by which wallet or user, with the transaction hash |
 
-```typescript
-// POST https://api.trusset.org/instance/data/configure
+### Personal data Trusset no longer keeps
 
-await fetch('https://api.trusset.org/instance/data/configure', {
-  method: 'POST',
-  body: JSON.stringify({
-    publicCategories: [
-      'token_metadata',      // Allow external reads of token info
-      'pricing_data',        // Share price feeds with partners
-      'compliance_reports'   // Enable auditor access
-    ],
-    accessControls: {
-      token_metadata: ['public'],           // No authentication required
-      pricing_data: ['api_key'],           // Require API key
-      compliance_reports: ['approved_auditors'] // Whitelist specific addresses
-    }
-  })
-});
-```
+- **Identity check results.** The identity check runs at Sumsub. When its webhook arrives and the signature is checked, the payload is reduced at once to the review outcome, the reject labels and the applicant's IDs. Applicant reads keep the review, the country and the nationality only. Names, dates of birth and document data are not stored, and no customer record or queue row is given a name from the check.
+- **What Trusset sends to the identity check.** A new applicant is created with your reference, the level, the applicant type, the country and the documents the profile requires. No email, phone, company name or registration number is passed on.
+- **Document analysis.** Customer document analysis and stock document analysis in the Issuer Portal are removed. Both answer `410 FEATURE_REMOVED_PERSONAL_DATA`, and no document is read or sent anywhere.
 
-Public data remains encrypted but becomes readable through authenticated REST endpoints you control.
-</Accordion>
+## KYC proofs
+
+Your own KYC files stay with you. The [KYC-STARKs](/tools/kyc-starks/overview) tool proves facts from them on your machines.
+
+Trusset never receives proof bytes. The proofs are not zero-knowledge: an age proof reveals the date of birth, a set-membership proof the country, a tier proof the investor class. So verification is local. You run the tool's verifier or the SDK on the bundle, and send Trusset the manifest and its signed header. A 3.1 manifest carries commitments, hashes, public inputs, claim descriptors and the two expiry periods, and no clear-text personal value. Trusset checks the header signature, the leaves and the root against them.
+
+The proof endpoints refuse a request that carries proof bytes with `400 PROOFS_NOT_ACCEPTED`, before anything is read or stored. A 2.x or 3.0 manifest, which carries the country and the investor type in clear text, is refused with `400 PERSONAL_DATA_IN_MANIFEST`.
+
+[Disclosure requests](/endpoints/customers/create-disclosure-request) follow the same rule. A holder who discloses facts to you encrypts the proofs in their browser to your record key with HPKE, and Trusset relays and stores only the ciphertext and a header without personal data. An approval that carries a manifest or proofs in clear is refused with `400 PROOFS_NOT_ACCEPTED`. Trusset verifies no disclosed proof. Your local tool decrypts the envelope and verifies the proofs on your machine, and Trusset deletes the ciphertext when you open it, reject it, or leave it uncollected for 30 days. See [Disclosures from a holder](/protocol/infrastructure/sealed-kyc-records#disclosures-from-a-holder).
+
+Approvals given before disclosures were encrypted kept the holder's manifest and proofs with the request. No route reads or serves them any more.

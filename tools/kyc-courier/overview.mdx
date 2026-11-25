@@ -11,13 +11,15 @@ The KYC courier moves an investor's KYC file from your verifier to your bank as 
 - **The verifier** seals the KYC file of an investor so that only the bank can read it, signs it, and posts it to the bank's inbox on Trusset.
 - **The bank** downloads the sealed envelope, verifies and decrypts it locally, files the record, and proves to Trusset that it opened it. Trusset then deletes the ciphertext.
 
+The bank also uses the tool to open [disclosures from holders](#disclosures-from-holders), which a holder encrypts to the same record key.
+
 Banks follow the [bank walkthrough](/tools/kyc-courier/bank-walkthrough). Fintechs and other verifiers follow the [verifier walkthrough](/tools/kyc-courier/verifier-walkthrough). [Trusset for banks](/protocol/banks) and [Trusset for fintechs](/protocol/fintechs) show where KYC fits in each path.
 
 ## Who uses it
 
 | Role | What they do with the tool |
 |---|---|
-| Bank | Creates the record key, pins each verifier's signing key, opens the records that arrive, and can verify a filed record again offline at any time |
+| Bank | Creates the record key, pins each verifier's signing key, opens the records and disclosures that arrive, and can verify a filed record again offline at any time |
 | Verifier | Creates a signing key, stores the bank's invite, seals and sends records, follows their status, and revokes a record when needed |
 | Auditor | Runs `trusset-kyc verify` on a filed record directory with the verifier's fingerprint, which the bank gives it (`--fingerprint`). Needs no network and no private key |
 
@@ -58,6 +60,21 @@ When a verifier changes its signing key, the bank's tool holds the records signe
 
 `verify` checks a filed record against a key the person running it trusts: the pin in the local keystore, one of its retired keys, or the key or fingerprint given on the command line. Without one of these the record does not verify, because the key that comes with the folder proves nothing on its own.
 
+## Disclosures from holders
+
+A holder can answer a [disclosure request](/endpoints/customers/create-disclosure-request) of the bank with facts from their KYC proof bundle. Their browser encrypts the disclosed proofs to the bank's record key, and their wallet signs a consent that names that exact envelope. No source key is pinned for a disclosure. Its authenticity rests on the attester's signed header inside each disclosed leaf, checked against the operator key on the identity hub, and on the holder's consent over the envelope.
+
+The bank lists, opens, verifies and rejects disclosures with four commands, described in the [CLI reference](/tools/kyc-courier/cli-reference#disclosure-commands). Opening one works in this order and stops at the first step that fails:
+
+1. It downloads the envelope and checks its header against the request.
+2. It recomputes the envelope digest, rebuilds the consent from the request, and checks that the holder's wallet signed it.
+3. It decrypts with the record key and checks the plaintext against the digests in the header.
+4. With `--verifier` and `--rpc`, it verifies every disclosed proof with `verify_disclosure` of [KYC-STARKs](/tools/kyc-starks/verification#a-single-disclosed-leaf) 3.1, against the operator key the identity hub publishes for the attester, and checks the root against the wallet's attestation on the hub. Without them it prints the commands to run later, or `disclosures verify` runs them.
+5. It checks that the disclosures answer the scope of the request.
+6. It stores the result, and only then proves the opening to Trusset, which deletes the ciphertext.
+
+A disclosure that fails decryption, the digests, a proof or the scope is rejected with the matching [reason](/endpoints/customers/reject-disclosure#reasons), and Trusset deletes the ciphertext as well. A failed header or consent check, or a verifier or RPC that cannot run, rejects nothing, and the envelope stays at Trusset for 30 days. What the bank holds after opening is the value each proof shows, such as a date of birth or a country.
+
 ## What the tool does not decide
 
 The tool moves a file and proves where it came from. It does not judge whether the verification behind it is sufficient. Whether a bank may rely on a verifier's KYC, and how personal data may pass between the two, is governed by the agreements between the bank and the verifier.
@@ -68,18 +85,18 @@ The tool does not check what a verifier seals. A record with wrong content is st
 
 The tool is not published to a package registry. Trusset provides it during onboarding.
 
-It needs Node.js 18 or newer and has no runtime dependencies. All cryptography uses the `crypto` module built into Node.js. From the folder you received:
+It needs Node.js 18 or newer. It has two runtime dependencies, pinned to exact versions: `@noble/hashes` 1.7.0 and `@noble/curves` 1.8.0, used only to check a holder's wallet signature on a disclosure. All other cryptography uses the `crypto` module built into Node.js. From the folder you received:
 
 ```bash
 npm install -g .
 trusset-kyc --version
 ```
 
-Or run it without installing: `node bin/trusset-kyc.js --help`.
+Or run `npm ci` once, then `node bin/trusset-kyc.js --help` without installing it.
 
 File modes are not enforced on Windows. Use a directory there that only your account can read.
 
-Version 1.2.0. Apache-2.0 license.
+Version 1.3.0. Apache-2.0 license.
 
 <CardGroup cols={2}>
   <Card title="Bank walkthrough" icon="building-columns" href="/tools/kyc-courier/bank-walkthrough">

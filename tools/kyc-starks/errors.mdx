@@ -4,7 +4,7 @@ sidebarTitle: "Errors"
 description: "Every error code, what triggers it and how to fix it."
 ---
 
-Failure messages name the field, the subject and the fix, and never echo the subject's value. `npm start -- --dry-run` reports every problem in a batch at once, so most of these are found before anything is proved.
+Failure messages name the field, the subject and the fix, and never echo the subject's value. `npm run issue -- --dry-run` reports every problem in a batch at once, so most of these are found before anything is proved.
 
 ## Prover error codes
 
@@ -14,25 +14,28 @@ Every failure inside `trusset-prover` maps to one stable code. Codes reach you i
 |---|---|---|
 | `E_CONFIG` | The job or config is malformed: an unknown circuit name, a predicate with no list or no age threshold, an unknown tier name, or a list whose declared root or depth does not match its values | Correct `config.json`, or re-record the list with `npm run list-version` |
 | `E_INPUT` | A bad value in the row: the date is not `YYYY-MM-DD`, the value is an object or array, the wallet is not `0x` plus 40 hex | Correct the input row |
-| `E_KEY_MISSING` | `TRUSSET_KYC_MASTER_KEY` or `TRUSSET_KYC_SIGNING_KEY` is not set when the prover starts | `set -a && . ./.trusset/keys.env && set +a` |
+| `E_KEY_MISSING` | The prover received no keys: no key store is configured and `TRUSSET_KYC_MASTER_KEY` or `TRUSSET_KYC_SIGNING_KEY` is not set | Configure `security.keyStore`, or for CI set both variables |
 | `E_KEY_MALFORMED` | A key is set but is not 64 hex characters | Set it to the value `init` generated |
 | `E_LIST_NOT_FOUND` | A `set_membership` predicate names a list the prover was not given | Declare the list under `config.lists` and record it with `npm run list-version` |
 | `E_LIST_MEMBER_MISSING` | The subject's value is not in the list version authoritative on the batch date | Add the value to the source and record a new version, or exclude the subject |
 | `E_AGE_BELOW_MIN` | The age on the batch date is below the threshold, or the date of birth is after the batch date | Correct the row, lower `minAgeYears`, or exclude the subject |
 | `E_TIER_BELOW_MIN` | The investor tier is below `minTier` | Correct the row, lower `minTier`, or exclude the subject |
-| `E_TIER_NONE` | The investor tier is `NONE`, which cannot be proved | Give the subject a tier, or remove the `tier_threshold` predicate |
+| `E_TIER_NONE` | The investor tier is `NONE`, which cannot be proved. Under 3.1 the CLI quarantines such a record before proving, because the hub records a class | Give the subject a tier of `RETAIL`, `PROFESSIONAL` or `ELIGIBLE_COUNTERPARTY` |
 | `E_EMPTY_VALUE` | A `set_membership` value is empty | Supply a value, or remove the predicate for that field |
 | `E_CIRCUIT_INTERNAL` | A circuit failed to validate or prove. The one input-driven case is a `preimage_knowledge` value over 128 bytes, reported as `ValueTooLong` | Shorten the value or switch the field to `commitment_only`. Any other occurrence is a bug; report it with the manifest and the message |
 | `E_IO` | A filesystem failure while writing the bundle or a registry | Check permissions and disk space under `output/` and `config/registry` |
 | `E_DETERMINISM_VIOLATION` | The prover tried to draw OS entropy while `TRUSSET_KYC_DETERMINISTIC=1` was set | This should not happen under the shipped code; report it |
 | `E_STUB_REJECTED` | Defined for a stub proof presented in production mode. Not raised by the current prover; the verifier reports the case through `mode_acceptable` | Re-run without `--skip-proofs` |
 | `E_WEAK_PROOF_OPTIONS` | The pinned proof parameters fall below the published 100-bit floor. Checked at startup before any proving | Only reachable with modified source; restore `circuits/common/src/proof_options.rs` |
-| `E_ISSUER_MISSING` | A version 3.0.0 job carries no issuer block | Run `npm run init`, or add `manifest.issuer` to `config.json` |
+| `E_ISSUER_MISSING` | A version 3.0.0 or 3.1.0 job carries no issuer block | Run `npm run init`, or add `manifest.issuer` to `config.json` |
 | `E_DESCRIPTOR_MISSING` | A validity interval arrived without a descriptor, or a `set_membership` leaf with a descriptor has no list version | Add the `descriptor`, or record the list in the registry |
 | `E_DESCRIPTOR_INVALID` | A descriptor is present but unusable: an empty legal basis, an unknown evidence class, a malformed party identifier | Correct the descriptor in `config.json` |
 | `E_VALIDITY_INVALID` | A descriptor arrived without a validity interval, or the interval is inverted or its evidence post-dates the window | Add or correct `validity`, or the row's `evidenceDate` |
 | `E_LIST_VERSION_MISMATCH` | A leaf's declared list version has a root or content hash that the values supplied to the prover do not reproduce | Re-record the list with `npm run list-version`; the registry and the list values disagree |
 | `E_UNPINNED_EPOCH` | `epochDaysSource` is `utc_today` and the run did not carry the development flag | Set `"epochDaysSource": "fixed:<n>"`, or pass `--dev-unpinned-epoch` for development only |
+| `E_CHAIN_INVALID` | 3.1: the `chain` block is missing or malformed: a zero or malformed attester or hub, a chain id or key id below 1 | Correct `chain` in `config.json` |
+| `E_PREDICATE_INVALID` | 3.1: a leaf names a predicate no circuit proves, a predicate that does not fit its circuit or parameters, or the subject has not exactly one `INVESTOR_CLASS` leaf | Correct the `predicate` of that instance in `config.json` |
+| `E_PASSTHROUGH_REFUSED` | 3.1: `passthrough` carries a key besides `softExpiryDays` and `hardExpiryDays`, or a value that is not a whole number of days | Prove the value as a leaf instead. Only the two expiry periods travel in clear text |
 
 In a real run the prover stops at the first failing leaf of a subject and reports it; the other subjects continue. In a dry run every failing leaf of every subject is reported.
 
@@ -43,24 +46,29 @@ The TypeScript layer stops with exit code 1 and a message ending in `Fix:` when 
 | Message starts with | Cause |
 |---|---|
 | `config.json not found` | No config in the working directory. Run `npm run init`, or copy `config.example.json` |
-| `manifest.version: "..." is not a version this build emits` | Use `3.0.0`, `2.1.0` or `2.0.0` |
-| `manifest.issuer: missing` | A 3.0.0 config with no issuer. Run `init`, or pin `manifest.version` to `2.1.0` |
+| `manifest.version: "..." is not a version this build emits` | Use `3.1.0`, `3.0.0`, `2.1.0` or `2.0.0` |
+| `issue writes 3.1.0 bundles bound to a hub attestation` | `npm run issue` on a config that emits an older version. Set `manifest.version` to `3.1.0` and add `chain`, or keep the old shape with `npm start` |
+| `chain: missing` | A 3.1.0 config needs `chain`: `chainId`, `hub`, `attester` and `keyId` |
+| `a 3.1.0 config needs exactly one INVESTOR_CLASS predicate` | Add `"investorType": { "circuit": "tier_threshold", "params": { "minTier": "ATTESTED" }, "predicate": "INVESTOR_CLASS", ... }` |
+| `The key file did not decrypt` | Wrong passphrase, or the file was edited. Restore it from your backup |
+| `No terminal to ask for the key passphrase` | Run interactively, or set `TRUSSET_KYC_KEY_PASSPHRASE` for that one command |
+| `manifest.issuer: missing` | A 3.0.0 or 3.1.0 config with no issuer. Run `init`, or add `manifest.issuer` |
 | `security.epochDaysSource is "utc_today"` | The unpinned-epoch refusal, with today's epoch day to pin |
 | `security.epochDaysSource: "env:X" but the environment variable X is unset` | Export the variable, or pin `fixed:<n>` |
-| `predicates.<leaf>.descriptor` or `predicates.<leaf>.validity` | A 3.0.0 predicate missing either block, with the config path and what to add |
+| `predicates.<leaf>.descriptor` or `predicates.<leaf>.validity` | A 3.0.0 or 3.1.0 predicate missing either block, with the config path and what to add |
 | `List "<id>" is referenced by a set_membership predicate but has no source` | Neither a registry nor `config.lists.<id>.path` exists. Run `npm run list-version` |
 | `List "<id>" has no version authoritative on the batch as-of date` | The batch date is before the list's first version. Pin a later date or record a version for it |
-| `predicates.<leaf>: list "<id>" has no registry version` | A bare list file under 3.0.0. Record the list in the registry |
+| `predicates.<leaf>: list "<id>" has no registry version` | A bare list file under 3.0.0 or 3.1.0. Record the list in the registry |
 | `config.predicates.<field> not provided and no default exists` | A hashed field with no predicate. Add one or remove the field from `mapping.fields` |
 | `config.predicates.<field> references unknown field` | A predicate for a field that is not mapped |
-| `Environment variable TRUSSET_KYC_... is not set` | Keys not loaded. A dry run does not need them |
+| `Environment variable TRUSSET_KYC_... is not set` | No `security.keyStore` and no key variables. A dry run needs no keys |
 | `At least one anchor is required.` | `npm run verify` without `--root` or `--public-key` |
 | `Could not run trusset-...` | A binary was not found or is not executable. Run `npm run build` |
 
 Rows quarantined by validation carry `E_INPUT` in `failures.csv`. The causes:
 
 - a malformed wallet,
-- an unrecognised `investorType`,
+- an unrecognised `investorType`, or under 3.1 one that is not a class (`E_TIER_NONE`),
 - an expiry out of range or in the wrong order,
 - a malformed `evidenceDate`,
 - an object where a scalar was expected,
@@ -84,10 +92,10 @@ The verifier exits 66 when a bundle or archive cannot be read, including `archiv
 | Command | 0 | 1 | 2 | 3 | 64 | 66 | 70 |
 |---|---|---|---|---|---|---|---|
 | `npm run init` | ready | not ready, or error | | | | | |
-| `npm start` | all rows proved | none proved, or aborted | partial | | | | |
-| `npm start -- --dry-run` | clean | error | problems found | | | | |
+| `npm run issue`, `npm start` | all rows proved | none proved, or aborted | partial | | | | |
+| `npm run issue -- --dry-run` | clean | error | problems found | | | | |
 | `npm run verify` | verified and entitled | no anchor, or wrapper error | verification failed | not entitled | usage error | unreadable | |
-| `npm run show` | printed | error | | | | | |
+| `npm run show`, `npm run key` | printed | error | | | | | |
 | `list-version`, `anchor`, `revoke`, `archive` | done | refused | | | usage error | | |
 | `npm run decrypt` | | | | | | | not implemented |
 
@@ -96,19 +104,23 @@ The verifier exits 66 when a bundle or archive cannot be read, including `archiv
 | Symptom | Cause and fix |
 |---|---|
 | The unpinned-epoch refusal | Working as intended. Pin `"epochDaysSource": "fixed:<today>"`; `init` does this |
-| `TRUSSET_KYC_MASTER_KEY is not set` | Load the keys in this shell: `set -a && . ./.trusset/keys.env && set +a` |
-| `manifest.issuer: missing` | A 3.0.0 bundle records who is responsible. Run `npm run init`, or set `manifest.version` to `"2.1.0"` |
-| `predicates.X.descriptor is missing` | Every 3.0.0 predicate needs a legal basis and evidence class. `init` writes starting values to edit |
+| `TRUSSET_KYC_MASTER_KEY is not set` | No key store is configured. Move the keys into one with `npm run key -- encrypt --from .trusset/keys.env` and add the printed `keyStore` line to `config.json` |
+| `chain: missing` | A 3.1.0 config needs the `chain` block. `npm run init -- --chain-id ... --hub ... --attester ...` writes it |
+| `E_TIER_NONE` on a row | The hub needs a class: set `investorType` to `RETAIL`, `PROFESSIONAL` or `ELIGIBLE_COUNTERPARTY` |
+| `manifest.issuer: missing` | A 3.0.0 or 3.1.0 bundle records who is responsible. Run `npm run init` |
+| `predicates.X.descriptor is missing` | Every 3.0.0 and 3.1.0 predicate needs a legal basis and evidence class. `init` writes starting values to edit |
 | `list "X" ... has no source` | `npm run list-version -- --list-id X --source <file>` |
-| `E_LIST_MEMBER_MISSING` | The value is not in the list version for the batch date. Add it and record a new version, or exclude the subject |
+| `E_LIST_MEMBER_MISSING` | The value is not in the list version for the batch date. Mark the instance `optional`, as the `EEA_RESIDENT` one is, add the value and record a new version, or exclude the subject |
 | `Entitled: NO` but `Verifies: PASS` | The proof is fine; the claim lapsed, was voided, or the instant is outside its window. The per-leaf status says which |
 | `Verifies: FAIL` with `mode_acceptable: [FAIL]` | A stub bundle. Re-run without `--skip-proofs`, or pass `--accept-stub` for development |
 | `Verifies: FAIL` with `root_anchor_valid: [FAIL]` | The supplied root is not this bundle's root. A re-proved subject has a new root; verify against the one that matches |
-| `verify` exits 66 for a wallet that exists | The bundle directory is the checksummed address printed by `npm start`; on a case-sensitive filesystem an all-lowercase address is a different path |
+| `verify` exits 66 for a wallet that exists | The bundle directory is the checksummed address printed by `npm run issue`; on a case-sensitive filesystem an all-lowercase address is a different path |
 | `cargo not found` | Install Rust from rustup.rs. There are no prebuilt binaries |
 | `Could not run trusset-registry` | Binaries not built. `npm run build` |
 | A row you expected to be coerced is quarantined | An `investorType` that is present but unrecognised is a failure since version 3, not a silent default. Fix the row or leave the column blank |
 | Input files vanished after a run | `security.clearInputAfterProcessing` is `true` in the generated config |
+| `PROOFS_NOT_ACCEPTED` from the Trusset API | Trusset never receives proofs. Verify them locally and send `manifest`, `header` and `headerSignature` only |
+| `PERSONAL_DATA_IN_MANIFEST` from the Trusset API | A 2.x or 3.0 bundle. Re-issue the subject under 3.1 |
 
 ## In the repository
 

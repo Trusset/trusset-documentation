@@ -236,6 +236,8 @@ The replacement states the same protection accurately. A commitment carries no v
 
 **Needed:** confirmation from whoever owns the regulatory argument that the replacement wording is the one to stand behind. Until then the page is accurate and the lock entry in `INVENTORY.md` is stale.
 
+**Update, 2026-11-20.** Both halves of the replacement are now false. Tool 3.1 documents that Winterfell 0.13.1 has no hiding mode, so a STARK reveals its value (date of birth, country, tier), and the backend no longer takes proof bytes: `proofBytesRefusal` in `services/customers/proofVerificationService.js` answers `400 PROOFS_NOT_ACCEPTED` on claims/from-proof, manifest/inspect and proofs. The original locked sentence, "never uploaded", is true again for the claim endpoints. The endpoint, tool, data-storage and security pages are corrected; `sdk/customers/kyc-proofs.mdx` still carries the replacement wording and needs the same correction once the SDK pages are free to edit. Disclosure requests still take proofs (`zk.proofs`) and are documented as unchanged for now.
+
 ---
 
 ## 14. The Lending and Vaults reference moved to the v2 surface

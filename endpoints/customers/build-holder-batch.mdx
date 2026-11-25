@@ -1,0 +1,204 @@
+---
+title: 'Build Holder Batch'
+api: 'POST /customers/api/identity/pending/holder-batch'
+description: 'One message your attester signs, so each customer can submit their own attestation'
+---
+
+Turns a set of rows from [List Pending Verifications](/endpoints/customers/list-pending-verifications) into one batch of attestations that each customer submits from their own wallet. Your attester signs a single EIP-712 message for the whole batch, and each customer pays the gas for their own claim. See [Holder claims](/endpoints/customers/introduction#holder-claims) for the whole path.
+
+This is the holder path, on the [instance ID register](/endpoints/customers/introduction#the-instance-id-register) only. The issuer path, where your wallet sends one `attestBatch` for the rows and pays its gas, stays the default: [Build Pending Registration](/endpoints/customers/build-pending-registration). Both read the same rows.
+
+Nothing is signed or sent here. The call reads the chain time and each wallet's current nonce on the identity hub, builds the batch, and stores the draft on each row. Sign `typedData` with the wallet you named as `attester`, then send the signature to [Store Holder Signature](/endpoints/customers/store-holder-signature) with the same `ids`.
+
+## What each claim attests
+
+Each row becomes one attestation under your attester's address, with the row's `kycHash` as the root, its investor type as the investor class, its expiries, and these [predicates](/endpoints/customers/introduction#predicates):
+
+| Predicate | Set when |
+|---|---|
+| `KYC_DONE` | Always |
+| `RESIDENCY_ON_FILE` | The row carries a `residencyClaim` |
+| `EEA_RESIDENT` | The row's country is in the EEA |
+
+These are the same attestations Build Pending Registration would send for the rows. The country itself never goes on chain.
+
+Each attestation is a leaf of a Merkle tree: `keccak256(keccak256(abi.encode(subject, root, predicates, softExpiry, hardExpiry, investorClass, nonce)))`, with each pair hashed in sorted order. Your attester signs only the tree's root, `batchRoot`.
+
+The batch is dated with `issuedAt`, the earlier of the server time and the chain time when it was built. The hub stores that signed time as the attestation's issue time, so a late claim never looks fresher than the batch. A claim can be sent until `deadline`, 30 days after the build.
+
+<Warning>
+  A claim carries the wallet's nonce from the build. Any later write by your attester about the same wallet on the identity hub voids it, including an attestation from the issuer path for that row. Building the batch again replaces the draft on each row, and a signature stored for an earlier batch stays on the row until a new one is stored.
+</Warning>
+
+## Body Parameters
+
+<ParamField body="ids" type="array" required>
+  1 to 200 row ids. Only rows still `PENDING` on your instance are used, and any other id is dropped without an error. Compare `ids` in the response with what you sent.
+</ParamField>
+
+<ParamField body="attester" type="string" required>
+  The wallet that signs the batch. Your instance ID register must trust it as an attester. The attestations are written under this address.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="action" type="string">`SIGN_TYPED_DATA`.</ResponseField>
+    <ResponseField name="registerKind" type="string">`INSTANCE`.</ResponseField>
+    <ResponseField name="chainId" type="integer">The chain of the identity hub.</ResponseField>
+    <ResponseField name="hub" type="string">The identity hub, checksummed.</ResponseField>
+    <ResponseField name="attester" type="string">The signing wallet, checksummed.</ResponseField>
+    <ResponseField name="batchRoot" type="string">The Merkle root over every claim of the batch.</ResponseField>
+    <ResponseField name="issuedAt" type="integer">The issue time the hub will store for every claim, unix seconds.</ResponseField>
+    <ResponseField name="deadline" type="integer">The last moment a claim can be sent, unix seconds.</ResponseField>
+    <ResponseField name="typedData" type="object">
+      The EIP-712 message to sign, as `eth_signTypedData_v4` takes it.
+      <Expandable>
+        <ResponseField name="domain" type="object">`name: IdentityHub`, `version: 1`, `chainId` and `verifyingContract`, the hub.</ResponseField>
+        <ResponseField name="types" type="object">`AttestationBatch(address attester, bytes32 batchRoot, uint32 issuedAt, uint64 deadline)`.</ResponseField>
+        <ResponseField name="primaryType" type="string">`AttestationBatch`.</ResponseField>
+        <ResponseField name="message" type="object">`attester`, `batchRoot`, `issuedAt` and `deadline`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="total" type="integer">The number of rows in the batch.</ResponseField>
+    <ResponseField name="ids" type="string[]">The row ids in the batch.</ResponseField>
+    <ResponseField name="rows" type="array">
+      One entry per row.
+      <Expandable>
+        <ResponseField name="id" type="string">Row ID.</ResponseField>
+        <ResponseField name="walletAddress" type="string">The customer's wallet, checksummed.</ResponseField>
+        <ResponseField name="nonce" type="integer">The wallet's nonce for your attester on the hub at the build.</ResponseField>
+        <ResponseField name="leaf" type="string">The row's leaf in the tree.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="confirmWith" type="object">`endpoint: POST /customers/api/identity/pending/holder-batch/signature` and the `fields` it takes: `ids`, `signature`, `attester`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/identity/pending/holder-batch" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ids": ["cmg1u7k3p0004l80h2f9s6d1x", "cmg1u8b5r0006l80h7d3w1q2z"],
+    "attester": "0xCD92134767aEC2562be15d2a2062A082dA17dD84"
+  }'
+```
+```typescript TypeScript
+const response = await fetch('https://api.trusset.org/customers/api/identity/pending/holder-batch', {
+  method: 'POST',
+  headers: {
+    'X-API-Key': 'trusset_your_key_here',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    ids: ['cmg1u7k3p0004l80h2f9s6d1x', 'cmg1u8b5r0006l80h7d3w1q2z'],
+    attester: '0xCD92134767aEC2562be15d2a2062A082dA17dD84'
+  })
+});
+const { data: batch } = await response.json();
+
+const signature = await signer._signTypedData(batch.typedData.domain, batch.typedData.types, batch.typedData.message);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "action": "SIGN_TYPED_DATA",
+    "registerKind": "INSTANCE",
+    "chainId": 11155111,
+    "hub": "0x5A1d0c7E3f9B2a48C6e1D05b7F3a92c8E4d61B07",
+    "attester": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+    "batchRoot": "0xf70b33e87d042c289613546ef1d6fa4f30bc761b7e4b290b9d457a1565c0e0e0",
+    "issuedAt": 1795003200,
+    "deadline": 1797595242,
+    "typedData": {
+      "domain": {
+        "name": "IdentityHub",
+        "version": "1",
+        "chainId": 11155111,
+        "verifyingContract": "0x5A1d0c7E3f9B2a48C6e1D05b7F3a92c8E4d61B07"
+      },
+      "types": {
+        "AttestationBatch": [
+          { "name": "attester", "type": "address" },
+          { "name": "batchRoot", "type": "bytes32" },
+          { "name": "issuedAt", "type": "uint32" },
+          { "name": "deadline", "type": "uint64" }
+        ]
+      },
+      "primaryType": "AttestationBatch",
+      "message": {
+        "attester": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+        "batchRoot": "0xf70b33e87d042c289613546ef1d6fa4f30bc761b7e4b290b9d457a1565c0e0e0",
+        "issuedAt": 1795003200,
+        "deadline": 1797595242
+      }
+    },
+    "total": 2,
+    "ids": ["cmg1u7k3p0004l80h2f9s6d1x", "cmg1u8b5r0006l80h7d3w1q2z"],
+    "rows": [
+      {
+        "id": "cmg1u7k3p0004l80h2f9s6d1x",
+        "walletAddress": "0x96C5822784130360F904372b83E130be4A1894D6",
+        "nonce": 0,
+        "leaf": "0x7855602f96c2932c46dafc5f85722e095878cdd7ccd9164344d574d88c3dfa34"
+      },
+      {
+        "id": "cmg1u8b5r0006l80h7d3w1q2z",
+        "walletAddress": "0x3f5CE5FBFe3E9af3971dD833D26bA9b5C936f0bE",
+        "nonce": 0,
+        "leaf": "0xc42c75550a0fbdcff5624eb67e838ab36a243ddff67360cb5acd20a6b7499d2b"
+      }
+    ],
+    "confirmWith": {
+      "endpoint": "POST /customers/api/identity/pending/holder-batch/signature",
+      "fields": ["ids", "signature", "attester"]
+    }
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-18T12:00:42.000Z"
+  }
+}
+```
+```json Error - Untrusted Attester
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "UNTRUSTED_ATTESTER",
+    "message": "The instance ID register does not trust 0xCD92134767aEC2562be15d2a2062A082dA17dD84 as an attester. Add the wallet as an attester first."
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-18T12:00:42.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `attester` is missing or not a wallet address |
+| `VALIDATION_ERROR` | `400` | `ids` is not an array of 1 to 200 ids |
+| `INVALID_EXPIRY` | `400` | A row's soft or hard expiry has already passed, or the soft expiry is not before the hard expiry. Dismiss that row to build the rest |
+| `INVALID_INVESTOR_TYPE` | `400` | A row's investor type is not 1, 2 or 3 |
+| `NOT_FOUND` | `404` | None of the ids is a `PENDING` row of your instance, or the instance no longer exists |
+| `COUNTRY_BLOCKED` | `403` | A row's country is blocked by its verification profile. The message names the wallet |
+| `UNTRUSTED_ATTESTER` | `403` | Your instance ID register does not trust `attester`. A register admin trusts a wallet in the Issuer Portal, on the wallet page |
+| `CUSTOMER_ARCHIVED` | `409` | A row's wallet belongs only to an archived customer |
+| `HOLDER_PATH_UNAVAILABLE` | `409` | Your instance writes to a register of its own, not to an instance ID register. Use Build Pending Registration |
+| `INSTANCE_REGISTER_REQUIRED` | `409` | Your instance has no instance ID register yet. It is created in the Issuer Portal, under Settings |
+| `KYC_HASH_MISSING` | `409` | A row has no `kycHash` to attest. Dismiss it and verify the customer again |
+| `IDENTITY_HUB_NOT_CONFIGURED` | `501` | The identity hub is not deployed on your instance's network |
+| `CHAIN_UNAVAILABLE` | `503` | The chain time could not be read. Retry shortly |
+| `HOLDER_BATCH_FAILED` | `400`, `500` | The batch could not be built, for example because a chain read failed |

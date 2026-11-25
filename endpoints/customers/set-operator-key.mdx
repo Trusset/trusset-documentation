@@ -1,23 +1,25 @@
 ---
 title: 'Set Operator Key'
 api: 'PUT /customers/api/identity/operator-key'
-description: 'Register the ed25519 key your proof manifests are signed with'
+description: 'Register a fallback ed25519 key for proof bundle headers, and the proof settings of this instance'
 ---
 
-Records the public half of the key the [KYC zk-Proof Tool](https://github.com/Trusset/trusset-kyc-zk-proofs) signs manifests with, and sets how strictly proofs are enforced on this instance.
+Records the public half of the operator key the [KYC-STARKs](/tools/kyc-starks/overview) tool signs bundle headers with, and sets how strictly bundles are judged on this instance.
 
-The key is public by nature. No secret reaches this API, and the private half never leaves the machine that runs the tool. `npm run show` prints the value to send here.
+The key is public by nature. No secret reaches this API, and the private half never leaves the machine that runs the tool. `npm run key -- show` prints the value.
+
+Publish the key on the identity hub instead, with `setAttesterProfile` from your attester wallet; `npm run key -- show` prints that calldata too. Trusset checks a 3.1 header against the key the hub publishes for the header's attester and key id. It falls back to the key set here only when the attester has published no key on the hub, and then says so with `operatorKey.source: instance` on every proof response. Once the attester publishes a key on the hub, the key set here is no longer read for that attester's bundles.
 
 ## Body Parameters
 
 Send any combination. Sending none is refused with `NOTHING_TO_UPDATE`.
 
 <ParamField body="publicKey" type="string">
-  32-byte ed25519 public key as 64 hex characters, with or without a `0x` prefix. It is stored lowercased and unprefixed. Send `null` to clear the key. Without a key, an instance that does not enforce proofs skips the signature check.
+  32-byte ed25519 public key as 64 hex characters, with or without a `0x` prefix. It is stored lowercased and unprefixed. Send `null` to clear the key. With no key here and none on the hub, a 3.1 bundle is refused with `UNREGISTERED_OPERATOR_KEY`.
 </ParamField>
 
 <ParamField body="proofVerificationEnabled" type="boolean">
-  Whether this instance requires a STARK behind every leaf it files as a claim. When `true`, verification needs a registered operator key and the proof in `proofs` for every leaf being filed, and a commitment-only leaf cannot be attested. A production instance enforces this whatever the setting says. A value that is not a boolean is ignored.
+  Whether this instance refuses `stub` bundles, which carry no real proofs. A production instance refuses them whatever the setting says. Trusset never receives or runs the proofs themselves, so this setting does not make the server verify a STARK: verifying the proofs before you send a bundle is your step. A value that is not a boolean is ignored.
 </ParamField>
 
 <ParamField body="maxStalenessDays" type="integer">
@@ -31,14 +33,18 @@ Send any combination. Sending none is refused with `NOTHING_TO_UPDATE`.
     <ResponseField name="operatorKey" type="string">The stored key, lowercased and unprefixed, or `null`.</ResponseField>
     <ResponseField name="operatorKeySetAt" type="string">When it was last set, ISO 8601, or `null`.</ResponseField>
     <ResponseField name="proofVerificationEnabled" type="boolean">What this instance asked for.</ResponseField>
-    <ResponseField name="proofVerificationEnforced" type="boolean">What actually applies. It is `true` when the instance asked for it, and always on a production instance, whose trust anchors require proofs. Read this one, not the setting.</ResponseField>
+    <ResponseField name="proofVerificationEnforced" type="boolean">What actually applies. It is `true` when the instance asked for it, and always on a production instance, whose trust anchors refuse stub bundles. Read this one, not the setting.</ResponseField>
     <ResponseField name="maxStalenessDays" type="integer">The stored bound, or `null` when unset, in which case the default of 400 days applies.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Warning>
-  Rotating the key does not re-verify anything already attested. Claims filed under the old key stay on the registry. Rotate deliberately, and keep the old key with the bundles it signed.
+  Rotating the key does not re-verify anything already attested. Claims filed under the old key stay on chain. Rotate deliberately, and keep the old key with the bundles it signed. On the hub, publishing a new key gives it the next key id and keeps the old one readable, so headers signed under an older key id keep verifying.
 </Warning>
+
+<Note>
+  [Disclosure requests](/endpoints/customers/create-disclosure-request) do not use the key set here. Trusset verifies no disclosed proof. Your local tool verifies each one against the operator key the identity hub publishes for its attester.
+</Note>
 
 <Note>
   Every change is written to the customer audit log as `PROOF_OPERATOR_KEY_UPDATED`, recording whether a key was sent, whether it was cleared, and the new value of each setting sent.
@@ -68,7 +74,7 @@ const res = await fetch('https://api.trusset.org/customers/api/identity/operator
 const { data } = await res.json();
 
 if (!data.proofVerificationEnforced) {
-  throw new Error('This instance still files claims without checking STARKs');
+  throw new Error('This instance still accepts stub bundles');
 }
 ```
 </RequestExample>

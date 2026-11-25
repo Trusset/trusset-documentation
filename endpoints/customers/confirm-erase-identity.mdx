@@ -1,0 +1,128 @@
+---
+title: 'Confirm Erase Identity'
+api: 'POST /customers/api/identity/erase/confirm'
+description: 'Record an erasure on the identity hub from its transaction hash'
+---
+
+Records the `erase` transaction built by [Erase Identity](/endpoints/customers/erase-identity) once it is mined. The confirm reads the receipt's logs, not the transaction's target, so an attester that is a Safe or a 4337 smart account can send it.
+
+The receipt must show all of this:
+
+- The transaction succeeded, and the identity hub emitted `Erased` in it for the wallet you name, under the attester you name as `signerAddress`.
+- That attester is a trusted attester of your instance ID register or a registered wallet of your instance. A wallet of your instance that your register no longer trusts can therefore still record the erasure of its old entry.
+
+The confirm then sets every customer record of the wallet, archived or not, to `revoked`, the status a revoke records. A record already `revoked` keeps its `revokedAt`; any other gets the time of the confirm. The record's `metadata` gains `erasedAt` and `erasedAttester`. The erasure is written once to your instance's verification history as an `ERASE` entry with the transaction, the attester and the sender. Confirming the same transaction again answers `alreadyRecorded: true` and writes nothing.
+
+Like a revoke, the confirm queues the wallet's removal, with reason `REVOKED`, from every eligibility register it is on. See [Eligibility registers](/endpoints/customers/introduction#eligibility-registers).
+
+An erasure withdraws only the attester's own entry. When another trusted attester still vouches for the wallet, the register keeps reporting it as verified, and the answer carries a `STILL_VERIFIED_BY_ANOTHER_ATTESTER` warning naming that attester. A register admin or compliance officer freezes the wallet in the issuer app to stop it for your whole instance.
+
+## Body Parameters
+
+<ParamField body="walletAddress" type="string" required>
+  The wallet whose entry was erased.
+</ParamField>
+
+<ParamField body="signerAddress" type="string" required>
+  The attester whose entry was erased. The `Erased` event must name it.
+</ParamField>
+
+<ParamField body="txHash" type="string" required>
+  The hash of the mined `erase` transaction.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="walletAddress" type="string">The wallet, checksummed.</ResponseField>
+    <ResponseField name="attester" type="string">The attester whose entry was erased, read from the event.</ResponseField>
+    <ResponseField name="status" type="string">Always `revoked`, the status the customer record now carries.</ResponseField>
+    <ResponseField name="erased" type="boolean">Always `true`.</ResponseField>
+    <ResponseField name="txHash" type="string">The confirmed transaction.</ResponseField>
+    <ResponseField name="gasUsed" type="string">Gas used.</ResponseField>
+    <ResponseField name="alreadyRecorded" type="boolean">Present, and `true`, when this transaction was confirmed before. Nothing is written again.</ResponseField>
+    <ResponseField name="warnings" type="array">Present only when the register still verifies the wallet: `[{ code: 'STILL_VERIFIED_BY_ANOTHER_ATTESTER', attester, message }]`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/identity/erase/confirm" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -d '{
+    "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
+    "signerAddress": "0x51A4F0c3B2e8d7A6c5B4e3f2A1d0c9b8e7f6A5D4",
+    "txHash": "0x8f2c41d07a6e93b5c1f04d8e27a9b36c50e1f7d42a8b9c03e6f15d7a2b4c8e91"
+  }'
+```
+```typescript TypeScript
+const response = await fetch('https://api.trusset.org/customers/api/identity/erase/confirm', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-API-Key': 'trusset_your_key_here'
+  },
+  body: JSON.stringify({
+    walletAddress: '0xaBc123DEf456789012345678901234567890aBCD',
+    signerAddress: '0x51A4F0c3B2e8d7A6c5B4e3f2A1d0c9b8e7f6A5D4',
+    txHash: tx.hash
+  })
+});
+const { success, data, error } = await response.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
+    "attester": "0x51A4F0c3B2e8d7A6c5B4e3f2A1d0c9b8e7f6A5D4",
+    "status": "revoked",
+    "erased": true,
+    "txHash": "0x8f2c41d07a6e93b5c1f04d8e27a9b36c50e1f7d42a8b9c03e6f15d7a2b4c8e91",
+    "gasUsed": "28410"
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-19T12:05:00.000Z"
+  }
+}
+```
+```json Error - Attester Mismatch
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "TX_ATTESTER_MISMATCH",
+    "message": "The transaction erases the entry of 0x6E2d9A4b1C8f3E7a0D5c2B9f4A1e8D3c6B0a7F52, not of 0x51A4F0c3B2e8d7A6c5B4e3f2A1d0c9b8e7f6A5D4"
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-19T12:05:00.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `walletAddress` is missing or not a valid address |
+| `INVALID_SIGNER` | `400` | `signerAddress` is missing, not a valid address or the zero address |
+| `INVALID_TX` | `400` | `txHash` is not 32-byte hex |
+| `TX_REVERTED` | `400` | The transaction reverted |
+| `TX_TARGET_MISMATCH` | `400` | The receipt holds no `Erased` event from the identity hub for this wallet |
+| `TX_ATTESTER_MISMATCH` | `400` | The `Erased` event names another attester than `signerAddress` |
+| `UNTRUSTED_ATTESTER` | `403` | The attester is neither a trusted attester of your register nor a wallet of your instance |
+| `TX_NOT_FOUND` | `404` | The transaction is not mined yet |
+| `REGISTER_OPERATION_UNSUPPORTED` | `409` | Your instance writes to a register of its own |
+| `INSTANCE_REGISTER_REQUIRED` | `409` | Your instance has not created its instance ID register yet |
+| `IDENTITY_HUB_NOT_CONFIGURED` | `501` | The identity hub is not deployed on your instance's network |
+| `CHAIN_UNAVAILABLE` | `503` | The chain or the register could not be read. Retry |
+| `ERASE_CONFIRM_FAILED` | `400`, `500` | Any other failure. `400` when a chain call failed |

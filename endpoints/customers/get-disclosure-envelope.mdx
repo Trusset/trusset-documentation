@@ -1,0 +1,209 @@
+---
+title: 'Download Disclosure Envelope'
+api: 'GET /customers/api/disclosure-requests/{id}/envelope'
+description: 'The encrypted disclosure of an approved request, while Trusset still holds it'
+---
+
+Returns the encrypted disclosure of one approved request: the header, the encapsulated key and the ciphertext exactly as the holder's browser sealed them, with the consent the wallet signed. Your [local tool](/tools/kyc-courier/overview) calls this, checks the envelope and decrypts it on your machine. You call it yourself only when you open disclosures with your own implementation.
+
+The envelope is available only while `envelope.status` is `HELD`. Once it is opened, rejected or unclaimed, Trusset has deleted the ciphertext and this call answers `409 ENVELOPE_GONE`. Downloading changes nothing. The status changes only through [Open Disclosure](/endpoints/customers/open-disclosure) or [Reject Disclosure](/endpoints/customers/reject-disclosure). The response is sent with `Cache-Control: no-store`.
+
+This route takes an API key only. The Issuer Portal never downloads or opens an envelope.
+
+<Warning>
+  `consent.typedData` and the digests are what Trusset stored. Do not rely on them as served. Recompute `envelopeDigest` from `header`, `enc` and `ciphertext`, rebuild the typed data from the request with that digest, and check that the signature recovers to the request wallet, as the tool does. Otherwise you trust Trusset for what the holder consented to.
+</Warning>
+
+## The envelope
+
+`header` is the base64url encoding, without padding, of compact UTF-8 JSON with exactly these keys in this order. Those bytes are the HPKE associated data, so a changed header does not decrypt.
+
+| Key | Value |
+|---|---|
+| `v` | `1` |
+| `type` | `DISCLOSURE` |
+| `suite` | `HPKE-X25519-SHA256-AES256GCM` |
+| `requestId` | The request ID |
+| `walletAddress` | The request wallet, lowercase |
+| `recipientKeyId` | The `recipientKeyId` of the request |
+| `scope` | The request scope |
+| `predicates` | The fixed predicate list of the scope |
+| `payloadDigest` | SHA-256 of the plaintext, 64 lowercase hex characters |
+| `openCommitment` | SHA-256 of the 32 raw bytes of `openProof`, 64 lowercase hex characters |
+| `createdAt` | When the holder's browser sealed it, ISO 8601 with milliseconds |
+
+The header carries no personal data beyond the wallet address, and never names the leaves the holder disclosed.
+
+The ciphertext is sealed with HPKE (RFC 9180) in base mode: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256 and AES-256-GCM, to the public half of your record key. `info` is the UTF-8 string `trusset-disclosure-v1`. A [sealed KYC record](/endpoints/kyc-inbox/introduction#envelope-format) uses the same suite with `trusset-kyc-envelope-v1`, so a record never opens as a disclosure, or the other way round.
+
+The plaintext is UTF-8 JSON with exactly these keys:
+
+```json
+{
+  "version": "trusset-disclosure-payload-v1",
+  "requestId": "cmi6q2x8v0004l50c7k3d9m1r",
+  "wallet": "0x4b7250ae316d20ea2c1d74ece6414f4f192cf002",
+  "openProof": "<64 lowercase hex characters>",
+  "disclosures": [
+    { "disclosure": { "...": "disclosures/<leaf>.json of the holder's bundle" }, "proof": "<proofs/<leaf>.bin in standard base64>" }
+  ]
+}
+```
+
+Each of the 1 to 32 items holds one [disclosed leaf](/tools/kyc-starks/bundle-format#disclosures) of a KYC-STARKs 3.1 bundle exactly as the tool wrote it, with its proof file in standard base64 with padding. The proof is an empty string for a commitment-only leaf. `openProof` is the value [Open Disclosure](/endpoints/customers/open-disclosure) takes.
+
+### Envelope digest
+
+```
+envelopeDigest = keccak256(
+    UTF8("trusset-disclosure-envelope-v1\n")
+ || sha256(header bytes)
+ || sha256(enc || ciphertext)
+)
+```
+
+The header bytes are the decoded `header`. Both inner digests are the raw 32 bytes, not hex. `sha256(enc || ciphertext)` is `sealedDigest`. The holder's consent names this digest, so it binds the signature to the header, the ciphertext and, through `payloadDigest`, the plaintext.
+
+## Path Parameters
+
+<ParamField path="id" type="string" required>
+  The request `id`. Letters and digits only, at most 100 characters.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="requestId" type="string">The request ID.</ResponseField>
+    <ResponseField name="walletAddress" type="string">The request wallet, checksummed.</ResponseField>
+    <ResponseField name="scope" type="string">`AGE`, `COUNTRY` or `FULL_KYC`.</ResponseField>
+    <ResponseField name="predicates" type="array">The fixed predicate list of the scope.</ResponseField>
+    <ResponseField name="recipientKeyId" type="string">The record key the envelope is sealed to.</ResponseField>
+    <ResponseField name="envelope" type="object">
+      <Expandable>
+        <ResponseField name="header" type="string">The header, base64url without padding.</ResponseField>
+        <ResponseField name="enc" type="string">The 32-byte HPKE encapsulated key, standard base64.</ResponseField>
+        <ResponseField name="ciphertext" type="string">The AES-256-GCM ciphertext with its 16-byte tag appended, standard base64. From 128 bytes to 4 MiB before encoding.</ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="envelopeDigest" type="string">As stored, `0x` and 64 hex characters.</ResponseField>
+    <ResponseField name="sealedDigest" type="string">As stored, 64 hex characters.</ResponseField>
+    <ResponseField name="payloadDigest" type="string">As stored, 64 hex characters.</ResponseField>
+    <ResponseField name="consent" type="object">`typedData`, `signature` and `signedAt`, as on [Get Disclosure Request](/endpoints/customers/get-disclosure-request#response-fields).</ResponseField>
+    <ResponseField name="collectBy" type="string">When Trusset deletes the ciphertext unless you open or reject it first, ISO 8601.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl "https://api.trusset.org/customers/api/disclosure-requests/cmi6q2x8v0004l50c7k3d9m1r/envelope" \
+  -H "X-API-Key: trusset_your_key_here"
+```
+```typescript TypeScript
+import { createHash } from 'node:crypto';
+import { keccak256 } from 'ethers';
+
+const res = await fetch(
+  `https://api.trusset.org/customers/api/disclosure-requests/${requestId}/envelope`,
+  { headers: { 'X-API-Key': 'trusset_your_key_here' } }
+);
+const { success, data, error } = await res.json();
+
+if (success) {
+  const sha256 = (...parts: Buffer[]) => {
+    const hash = createHash('sha256');
+    for (const part of parts) hash.update(part);
+    return hash.digest();
+  };
+  const headerBytes = Buffer.from(data.envelope.header, 'base64url');
+  const enc = Buffer.from(data.envelope.enc, 'base64');
+  const ciphertext = Buffer.from(data.envelope.ciphertext, 'base64');
+  const envelopeDigest = keccak256(Buffer.concat([
+    Buffer.from('trusset-disclosure-envelope-v1\n', 'utf8'),
+    sha256(headerBytes),
+    sha256(enc, ciphertext)
+  ]));
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "requestId": "cmi6q2x8v0004l50c7k3d9m1r",
+    "walletAddress": "0x4b7250ae316D20Ea2c1d74Ece6414F4f192cF002",
+    "scope": "COUNTRY",
+    "predicates": ["EEA_RESIDENT", "RESIDENCY_ON_FILE"],
+    "recipientKeyId": "84566958631088a4",
+    "envelope": {
+      "header": "eyJ2IjoxLCJ0eXBlIjoiRElTQ0xPU1VSRSIsInN1aXRlIjoiSFBLRS1YMjU1MTktU0hBMjU2LUFFUzI1NkdDTSIsInJlcXVlc3RJZCI6ImNtaTZxMng4djAwMDRsNTBjN2szZDltMXIiLCJ3YWxsZXRBZGRyZXNzIjoiMHg0YjcyNTBhZTMxNmQyMGVhMmMxZDc0ZWNlNjQxNGY0ZjE5MmNmMDAyIiwicmVjaXBpZW50S2V5SWQiOiI4NDU2Njk1ODYzMTA4OGE0Iiwic2NvcGUiOiJDT1VOVFJZIiwicHJlZGljYXRlcyI6WyJFRUFfUkVTSURFTlQiLCJSRVNJREVOQ1lfT05fRklMRSJdLCJwYXlsb2FkRGlnZXN0IjoiMTEwNmJjMjgzYzFkMjcwNjc5NjFiYWZiMjgyOTkxOTE3YmZmN2U1MDE4ZGRmNzA1NjU4NDg2YTk0YTY0YjBkMSIsIm9wZW5Db21taXRtZW50IjoiOTAzOWY1MjI0ZTA5ZWNmNzU5ZjFjMjBhMWY2YzkwZmYwZGU3ZjIzZmNlZGFhMWIxYTMyZmY1YTE4YWU2NzE5ZSIsImNyZWF0ZWRBdCI6IjIwMjYtMTEtMjFUMTQ6MDQ6NTEuMzE4WiJ9",
+      "enc": "bBBSJlZ1SffsK1DDe4vk+K2MNmZCYIfbPPLnIVkNHlk=",
+      "ciphertext": "aq1aI+jairNnVSqN3qKMf1TnOD/1xbeAOj8PE/IFi0araqlY4gDg2aLYDT2x+TGj..."
+    },
+    "envelopeDigest": "0xeb6b31ad295cd93c10b4cdc19ba1a136b767e17aa2e04b178c97903007f09548",
+    "sealedDigest": "2390d876c1b953300cce3b02ae4ed21bfaaa535fb180090aa80f2acc6459af08",
+    "payloadDigest": "1106bc283c1d27067961bafb282991917bff7e5018ddf705658486a94a64b0d1",
+    "consent": {
+      "typedData": {
+        "domain": { "name": "Trusset Verify", "version": "2", "chainId": 11155111 },
+        "types": {
+          "DisclosureConsent": [
+            { "name": "requestId", "type": "string" },
+            { "name": "wallet", "type": "address" },
+            { "name": "requestor", "type": "string" },
+            { "name": "scope", "type": "string" },
+            { "name": "reference", "type": "string" },
+            { "name": "expiresAt", "type": "uint256" },
+            { "name": "envelopeDigest", "type": "bytes32" }
+          ]
+        },
+        "primaryType": "DisclosureConsent",
+        "message": {
+          "requestId": "cmi6q2x8v0004l50c7k3d9m1r",
+          "wallet": "0x4b7250ae316D20Ea2c1d74Ece6414F4f192cF002",
+          "requestor": "ACME Capital AG",
+          "scope": "COUNTRY",
+          "reference": "https://acme-capital.example/onboarding/4711",
+          "expiresAt": 1796376600,
+          "envelopeDigest": "0xeb6b31ad295cd93c10b4cdc19ba1a136b767e17aa2e04b178c97903007f09548"
+        }
+      },
+      "signature": "0x910b3bcd38af731efdc606bcb83474e0edcaf2ebf57f7b8ab8bf2d1b3c93d35764c33bd02b0f0605e3cad76a110a5cb65b23a61365669cfd5b686fc6704df6b71c",
+      "signedAt": "2026-11-21T14:05:12.406Z"
+    },
+    "collectBy": "2026-12-21T14:05:12.406Z"
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-21T15:12:38.004Z"
+  }
+}
+```
+```json Error - Envelope Gone
+{
+  "success": false,
+  "error": {
+    "code": "ENVELOPE_GONE",
+    "message": "The encrypted disclosure of this request is no longer held: it was opened, rejected or never collected.",
+    "details": { "envelopeStatus": "OPENED" }
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-21T15:20:02.517Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `id` contains characters other than letters and digits, or is longer than 100 characters |
+| `NOT_FOUND` | `404` | No request with this ID was made by your instance |
+| `ENVELOPE_NOT_FOUND` | `404` | The request carries no envelope: it is not approved, or it was approved before disclosures were encrypted |
+| `ENVELOPE_GONE` | `409` | The envelope was opened, rejected or left uncollected, so the ciphertext was deleted. `details.envelopeStatus` is its status |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 240 disclosure request reads per minute |
+| `GET_DISCLOSURE_ENVELOPE_FAILED` | `500` | The envelope could not be read |

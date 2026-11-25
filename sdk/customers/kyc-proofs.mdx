@@ -1,37 +1,36 @@
 ---
 title: "KYC Proofs"
-description: "Generate zk-STARK KYC proofs locally and back on-chain claims with them"
+description: "Prove KYC predicates locally, verify the bundle on your machine, and back on-chain claims with its manifest and signed header"
 ---
 
-You run the [trusset-kyc-zk-proofs](https://github.com/Trusset/trusset-kyc-zk-proofs) tool on your own machines. It reads your KYC records and writes, per subject, a Merkle root to publish on chain, one zk-STARK per proved field, and a manifest signed with your operator key.
+You run the [trusset-kyc-zk-proofs](https://github.com/Trusset/trusset-kyc-zk-proofs) tool on your own machines. It reads your KYC records and writes, per subject, a Merkle root to publish on chain, one zk-STARK per proved field, a manifest, and a header signed with your operator key.
 
 ## What leaves your infrastructure
 
-Trusset never sees the underlying KYC data. Names, birth dates, nationalities and document numbers stay on your machine, and no endpoint accepts them.
-
-What does travel is the evidence that a predicate held:
+Trusset never sees the underlying KYC data, and it never receives proof bytes. You verify the proofs on your own machine, then send the manifest and its signed header.
 
 | Artifact | Sent | Why |
 |---|---|---|
 | `kycHash` (the root) | Yes | Published on chain by `identity.verify` |
-| `manifest.json` | Yes | Hashes, public inputs and claim descriptors |
-| `manifest.sig` | Yes | Checked against your registered operator key |
-| `proofs/*.bin` | Yes, on a production instance | The STARKs are verified server-side before a claim is filed |
+| `manifest.json` | Yes | Hashes, commitments, public inputs and the predicate each leaf proves. A 3.1.0 manifest carries no clear-text personal value |
+| `header.json` | Yes, as `header` | Binds the bundle to one wallet, root, date, attester, chain, hub and operator key |
+| `header.sig` | Yes, as `headerSignature` | Checked against the operator key the IdentityHub publishes for the attester |
+| `proofs/*.bin` | Never | Verify them locally, with the tool or a [verifier](#verify-the-bundle-locally) |
 | `secrets.enc` | Never | Encrypted witness material. No endpoint accepts it |
 
-<Warning>
-  A production instance requires the STARK bytes and verifies each one before filing a claim. Sending only the manifest is refused with `PROOF_MISSING`.
+The proofs stay with you because they are not zero-knowledge. The STARK library the tool uses has no hiding mode, so a proof hands its proved value to whoever holds it: an age proof reveals the exact date of birth, a set-membership proof the country, a tier proof the tier. Sending a proof would send that value. The manifest and the header carry only hashes, hiding commitments and the predicates that held.
 
-  A commitment carries no value and a STARK reveals nothing beyond the predicate, so uploading them discloses no personal data. `secrets.enc` is the file that would, and it is never accepted. Keep it and your `.trusset/keys.env` on your own machines.
+<Warning>
+  The SDK refuses `proofs`, `proof`, `proofBytes` and `zk`, in the request, in the manifest or in one of its leaves, with `PROOFS_NOT_ACCEPTED` before any request is sent. The API refuses them the same way. A manifest whose `passthrough` still carries `country` or `investorType`, as 2.x and 3.0 bundles do, is refused with `PERSONAL_DATA_IN_MANIFEST`: re-issue it with tool v3.1.
+
+  `ProofClaimsInput.proofs` and `manifestSig` are deprecated. `proofs` is refused whenever it holds a value, and a 3.1.0 bundle is checked through its signed header, so `manifest.sig` is no longer needed.
 </Warning>
 
 ## Enforcement depends on the instance
 
-Two settings decide how strict a submission is judged, and they are not the same field.
+A `PRODUCTION` instance rejects `stub` manifests, whatever the instance itself is set to. A `DEVELOPMENT` instance accepts them by default, which is what makes a structural dry run possible without generating STARKs.
 
-A `PRODUCTION` instance requires proofs and rejects `stub` manifests, whatever the instance itself is set to. A `DEVELOPMENT` instance does neither by default, which is what makes a structural dry run possible without generating STARKs.
-
-An instance can also opt in on top of that. Read both from [Get Operator Key](/endpoints/customers/get-operator-key): `proofVerificationEnabled` is what you asked for, `proofVerificationEnforced` is what a submission is actually judged against. Gate on the enforced flag. A `DEVELOPMENT` instance with enforcement on is judged like production in both respects: it requires proofs and it rejects `stub` manifests with `STUB_NOT_ALLOWED`, so a run that passes there passes on a `PRODUCTION` instance.
+An instance can also opt in on top of that. Read both from [Get Operator Key](/endpoints/customers/get-operator-key): `proofVerificationEnabled` is what you asked for, `proofVerificationEnforced` is what a submission is actually judged against. Gate on the enforced flag. A `DEVELOPMENT` instance with enforcement on rejects `stub` manifests with `STUB_NOT_ALLOWED`, so a run that passes there passes on a `PRODUCTION` instance.
 
 ## Run the proof tool
 
@@ -39,39 +38,90 @@ An instance can also opt in on top of that. Read both from [Get Operator Key](/e
 git clone https://github.com/Trusset/trusset-kyc-zk-proofs
 cd trusset-kyc-zk-proofs
 npm install
-npm run init
+npm run init -- --issuer-name "Example Bank AG" --issuer-scheme LEI \
+                --issuer-identifier 529900T8BM49AURSDO55 --issuer-jurisdiction DE \
+                --chain-id 11155111 --hub 0x<IdentityHub> --attester 0x<your attesting wallet>
 ```
 
-`init` asks four questions about your institution, generates both keys, pins the batch date, and prints your operator public key. Load the keys, drop records in `input/`, and run it:
+`init` generates the operator keys into an encrypted key file, writes a 3.1.0 `config.json`, pins the batch date, and prints your operator public key. Drop records in `input/` and issue:
 
 ```bash
-set -a && . ./.trusset/keys.env && set +a
-npm start -- --dry-run
-npm start
+npm run issue -- --dry-run
+npm run issue
 ```
 
 ```
 output/
 ├── 0xAbCd.../                       # one bundle per subject wallet
 │   ├── kycHash.hex                  # the root hash (0x + 64 hex chars)
-│   ├── manifest.json                # what was asserted, by whom, on what evidence
-│   ├── manifest.sig                 # ed25519 over a canonical view of the manifest
-│   ├── proofs/<field>.bin           # one STARK per proving leaf
+│   ├── manifest.json                # what was asserted, by whom, on what evidence. Sent
+│   ├── header.json                  # root, wallet, date, attester, chain, hub, keyId. Sent as header
+│   ├── header.sig                   # ed25519 over the header, 64 bytes. Sent as headerSignature
+│   ├── manifest.sig                 # ed25519 over the manifest. For the local verifier only
+│   ├── proofs/<field>.bin           # one STARK per proving leaf. For the local verifier only
+│   ├── disclosures/<field>.json     # one leaf for a counterparty you choose
+│   ├── attestation.json             # what the hub attest call will carry
 │   └── secrets.enc                  # encrypted witnesses, keep local
 └── kyc_hashes_<timestamp>.csv       # batch index: one row per subject
 ```
 
-The root hash appears in three places and they are the same value: `kycHash.hex`, the `kycHash` field of `manifest.json`, and the `kycHash` column of the batch CSV.
+The root hash appears in four places and they are the same value: `kycHash.hex`, the `kycHash` field of `manifest.json`, the `root` field of `header.json`, and the `kycHash` column of the batch CSV.
 
 <Note>
   `init` pins the batch date into `config.json`. Leave it pinned. Every per-subject key and commitment derives from that number, so a bundle proved against a moving clock cannot be reproduced tomorrow, which is exactly what an auditor asks for.
 </Note>
 
+## Verify the bundle locally
+
+Verify every bundle on your machine before any of it is sent. The tool's verifier checks each STARK, the Merkle root, the manifest signature and the signed header:
+
+```bash
+npm run verify -- 0xAbCd... --public-key <your operator public key>
+npm run verify -- 0xAbCd... --rpc-url https://<rpc>
+```
+
+The second form reads your operator key and the subject's attestation from the IdentityHub and compares them with the bundle.
+
+To make the check part of the call itself, pass a `verifier` to `addClaimsFromProof`, `attestProofs`, `inspectManifest` or `verifyFromManifest`. The SDK runs it before any request and stops with `LOCAL_VERIFICATION_FAILED` when it returns `false`, `{ ok: false }` or throws. It receives what the request will carry: `walletAddress`, `manifest`, `header`, `headerSignature` (as `0x` hex) and `manifestSig`. The proof files are yours to read, as below. The SDK does not bundle the verifier: build the tool's Node WASM verifier with `bash scripts/rebuild-wasm.sh`, which writes `target/wasm-vendor/trusset_verifier.js`, and call its `verify_with_header`.
+
+```typescript
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import type { ProofVerifier } from '@trusset/sdk'
+
+const wasm = createRequire(import.meta.url)('./trusset-kyc-zk-proofs/target/wasm-vendor/trusset_verifier.js')
+
+function bundleVerifier(bundle: string, operatorPublicKey: string): ProofVerifier {
+  const read = (name: string) => readFileSync(`${bundle}/${name}`)
+  return ({ manifest }) => {
+    const proofs = Object.fromEntries(
+      manifest.leaves.map(leaf => [String(leaf.proofPath), Array.from(read(String(leaf.proofPath)))]),
+    )
+    const report = JSON.parse(wasm.verify_with_header(
+      read('manifest.json'),
+      read('kycHash.hex').toString('utf8'),
+      read('manifest.sig'),
+      JSON.stringify(proofs),
+      read('header.json'),
+      read('header.sig'),
+      Buffer.from(operatorPublicKey, 'hex'),
+      manifest.kycHash,
+      false,
+    ))
+    return { ok: report.overall_pass === true, reason: report.header?.reason ?? 'the tool verifier refused the bundle', report }
+  }
+}
+```
+
+The proofs are read inside the verifier and never reach the request. On failure the error's `details` holds what the verifier returned, here the tool's full report.
+
 ## From bundle to verified customer
 
 <Steps>
-  <Step title="Register your operator key, once">
-    Every manifest signature is checked against this key. Take the value `npm run show` prints and send it to [Set Operator Key](/endpoints/customers/set-operator-key). The SDK has no method for this call yet, so send it with `fetch` and the same API key.
+  <Step title="Publish your operator key, once">
+    Every header signature is checked against the operator key the IdentityHub holds for the header's attester and `keyId`. `npm run key -- show` prints the `setAttesterProfile` calldata; send it from the attester wallet. The tool never sends anything.
+
+    When the hub holds no key for the attester, the header is checked against the key registered on the instance with [Set Operator Key](/endpoints/customers/set-operator-key), and `verification.operatorKey.source` reads `instance` with a `message` that says so. The SDK has no method for that call, so send it with `fetch` and the same API key:
 
     ```typescript
     await fetch('https://api.trusset.org/customers/api/identity/operator-key', {
@@ -84,82 +134,53 @@ The root hash appears in three places and they are the same value: `kycHash.hex`
     })
     ```
 
-    Rotating it later does not re-verify anything already filed. Claims added under the old key stay on chain, and their manifests no longer verify against the new one. Keep the old key with the bundles it signed.
+    Rotating the key on the hub gives it a new `keyId`. Issue new bundles after the rotation, so their headers name the key the hub publishes.
   </Step>
   <Step title="Verify on-chain with the root hash">
-    Load the bundle's `manifest.json` and call `verifyFromManifest` with the registered issuer wallet as `signer`. The wallet address, root hash, country, investor type, and expiry days are read straight from the manifest. Pass overrides in the second argument for anything you want to change.
+    Load the bundle and call `verifyFromManifest` with the registered issuer wallet as `signer`. The wallet address, root hash and expiry days are read from the manifest. A 3.1.0 manifest carries no country or investor type, so pass them in the second argument, together with the signed header.
 
     ```typescript
     import { readFileSync } from 'node:fs'
     import { Wallet, providers } from 'ethers'
-    import type { KycProofManifest } from '@trusset/sdk'
+    import type { KycProofHeader, KycProofManifest } from '@trusset/sdk'
 
     const signer = new Wallet(process.env.ISSUER_WALLET_KEY!, new providers.JsonRpcProvider(process.env.RPC_URL))
 
-    const manifest: KycProofManifest = JSON.parse(
-      readFileSync('output/0xAbCd.../manifest.json', 'utf8'),
-    )
+    const bundle = 'output/0xAbCd...'
+    const manifest: KycProofManifest = JSON.parse(readFileSync(`${bundle}/manifest.json`, 'utf8'))
+    const header: KycProofHeader = JSON.parse(readFileSync(`${bundle}/header.json`, 'utf8'))
+    const headerSignature = readFileSync(`${bundle}/header.sig`)
+    const verifier = bundleVerifier(bundle, process.env.OPERATOR_PUBLIC_KEY!)
 
-    const result = await trusset.customers.identity.verifyFromManifest(manifest, undefined, { signer })
-    ```
-
-    The SDK signs, waits for the transaction to mine and confirms it. `result.kycHash` equals `manifest.kycHash` once the root hash is on chain. `result.operation` is `verify` for a new identity and `update` for an existing one. To sign elsewhere, call it without the third argument and confirm with `{ txHash }`, as [Identity Verification](/sdk/customers/identity#sign-prepare-or-confirm-a-write) shows.
-
-    If you only stored the root hash, for example from the batch CSV, call `verify` directly with `kycHash`:
-
-    ```typescript
-    await trusset.customers.identity.verify({
-      walletAddress: '0xAbCd...',
+    const result = await trusset.customers.identity.verifyFromManifest(manifest, {
       country: 'DEU',
       investorType: 'PROFESSIONAL',
-      kycHash: '0x591aa0f6...',
-      softExpiryDays: 365,
-      hardExpiryDays: 730,
+      header,
+      headerSignature,
+      verifier,
     }, { signer })
     ```
+
+    The SDK verifies the bundle, signs, waits for the transaction to mine and confirms it. `result.kycHash` equals `manifest.kycHash` once the root hash is on chain. `result.operation` is `verify` for a new identity and `update` for an existing one. To sign elsewhere, call it without the third argument and confirm with `{ txHash }`, as [Identity Verification](/sdk/customers/identity#sign-prepare-or-confirm-a-write) shows.
   </Step>
   <Step title="Add proof-backed claims">
-    With the root on chain, the bundle can back claims. Send the signature and the STARKs alongside the manifest.
+    With the root on chain, the bundle can back claims. Send the manifest with its header and header signature, nothing else of the bundle.
 
     ```typescript
-    const bundle = 'output/0xAbCd...'
-
     const claims = await trusset.customers.identity.addClaimsFromProof({
       walletAddress: manifest.walletAddress,
       manifest,
-      manifestSig: readFileSync(`${bundle}/manifest.sig`),
-      proofs: {
-        country: readFileSync(`${bundle}/proofs/country.bin`).toString('base64'),
-        nationality: readFileSync(`${bundle}/proofs/nationality.bin`).toString('base64'),
-      },
-      selected: ['KYC', 'RESIDENCY', 'CITIZENSHIP'],
+      header,
+      headerSignature,
+      verifier,
     }, { signer })
     ```
 
-    `selected` must match the proofs you send. Without it, every claim the bundle backs is filed, and on an instance that enforces proofs each of them needs its STARK: `ACCREDITATION` needs `proofs/investorType.bin`, so the call above without `selected` stops at `PROOF_MISSING`. `KYC` needs no file, since it is the root itself. To file every claim the bundle backs, send every file in `proofs/` and leave `selected` out:
+    Without `selected`, every claim the bundle backs is filed. `selected: ['KYC']` adds the root claim alone. On an [instance ID register](/sdk/customers/identity#instance-id-registers) the plan is one `attest` call that sets every proved predicate and the investor class at once, signed by the bundle's attester: sign with the wallet `header.attester` names, or the API refuses with `ATTESTER_MISMATCH`.
 
-    ```typescript
-    import { readdirSync } from 'node:fs'
+    `headerSignature` takes the 64 raw bytes of `header.sig` as read, their hex or their base64. The SDK sends `0x` and 128 lowercase hex characters. The file read as text cannot carry the signature, so the SDK refuses it with `INVALID_HEADER_SIGNATURE` before any request is sent.
 
-    const proofs = Object.fromEntries(
-      readdirSync(`${bundle}/proofs`)
-        .filter(file => file.endsWith('.bin'))
-        .map(file => [file.slice(0, -'.bin'.length), readFileSync(`${bundle}/proofs/${file}`).toString('base64')]),
-    )
-
-    const all = await trusset.customers.identity.addClaimsFromProof({
-      walletAddress: manifest.walletAddress,
-      manifest,
-      manifestSig: readFileSync(`${bundle}/manifest.sig`),
-      proofs,
-    }, { signer })
-    ```
-
-    A development instance does not enforce proofs by default, so a call that passes there can still stop at `PROOF_MISSING` on a production instance. To test the production behaviour there, turn on `proofVerificationEnabled` with [Set Operator Key](/endpoints/customers/set-operator-key) and check that [Get Operator Key](/endpoints/customers/get-operator-key) reports `proofVerificationEnforced: true`.
-
-    `manifest.sig` holds 64 raw bytes. Pass them as read; the SDK sends them base64-encoded. A base64 string (`readFileSync(path).toString('base64')`) or 0x-prefixed hex works as well. The file read as text cannot carry the signature, so the SDK refuses it with a `ValidationError` before any request is sent.
-
-    One transaction is signed per claim, in the order the backend returns them. `claims.added` counts what landed, and `claims.claims` holds one entry per claim with `claimType`, `dataHash`, `status`, and `txHash` or `error`. `selected: ['KYC']` adds the root claim alone, with no proof file.
+    `claims.added` counts what landed, and `claims.claims` holds one entry per claim with `claimType`, `dataHash`, `status`, and `txHash` or `error`. `claims.verification` reports how the bundle was checked: `operatorKey` names the key (`source` `hub` or `instance`, `keyId`, `publicKey`) and `attestation` the hub attestation the bundle derives.
   </Step>
   <Step title="Check the result">
     `status.onChain.isVerified` is now `true` and `status.onChain.kycHash` matches the manifest. Both calls are reads and need no signature.
@@ -172,26 +193,71 @@ The root hash appears in three places and they are the same value: `kycHash.hex`
   </Step>
 </Steps>
 
+## Inspect a bundle before filing it
+
+`inspectManifest` reads the bundle the way a claim would, writes nothing, and lists every leaf with what it proves. Build a selection screen from it.
+
+<Note>
+  Available from `@trusset/sdk` 0.10.0.
+</Note>
+
+```typescript
+const inspection = await trusset.customers.identity.inspectManifest({
+  manifest,
+  header,
+  headerSignature,
+  walletAddress: manifest.walletAddress,
+  verifier,
+})
+
+for (const leaf of inspection.leaves.filter(l => !l.attestable)) {
+  console.warn(`${leaf.fieldName}: ${leaf.blockedReason}`)
+}
+```
+
+Each leaf carries `predicate` (the predicate it proves, `INVESTOR_CLASS` for the class leaf, or `null`), `attestable`, `classOnly` (on an instance ID register the class leaf sets the class of every attestation and is not a predicate of its own) and `blockedReason`, why it cannot be filed, in one sentence. The inspection also carries `operatorKey`, the hub `attestation` the bundle derives, and `signature: 'header-verified'`.
+
 ## Which claims a proof can back
 
-The `KYC` claim always derives from the root hash. Field-level claims derive from the manifest's proof leaves:
+Every leaf of a 3.1.0 bundle names the predicate it proves, and the predicate decides the claim. The root always backs `KYC`.
 
-| Claim type | Derived from | Circuit |
+| Leaf predicate | Instance ID register | Register of your own |
 |---|---|---|
-| `KYC` | the root hash itself | `merkle_root` |
-| `RESIDENCY` | `country` leaf | `set_membership` |
-| `CITIZENSHIP` | `nationality` leaf | `set_membership` |
-| `ACCREDITATION` | `investorType` leaf | `tier_threshold` |
+| the root | `KYC_DONE` | `KYC` |
+| `ADULT` | `ADULT` | Not filed by `addClaimsFromProof`. `attestProofs` files it under a slot you name in `claimType` |
+| `EEA_RESIDENT` | `EEA_RESIDENT` | `RESIDENCY`, when the bundle has no `RESIDENCY_ON_FILE` leaf |
+| `RESIDENCY_ON_FILE` | `RESIDENCY_ON_FILE` | `RESIDENCY` |
+| `CITIZENSHIP_ON_FILE` | `CITIZENSHIP_ON_FILE` | `CITIZENSHIP` |
+| `TAX_RESIDENCY_ON_FILE` | `TAX_RESIDENCY_ON_FILE` | `TAX_RESIDENCY` |
+| `ACCREDITED` | `ACCREDITED` | `ACCREDITATION` |
+| `INVESTOR_CLASS` | The investor class of the attestation | `ACCREDITATION`, when the bundle has no `ACCREDITED` leaf |
 
-A canonical field proved with a different circuit is skipped rather than filed elsewhere. A `country` leaf proved with `preimage_knowledge` backs nothing, because filing it under another slot would let it read as an unrelated attestation.
+A leaf that names no predicate, such as a commitment-only name field, backs nothing and is refused with `NOT_ATTESTABLE` when filed. A leaf whose validity window has passed is refused with `LEAF_LAPSED`.
 
-`AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK`, and `PEP_CHECK` are not proof-backed. Add them with [`addClaim`](/sdk/customers/identity#manual-claims). Those four are also the only slots a leaf with no canonical meaning may be filed under.
+`AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK`, and `PEP_CHECK` can also be added by hand with [`addClaim`](/sdk/customers/identity#manual-claims).
 
 ## Re-proving a subject
 
 Re-running the tool always produces a new root, because the batch date is bound into every leaf hash. The bundle is legitimate and supersedes the registered one, but its root no longer matches what the registry holds.
 
-`addClaimsFromProof` refuses that with `HASH_MISMATCH`. Rotating the registered root to the new bundle is a separate, opt-in operation: see [Attest Proofs](/endpoints/customers/attest-proofs), which takes the rotation transaction alongside the claims.
+`addClaimsFromProof` refuses that with `HASH_MISMATCH`. `attestProofs` rotates the registered root to the new bundle and attests the data points you name in one plan.
+
+<Note>
+  Available from `@trusset/sdk` 0.10.0.
+</Note>
+
+```typescript
+const attested = await trusset.customers.identity.attestProofs({
+  walletAddress: manifest.walletAddress,
+  manifest,
+  header,
+  headerSignature,
+  verifier,
+  entries: [{ fieldName: 'country' }, { fieldName: 'dateOfBirth' }],
+}, { signer })
+```
+
+`entries` names one to eight leaves by `fieldName`, with an optional `claimType` for a register of your own and `expiryDays`. On an instance ID register the plan is one `attest` (or `updateIdentity` when the root rotates) that takes its expiries from the bundle. On a register of your own it is a root rotation step followed by one step per data point. With `{ signer }` the SDK pairs each step with its hash itself. To sign elsewhere, call it without options and confirm with `{ txResults: [{ fieldName, txHash }], rootTxHash }`, where `rootTxHash` is the hash of the rotation step on a register of your own. `attested.proofs` holds one entry per data point with `fieldName`, `claimType`, `status`, and `txHash` or `error`, and `attested.rootRotated` the rotation when one ran.
 
 ## Onboard in batch
 
@@ -200,7 +266,7 @@ The tool's batch CSV maps row for row onto `batchVerify` entries, up to 500 subj
 ```typescript
 await trusset.customers.identity.batchVerify(rows.map(row => ({
   walletAddress: row.walletAddress,
-  country: row.country,
+  country: countryOf(row.walletAddress),
   investorType: row.investorType,
   kycHash: row.kycHash,
   softExpiryDays: Number(row.softExpiryDays) || undefined,
@@ -208,37 +274,47 @@ await trusset.customers.identity.batchVerify(rows.map(row => ({
 })), { signer })
 ```
 
-Addresses that are already actively verified are skipped on chain and keep their existing root hash; revoked identities are re-verified. Entries that fail validation are left out of the transaction and listed in the result's `rejected`, each with its `index`, `code` and `message`.
+A 3.1.0 batch CSV has no country column, so take the country from your own records. Addresses that are already actively verified are skipped on chain and keep their existing root hash; revoked identities are re-verified. Entries that fail validation are left out of the transaction and listed in the result's `rejected`, each with its `index`, `code` and `message`.
 
-Claims still go one bundle at a time, because each one carries its own proofs.
+Claims still go one bundle at a time, because each one carries its own header.
 
 ## Troubleshooting
 
+The first six codes come from the SDK itself, before any request is sent. Each is a `ValidationError` with that `code`.
+
 | Error code | Meaning | Fix |
 |---|---|---|
+| `PROOFS_NOT_ACCEPTED` | The request, the manifest or one of its leaves carries `proofs`, `proof`, `proofBytes` or `zk` | Verify the proofs locally and leave them out. The API answers the same code |
+| `PERSONAL_DATA_IN_MANIFEST` | The manifest `passthrough` carries `country`, `investorType` or another clear-text value | Re-issue the bundle with tool v3.1. The API answers the same code |
+| `LOCAL_VERIFICATION_FAILED` | Your `verifier` returned `false` or `{ ok: false }`, or threw | Read `err.details`, which holds what the verifier returned or threw, and re-run the tool |
+| `HEADER_REQUIRED` | A 3.1.0 bundle was sent without `header` and `headerSignature`, or with only one of them | Send both, from the same bundle. The API answers the same code for a missing header |
+| `INVALID_HEADER` | `header` is not `header.json` parsed with exactly its ten keys, or a header came with a pre-3.1.0 manifest | Pass `JSON.parse(readFileSync('header.json', 'utf8'))` unchanged |
+| `INVALID_HEADER_SIGNATURE` | `headerSignature` is not 64 bytes, or, from the API, does not verify under the operator key | Pass `readFileSync('header.sig')`. For the API's answer, check which key the hub publishes for the header's `keyId` |
+| `HEADER_MISMATCH` | The header and the manifest disagree on root, wallet, date, leaf count or chain block | Send the header and the manifest of the same bundle |
+| `WALLET_MISMATCH` | The signed header or the manifest names a different wallet than the customer | Use the bundle generated for this wallet |
 | `NOT_VERIFIED` | The wallet has no on-chain identity yet | Run `verify` / `verifyFromManifest` first |
 | `IDENTITY_REVOKED` | The identity was revoked on chain, so every claim would revert | Re-verify the wallet, then add the claims |
-| `WALLET_MISMATCH` | Manifest belongs to a different wallet | Use the bundle generated for this wallet |
-| `ROOT_MISMATCH` | The root recomputed from the leaves does not equal the one the manifest states | The bundle is inconsistent. Re-run the tool rather than editing the manifest |
-| `HASH_MISMATCH` | Manifest root differs from the on-chain root | A newer bundle. Rotate the root, or use the bundle that matches the chain |
-| `UNREGISTERED_OPERATOR_KEY` | No operator key on this instance | Register it with [Set Operator Key](/endpoints/customers/set-operator-key) |
-| `INVALID_SIGNATURE` | `manifest.sig` is malformed, or signed by a different key | Pass the raw bytes of `manifest.sig` from the same bundle (`readFileSync(path)`), never the file read as text |
-| `PROOF_MISSING` | A claimed leaf has no STARK, or is commitment-only | Send its `proofs/<field>.bin`. A commitment-only leaf cannot be attested under enforcement |
-| `PROOF_DIGEST_MISMATCH` | The proof bytes sent for a field are not the ones the manifest signed for it | Send each `proofs/<field>.bin` under its own field name, from the bundle of this subject. Swapped files and another subject's proofs end here |
+| `HASH_MISMATCH` | Manifest root differs from the on-chain root | A newer bundle. Rotate the root with `attestProofs`, or use the bundle that matches the chain |
+| `CHAIN_MISMATCH`, `HUB_MISMATCH` | The header names another chain or IdentityHub than the instance writes to | Issue the bundle with the instance's chain and hub in `config.json` |
+| `ATTESTER_NOT_TRUSTED` | The header's attester is not a trusted attester of the instance ID register, or not a verified wallet of the instance | Trust the wallet on the wallet page of the issuer app, or issue with an attester that is |
+| `ATTESTER_MISMATCH` | The plan is built for another signer than the header's attester | Sign with the wallet `header.attester` names |
+| `OPERATOR_KEY_UNKNOWN` | The hub holds no operator key under the header's `keyId` for this attester, but does hold a current one | Re-sign the header with the key the hub publishes |
+| `UNREGISTERED_OPERATOR_KEY` | Neither the hub nor the instance holds an operator key for the attester | Publish it with `setAttesterProfile`, or register it with [Set Operator Key](/endpoints/customers/set-operator-key) |
+| `ROOT_MISMATCH` | The root recomputed from the leaves is not the signed header root | The bundle is inconsistent. Re-run the tool rather than editing the manifest |
 | `LEAF_HASH_MISMATCH` | A leaf of the manifest was changed after the tool wrote it | Pass the unmodified `manifest.json`, or re-run the tool |
-| `INVALID_PROOFS` | A value in `proofs` is not a base64 string | Encode each proof file as base64 text |
+| `LEAF_INVALID` | A leaf's public inputs, parameters or list version do not hold together | Re-run the tool. Do not hand-edit anything in the bundle |
+| `NOT_ATTESTABLE` | A selected leaf proves no predicate | File only leaves `inspectManifest` reports as `attestable` |
+| `LEAF_LAPSED` | The leaf's validity window has passed | Re-prove the subject |
 | `UNSUPPORTED_VERSION` | The manifest version, circuits version or STARK library is not one the verifier accepts | Generate the bundle with a current release of the tool |
-| `PROOF_INVALID` | A STARK failed verification | Re-run the tool. Do not hand-edit anything in the bundle |
 | `PROOF_STALE` | The batch date is older than `maxStalenessDays` | Re-prove the subject, or raise the bound deliberately |
-| `PROOF_TOO_LARGE` | One proof, or the payload, is over the size cap | Send fewer leaves per call |
+| `PROOF_TOO_LARGE` | The manifest is over the size cap | Send fewer leaves per call |
 | `UNAPPROVED_PARAMS` | The threshold is outside the network's trust anchors | Use approved parameters |
 | `UNAPPROVED_LIST` | The allowlist the proof committed to is not accepted | Record an approved list version and re-prove |
 | `STUB_NOT_ALLOWED` | Stub-mode manifest where proofs are enforced, on a `PRODUCTION` instance or a `DEVELOPMENT` instance with enforcement on | Re-run the tool without `--skip-proofs` |
-| `INVALID_MANIFEST` | Malformed or incomplete manifest, or a batch date that is missing or in the future | Pass the unmodified `manifest.json` object, and check the clock of the machine that ran the tool |
-| `NO_SELECTED_CLAIMS` | `selected` names claim types this proof cannot back. A canonical field proved with another circuit is skipped, so its claim ends here too | See the claim derivation table above, and fix the predicate in `config.json` when a canonical field was proved with the wrong circuit |
-| `VERIFY_BUSY` | Verification capacity is saturated | Retry shortly. Nothing was cached |
-| `VERIFY_TIMEOUT` | Verification did not finish in time | Retry shortly. Nothing was cached |
+| `INVALID_MANIFEST` | Malformed or incomplete manifest, unknown keys or nulls in a 3.1.0 manifest, or a batch date that is missing or in the future | Pass the unmodified `manifest.json` object, and check the clock of the machine that ran the tool |
+| `NO_SELECTED_CLAIMS` | `selected` names claim types this bundle cannot back | See the claim table above |
+| `CHAIN_UNAVAILABLE` | The IdentityHub could not be read to check the header | Retry shortly. Nothing was decided |
 
 <Note>
-  The wallet, root, signature and proof checks run on every call, so a refused request is never replayed: fix it and send it again. Only the STARK verification is reused when the same bundle, proofs and selection come back for the same on-chain root and operator key, and `verification.cached` tells you when that happened. A transient `VERIFY_BUSY` or `VERIFY_TIMEOUT` is never cached.
+  The wallet, root and header checks run on every call, so a refused request is never replayed: fix it and send it again.
 </Note>

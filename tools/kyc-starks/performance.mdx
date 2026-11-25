@@ -1,9 +1,9 @@
 ---
 title: "Performance"
-description: "Measured proving times, proof sizes and memory use for version 3.0.0."
+description: "Measured proving times, proof sizes and verification times for versions 3.1.0 and 3.0.0."
 ---
 
-Every number below is copied from the repository's `docs/PERFORMANCE.md` for version 3.0.0 as shipped. These are single-machine measurements, not a benchmark claim, and native builds on other hardware are expected to differ. The machine used to run the commands in this documentation, a different one, proved the two-subject quickstart batch at about seven seconds per subject.
+Every number below is copied from the repository's `docs/PERFORMANCE.md`. The version 3.1 section measures the 3.1.0 code; the sections after it are the 3.0.0 measurements, which 3.1 does not change, because the circuits are the same. These are single-machine measurements, not a benchmark claim, and native builds on other hardware are expected to differ. The 3.1 quickstart batch on these pages took about eleven seconds for two subjects.
 
 ## Hardware
 
@@ -17,6 +17,32 @@ Every number below is copied from the repository's `docs/PERFORMANCE.md` for ver
 | Build | `cargo build --release --workspace` |
 
 These are Rosetta 2 numbers, not native arm64 numbers. The host is arm64, but the installed Rust toolchain's host triple was `x86_64-apple-darwin`, so every binary measured is an x86_64 executable running under translation. A native `aarch64-apple-darwin` toolchain will be faster, likely substantially, so the figures are an upper bound on prove time for this hardware rather than a measurement of it. Check `rustc -vV | grep host` before comparing your own numbers. Tested on macOS only; Linux and Windows are untested.
+
+## Version 3.1: a typical bundle
+
+The 3.1.0 config `init` writes produces 10 leaves for an EEA resident and 9 for anyone else, since the `EEA_RESIDENT` leaf is optional. Proving leaves: 4 `set_membership` (EEA list, allowlist, nationality, document issuer), 1 `age_threshold`, 1 `tier_threshold`; and 4 `commitment_only`. Same host and Rosetta caveat as below.
+
+| Operation | Time |
+|---|---|
+| Prove one subject, 10 leaves, sum of leaf times from `audit.log` | 5.27 s (`set_membership` 1.2 to 1.4 s each, age 67 ms, tier 149 ms) |
+| Prove one subject, 9 leaves, outside the EEA | 4.70 s |
+| `npm run issue`, 2 subjects, end to end including Node start and key-file unlock | 10 s |
+| Header, 10 disclosures and `attestation.json` per subject | under 5 ms |
+| Native whole-bundle verify with the header, process wall clock | 0.05 s |
+| Native single-leaf disclosure verify, process wall clock | 0.01 to 0.02 s |
+| WASM in Node, whole bundle with the header, 6 STARKs (`verify_with_header`, p50 of 7) | 387 ms |
+| WASM in Node, `verify_disclosure`, p50 of 9 | `set_membership` 81 ms, `age_threshold` 32 ms, `tier_threshold` 26 ms, `commitment_only` 0.7 ms |
+| Key-file unlock (scrypt N = 2^17, r = 8, Node) | 0.17 s |
+
+| Artifact, 10-leaf subject | Size |
+|---|---|
+| Bundle on disk | 332 KB, of which proofs 248 KB |
+| `manifest.json` | 19.2 KB |
+| `header.json` and `header.sig` | 378 B and 64 B |
+| One disclosure, `disclosures/country.json` | 2.8 KB, plus its 50 KB proof |
+| `attestation.json` | 544 B |
+
+None of the verification runs on Trusset: it never receives proofs. These are the numbers for the operator, the holder or the counterparty who verifies locally.
 
 ## Per-circuit proving and verification
 
@@ -37,7 +63,7 @@ The same command with `trusset-circuit-preimage-knowledge` and `prod-proofs-prei
 
 `set_membership` is the most expensive circuit by a wide margin: its trace is 2048 rows because the Merkle walk runs in-AIR at 30 rows per level. `tier_threshold` is the outlier relative to its trace size: 539 ms for 16 x 32, against 206 ms for the larger `age_threshold`. The repository attributes it to the constraint composition degree rather than the trace shape, and tracks it in `docs/FUTURE_WORK.md`. Version 3.0.0 changed nothing inside the circuits, so these figures differ from the 2.1.0 table only by measurement noise.
 
-## Full pipeline
+## Full pipeline, version 3.0.0
 
 Measured on the shipped `config.example.json`, which produces 9 leaves per subject: 5 proving leaves (1 `age_threshold`, 3 `set_membership`, 1 `tier_threshold`) and 4 `commitment_only` leaves.
 
@@ -129,11 +155,11 @@ There are no prebuilt binaries. A cold `npm install` compiles 130 crates from `C
 
 ## Where to look for slowdowns
 
-1. **`set_membership` count.** Each one costs about 1.1 to 1.5 s. A config with three of them spends 3.7 s of its 4.2 s there. Fields that do not need allowlist membership should not use it.
+1. **`set_membership` count.** Each one costs about 1.1 to 1.5 s. The 3.1 config has four of them, which is most of its 5.3 s per subject. Fields that do not need allowlist membership should not use it.
 2. **`commitment_only` versus `preimage_knowledge`.** The former is free; the latter costs 351 ms and 23 KB per leaf while proving only that the operator knows an opening of its own commitment.
 3. **Several predicates on one field.** Two age thresholds are two leaves and two proofs. Cheap for `age_threshold`, expensive for `set_membership`.
 4. **Startup dominates small batches.** A 1-subject run is mostly Node cold start plus the build check every npm command performs; a 100-subject batch amortises it.
-5. **Check before you prove.** `npm start -- --dry-run` costs about 0.1 s per subject and catches everything the prover would reject.
+5. **Check before you prove.** `npm run issue -- --dry-run` costs about 0.1 s per subject and catches everything the prover would reject.
 
 ## In the repository
 

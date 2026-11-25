@@ -3,7 +3,17 @@ title: "Identity Verification"
 description: "On-chain KYC verification, claims, status queries, and transfer compliance checks"
 ---
 
-The `identity` sub-module works against the <Tooltip tip="UUPS-upgradeable, MiCA/eWpG-compliant smart contract that stores KYC state and enforces transfer restrictions">IdentityRegistry</Tooltip> contract. Every write (`verify`, `verifyFromManifest`, `batchVerify`, `revoke`, `addClaimsFromProof`, `addClaim`, `revokeClaim`) is signed by the registered issuer wallet of your instance. Trusset builds the transaction. Your wallet signs it.
+The `identity` sub-module works against the identity register your instance is bound to. Every write (`verify`, `verifyFromManifest`, `batchVerify`, `revoke`, `addClaimsFromProof`, `attestProofs`, `addClaim`, `revokeClaim`) is signed by a registered issuer wallet of your instance. Trusset builds the transaction. Your wallet signs it.
+
+Every prepared write names the register in `registerKind`:
+
+| `registerKind` | Register | Where it writes |
+|---|---|---|
+| `INSTANCE` | The [instance ID register](#instance-id-registers), the default. One `InstanceRegister` per instance, owned by your wallets, reading attestations from the shared `IdentityHub` | `attest`, `attestBatch` and `revoke` on the IdentityHub |
+| `TREX` | Your own [ERC-3643 register](#own-erc-3643-registers) | The register's ONCHAINID and registration calls, in phases |
+| `TRUSSET` | Your own register with the Trusset IdentityRegistry interface | One transaction on that register |
+
+An instance on the default setting that has not created its register yet gets `409 INSTANCE_REGISTER_REQUIRED` from every identity call. Create the register in the instance settings of the issuer app.
 
 ## Sign, prepare, or confirm a write
 
@@ -13,7 +23,7 @@ Each write method takes the same three shapes. Without options it returns the un
   Only a confirmed transaction updates the customer record, and the backend confirms nothing until it has read the mined receipt. If the confirm call fails after the transaction mined, the identity is on chain but the record is not. With `{ signer }` the SDK then throws a `ConfirmationError` whose `txHash` is the hash to confirm and whose `transactions` lists every hash it sent: confirm again with `{ txHash: err.txHash }` instead of repeating the write. When you broadcast yourself, confirm again with `{ txHash }`.
 </Warning>
 
-The signer must be the registered issuer wallet, because the registry checks its KYC provider role on chain. Any ethers v5 `Signer` works, from a self-custody wallet or a regulated custodian, with no preference between them. The SDK never asks for, stores or sends a private key.
+The signer must be a registered issuer wallet that the register accepts: a trusted attester on an instance ID register, or the role holder on your own register. Any ethers v5 `Signer` works, from a self-custody wallet or a regulated custodian, with no preference between them. The SDK never asks for, stores or sends a private key.
 
 ```typescript
 import { Wallet, providers } from 'ethers'
@@ -28,7 +38,7 @@ const result = await trusset.customers.identity.verify({
 }, { signer })
 ```
 
-To sign in your own infrastructure instead, call the method without options. On the Trusset register the result has `action: 'SIGN_TRANSACTION'`, a `transaction` with `to` and `data`, and the `chainId` of your instance. Broadcast it, wait for it to mine, then call the same method again with the hash. An instance bound to its own ERC-3643 register answers with a phased plan instead, so check `action` before you broadcast; see [Own ERC-3643 registers](#own-erc-3643-registers).
+To sign in your own infrastructure instead, call the method without options. On an instance ID register the result has `action: 'SIGN_TRANSACTION'`, a `transaction` with `to` and `data`, and the `chainId` of your instance. Broadcast it, wait for it to mine, then call the same method again with the hash. An instance bound to its own ERC-3643 register answers with a phased plan instead, so check `action` before you broadcast; see [Own ERC-3643 registers](#own-erc-3643-registers).
 
 ```typescript
 const prepared = await trusset.customers.identity.verify({
@@ -61,7 +71,7 @@ Before anything is built, the SDK checks that the signer is connected to your in
 
 ## Verify an identity
 
-Registers an address as KYC-verified on the IdentityRegistry. The address can then take part in compliant token transfers.
+Registers an address as KYC-verified on your instance's register. The address can then take part in compliant token transfers.
 
 Pass `kycHash` with the root hash from the [KYC proof tool](/sdk/customers/kyc-proofs). It is stored on chain verbatim and later checked when adding proof-backed claims. If the address already has an active on-chain identity, it is updated instead of failing, and `result.operation` tells you which happened.
 
@@ -95,22 +105,28 @@ The result carries `txHash`, `gasUsed`, the `kycHash` now stored on chain, and `
     Days until KYC status changes to `hard_expired`. Transfers are blocked until re-verification.
   </ParamField>
   <ParamField body="kycHash" type="string">
-    32-byte hex root hash from the KYC proof tool. Stored on chain verbatim. Required if you plan to add claims from the proof manifest later.
+    32-byte hex root hash from the KYC proof tool, or your own salted commitment. Stored on chain verbatim. Required on an instance ID register, and if you plan to add claims from the proof manifest later.
   </ParamField>
   <ParamField body="kycData" type="object">
-    Legacy fallback: arbitrary data the backend hashes with `keccak256(JSON.stringify(kycData))`. Ignored when `kycHash` is set. A hash produced this way can never match a proof manifest, so prefer `kycHash`.
+    Legacy fallback for a register of your own: arbitrary data the backend hashes with `keccak256(JSON.stringify(kycData))`, with no salt. An instance ID register refuses it with `KYC_HASH_REQUIRED`. Ignored when `kycHash` is set elsewhere. A hash produced this way can never match a proof manifest, so prefer `kycHash`.
   </ParamField>
 </Expandable>
 
 ### Verify from a proof manifest
 
-`verifyFromManifest` reads the wallet address, root hash, and verification parameters (country, investor type, expiry days) straight from the bundle's `manifest.json`. Overrides in the second argument win where given, and the signing options go third.
+`verifyFromManifest` reads the wallet address, root hash and expiry days straight from the bundle's `manifest.json`. A 3.1.0 manifest carries no country or investor type, so pass them in the second argument, where overrides win over the manifest. The signing options go third.
 
 ```typescript
-const result = await trusset.customers.identity.verifyFromManifest(manifest, undefined, { signer })
-
-await trusset.customers.identity.verifyFromManifest(manifest, { investorType: 'RETAIL' }, { signer })
+const result = await trusset.customers.identity.verifyFromManifest(manifest, {
+  country: 'DEU',
+  investorType: 'PROFESSIONAL',
+  header,
+  headerSignature: readFileSync(`${bundle}/header.sig`),
+  verifier,
+}, { signer })
 ```
+
+`header` (`header.json` parsed), `headerSignature` (the bytes of `header.sig`) and `verifier` are optional here and work as on [claims from a proof](#claims-from-a-proof): the SDK checks that the header belongs to the manifest and names the same wallet, runs the verifier before any request, and sends the header with the request. The manifest itself is not sent by this call.
 
 The root hash itself cannot be overridden. It must match the manifest, otherwise proof-backed claims fail later with `HASH_MISMATCH`.
 
@@ -118,7 +134,7 @@ The root hash itself cannot be overridden. It must match the manifest, otherwise
 
 Verify up to 500 addresses in a single on-chain transaction. Give each entry its own `kycHash`: the rows of the proof tool's batch CSV map directly onto entries.
 
-Entries that fail validation are left out of the transaction and reported one by one in `rejected`, each with its `index` in the array you sent, the `walletAddress`, a `code` and a `message`. The rest go on chain. Addresses that are already actively verified are skipped by the contract and keep their existing identity; revoked identities are re-verified.
+Entries that fail validation are left out of the transaction and reported one by one in `rejected`, each with its `index` in the array you sent, the `walletAddress`, a `code` and a `message`. The rest go on chain. On an instance ID register every entry is attested, replacing the signing attester's earlier attestation of that wallet. On a register with the Trusset IdentityRegistry interface, addresses that are already actively verified are skipped and keep their existing identity, and revoked identities are verified again.
 
 ```typescript
 const result = await trusset.customers.identity.batchVerify([
@@ -131,9 +147,118 @@ The result counts `submitted`, `accepted`, `totalEntries` and `rejectedCount`, a
 
 When you confirm a batch yourself with `{ txHash }`, pass the `entries` from the prepared response, not the ones you submitted. Rejected entries never reached the transaction, and the confirm is checked against the accepted ones.
 
+## Instance ID registers
+
+<Note>
+  Available from `@trusset/sdk` 0.9.0.
+</Note>
+
+An instance ID register keeps no personal data on chain. Each issuer wallet writes its own attestation about a customer wallet to the IdentityHub: the root hash, the investor class (`1` retail, `2` professional, `3` eligible counterparty), the expiries and a set of predicates. Your InstanceRegister lists the attesters it trusts and answers `isVerified` for your tokens and markets. The country never goes on chain: `verify` turns it into predicates.
+
+| Method | Contract call |
+|---|---|
+| `verify`, `verifyFromManifest` | `attest` on the IdentityHub |
+| `batchVerify` | `attestBatch` on the IdentityHub |
+| `addClaim`, `revokeClaim`, `addClaimsFromProof` | `attest` again, with the claim's predicate set or cleared |
+| `revoke` | `revoke` on the IdentityHub |
+
+A prepared write carries `contractFunction`, the contract call, beside `functionName`, the identity operation such as `verifyIdentity`. It also carries `predicates`, the mask it attests. A claim change names the `attester` of the record it edits. Sign it with that wallet: any other trusted wallet writes a second attestation under its own address instead of changing the first.
+
+The signer must be a trusted attester of your register. The build refuses with `ATTESTER_MISSING` when none of your instance's wallets is one, and the confirm with `UNTRUSTED_ATTESTER` when the transaction came from a wallet the register does not trust. A `verify` confirm also checks that the register now reports the wallet as verified.
+
+Freezing a wallet for the whole instance is a call on the InstanceRegister (`freeze`, `unfreeze`), signed by a compliance officer. There is no API key route for it, so freeze in the issuer app.
+
+### Predicates
+
+A predicate is a yes or no fact, one bit of a 128-bit mask. The API sends masks as decimal strings, such as `'289'`. Bits 0 to 11 are defined:
+
+| Bit | Name | Set by |
+|---|---|---|
+| 0 | `KYC_DONE` | Every verification |
+| 1 | `AML_CLEAR` | `addClaim` with `AML` |
+| 2 | `SANCTIONS_CLEAR` | `addClaim` with `SANCTIONS_CHECK` |
+| 3 | `PEP_CLEAR` | `addClaim` with `PEP_CHECK` |
+| 4 | `ADULT` | An age proof |
+| 5 | `EEA_RESIDENT` | A verification with an EEA country, or a residency proof against a list of EEA countries |
+| 6 | `NOT_US_PERSON` | No Trusset flow sets it yet |
+| 7 | `CONTRACT_HOLDER` | Your own wallet, for a contract that holds collateral. Not set through the API |
+| 8 | `RESIDENCY_ON_FILE` | Every verification, and the `RESIDENCY` proof claim |
+| 9 | `CITIZENSHIP_ON_FILE` | The `CITIZENSHIP` proof claim |
+| 10 | `TAX_RESIDENCY_ON_FILE` | `addClaim` with `TAX_RESIDENCY` |
+| 11 | `ACCREDITED` | The `ACCREDITATION` proof claim, which also raises the investor class to the proved tier |
+
+Bits up to 63 are kept for this public table. The bits above are defined by each attester, which publishes their meaning.
+
+The SDK exports the table and three helpers. None of them reads the chain.
+
+```typescript
+import { PREDICATE_BITS, predicateMask, predicateNamesOf, hasPredicates } from '@trusset/sdk'
+
+const mask = predicateMask(['KYC_DONE', 'RESIDENCY_ON_FILE', 'EEA_RESIDENT'])
+const names = predicateNamesOf(mask)
+const eea = hasPredicates(mask, ['EEA_RESIDENT'])
+```
+
+`mask` is `'289'`, and `names` is `['KYC_DONE', 'EEA_RESIDENT', 'RESIDENCY_ON_FILE']`, in bit order. `predicateNamesOf` leaves out bits it has no name for, and takes a decimal string, a `0x` hex string, a number or a bigint. An unknown name or a bit outside 0 to 127 throws a `ValidationError`. `predicateNameOfClaimType` maps a claim's `claimType` to its predicate.
+
+### Revoking on an instance ID register
+
+A `revoke` withdraws only the attestation of the wallet that signs it. When another trusted attester still vouches for the customer, the wallet stays verified, and the confirm returns `warnings` with the code `STILL_VERIFIED_BY_ANOTHER_ATTESTER` and that `attester`. To stop the wallet for the whole instance, freeze it.
+
+```typescript
+const prepared = await trusset.customers.identity.revoke(customerWallet, { signerAddress: issuerWallet })
+```
+
+Pass `signerAddress` when you prepare a revoke without a signer. The API then checks that this wallet holds an attestation about the customer, and refuses with `NOTHING_TO_REVOKE` before you sign a transaction that would revert. `revokeClaim` takes the same third argument.
+
+## Holder claims
+
+<Note>
+  Available from `@trusset/sdk` 0.9.0, on instance ID registers only.
+</Note>
+
+KYC approvals that are not on chain yet wait in the pending queue. Usually your issuer wallet registers them itself and pays the gas, through [Build Pending Registration](/endpoints/customers/build-pending-registration). With holder claims your wallet signs once, and each customer submits their own attestation:
+
+1. Your attester wallet signs one EIP-712 message over the whole batch. Nothing is broadcast and no gas is paid.
+2. Each customer sends one transaction from their own wallet with their part of the batch. The hub accepts it only from the wallet it names, so the transaction is also the customer's consent.
+
+```typescript
+const { rows } = await trusset.customers.identity.listPending()
+
+const batch = await trusset.customers.identity.buildHolderBatch({
+  ids: rows.map(row => row.id),
+  attester: await issuer.getAddress(),
+})
+
+const { domain, types, message } = batch.typedData
+const signature = await issuer._signTypedData(domain, types, message)
+
+const stored = await trusset.customers.identity.storeHolderSignature({
+  ids: batch.ids,
+  signature,
+  attester: batch.attester,
+})
+```
+
+The typed data is `AttestationBatch(address attester, bytes32 batchRoot, uint32 issuedAt, uint64 deadline)` in the domain `IdentityHub`, version `1`, with your instance's chain and the hub address. Sign it wherever your key lives. A Safe or another contract wallet can sign in its own flow, and the hub checks that signature through ERC-1271. The batch is valid for 30 days and holds 1 to 200 rows. `issuedAt` is the issue date the hub stores, also for a claim sent weeks later.
+
+Each customer then claims in one of two ways:
+
+- **On verify.trusset.org.** A customer who passed KYC through an ID link that names their wallet signs in on the verification page and sees "Claim your verified identity". The page sends the transaction and records it.
+- **From their own wallet.** `stored.claims` holds one entry per wallet, with the `transaction` to send. The customer sends `transaction.transaction` from that wallet, and you confirm the hash.
+
+```typescript
+const confirmed = await trusset.customers.identity.confirmHolderClaim(holderTxHash)
+console.log(confirmed.walletAddress, confirmed.status, confirmed.predicates)
+```
+
+The customer pays the gas of the claim. The confirm reads the hub's logs, so a claim sent from a Safe or a smart account is recorded too, and the queue row reads `CONFIRMED`. A claim becomes void when your attester acts on that wallet again, or when the batch passes its deadline. Build a new batch for those rows. Refusals are listed under [Holder claim codes](/sdk/customers/errors#holder-claim-codes).
+
+`listPending` takes `status` (`PENDING` by default, `CONFIRMED` or `DISMISSED`), `page` and `limit`, at most 200, and returns `rows` and `pagination`.
+
 ## Own ERC-3643 registers
 
-An instance can be bound to the issuer's own ERC-3643 (T-REX 3, 4 or 5) identity register instead of the Trusset register. There a verification is three things: an ONCHAINID contract for the wallet, a claim on it signed by a claim key of the register's trusted issuer, and the registration on the register. The API hands them out phase by phase, and each answer names the next step:
+An instance can be bound to the issuer's own ERC-3643 (T-REX 3, 4 or 5) identity register instead of an instance ID register. There a verification is three things: an ONCHAINID contract for the wallet, a claim on it signed by a claim key of the register's trusted issuer, and the registration on the register. The API hands them out phase by phase, and each answer names the next step:
 
 | Phase | `action` | What it holds |
 |---|---|---|
@@ -202,13 +327,25 @@ The types for these plans are exported: `TrexVersion` (`4 | 5`), `RegisterPhase`
 const result = await trusset.customers.identity.revoke('0x1234567890abcdef1234567890abcdef12345678', { signer })
 ```
 
-The result carries `walletAddress`, `status`, `txHash` and `gasUsed`.
+The result carries `walletAddress`, `status`, `txHash` and `gasUsed`. On an instance ID register it can also carry `warnings`; see [Revoking on an instance ID register](#revoking-on-an-instance-id-register).
 
 On a T-REX 5 register `revoke` revokes the wallet's KYC claim with `revokeClaimByDigest` instead of deleting the identity, so verifying the wallet again signs a new claim and reverses it. See [Revoke Identity](/endpoints/customers/revoke-identity#on-a-t-rex-5-register).
 
+## Erase an identity
+
+On an instance ID register an attester can erase its own attestation for a wallet, for example after a deletion request once no retention duty applies. Erasing deletes the entry from the hub; the events keep only the salted root and the predicate bits.
+
+```typescript
+const plan = await trusset.customers.identity.erase(walletAddress, signerAddress)
+const txHash = await sendWithYourWallet(plan.transaction)
+const result = await trusset.customers.identity.confirmErase(walletAddress, signerAddress, txHash)
+```
+
+`signerAddress` is the attester that holds the entry. `erase` answers `NOTHING_TO_ERASE` when that wallet holds none. The result carries `walletAddress`, `attester`, `status`, `erased`, `txHash` and `gasUsed`, plus `warnings` when another trusted attester still vouches for the wallet. See [Erase Identity](/endpoints/customers/erase-identity).
+
 ## Get identity status
 
-Returns combined on-chain and off-chain status for an address. The on-chain part comes from the IdentityRegistry contract and the off-chain part from the customer record. It is a read and needs no signature.
+Returns combined on-chain and off-chain status for an address. The on-chain part comes from your instance's register and the off-chain part from the customer record. It is a read and needs no signature.
 
 ```typescript
 const status = await trusset.customers.identity.getStatus('0x1234567890abcdef1234567890abcdef12345678')
@@ -225,7 +362,16 @@ const status = await trusset.customers.identity.getStatus('0x1234567890abcdef123
 | `status.offChain.status` | `pending`, `verified`, or `revoked` |
 | `status.offChain.country`, `investorType`, `verifiedAt` | The customer record's values |
 
-If no customer record exists, `offChain` is `null`. If the address was never verified on chain, `onChain.isVerified` is `false` with a status of `none`. On an instance bound to a T-REX 5 register, `onChain.trexVersion` is `5`.
+On an instance ID register, `onChain` also carries:
+
+| Field | Holds |
+|---|---|
+| `status.onChain.registerKind` | `INSTANCE` |
+| `status.onChain.attester` | The trusted attester whose attestation the register reads. `kycProvider` holds the same wallet |
+| `status.onChain.predicates` | The attested mask, as a decimal string |
+| `status.onChain.predicateNames` | The same mask as names |
+
+`kycHash` is the attested root. If no customer record exists, `offChain` is `null`. If the address was never verified on chain, `onChain.isVerified` is `false` with a status of `none`. On an instance bound to a T-REX 5 register, `onChain.trexVersion` is `5`. When the register could not be read, `onChain.unavailable` is `true`: that is not a verdict, so read again.
 
 ## On-chain claims
 
@@ -245,29 +391,65 @@ const { claims } = await trusset.customers.identity.getClaims('0x1234567890abcde
 
 Each active claim carries `claimType`, `claimTypeLabel` (for example `KYC`), `dataHash`, `issuer`, `issuedAt`, `expiry` and `active`.
 
+On an instance ID register each predicate bit of the attestation reads as one claim. A predicate that matches one of the eight claim types keeps that type's number and label, so `RESIDENCY_ON_FILE` reads as claim type `3`, `RESIDENCY`. Any other predicate reads as claim type `100` plus its bit, with the predicate name as its label: `ADULT` is `104`. Every claim also carries `predicate`, its own name, and `predicates`, all names of the attestation. `dataHash` is the attested root and `issuer` the attester.
+
 ### Claims from a proof
 
 Adds every claim the bundle can back, or a `selected` subset. The wallet must already be verified on chain with the manifest's root hash, and the backend compares them before preparing any transaction. One transaction is prepared per claim, to be signed in the order returned.
 
-Send the manifest signature and the STARK bytes with it. A production instance verifies each proof before preparing anything, and refuses a claimed leaf that arrives without one.
+Verify the bundle locally first, with the proof tool or a `verifier`, then send the manifest and its signed header only. Proof bytes never go to Trusset: these STARKs are not zero-knowledge, so a proof reveals the value it proves, an age proof the date of birth and a set-membership proof the country. The SDK refuses `proofs`, `proof`, `proofBytes` and `zk` with `PROOFS_NOT_ACCEPTED` before any request. [KYC Proofs](/sdk/customers/kyc-proofs#verify-the-bundle-locally) shows a verifier built on the tool's WASM `verify_with_header`.
 
 ```typescript
+const bundle = 'output/0xAbCd...'
+const manifest = JSON.parse(readFileSync(`${bundle}/manifest.json`, 'utf8'))
+const header = JSON.parse(readFileSync(`${bundle}/header.json`, 'utf8'))
+const headerSignature = readFileSync(`${bundle}/header.sig`)
+
 const result = await trusset.customers.identity.addClaimsFromProof({
   walletAddress: manifest.walletAddress,
   manifest,
-  manifestSig,
-  proofs: { country: countryProofBase64 },
+  header,
+  headerSignature,
+  verifier,
   selected: ['KYC', 'RESIDENCY'],
-  expiryDays: 365,
 }, { signer })
 ```
 
-`result.added` counts the claims confirmed on chain and `result.total` the claims attempted. `result.claims` holds one entry per claim with `claimType`, `dataHash`, `status` (`confirmed`, `failed` or `skipped`), and `txHash` or `error`. `result.verification` reports how the proof bundle was verified.
+<Expandable title="ProofClaimsInput fields">
+  <ParamField body="manifest" type="KycProofManifest" required>
+    `manifest.json` from the bundle, parsed and unmodified.
+  </ParamField>
+  <ParamField body="header" type="KycProofHeader">
+    `header.json` from the bundle, parsed: `version` (`3.1.0`), `root`, `wallet`, `epochDays`, `attester`, `chainId`, `hub`, `keyId`, `merkleVersion` (`3`) and `leafCount`, in lowercase hex as the tool wrote them. Required with a 3.1.0 manifest. From 0.10.0.
+  </ParamField>
+  <ParamField body="headerSignature" type="Uint8Array | string">
+    `header.sig`: its 64 raw bytes, their hex or their base64. Sent as `0x` and 128 lowercase hex characters. Required with `header`. From 0.10.0.
+  </ParamField>
+  <ParamField body="verifier" type="ProofVerifier">
+    Your local check, run before any request. It receives `{ walletAddress, manifest, header, headerSignature, manifestSig }` and returns `true` or `{ ok: true }` to go on; `false`, `{ ok: false, reason }` or a throw stops the call with `LOCAL_VERIFICATION_FAILED`. Never sent. From 0.10.0.
+  </ParamField>
+  <ParamField body="selected" type="ClaimType[]">
+    The claim types to add. Default: every claim the bundle backs.
+  </ParamField>
+  <ParamField body="expiryDays" type="number">
+    Claim expiry. Default: the identity's hard expiry. An instance ID register takes its expiries from the bundle instead and answers the warning `EXPIRY_FROM_BUNDLE`.
+  </ParamField>
+  <ParamField body="manifestSig" type="Uint8Array | string">
+    Deprecated. A 3.1.0 bundle is checked through its signed header.
+  </ParamField>
+  <ParamField body="proofs" type="Record<string, string>">
+    Deprecated, and refused with `PROOFS_NOT_ACCEPTED` whenever it holds a value.
+  </ParamField>
+</Expandable>
 
-Without options the method returns `action: 'SIGN_TRANSACTIONS'` with ordered `steps`. Broadcast them in order, then confirm all of them at once with `{ txResults }`, pairing the `claimType` of each step that writes a claim with its hash. On a T-REX 5 register the plan can also hold a `rotateClaim` step, which revokes the claim a new one replaces. Broadcast it, and leave it out of `txResults`. With `{ signer }` the SDK does this pairing itself. On an [own ERC-3643 register](#own-erc-3643-registers) the first answer is the `SIGN_CLAIMS` phase instead, which carries no `verification` yet:
+The SDK checks the header before anything is sent: exactly its ten keys, a 64-byte signature, the same root, wallet, date, leaf count and chain block as the manifest, and the same wallet as `walletAddress`. A manifest whose `passthrough` carries `country` or `investorType`, as 2.x and 3.0 bundles do, is refused with `PERSONAL_DATA_IN_MANIFEST`.
+
+`result.added` counts the claims confirmed on chain and `result.total` the claims attempted. `result.claims` holds one entry per claim with `claimType`, `dataHash`, `status` (`confirmed`, `failed` or `skipped`), and `txHash` or `error`. `result.verification` reports how the bundle was checked: `operatorKey` (`source` `hub` or `instance`, `keyId`, `publicKey`, and a `message` when the instance key stood in for the hub's), the hub `attestation` the bundle derives, and `attestPredicateNames`, the predicates the plan sets.
+
+Without options the method returns `action: 'SIGN_TRANSACTIONS'` with ordered `steps`. Broadcast them in order, then confirm all of them at once with `{ txResults }`, pairing the `claimType` of each step that writes a claim with its hash. On a T-REX 5 register the plan can also hold a `rotateClaim` step, which revokes the claim a new one replaces. Broadcast it, and leave it out of `txResults`. With `{ signer }` the SDK does this pairing itself. On an instance ID register the plan is a single `attest` step that sets every proved predicate at once, and its `claims` lists the claims it covers. Pair each of them with that step's hash, as below. On an [own ERC-3643 register](#own-erc-3643-registers) the first answer is the `SIGN_CLAIMS` phase instead, which carries no `verification` yet:
 
 ```typescript
-const prepared = await trusset.customers.identity.addClaimsFromProof({ walletAddress, manifest, manifestSig, proofs })
+const prepared = await trusset.customers.identity.addClaimsFromProof({ walletAddress, manifest, header, headerSignature })
 if (!('verification' in prepared)) {
   throw new Error('Sign the claim messages first, then call again with claimSignatures')
 }
@@ -277,14 +459,28 @@ for (const step of prepared.steps) {
   const tx = await signer.sendTransaction(step.transaction)
   await tx.wait(1)
   if (step.stepType === 'ADD_CLAIM' || step.stepType === 'ROOT_ROTATION') {
-    txResults.push({ claimType: step.claimType, txHash: tx.hash })
+    for (const claim of step.claims ?? [step]) {
+      txResults.push({ claimType: claim.claimType, txHash: tx.hash })
+    }
   }
 }
 
-const result = await trusset.customers.identity.addClaimsFromProof({ walletAddress, manifest, manifestSig, proofs }, { txResults })
+const result = await trusset.customers.identity.addClaimsFromProof({ walletAddress, manifest, header, headerSignature }, { txResults })
 ```
 
-Failure modes: `NOT_VERIFIED`, `IDENTITY_REVOKED`, `HASH_MISMATCH`, `WALLET_MISMATCH`, `PROOF_MISSING`, `PROOF_DIGEST_MISMATCH`, `LEAF_HASH_MISMATCH`, `PROOF_INVALID`, `INVALID_PROOFS`, `UNSUPPORTED_VERSION`, `UNREGISTERED_OPERATOR_KEY`, `STUB_NOT_ALLOWED`, `INVALID_MANIFEST`, `NO_SELECTED_CLAIMS`. See the [troubleshooting table](/sdk/customers/kyc-proofs#troubleshooting).
+On an instance ID register one transaction confirms every claim, so each entry of `txResults` carries the same hash.
+
+Failure modes: `PROOFS_NOT_ACCEPTED`, `PERSONAL_DATA_IN_MANIFEST`, `LOCAL_VERIFICATION_FAILED`, `HEADER_REQUIRED`, `INVALID_HEADER`, `INVALID_HEADER_SIGNATURE`, `HEADER_MISMATCH`, `NOT_VERIFIED`, `IDENTITY_REVOKED`, `HASH_MISMATCH`, `WALLET_MISMATCH`, `ATTESTER_NOT_TRUSTED`, `ATTESTER_MISMATCH`, `OPERATOR_KEY_UNKNOWN`, `UNREGISTERED_OPERATOR_KEY`, `LEAF_HASH_MISMATCH`, `ROOT_MISMATCH`, `NOT_ATTESTABLE`, `LEAF_LAPSED`, `UNSUPPORTED_VERSION`, `STUB_NOT_ALLOWED`, `INVALID_MANIFEST`, `NO_SELECTED_CLAIMS`. See the [troubleshooting table](/sdk/customers/kyc-proofs#troubleshooting).
+
+### Inspect a bundle and attest single proofs
+
+<Note>
+  Available from `@trusset/sdk` 0.10.0.
+</Note>
+
+`inspectManifest({ manifest, header, headerSignature, walletAddress?, verifier? })` checks a bundle the way a claim would and writes nothing. Each leaf of the answer carries `predicate`, `attestable`, `classOnly` and `blockedReason`, and the answer carries `operatorKey` and `attestation`.
+
+`attestProofs({ walletAddress, manifest, header, headerSignature, entries, verifier? }, options?)` attests the data points you name in `entries` (`[{ fieldName, claimType?, expiryDays? }]`, one to eight) and rotates the registered root when the bundle is newer. It takes the same three call shapes as every write; confirm a plan you signed yourself with `{ txResults: [{ fieldName, txHash }], rootTxHash }`. Both are described on [KYC Proofs](/sdk/customers/kyc-proofs#inspect-a-bundle-before-filing-it), and both refuse proof bytes like `addClaimsFromProof`.
 
 When every claim of a confirm fails, the API answers `NO_CLAIMS_ADDED` and the SDK throws. The per-claim reasons are on the error: `err.data.claims` holds the same entries a successful confirm returns in `result.claims`. With `{ txResults }` the error's `code` is `NO_CLAIMS_ADDED`. With `{ signer }` it is a `ConfirmationError` with the code `CONFIRMATION_FAILED`, and `NO_CLAIMS_ADDED` is on `err.failure.code`.
 
@@ -303,13 +499,15 @@ const added = await trusset.customers.identity.addClaim({
 
 The result carries `claimType`, `dataHash`, `expiry`, `txHash` and `gasUsed`. When you confirm yourself, send the `dataHash` from the prepared response. Adding a proof-backed type manually fails with `PROOF_REQUIRED`, and re-adding an existing claim type overwrites it.
 
+On an instance ID register the claim is its [predicate](#predicates), for example `AML_CLEAR`. The result also carries the mined `predicates` and `root`. The `dataHash` is kept in the audit trail, not on chain. A claim change edits a live attestation, so it fails with `IDENTITY_SUSPENDED`, `IDENTITY_SOFT_EXPIRED` or `IDENTITY_EXPIRED` until the identity is unsuspended or verified again.
+
 ### Revoke a claim
 
 ```typescript
 await trusset.customers.identity.revokeClaim('0x1234567890abcdef1234567890abcdef12345678', 'AML', { signer })
 ```
 
-The result carries `claimType`, `txHash` and `gasUsed`.
+The result carries `claimType`, `txHash` and `gasUsed`. On an instance ID register the `KYC` claim cannot be revoked on its own, because `KYC_DONE` carries the verification: the API refuses with `BASE_PREDICATE_REQUIRED`. Revoke the identity instead.
 
 ## Check transfer compliance
 

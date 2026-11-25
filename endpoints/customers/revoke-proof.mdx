@@ -4,10 +4,12 @@ api: 'POST /customers/api/identity/proofs/revoke'
 description: 'Revoke a proof-backed claim and drop its ledger row'
 ---
 
-Revokes one claim slot on the registry and removes the ledger row that recorded which proof backed it. Use it when a proved fact stops being true.
+Revokes one claim on your register and removes the ledger row that recorded which proof backed it. Use it when a proved fact stops being true.
+
+On the [instance ID register](/endpoints/customers/introduction#the-instance-id-register) the claim is a [predicate](/endpoints/customers/introduction#predicates): the revocation writes the wallet's attestation again without it, keeping the root, the investor class, the expiries and every other predicate.
 
 <Warning>
-  The confirm leg deletes the ledger row as soon as it accepts a receipt, so check what it accepts. On the Trusset register the receipt must be a mined `revokeClaim` on this instance's register, for this wallet and this slot. On an ERC-3643 register the slot cannot be read back from the transaction: any mined `revokeClaimBySignature`, or a `removeClaim` on this wallet's ONCHAINID, is accepted.
+  The confirm leg deletes the ledger row as soon as it accepts a receipt, so check what it accepts. On the instance ID register the receipt must be a mined `attest` on the identity hub for this wallet, sent by a trusted attester, whose attestation no longer carries the predicate. On a register of your own with the Trusset interface it must be a mined `revokeClaim` on that register, for this wallet and this slot. On an ERC-3643 register the slot cannot be read back from the transaction: any mined `revokeClaimBySignature`, or a `removeClaim` on this wallet's ONCHAINID, is accepted.
 </Warning>
 
 ## Body Parameters
@@ -15,7 +17,7 @@ Revokes one claim slot on the registry and removes the ledger row that recorded 
 <ParamField body="walletAddress" type="string" required>The subject.</ParamField>
 
 <ParamField body="claimType" type="string | integer" required>
-  The slot to revoke, as a name or an integer index from 0 to 7.
+  The claim to revoke, as a name or an integer index from 0 to 7. On the instance ID register it can also name a predicate of the hub's standard table, as its name such as `ADULT` or as 100 plus its bit such as `104`. `KYC` (`KYC_DONE`) carries the verification itself and is refused with `409 BASE_PREDICATE_REQUIRED`: revoke the identity instead.
 </ParamField>
 
 <ParamField body="txHash" type="string">
@@ -23,16 +25,20 @@ Revokes one claim slot on the registry and removes the ledger row that recorded 
 </ParamField>
 
 <ParamField body="signerAddress" type="string">
-  ERC-3643 register only. The instance wallet you will send the revocation from, echoed back as `signerAddress`.
+  The instance wallet you will send the revocation from. On the instance ID register, when it holds an active or suspended attestation for the wallet, the plan rewrites that one. Otherwise it rewrites the attestation the register resolves. On an ERC-3643 register it is echoed back as `signerAddress`.
 </ParamField>
 
 ## Sign and confirm
 
-Without `txHash` the response carries one unsigned transaction. On the Trusset register it calls `revokeClaim` on the register, which needs a wallet holding `KYC_PROVIDER_ROLE`. The API checks that one of your instance's wallets holds that role, and refuses with `KYC_PROVIDER_ROLE_MISSING` otherwise. The register reverts the call when the slot holds no active claim.
+Without `txHash` the response carries one unsigned transaction.
+
+On the instance ID register it is an `attest` on the identity hub. It names in `attester` the wallet whose attestation it rewrites, and carries the remaining `predicates`. The hub stores an attestation under the wallet that sends it, so send it from `attester`: another trusted attester would write an attestation of its own, and the original would keep the predicate. The API checks that one of your instance's registered wallets is a trusted attester, and refuses with `403 ATTESTER_MISSING` otherwise. A wallet the register resolves to no active attestation is refused with `409 IDENTITY_NOT_ACTIVE`, a suspended attestation with `409 IDENTITY_SUSPENDED`, and one past its soft or hard expiry with `409 IDENTITY_SOFT_EXPIRED` or `409 IDENTITY_EXPIRED`.
+
+On a register of your own with the Trusset interface it calls `revokeClaim` on the register, which needs a wallet holding `KYC_PROVIDER_ROLE`. The API checks that one of your instance's wallets holds that role, and refuses with `KYC_PROVIDER_ROLE_MISSING` otherwise. The register reverts the call when the slot holds no active claim.
 
 On an ERC-3643 register it calls `revokeClaimBySignature` on the trusted issuer that signed the claim, which marks that signature revoked. The claim stays on the ONCHAINID, and [List Claims](/endpoints/customers/list-claims) stops returning it once the issuer reports it invalid. A slot with no claim is refused up front with `CLAIM_NOT_FOUND`. The role check becomes an agent check on the register.
 
-With `txHash`, the API checks the receipt as described above, deletes the ledger row, and writes a `REVOKE_CLAIM` entry to the customer audit log. It does not check who signed.
+With `txHash`, the API checks the receipt as described above, deletes the ledger row, and writes a `REVOKE_CLAIM` entry to the customer audit log. Only on the instance ID register does it check who signed.
 
 ## Response Fields
 
@@ -41,11 +47,15 @@ With `txHash`, the API checks the receipt as described above, deletes the ledger
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`. Calldata leg only.</ResponseField>
     <ResponseField name="transaction" type="object">The unsigned call, as `to` and `data`. Calldata leg only.</ResponseField>
     <ResponseField name="functionName" type="string">`revokeClaim`, or `revokeClaimBySignature` on an ERC-3643 register. Calldata leg only.</ResponseField>
-    <ResponseField name="registerKind" type="string">`TRUSSET` or `TREX`. Calldata leg only.</ResponseField>
+    <ResponseField name="contractFunction" type="string">Instance ID register only: `attest`, the hub function the transaction calls. Calldata leg only.</ResponseField>
+    <ResponseField name="registerKind" type="string">`INSTANCE` on the instance ID register, `TRUSSET` on a register of your own with the Trusset interface, `TREX` on an ERC-3643 register. Calldata leg only.</ResponseField>
+    <ResponseField name="chainId" type="integer">Instance ID register only: the chain to send it on. Calldata leg only.</ResponseField>
+    <ResponseField name="predicates" type="string">Instance ID register only: the predicates the attestation keeps, as a decimal string. Calldata leg only.</ResponseField>
+    <ResponseField name="attester" type="string">Instance ID register only: the wallet whose attestation is rewritten, and the one to send from. Calldata leg only.</ResponseField>
     <ResponseField name="identity" type="string">ERC-3643 register only: the subject's ONCHAINID. Calldata leg only.</ResponseField>
     <ResponseField name="claimId" type="string">ERC-3643 register only: the claim being revoked. Calldata leg only.</ResponseField>
     <ResponseField name="walletAddress" type="string">The subject, checksummed.</ResponseField>
-    <ResponseField name="claimType" type="string">The slot, by name. On the confirm leg it echoes the request.</ResponseField>
+    <ResponseField name="claimType" type="string">The claim, by name. On the confirm leg it echoes the request.</ResponseField>
     <ResponseField name="txHash" type="string">The confirmed transaction. Confirm leg only.</ResponseField>
     <ResponseField name="gasUsed" type="string">Gas the revocation used. Confirm leg only.</ResponseField>
     <ResponseField name="confirmWith" type="object">`{ field: "txHash" }`. Calldata leg only.</ResponseField>
@@ -53,7 +63,7 @@ With `txHash`, the API checks the receipt as described above, deletes the ledger
 </ResponseField>
 
 <Note>
-  This revokes on the registry, which is a different act from the revocation the proof tool records. `npm run revoke` in the tool writes a signed entry into your own append-only registry, distinguishing a claim that lapsed from one that was never valid. Doing that keeps your record straight; doing this stops a token contract acting on the claim. A real revocation usually wants both.
+  This revokes on your register, which is a different act from the revocation the proof tool records. `npm run revoke` in the tool writes a signed entry into your own append-only registry, distinguishing a claim that lapsed from one that was never valid. Doing that keeps your record straight; doing this stops a token contract acting on the claim. A real revocation usually wants both.
 </Note>
 
 <RequestExample>
@@ -83,10 +93,14 @@ await fetch(url, { method: 'POST', headers, body: JSON.stringify({ ...body, txHa
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTION",
-    "transaction": { "to": "0xEf244c4Bd4d71Bd9A30EDF6Edef7CCC72642291a", "data": "0x..." },
+    "chainId": 11155111,
+    "transaction": { "to": "0x5A1d0c7E3f9B2a48C6e1D05b7F3a92c8E4d61B07", "data": "0x..." },
     "functionName": "revokeClaim",
+    "contractFunction": "attest",
+    "registerKind": "INSTANCE",
     "description": "Revoke the RESIDENCY proof for 0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
-    "registerKind": "TRUSSET",
+    "predicates": "33",
+    "attester": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
     "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
     "claimType": "RESIDENCY",
     "confirmWith": { "field": "txHash" }
@@ -94,7 +108,7 @@ await fetch(url, { method: 'POST', headers, body: JSON.stringify({ ...body, txHa
   "error": null,
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2026-09-06T12:00:00.000Z"
+    "timestamp": "2026-11-19T12:00:00.000Z"
   }
 }
 ```
@@ -105,12 +119,12 @@ await fetch(url, { method: 'POST', headers, body: JSON.stringify({ ...body, txHa
     "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
     "claimType": "RESIDENCY",
     "txHash": "0xd402612bae9f7c3018d5a64b0f9e28c7135ad60897e4b2f150c3a8e6d7b409f1",
-    "gasUsed": "51204"
+    "gasUsed": "39114"
   },
   "error": null,
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2026-09-06T12:00:00.000Z"
+    "timestamp": "2026-11-19T12:00:00.000Z"
   }
 }
 ```
@@ -121,19 +135,29 @@ await fetch(url, { method: 'POST', headers, body: JSON.stringify({ ...body, txHa
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_ADDRESS` | `400` | `walletAddress` is missing or malformed |
-| `INVALID_CLAIM_TYPE` | `400` | `claimType` is not a slot name or an index from 0 to 7 |
+| `INVALID_CLAIM_TYPE` | `400` | `claimType` is not a claim name or an index from 0 to 7, or on the instance ID register a predicate of the hub's standard table |
 | `INVALID_TX` | `400` | `txHash` is not a 32-byte hex hash |
 | `TX_REVERTED` | `400` | The transaction reverted |
-| `TX_WRONG_TARGET` | `400` | The transaction was not sent to this instance's register |
-| `TX_WRONG_FUNCTION` | `400` | The transaction does not call a revocation function |
+| `TX_WRONG_TARGET` | `400` | The transaction was not sent to your register, or on the instance ID register to the identity hub |
+| `TX_WRONG_FUNCTION` | `400` | The transaction does not call a revocation function, or on the instance ID register `attest` |
 | `TX_TARGET_MISMATCH` | `400` | The transaction targets a different wallet |
-| `TX_CLAIM_MISMATCH` | `400` | The transaction revokes a different slot. Trusset register only |
-| `KYC_PROVIDER_ROLE_MISSING` | `403` | None of your instance's wallets holds `KYC_PROVIDER_ROLE` on the register. Calldata leg only |
+| `TX_PREDICATES_MISMATCH` | `400` | Instance ID register: the mined attestation still carries the predicate |
+| `TX_CLAIM_MISMATCH` | `400` | Your own Trusset-interface register: the transaction revokes a different slot |
+| `ATTESTER_MISSING` | `403` | Instance ID register: none of your instance's registered wallets is a trusted attester of the register. Calldata leg only |
+| `UNTRUSTED_ATTESTER` | `403` | Instance ID register: the transaction was sent by a wallet the register does not trust as an attester |
+| `KYC_PROVIDER_ROLE_MISSING` | `403` | Your own Trusset-interface register: none of your instance's wallets holds `KYC_PROVIDER_ROLE` on it. Calldata leg only |
 | `REGISTRY_AGENT_MISSING` | `403` | ERC-3643 register: none of your instance's wallets is an agent of the register. Calldata leg only |
 | `INSTANCE_NOT_FOUND` | `404` | The instance behind your key no longer exists |
 | `TX_NOT_FOUND` | `404` | The transaction is not mined yet |
 | `CLAIM_NOT_FOUND` | `404` | ERC-3643 register: the wallet's ONCHAINID carries no claim in that slot |
+| `BASE_PREDICATE_REQUIRED` | `409` | Instance ID register: `KYC` was named. Revoke the identity instead |
+| `IDENTITY_NOT_ACTIVE` | `409` | Instance ID register: the register resolves the wallet to no active attestation. Calldata leg only |
+| `IDENTITY_SUSPENDED` | `409` | Instance ID register: the attestation is suspended. Calldata leg only |
+| `IDENTITY_SOFT_EXPIRED` | `409` | Instance ID register: the attestation has passed its soft expiry. Calldata leg only |
+| `IDENTITY_EXPIRED` | `409` | Instance ID register: the attestation has passed its hard expiry. Calldata leg only |
+| `INSTANCE_REGISTER_REQUIRED` | `409` | Your instance has no instance ID register yet. It is created in the issuer app, under Settings |
 | `OWN_REGISTRY_NOT_CONFIGURED` | `409` | The instance is bound to its own register but has no valid register address |
+| `IDENTITY_HUB_NOT_CONFIGURED` | `501` | The identity hub is not deployed on your instance's network |
 | `CHAIN_UNAVAILABLE` | `503` | ERC-3643 register: the transaction could not be read |
 | `REGISTRY_PROBE_FAILED` | `503` | The interface of the instance's own register could not be read |
 | `REVOKE_PROOF_FAILED` | `400` or `500` | A chain call failed (`400`), or the request failed unexpectedly (`500`) |

@@ -1,0 +1,122 @@
+---
+title: 'Confirm Holder Claim'
+api: 'POST /customers/api/identity/pending/holder-claims/confirm'
+description: 'Record an attestation a customer submitted from their own wallet'
+---
+
+Records a holder claim: the `attestWithSig` transaction a customer sent from their own wallet with the claim from [Store Holder Signature](/endpoints/customers/store-holder-signature). See [Holder claims](/endpoints/customers/introduction#holder-claims).
+
+A claim sent through verify.trusset.org is recorded by the app, so you need this route for a claim you delivered yourself, or to record one the app has not recorded yet. A claim already recorded answers again with `alreadyRecorded: true`, so calling it twice is safe.
+
+## What is checked
+
+The receipt is read for the identity hub's events, not for the transaction's target, so a claim sent through a Safe or a smart account counts as well. The transaction must have succeeded and claimed exactly one wallet's attestation. Then:
+
+- The attester named in the claim must be one your instance ID register trusts.
+- A `PENDING` row of your instance for that wallet must carry a stored claim, from the same attester and the same batch.
+- The mined attestation must carry the row's root and every predicate the claim was built with.
+
+The row then turns `CONFIRMED` with the transaction hash, and the same follow-ups run as for [Confirm Pending Registration](/endpoints/customers/confirm-pending-registration). The customer record for the wallet is created or set to `verified` with the attested root. The confirmation is written to the customer audit log as `ON_CHAIN_VERIFIED` with `operation: holder-claim`, the attester and the wallet that claimed. A hosted verification checkout turns `VERIFIED`, stock escrow deposits waiting on the row's ID link are bound to the wallet, and your customer webhooks receive `customer.registered`.
+
+A claim found on chain before anyone confirmed it, for example when the customer reopened the link after the app failed to record it, is recorded from the chain state without a transaction hash. A later call with its hash attaches the hash and answers `alreadyRecorded: true`.
+
+## Body Parameters
+
+<ParamField body="txHash" type="string" required>
+  The hash of the customer's claim transaction.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="id" type="string">The row the claim was recorded on.</ResponseField>
+    <ResponseField name="walletAddress" type="string">The customer's wallet, checksummed.</ResponseField>
+    <ResponseField name="status" type="string">`CONFIRMED`.</ResponseField>
+    <ResponseField name="txHash" type="string">The claim transaction.</ResponseField>
+    <ResponseField name="attester" type="string">The attester the attestation is written under. Absent when `alreadyRecorded` is `true`.</ResponseField>
+    <ResponseField name="predicates" type="string">The mined [predicates](/endpoints/customers/introduction#predicates), as a decimal string. Absent when `alreadyRecorded` is `true`.</ResponseField>
+    <ResponseField name="registerKind" type="string">`INSTANCE`. Absent when `alreadyRecorded` is `true`.</ResponseField>
+    <ResponseField name="alreadyRecorded" type="boolean">`true` when the claim was recorded before this call. Absent otherwise.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/identity/pending/holder-claims/confirm" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "txHash": "0x9a3e5c71d2b84f06e1c7a9d3b5f2e8c4a6d0b1f3e5c7a9d2b4f6e8c0a2d4f6b8" }'
+```
+```typescript TypeScript
+const response = await fetch('https://api.trusset.org/customers/api/identity/pending/holder-claims/confirm', {
+  method: 'POST',
+  headers: {
+    'X-API-Key': 'trusset_your_key_here',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({ txHash: claimTxHash })
+});
+const { success, data, error } = await response.json();
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "id": "cmg1u7k3p0004l80h2f9s6d1x",
+    "walletAddress": "0x96C5822784130360F904372b83E130be4A1894D6",
+    "status": "CONFIRMED",
+    "txHash": "0x9a3e5c71d2b84f06e1c7a9d3b5f2e8c4a6d0b1f3e5c7a9d2b4f6e8c0a2d4f6b8",
+    "attester": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+    "predicates": "289",
+    "registerKind": "INSTANCE"
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-20T09:14:02.000Z"
+  }
+}
+```
+```json Already Recorded
+{
+  "success": true,
+  "data": {
+    "id": "cmg1u7k3p0004l80h2f9s6d1x",
+    "walletAddress": "0x96C5822784130360F904372b83E130be4A1894D6",
+    "status": "CONFIRMED",
+    "txHash": "0x9a3e5c71d2b84f06e1c7a9d3b5f2e8c4a6d0b1f3e5c7a9d2b4f6e8c0a2d4f6b8",
+    "alreadyRecorded": true
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-20T09:15:40.000Z"
+  }
+}
+```
+</ResponseExample>
+
+`predicates: "289"` is `KYC_DONE`, `EEA_RESIDENT` and `RESIDENCY_ON_FILE` (bits 0, 5 and 8).
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_TX` | `400` | `txHash` is not a 32-byte hex string |
+| `TX_REVERTED` | `400` | The transaction reverted |
+| `TX_WRONG_FUNCTION` | `400` | The receipt holds no claim on the identity hub |
+| `TX_TARGET_MISMATCH` | `400` | The transaction claims attestations for more than one wallet |
+| `TX_CLAIM_MISMATCH` | `400` | The claim comes from another attester or another batch than the one stored for the wallet |
+| `TX_ROOT_MISMATCH` | `400` | The mined attestation carries another root than the row |
+| `TX_PREDICATES_MISMATCH` | `400` | The mined attestation lacks a predicate the claim was built with |
+| `UNTRUSTED_ATTESTER` | `403` | Your instance ID register does not trust the claim's attester |
+| `TX_NOT_FOUND` | `404` | The transaction is not found or not mined yet |
+| `NOT_FOUND` | `404` | No `PENDING` row of your instance for the wallet carries a stored claim, or the instance no longer exists |
+| `HOLDER_PATH_UNAVAILABLE` | `409` | Your instance writes to a register of its own, not to an instance ID register |
+| `INSTANCE_REGISTER_REQUIRED` | `409` | Your instance has no instance ID register |
+| `IDENTITY_HUB_NOT_CONFIGURED` | `501` | The identity hub is not deployed on your instance's network |
+| `HOLDER_CLAIM_CONFIRM_FAILED` | `400`, `500` | The claim could not be recorded, for example because a chain read failed |

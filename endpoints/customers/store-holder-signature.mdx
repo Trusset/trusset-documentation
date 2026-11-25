@@ -1,0 +1,185 @@
+---
+title: 'Store Holder Signature'
+api: 'POST /customers/api/identity/pending/holder-batch/signature'
+description: 'Check the batch signature and prepare one claim per customer'
+---
+
+Takes the signature over the batch from [Build Holder Batch](/endpoints/customers/build-holder-batch), checks it, and stores one claim on each row. Each claim is the transaction the customer sends from their own wallet to put their attestation on the identity hub. See [Holder claims](/endpoints/customers/introduction#holder-claims).
+
+Nothing is sent on chain here, and the rows stay `PENDING` until a claim is recorded.
+
+## Where the claims go
+
+A customer whose row came from an [ID link](/endpoints/customers/create-id-link) with their wallet bound sees a Claim step on verify.trusset.org when they open the link again with that wallet. Their wallet switches to the hub's chain, sends the claim, and the app records it. Nothing else is needed from you.
+
+For any other row, hand the customer the `transaction` from `claims` yourself, for example in your own app. It must be sent from the customer's wallet, the `walletAddress` of the claim: the hub refuses it from any other sender. Record it afterwards with [Confirm Holder Claim](/endpoints/customers/confirm-holder-claim).
+
+The customer pays the gas. A claim can be sent until the batch's `deadline`, and any later write by your attester about the same wallet on the hub voids it.
+
+## How the signature is checked
+
+The signature must be the 65-byte signature of `attester` over the batch's typed data, with `v` 27 or 28 and a low `s`, as the identity hub requires. When `attester` is a contract wallet, such as a Safe, the contract is asked with ERC-1271 `isValidSignature` over the same digest, and `signatureCheck` is `CONTRACT`.
+
+The signature is written to the customer audit log of each row as `HOLDER_CLAIM_SIGNED`, with the attester, the `batchRoot`, the `deadline` and the check that passed.
+
+## Body Parameters
+
+<ParamField body="ids" type="array" required>
+  1 to 200 row ids, the same batch you built. Only rows still `PENDING` on your instance are used, and any other id is dropped without an error. Every row used must carry the same batch.
+</ParamField>
+
+<ParamField body="signature" type="string" required>
+  The signature over `typedData`, as a hex string.
+</ParamField>
+
+<ParamField body="attester" type="string" required>
+  The wallet that signed. It must be the `attester` the batch was built for, and your instance ID register must still trust it.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="stored" type="integer">The number of rows that now carry a claim.</ResponseField>
+    <ResponseField name="registerKind" type="string">`INSTANCE`.</ResponseField>
+    <ResponseField name="attester" type="string">The signing wallet, checksummed.</ResponseField>
+    <ResponseField name="batchRoot" type="string">The batch's Merkle root.</ResponseField>
+    <ResponseField name="deadline" type="integer">The last moment a claim can be sent, unix seconds.</ResponseField>
+    <ResponseField name="signatureCheck" type="string">`ECDSA` when the signature recovered to `attester`, `CONTRACT` when `attester` is a contract that accepted the signature with ERC-1271.</ResponseField>
+    <ResponseField name="claims" type="array">
+      One entry per stored row.
+      <Expandable>
+        <ResponseField name="id" type="string">Row ID.</ResponseField>
+        <ResponseField name="walletAddress" type="string">The customer's wallet, the only sender the hub accepts for this claim.</ResponseField>
+        <ResponseField name="transaction" type="object">
+          The claim, ready to send.
+          <Expandable>
+            <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
+            <ResponseField name="chainId" type="integer">The chain of the identity hub.</ResponseField>
+            <ResponseField name="transaction" type="object">`{ to, data }`: the hub and the `attestWithSig` call with the customer's attestation, its Merkle proof and the signed batch.</ResponseField>
+            <ResponseField name="functionName" type="string">`verifyIdentity`.</ResponseField>
+            <ResponseField name="contractFunction" type="string">`attestWithSig`.</ResponseField>
+            <ResponseField name="registerKind" type="string">`INSTANCE`.</ResponseField>
+            <ResponseField name="description" type="string">`Claim your verified identity`.</ResponseField>
+          </Expandable>
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/customers/api/identity/pending/holder-batch/signature" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ids": ["cmg1u7k3p0004l80h2f9s6d1x", "cmg1u8b5r0006l80h7d3w1q2z"],
+    "attester": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+    "signature": "0x5e1b...1c"
+  }'
+```
+```typescript TypeScript
+const response = await fetch('https://api.trusset.org/customers/api/identity/pending/holder-batch/signature', {
+  method: 'POST',
+  headers: {
+    'X-API-Key': 'trusset_your_key_here',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({ ids: batch.ids, attester: batch.attester, signature })
+});
+const { data } = await response.json();
+
+for (const claim of data.claims) {
+  await deliverToCustomer(claim.walletAddress, claim.transaction);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "stored": 2,
+    "registerKind": "INSTANCE",
+    "attester": "0xCD92134767aEC2562be15d2a2062A082dA17dD84",
+    "batchRoot": "0xf70b33e87d042c289613546ef1d6fa4f30bc761b7e4b290b9d457a1565c0e0e0",
+    "deadline": 1797595242,
+    "signatureCheck": "ECDSA",
+    "claims": [
+      {
+        "id": "cmg1u7k3p0004l80h2f9s6d1x",
+        "walletAddress": "0x96C5822784130360F904372b83E130be4A1894D6",
+        "transaction": {
+          "action": "SIGN_TRANSACTION",
+          "chainId": 11155111,
+          "transaction": {
+            "to": "0x5A1d0c7E3f9B2a48C6e1D05b7F3a92c8E4d61B07",
+            "data": "0x8c632296..."
+          },
+          "functionName": "verifyIdentity",
+          "contractFunction": "attestWithSig",
+          "registerKind": "INSTANCE",
+          "description": "Claim your verified identity"
+        }
+      },
+      {
+        "id": "cmg1u8b5r0006l80h7d3w1q2z",
+        "walletAddress": "0x3f5CE5FBFe3E9af3971dD833D26bA9b5C936f0bE",
+        "transaction": {
+          "action": "SIGN_TRANSACTION",
+          "chainId": 11155111,
+          "transaction": {
+            "to": "0x5A1d0c7E3f9B2a48C6e1D05b7F3a92c8E4d61B07",
+            "data": "0x8c632296..."
+          },
+          "functionName": "verifyIdentity",
+          "contractFunction": "attestWithSig",
+          "registerKind": "INSTANCE",
+          "description": "Claim your verified identity"
+        }
+      }
+    ]
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-18T12:03:10.000Z"
+  }
+}
+```
+```json Error - Wrong Signer
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "INVALID_SIGNATURE",
+    "message": "The signature recovers to 0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF, not to the attester 0xCD92134767aEC2562be15d2a2062A082dA17dD84."
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-18T12:03:10.000Z"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `INVALID_ADDRESS` | `400` | `attester` is missing or not a wallet address |
+| `VALIDATION_ERROR` | `400` | `ids` is not an array of 1 to 200 ids |
+| `ATTESTER_MISMATCH` | `400` | The batch was built for another attester |
+| `INVALID_SIGNATURE` | `400` | `signature` is not a hex string, is not a 65-byte low-s signature of `attester`, or the `attester` contract does not accept it |
+| `NOT_FOUND` | `404` | None of the ids is a `PENDING` row of your instance, or the instance no longer exists |
+| `UNTRUSTED_ATTESTER` | `403` | Your instance ID register no longer trusts `attester` |
+| `HOLDER_BATCH_MISSING` | `409` | A row carries no batch. Build it first with Build Holder Batch |
+| `HOLDER_BATCH_MISMATCH` | `409` | The rows belong to different batches. Store each batch with its own ids |
+| `HOLDER_BATCH_EXPIRED` | `409` | The batch has passed its `deadline`. Build it again |
+| `HOLDER_PATH_UNAVAILABLE` | `409` | Your instance writes to a register of its own, not to an instance ID register |
+| `INSTANCE_REGISTER_REQUIRED` | `409` | Your instance has no instance ID register |
+| `IDENTITY_HUB_NOT_CONFIGURED` | `501` | The identity hub is not deployed on your instance's network |
+| `CHAIN_UNAVAILABLE` | `503` | The `attester` contract could not be asked to check the signature. Retry shortly |
+| `HOLDER_SIGNATURE_FAILED` | `400`, `500` | The signature could not be stored, for example because a chain read failed |

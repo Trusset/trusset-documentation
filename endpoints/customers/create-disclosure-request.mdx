@@ -1,34 +1,46 @@
 ---
 title: 'Create Disclosure Request'
 api: 'POST /customers/api/disclosure-requests'
-description: 'Ask a wallet holder to disclose a verified fact to your instance'
+description: 'Ask a wallet holder to disclose facts from their KYC proof bundle, encrypted to your record key'
 ---
 
-Asks the holder of a wallet to disclose one verified fact to your instance. The holder answers on verify.trusset.org with a consent the wallet signs and, for some facts, a zk-STARK proof from their KYC proof bundle.
+Asks the holder of a wallet to disclose facts from their KYC proof bundle to your instance. The holder answers on verify.trusset.org. Their browser encrypts the proofs the scope needs to the record key of your instance, and their wallet signs a consent that names that exact envelope. Trusset relays the ciphertext and cannot read it. Your [local tool](/tools/kyc-courier/overview) opens it and verifies the proofs on your machine. [Disclosures from a holder](/protocol/infrastructure/sealed-kyc-records#disclosures-from-a-holder) sets out the whole flow.
+
+<Warning>
+  A KYC STARK proof is not zero-knowledge. An age proof shows the date of birth and a country proof shows the country. You receive exactly the values the disclosed proofs show. Ask only for a scope you are entitled to see.
+</Warning>
 
 <Note>
   Creating a request sends the holder nothing. Tell them to sign in at verify.trusset.org with the wallet, in the same environment as your instance. No webhook reports the answer either, so read the request with [Get Disclosure Request](/endpoints/customers/get-disclosure-request).
 </Note>
 
+## Before you create one
+
+The holder encrypts to the active record key of your instance: the key `trusset-kyc keygen` created and [Set Record Key](/endpoints/customers/set-kyc-record-key) registered. Without one the call answers `409 RECIPIENT_KEY_REQUIRED`. The request stores the key's ID as `recipientKeyId`, and an envelope encrypted to any other key is refused.
+
+Replacing the record key strands every open request made under the old one. The holder can then only decline it, and an approval is refused with `409 RECIPIENT_KEY_RETIRED`. Cancel those requests and create them again. An open request made before disclosures were encrypted has no `recipientKeyId`. Its approval is refused with `409 RECIPIENT_KEY_REQUIRED`, so replace it the same way.
+
+On a production instance, encrypted disclosures stay off until Trusset enables them for your organisation, with the same switch as [sealed KYC records](/protocol/infrastructure/sealed-kyc-records#availability). Until then this call answers `409 ENCRYPTED_DISCLOSURES_NOT_ENABLED`.
+
 ## Scopes
 
-| Scope | Asks for | What can answer it |
-|---|---|---|
-| `AGE` | Age over the 18-year floor | An age proof from the holder's bundle. Without one the holder cannot approve. |
-| `COUNTRY` | Country of residence | The bundle's `country` proof, or else an active `RESIDENCY` claim on the register. |
-| `FULL_KYC` | The complete on-chain verification | The wallet's register record and all its active claims. An attached bundle adds its proofs. |
+| Scope | `predicates` | The disclosure answers it when | What you learn |
+|---|---|---|---|
+| `AGE` | `["ADULT"]` | A disclosed leaf proves `ADULT` | The date of birth |
+| `COUNTRY` | `["EEA_RESIDENT", "RESIDENCY_ON_FILE"]` | A disclosed leaf proves either predicate | The country of residence |
+| `FULL_KYC` | `[]` | It covers every leaf of the bundle, under one root | Every value a proof in the bundle shows. Names and document data are commitment-only leaves and stay hidden |
 
-What each answer proves, and what it leaves undisclosed, is set out on [Get Disclosure Request](/endpoints/customers/get-disclosure-request).
+The predicate list is fixed per scope, so it says nothing about the holder. The envelope never names the leaf the holder chose: for `COUNTRY` that would show whether the holder lives in the EEA. Only bundles made with [KYC-STARKs](/tools/kyc-starks/overview) 3.1 can be disclosed.
 
 ## What the holder sees and signs
 
 The holder signs in by signing a message with the wallet. Each open request for that wallet shows your issuer name, or your instance name when there is none, with the scope, your `message`, your `referenceUrl` and the expiry.
 
-Approving signs this EIP-712 consent with the wallet. Declining needs no signature.
+Approving builds and encrypts the envelope in the browser first. The wallet then signs this EIP-712 consent, version 2. `envelopeDigest` commits to the header and the ciphertext of that envelope, so the signature covers exactly what you receive. Declining needs no signature.
 
 ```json
 {
-  "domain": { "name": "Trusset Verify", "version": "1", "chainId": 11155111 },
+  "domain": { "name": "Trusset Verify", "version": "2", "chainId": 11155111 },
   "primaryType": "DisclosureConsent",
   "types": {
     "DisclosureConsent": [
@@ -37,21 +49,25 @@ Approving signs this EIP-712 consent with the wallet. Declining needs no signatu
       { "name": "requestor", "type": "string" },
       { "name": "scope", "type": "string" },
       { "name": "reference", "type": "string" },
-      { "name": "expiresAt", "type": "uint256" }
+      { "name": "expiresAt", "type": "uint256" },
+      { "name": "envelopeDigest", "type": "bytes32" }
     ]
   },
   "message": {
-    "requestId": "cmg7q3v2k0004lq08h2z9x6de",
-    "wallet": "0x801D3b83882B1047fb2CeB6C097C3ae806D8D028",
+    "requestId": "cmi6q2x8v0004l50c7k3d9m1r",
+    "wallet": "0x4b7250ae316D20Ea2c1d74Ece6414F4f192cF002",
     "requestor": "ACME Capital AG",
     "scope": "COUNTRY",
     "reference": "https://acme-capital.example/onboarding/4711",
-    "expiresAt": 1791970200
+    "expiresAt": 1796376600,
+    "envelopeDigest": "0xeb6b31ad295cd93c10b4cdc19ba1a136b767e17aa2e04b178c97903007f09548"
   }
 }
 ```
 
-`chainId` is 1 for a production instance and 11155111 (Sepolia) for a development one. `reference` is an empty string when you send no `referenceUrl`, and `expiresAt` is in Unix seconds.
+`chainId` is 1 for a production instance and 11155111 (Sepolia) for a development one. `reference` is an empty string when you send no `referenceUrl`, and `expiresAt` is in Unix seconds. [Download Disclosure Envelope](/endpoints/customers/get-disclosure-envelope#envelope-digest) shows how `envelopeDigest` is computed. A version 1 consent had no `envelopeDigest`, and its signature never verifies as version 2.
+
+Trusset recovers the signer from the envelope the holder posts and refuses the approval unless it is the request wallet. Only signatures from an externally owned wallet are accepted.
 
 ## How a request resolves
 
@@ -59,9 +75,7 @@ A request starts `OPEN` and ends in one of four states. `APPROVED` and `DECLINED
 
 Expiry is applied when requests are read, so a list or a fetch never shows an overdue request as `OPEN`.
 
-Approval reads the identity register the wallet was verified on. That is the Trusset ID Register first, then the issuer-owned registers of instances that hold the wallet as a customer. A wallet with no identity root there cannot approve, and a register that cannot be read blocks approval until it can.
-
-An approval does not require the identity to be current. A revoked or expired identity keeps its root and can still approve, so read `disclosure.chain.isVerified` before relying on the answer.
+An approved request carries an `envelope` with its own status. Trusset holds the ciphertext while it is `HELD`, and deletes it when you open or reject it, or 30 days after the holder answered. [Get Disclosure Request](/endpoints/customers/get-disclosure-request#the-envelope) has the states.
 
 ## Body Parameters
 
@@ -85,7 +99,7 @@ An approval does not require the identity to be current. A revoked or expired id
   Days the holder has to answer, from 1 to 90.
 </ParamField>
 
-A wallet can have one open request per scope from your instance. Requests made in the Issuer Portal count toward this.
+A wallet can have one open request per scope from your instance, and at most five open requests from it in all. Requests made in the Issuer Portal count toward both.
 
 ## Response Fields
 
@@ -95,6 +109,7 @@ A wallet can have one open request per scope from your instance. Requests made i
     <ResponseField name="walletAddress" type="string">Checksummed.</ResponseField>
     <ResponseField name="scope" type="string">`AGE`, `COUNTRY` or `FULL_KYC`.</ResponseField>
     <ResponseField name="scopeLabel" type="string">`Reveal age`, `Reveal country` or `Reveal full KYC`.</ResponseField>
+    <ResponseField name="predicates" type="array">The fixed predicate list of the scope, as in the table above.</ResponseField>
     <ResponseField name="referenceUrl" type="string">As normalised, or `null`.</ResponseField>
     <ResponseField name="message" type="string">As stored, or `null`.</ResponseField>
     <ResponseField name="status" type="string">`OPEN`.</ResponseField>
@@ -102,7 +117,9 @@ A wallet can have one open request per scope from your instance. Requests made i
     <ResponseField name="createdAt" type="string">ISO 8601.</ResponseField>
     <ResponseField name="expiresAt" type="string">ISO 8601.</ResponseField>
     <ResponseField name="respondedAt" type="string">`null` until the request is answered or cancelled.</ResponseField>
-    <ResponseField name="proofLevel" type="string">`null` until the request is approved.</ResponseField>
+    <ResponseField name="proofLevel" type="string">`null` until the holder answers with an envelope.</ResponseField>
+    <ResponseField name="recipientKeyId" type="string">The ID of the record key the holder must encrypt to, 16 lowercase hex characters.</ResponseField>
+    <ResponseField name="envelope" type="object">`null` until the holder answers with an envelope.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -112,7 +129,7 @@ curl -X POST "https://api.trusset.org/customers/api/disclosure-requests" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: trusset_your_key_here" \
   -d '{
-    "walletAddress": "0x801D3b83882B1047fb2CeB6C097C3ae806D8D028",
+    "walletAddress": "0x4b7250ae316D20Ea2c1d74Ece6414F4f192cF002",
     "scope": "COUNTRY",
     "referenceUrl": "https://acme-capital.example/onboarding/4711",
     "message": "Please confirm your country of residence for your account opening",
@@ -127,7 +144,7 @@ const response = await fetch('https://api.trusset.org/customers/api/disclosure-r
     'X-API-Key': 'trusset_your_key_here'
   },
   body: JSON.stringify({
-    walletAddress: '0x801D3b83882B1047fb2CeB6C097C3ae806D8D028',
+    walletAddress: '0x4b7250ae316D20Ea2c1d74Ece6414F4f192cF002',
     scope: 'COUNTRY',
     referenceUrl: 'https://acme-capital.example/onboarding/4711',
     message: 'Please confirm your country of residence for your account opening',
@@ -143,22 +160,38 @@ const { success, data, error } = await response.json();
 {
   "success": true,
   "data": {
-    "id": "cmg7q3v2k0004lq08h2z9x6de",
-    "walletAddress": "0x801D3b83882B1047fb2CeB6C097C3ae806D8D028",
+    "id": "cmi6q2x8v0004l50c7k3d9m1r",
+    "walletAddress": "0x4b7250ae316D20Ea2c1d74Ece6414F4f192cF002",
     "scope": "COUNTRY",
     "scopeLabel": "Reveal country",
+    "predicates": ["EEA_RESIDENT", "RESIDENCY_ON_FILE"],
     "referenceUrl": "https://acme-capital.example/onboarding/4711",
     "message": "Please confirm your country of residence for your account opening",
     "status": "OPEN",
     "environment": "DEV",
-    "createdAt": "2026-09-30T09:30:00.000Z",
-    "expiresAt": "2026-10-14T09:30:00.000Z",
+    "createdAt": "2026-11-20T09:30:00.000Z",
+    "expiresAt": "2026-12-04T09:30:00.000Z",
     "respondedAt": null,
-    "proofLevel": null
+    "proofLevel": null,
+    "recipientKeyId": "84566958631088a4",
+    "envelope": null
   },
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2026-09-30T09:30:00.000Z"
+    "timestamp": "2026-11-20T09:30:00.000Z"
+  }
+}
+```
+```json 409 No Record Key
+{
+  "success": false,
+  "error": {
+    "code": "RECIPIENT_KEY_REQUIRED",
+    "message": "Register the record key of this instance first. The holder encrypts the disclosure to it, and only your local tool can open it."
+  },
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-11-20T09:30:00.000Z"
   }
 }
 ```
@@ -174,5 +207,11 @@ const { success, data, error } = await response.json();
 | `INVALID_MESSAGE` | `400` | `message` is not a string, or is longer than 280 characters |
 | `INVALID_EXPIRY` | `400` | `expiresInDays` is not an integer from 1 to 90 |
 | `INSTANCE_NOT_FOUND` | `404` | The instance behind your key no longer exists or is archived |
+| `ENCRYPTED_DISCLOSURES_NOT_ENABLED` | `409` | A production instance whose organisation Trusset has not enabled yet |
+| `RECIPIENT_KEY_REQUIRED` | `409` | Your instance has no active record key. Register one with [Set Record Key](/endpoints/customers/set-kyc-record-key) |
 | `DUPLICATE_REQUEST` | `409` | The wallet already has an open request for this scope from your instance |
+| `TOO_MANY_OPEN_REQUESTS` | `409` | The wallet already has five open requests from your instance |
+| `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 disclosure request changes per minute |
 | `CREATE_DISCLOSURE_REQUEST_FAILED` | `500` | The request could not be created. A mixed-case `walletAddress` with a wrong checksum also ends here |
+
+`RECIPIENT_KEY_RETIRED` never comes from this call. The holder meets it when approving a request whose record key you replaced since.

@@ -1,10 +1,10 @@
 ---
 title: "KYC-STARKs concepts"
 sidebarTitle: "Concepts"
-description: "The parts of a kycHash: leaves, hiding commitments, the Merkle root and claim descriptors."
+description: "The parts of a kycHash: leaves, hiding commitments, the Merkle root, claim descriptors, the signed header and single-leaf disclosure."
 ---
 
-A `kycHash` is the Merkle root over one leaf per KYC field. Each leaf commits to a value without revealing it, and a claim descriptor records what the operator asserts about it.
+A `kycHash` is the Merkle root over one leaf per KYC claim. Each leaf commits to a value with a salted commitment, names the hub predicate it proves, and carries a claim descriptor that records what the operator asserts about it. A signed header binds the root to one attestation on the identity hub.
 
 The formulas below use `‖` for byte concatenation. `Rescue` is Rescue-Prime 64/256 over the Goldilocks field, the one hash used everywhere in the tool. Every call is prefixed with a distinct 32-byte domain tag; [Security model](/tools/kyc-starks/security-model#domain-separation) lists all ten.
 
@@ -16,15 +16,17 @@ That number is folded into every per-subject key, every commitment nonce and eve
 
 ## Leaves
 
-Every field that carries a predicate becomes a leaf. A field can carry several predicate instances, for example an age threshold at 18 and another at 21, and then it becomes several leaves.
+Every field that carries a predicate instance becomes a leaf. A field can carry several predicate instances, for example an age threshold at 18 and another at 21, and then it becomes several leaves.
 
-The first instance keeps the bare field name. Later instances get a suffix derived from their parameters, so the name is stable across runs and safe as a file name. Examples: `dateOfBirth@7665d` for a 21-year threshold, `investorType@PROFESSIONAL` for a tier floor, `nationality@country_allowlist` for a list, `firstName@max128` for a commitment-only instance. The leaf name is the proof file's basename, `proofs/<leafName>.bin`, and the name a revocation refers to.
+The first instance keeps the bare field name. Later instances get a suffix derived from their parameters, so the name is stable across runs and safe as a file name. Examples: `country@country_allowlist` for the allowlist instance of `country` in the 3.1 config, `dateOfBirth@7665d` for a 21-year threshold, `investorType@PROFESSIONAL` for a tier floor, `nationality@country_allowlist` for a list, `firstName@max128` for a commitment-only instance. The leaf name is the proof file's basename, `proofs/<leafName>.bin`, and the name a revocation refers to.
 
-Each leaf carries a witness (the field value), a circuit, public inputs, resolved parameters, a commitment, a proof, and in version 3 a binding block. The circuits are on [Circuits](/tools/kyc-starks/circuits).
+Each leaf carries a witness (the field value), a circuit, public inputs, resolved parameters, a commitment, a proof, and since version 3 a binding block. The circuits are on [Circuits](/tools/kyc-starks/circuits).
+
+An instance marked `optional` is left out when the subject does not meet it. The 3.1 config proves `country` against the EEA list this way, so a resident outside the EEA still gets a bundle, without the `EEA_RESIDENT` leaf.
 
 ## Hiding commitments
 
-The field value never appears in the bundle. What appears is a commitment to it:
+No field value appears in clear text in a 3.1.0 bundle. What the manifest carries is a commitment to it:
 
 ```text
 commitment = Rescue( bytes_to_field(COMMITMENT_TAG)
@@ -37,6 +39,8 @@ commitment = Rescue( bytes_to_field(COMMITMENT_TAG)
 `witness_felts` is the circuit's canonical field-element encoding of the value: one element holding `dob_days` for `age_threshold`, and one holding the tier code for `tier_threshold`. The string circuits take the NFC-normalised UTF-8 bytes, append a `0x01` terminator, and chunk the result into 7-byte little-endian limbs. They then zero-pad to a fixed count: 12 elements for `set_membership`, 20 for `preimage_knowledge` and `commitment_only`. Unicode NFC normalisation happens first, so a composed and a decomposed spelling of the same name commit to the same value.
 
 The nonce is 32 bytes derived per leaf through HKDF from a per-subject key, never reused across leaves or subjects. It is what makes the commitment hiding. A date of birth has only a few tens of thousands of plausible values, and without the nonce none of them can be confirmed against the commitment. The nonce and the plaintext value are stored only in `secrets.enc`, encrypted, on the operator's machine.
+
+The commitment hides the value; the proof does not. A predicate leaf's STARK reveals the value it is about to whoever holds the proof, as set out on [What a proof reveals](/tools/kyc-starks/overview#what-a-proof-reveals). Share a proof only with a party entitled to that value.
 
 The circuit id and the length prefix are part of the preimage. A commitment minted under one circuit therefore cannot be re-read as a commitment under another. A two-element witness cannot be confused with a one-element witness followed by a longer nonce.
 
@@ -71,7 +75,7 @@ The last component is present only on leaves that carry a binding block, which i
 
 ## The binding digest
 
-A version 3 leaf records, in `binding`, what it asserts and for how long:
+A version 3 leaf records, in `binding`, what it asserts and for how long, and a 3.1.0 leaf also which hub predicate it proves:
 
 | Block | Contents |
 |---|---|
@@ -81,6 +85,7 @@ A version 3 leaf records, in `binding`, what it asserts and for how long:
 | `descriptor.evidenceRef` | optional operator-side case reference |
 | `validity` | `from`, optional `until`, `basisAsOf`, all in `epochDays` |
 | `listVersion` | for `set_membership`: `listId`, `version`, `root`, `contentHash` |
+| `predicate` | 3.1.0: the hub predicate the leaf proves, such as `ADULT`, `EEA_RESIDENT` or `INVESTOR_CLASS`. Absent on a `commitment_only` leaf and on a leaf that proves no predicate |
 
 The whole block is hashed as compact JSON with keys sorted at every depth:
 
@@ -88,7 +93,7 @@ The whole block is hashed as compact JSON with keys sorted at every depth:
 binding_digest = Rescue( LEAF_BIND_TAG ‖ canonical_json(binding) )
 ```
 
-Editing a descriptor after the fact therefore changes the leaf hash, the root and the signature. A descriptor that could be swapped freely would be decoration; this one is evidence.
+Editing a descriptor or a predicate after the fact therefore changes the leaf hash, the root and the signatures. A leaf cannot be relabelled as a predicate it does not prove, and a descriptor that could be swapped freely would be decoration; this one is evidence.
 
 Nothing in a binding block is proved by a circuit. A validity window is a signed assertion by the issuer about the period it stands behind a claim. `basisAsOf` is the day the underlying evidence was examined, which is deliberately separate from `from`. A passport checked in January and used for a March issuance records January in `basisAsOf` and March in `from`. The gap is the staleness a reviewer wants to see.
 
@@ -105,30 +110,45 @@ The leaf hashes of one subject are folded into one root:
 
 That root is the `kycHash`. It is written to `kycHash.hex`, recorded as `manifest.kycHash`, and printed in the batch index CSV; the three values are the same. Because the tree is sorted by hash, its shape depends only on the set of leaves, not on the order of fields in the config. The prover reorders `manifest.leaves` to match the tree.
 
-This is the `merkleVersion: 2` construction. Bundles from before version 2.1 carry no `merkleVersion` and were built with a version 1 construction that the verifier still supports; [Circuits](/tools/kyc-starks/circuits#merkle-root-construction) has both.
+This is the `merkleVersion: 2` construction. A 3.1.0 bundle uses `merkleVersion: 3`: the same tree with the root wrapped under its own tag, `Rescue(MERKLE_ROOT_V3_TAG ‖ inner_root ‖ u64_le(leaf_count) ‖ 0x02)`, and an inclusion path for every leaf. Bundles from before version 2.1 carry no `merkleVersion` and were built with a version 1 construction that the verifier still supports; [Circuits](/tools/kyc-starks/circuits#merkle-root-construction) has all three.
+
+## The signed header
+
+A 3.1.0 bundle carries `header.json` and `header.sig`. The header names the root, the wallet, `epochDays`, the attester, the chain id, the identity hub, the hub key id of the operator key, the Merkle version and the leaf count. The operator key signs it over 155 fixed bytes, laid out as Solidity's `abi.encodePacked` of the same fields. The same four chain values sit in the manifest's `chain` block, so the manifest signature covers them too.
+
+The header is what ties a bundle to one attestation. A verifier compares it with the attestation the hub holds for that attester and wallet, and checks its signature against the key the hub publishes at `operatorKeyAt(attester, keyId)`. Trusset does exactly that, and nothing more with the proofs: it never receives them.
+
+## Single-leaf disclosure
+
+Every leaf of a 3.1.0 bundle has its inclusion path: the sibling hashes from the leaf up to the root, merged smaller first, so the path carries no direction bits. `disclosures/<leaf>.json` holds the leaf exactly as in the manifest, its path and the signed header. With the leaf's proof file it verifies on its own: the header signature, the leaf, the leaf hash under the header's wallet and date, the path to the header's root, and the STARK.
+
+A holder can therefore show one claim without the rest of the bundle. The path's siblings are hashes over salted commitments and reveal nothing about the other fields. The disclosed leaf's own proof reveals its value, so disclose a leaf only to a party entitled to it.
 
 ## Disclosure classes
 
-Every leaf records how much of its value a reader of the bundle can learn, in `manifest.leaves[].disclosure`:
+Every leaf records in `manifest.leaves[].disclosure` how it was produced:
 
 | Class | Meaning |
 |---|---|
-| `plaintext` | The value is also written outside the zk layer, in the batch index CSV and in `manifest.passthrough`. The proof adds integrity, not privacy. |
-| `predicate` | Only the predicate outcome is meaningful to a counterparty. The value is hidden. |
-| `commitment_only` | A hiding commitment and a leaf hash, no STARK. The value is hidden and nothing is proved about it. |
+| `predicate` | A STARK proves a predicate about the committed value. The proof also reveals the value to whoever holds it. |
+| `commitment_only` | A hiding commitment and a leaf hash, no STARK. The value stays hidden and nothing is proved about it. |
+| `plaintext` | Bundles before 3.1 only. The value is also written in clear text to the batch index CSV and to `manifest.passthrough`. |
 
-The tool assigns `plaintext` to `country` and `investorType` whatever predicate they carry, because it always writes those two values to the index CSV and to the manifest's passthrough block. `country` is mandatory in every record; `investorType` is optional but takes a configured default when the column is absent. For the config that `init` writes, a counterparty learns:
+For the config that `init` writes under 3.1:
 
-| Field | Circuit | Disclosure | What a counterparty learns |
+| Leaf | Circuit | Predicate | In clear text anywhere |
 |---|---|---|---|
-| `country` | `set_membership` | `plaintext` | The exact value, from the CSV and `passthrough` |
-| `investorType` | `tier_threshold` | `plaintext` | The exact value, same sources |
-| `nationality` | `set_membership` | `predicate` | Only that it is in the committed allowlist |
-| `documentIssuingCountry` | `set_membership` | `predicate` | Only that it is in the committed allowlist |
-| `dateOfBirth` | `age_threshold` | `predicate` | Only that the age is at or above the recorded threshold |
-| `firstName`, `lastName`, `documentType`, `documentNumber` | `commitment_only` | `commitment_only` | Only that a commitment exists and is in the root |
+| `country` | `set_membership` on `eea`, optional | `EEA_RESIDENT` | No. Revealed by its proof |
+| `country@country_allowlist` | `set_membership` on `country_allowlist` | `RESIDENCY_ON_FILE` | No. Revealed by its proof |
+| `nationality` | `set_membership` | `CITIZENSHIP_ON_FILE` | No. Revealed by its proof |
+| `documentIssuingCountry` | `set_membership` | none | No. Revealed by its proof |
+| `dateOfBirth` | `age_threshold` | `ADULT` | No. Revealed by its proof |
+| `investorType` | `tier_threshold` at the subject's own class | `INVESTOR_CLASS` | The class is the attestation's investor class, on chain by design |
+| `firstName`, `lastName`, `documentType`, `documentNumber` | `commitment_only` | none | No |
 
-`softExpiryDays` and `hardExpiryDays` are passthrough integers. No circuit witnesses them and no verifier evaluates them; only the manifest signature covers them.
+`softExpiryDays` and `hardExpiryDays` are the only passthrough values. No circuit witnesses them; the manifest signature covers them, and they set the attestation's expiries in `attestation.json`.
+
+A bundle before 3.1 marks `country` and `investorType` `plaintext` and writes both in clear text to the index CSV and `manifest.passthrough`. Trusset refuses such a bundle with `PERSONAL_DATA_IN_MANIFEST`.
 
 ## List versions
 

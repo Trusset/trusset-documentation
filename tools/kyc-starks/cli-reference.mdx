@@ -14,7 +14,7 @@ All npm commands run from the repository root, where `config.json`, `input/` and
 npm run init -- [flags]
 ```
 
-Generates keys, writes `config.json`, records version 1 of every allowlist source it finds, checks the environment, and prints the operator public key. Without flags and with a terminal attached it prompts for the four issuer values. Nothing is destructive: an existing `config.json` or key file is kept and reported unless `--force` is given.
+Generates the operator keys into a key store, writes `config.json`, records version 1 of every allowlist source it finds, checks the environment, and prints the operator public key. With `--chain-id`, `--hub` and `--attester` it writes a 3.1.0 config; without them, a 3.0.0 one. Without flags and with a terminal attached it prompts for the four issuer values. It asks for the key file's passphrase, at least 12 characters, or reads it from `TRUSSET_KYC_KEY_PASSPHRASE`. Nothing is destructive: an existing `config.json` or key file is kept and reported unless `--force` is given.
 
 | Flag | Meaning |
 |---|---|
@@ -23,11 +23,24 @@ Generates keys, writes `config.json`, records version 1 of every allowlist sourc
 | `--issuer-identifier <id>` | Identifier under that scheme |
 | `--issuer-jurisdiction <cc>` | Supervising jurisdiction, ISO 3166-1 alpha-2 |
 | `--key-id <label>` | Stable label for the signing key; default `issuing-YYYY-MM` for the current month |
+| `--chain-id <n>` | 3.1: the chain of the identity hub the bundles are attested on |
+| `--hub <address>` | 3.1: the identity hub's address, all lowercase or correctly checksummed |
+| `--attester <address>` | 3.1: the wallet that attests on the hub |
+| `--hub-key-id <n>` | 3.1: the hub's key id for this operator key. Default 1 |
+| `--key-store <kind>` | `file` (encrypted, the default for 3.1), `keychain`, or `env` (a plaintext `.trusset/keys.env`, for CI) |
 | `--force` | Replace an existing `config.json` and key file. Every existing bundle becomes unreproducible |
 | `--non-interactive` | Never prompt; fail if a required value is missing |
 | `--json` | Emit the report as JSON |
 
 Exit 0 when the tree is ready, 1 when a blocking check failed or a required value was missing. An empty `input/` is reported and does not block.
+
+### issue
+
+```bash
+npm run issue -- [flags]
+```
+
+3.1: reads `input/`, validates every row, proves every valid subject, and writes 3.1.0 bundles, with their headers, disclosures and `attestation.json`, and the index file to `output/`. Refuses a config that does not emit `3.1.0`. Asks for the key file's passphrase, except under `--dry-run`. Takes the same flags as `start`, below.
 
 ### start, hash
 
@@ -35,7 +48,7 @@ Exit 0 when the tree is ready, 1 when a blocking check failed or a required valu
 npm start -- [flags]
 ```
 
-`npm run hash` is the same command. Reads `input/`, validates every row, proves every valid subject, writes bundles and the index file to `output/`. Needs both keys loaded, except under `--dry-run`.
+`npm run hash` is the same command. It runs the same batch for whatever version the config names, which is how a config that still emits 3.0.0 keeps working. Needs the keys, except under `--dry-run`.
 
 | Flag | Meaning |
 |---|---|
@@ -54,7 +67,7 @@ Exit 0 when every row produced a bundle, 2 when some did and some failed, 1 when
 npm run verify -- <wallet> [flags]
 ```
 
-Verifies `output/<wallet>`, or one subject of an archive. `<wallet>` is the checksummed address printed by `npm start`, which is the bundle directory name. At least one anchor is required.
+Verifies `output/<wallet>`, or one subject of an archive. `<wallet>` is the checksummed address printed by `npm run issue`, which is the bundle directory name. At least one anchor is required, or `--rpc-url`.
 
 | Flag | Meaning |
 |---|---|
@@ -65,6 +78,7 @@ Verifies `output/<wallet>`, or one subject of an archive. `<wallet>` is the chec
 | `--as-of-date <YYYY-MM-DD>` | Evaluate entitlement on that day. Exclusive with `--as-of-block` |
 | `--now <YYYY-MM-DD>` | Treat that day as today when evaluating validity windows. Default: the system clock |
 | `--archive <file>` | Verify from an archive instead of `output/<wallet>`; the wallet selects the subject |
+| `--rpc-url <url>` | 3.1: read the attester's operator key and the attestation from the hub the header names, over `eth_chainId` and `eth_call` only, use them as the anchors, and report any difference between the hub and the bundle. Exit 2 on a difference |
 | `--accept-stub` | Accept a bundle with `mode: "stub"` |
 | `--strict` | No-op. Strict mode has been the default since tool version 2.0 |
 | `--json` | Print the report as JSON |
@@ -83,9 +97,21 @@ Prints the resolved configuration:
 - the tier map,
 - each list's root, depth and size,
 - the key environment variable names, the epoch source and the config hash,
-- the operator public key, when the signing key is loaded,
+- the operator public key, when the keys can be unlocked,
 - every leaf's claim descriptor,
 - the registry summary. It works with an unpinned epoch and without keys, in which case it says the key is unavailable. `--json` emits the same as one object, including `configHash`, `epochDays`, `asOfDate` and `unpinnedEpoch`.
+
+### key
+
+```bash
+npm run key -- create [--key-file <path> | --keychain] [--force] [--json]
+npm run key -- encrypt [--from <keys.env>] [--key-file <path> | --keychain] [--force] [--json]
+npm run key -- show [--verify] [--lei-hash <hex>] [--metadata-uri <uri>] [--json]
+```
+
+`create` generates a new signing key and master key into an encrypted key file, default `.trusset/operator.key`, or the macOS keychain. `encrypt` moves existing keys, from a `keys.env` file or the environment, into a store; the public key does not change. Both print the `keyStore` line to put under `security` in `config.json`. `--service` and `--account` name the keychain entry.
+
+`show` prints the public key, the key store, the hub key id and attester from `config.json`, and the `setAttesterProfile(operatorKey, leiHash, metadataURI)` calldata to send from the attester wallet. `leiHash` defaults to the keccak256 of the issuer's LEI. `--verify` unlocks the store and checks it holds the key it names. The tool never sends the transaction.
 
 ### list-version
 
@@ -93,7 +119,7 @@ Prints the resolved configuration:
 npm run list-version -- --list-id <id> --source <file> [--effective-date <YYYY-MM-DD>] [--note <text>] [--allow-duplicates]
 ```
 
-Records a new authoritative version of an allowlist in `config/registry/lists/<id>.json`, signed with the signing key. `--effective-date` defaults to today and also accepts a days-since-1970 integer. `--allow-duplicates` dedupes repeated entries instead of failing. Refuses unchanged values and a start date on or before the current version's. Exit 0 recorded, 1 refused, 64 usage. Details on [Registries and archives](/tools/kyc-starks/registries-and-archives#list-versions).
+Records a new authoritative version of an allowlist in `config/registry/lists/<id>.json`, signed with the signing key. A 3.1 setup records `eea` this way, from `config/list_commitments/eea.source.txt`. `--effective-date` defaults to today and also accepts a days-since-1970 integer. `--allow-duplicates` dedupes repeated entries instead of failing. Refuses unchanged values and a start date on or before the current version's. Exit 0 recorded, 1 refused, 64 usage. Details on [Registries and archives](/tools/kyc-starks/registries-and-archives#list-versions).
 
 ### anchor
 
@@ -129,7 +155,7 @@ Builds one self-contained archive, or reads one back and re-checks its integrity
 npm run decrypt
 ```
 
-Reserved, not implemented. It prints that the self-audit round trip it would perform is exercised by `prover/tests/end_to_end.rs`, and exits 70. The suggested alternative is to re-run `npm start` over the original records with the same pinned date and master key, and compare byte for byte.
+Reserved, not implemented. It prints that the self-audit round trip it would perform is exercised by `prover/tests/end_to_end.rs`, and exits 70. The suggested alternative is to re-run the batch over the original records with the same pinned date and master key, and compare byte for byte.
 
 ### build
 
@@ -139,7 +165,7 @@ npm run build
 
 Runs `scripts/build.sh` on its own: `cargo build --release --workspace`, the WASM verifier when the `wasm32-unknown-unknown` target is installed, and `tsc` for the CLI. `npm install` runs the same script as its postinstall step.
 
-`--json` is accepted by `init`, `hash`, `verify` and `show` only. The registry and archive commands pass their output straight through from the native binary.
+`--json` is accepted by `init`, `hash`, `issue`, `verify`, `show` and `key` only. The registry and archive commands pass their output straight through from the native binary.
 
 ## Native binaries
 
@@ -147,7 +173,7 @@ The npm commands wrap five binaries under `target/release/`. They can be called 
 
 ### trusset-prover
 
-The proving engine. It reads one JSON job from stdin, emits newline-delimited JSON events on stdout, and writes bundles. `npm start` builds the job from `config.json` and the input records; the job schema is in `docs/ARCHITECTURE.md` and `prover/src/job.rs`.
+The proving engine. It reads one JSON job from stdin, emits newline-delimited JSON events on stdout, and writes bundles. `npm run issue` and `npm start` build the job from `config.json` and the input records, and hand the decrypted keys over on the first line of stdin; the job schema is in `docs/ARCHITECTURE.md` and `prover/src/job.rs`.
 
 Events: `start`, `subject_start`, `leaf_proved` (with `proof_bytes` and `ms`), `leaf_failed` (dry run only), `subject_done`, `subject_failed` (with `error_code` and `message`), `done`. Stderr carries unstructured logs, which the CLI prefixes with `[prover]`.
 
@@ -168,9 +194,10 @@ trusset-verifier-cli (--bundle <DIR> | --archive <FILE> [--subject <0xADDR>])
                      [--public-key <HEX>] [--root <HEX>]
                      [--as-of-block <N> --chain-id <N>] [--as-of-date <D>] [--now <D>]
                      [--registry <DIR>] [--accept-stub] [--strict] [--json]
+trusset-verifier-cli --disclosure <FILE> [--proof <FILE>] [--wallet <0xADDR>] --public-key <HEX> [--json]
 ```
 
-Exactly one source, at least one anchor. `--subject` selects one subject of an archive; without it every subject is verified. `--registry` names the signed registry root for as-of resolution, default `config/registry` relative to the working directory, and is ignored when reading an archive. Dates accept `YYYY-MM-DD` or a days-since-1970 integer. Exit codes 0, 2, 3, 64 and 66 as on [Verification](/tools/kyc-starks/verification#exit-codes).
+Exactly one source, at least one anchor. `--disclosure` verifies one 3.1 disclosed leaf on its own and needs `--public-key`; `--proof` defaults to `../proofs/<leaf>.bin` next to it, and `--wallet` names the wallet the disclosure must name. [Verification](/tools/kyc-starks/verification#a-single-disclosed-leaf) has the checks. `--subject` selects one subject of an archive; without it every subject is verified. `--registry` names the signed registry root for as-of resolution, default `config/registry` relative to the working directory, and is ignored when reading an archive. Dates accept `YYYY-MM-DD` or a days-since-1970 integer. Exit codes 0, 2, 3, 64 and 66 as on [Verification](/tools/kyc-starks/verification#exit-codes).
 
 ### trusset-registry
 
@@ -181,7 +208,7 @@ trusset-registry revoke --bundle <DIR> --effect lapsed|void_ab_initio --reason <
 trusset-registry show
 ```
 
-All four take `--registry <DIR>`, default `config/registry`. Every write needs `TRUSSET_KYC_SIGNING_KEY` in the environment. `show`, which has no npm wrapper, prints every list version with its window, every anchor and every revocation. Exit 0 recorded, 1 failed, 64 usage.
+All four take `--registry <DIR>`, default `config/registry`. Every write needs the signing key: the npm commands hand it over on stdin, and a direct call reads `TRUSSET_KYC_SIGNING_KEY`. `show`, which has no npm wrapper, prints every list version with its window, every anchor and every revocation. Exit 0 recorded, 1 failed, 64 usage.
 
 ### trusset-archive
 
@@ -198,16 +225,18 @@ Building needs no keys. Exit 0, 1 or 64.
 trusset-list-commit --list-id <ID> --source <FILE> --output <FILE> [--allow-duplicates]
 ```
 
-The version 2 way of committing a list: it writes a bare JSON file with the values, the root, the depth, the source SHA-256, and no version history. `list-version` runs the same code and records the result in the registry instead, which is what a version 3.0.0 run requires. Exit 0, 64 usage, 65 bad data, 66 unreadable source, 73 cannot write.
+The version 2 way of committing a list: it writes a bare JSON file with the values, the root, the depth, the source SHA-256, and no version history. `list-version` runs the same code and records the result in the registry instead, which is what a version 3.0.0 or 3.1.0 run requires. Exit 0, 64 usage, 65 bad data, 66 unreadable source, 73 cannot write.
 
 ## Environment variables
 
 | Variable | Read by | Meaning |
 |---|---|---|
-| `TRUSSET_KYC_MASTER_KEY` | prover, `npm start` | 32-byte hex master key. Wraps per-subject keys, derives every nonce under deterministic mode. The name is configurable through `security.masterKeyEnv`; the CLI forwards the value under this canonical name |
-| `TRUSSET_KYC_SIGNING_KEY` | prover, registry, `npm start`, `show` | 32-byte hex ed25519 seed. Signs manifests and registries. Configurable through `manifest.signingKeyEnv` |
+| `TRUSSET_KYC_KEY_PASSPHRASE` | the CLI | The key file's passphrase, for one unattended command. Otherwise the CLI asks on the terminal. Never passed on to a binary |
+| `TRUSSET_KYC_MASTER_KEY` | prover, the CLI | 32-byte hex master key, read only when no `security.keyStore` is configured. For CI. The name is configurable through `security.masterKeyEnv` |
+| `TRUSSET_KYC_SIGNING_KEY` | prover, registry, the CLI | 32-byte hex ed25519 seed, read only when no key store is configured. For CI. Configurable through `manifest.signingKeyEnv` |
+| `TRUSSET_KYC_KEYS_STDIN` | prover, registry | Set to `1` by the CLI when it hands the keys over on the first stdin line. The CLI then removes the key variables from the child's environment |
 | `TRUSSET_KYC_NEW_MASTER_KEY` | prover | The new master key for `--rekey-subject` |
-| `TRUSSET_KYC_EPOCH_DAYS` | `npm start` | The batch date when `security.epochDaysSource` is `env:TRUSSET_KYC_EPOCH_DAYS`. Any variable name can be used in the config |
+| `TRUSSET_KYC_EPOCH_DAYS` | `npm run issue`, `npm start` | The batch date when `security.epochDaysSource` is `env:TRUSSET_KYC_EPOCH_DAYS`. Any variable name can be used in the config |
 | `TRUSSET_KYC_DETERMINISTIC` | prover | Set to `1` by the CLI whenever the run is deterministic. Any OS entropy draw while it is set aborts with `E_DETERMINISM_VIOLATION` |
 | `TRUSSET_KYC_SOURCE_COMMIT` | prover | Advisory. Recorded as `manifest.toolchain.sourceCommit` when set |
 | `RUST_BACKTRACE` | prover | Pinned to `0` by the CLI to keep stderr short |

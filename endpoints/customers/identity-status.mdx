@@ -4,7 +4,7 @@ api: 'GET /customers/api/identity/status/{walletAddress}'
 description: 'Query both on-chain and off-chain identity status for a wallet'
 ---
 
-Returns the current identity state from two sources: the identity register your instance writes to, and your customer record. Comparing them shows where chain state and your records disagree.
+Returns the current identity state from two sources: the identity register your instance writes to, and your customer record. On the instance ID register the on-chain side is what the register resolves from the attestations of its trusted attesters on the identity hub. Comparing them shows where chain state and your records disagree.
 
 <Warning>
   A register that cannot be read does not fail this call. It answers `200` with `onChain.unavailable: true` and a zeroed record whose `isVerified` is `false`. Check `unavailable` before you read `isVerified`, or an outage reads as a customer who is not verified.
@@ -24,38 +24,26 @@ Returns the current identity state from two sources: the identity register your 
     <ResponseField name="onChain" type="object">
       The identity as the register reports it. Always an object, never `null`: a wallet the register does not know reads as a zeroed record.
       <Expandable>
-        <ResponseField name="kycHash" type="string">The registered KYC hash. On an ERC-3643 register, the data of the wallet's KYC claim. All zeros when there is none.</ResponseField>
-        <ResponseField name="investorType" type="integer">`1` retail, `2` professional, `3` eligible counterparty, `0` none. Always `0` on an ERC-3643 register.</ResponseField>
-        <ResponseField name="kycProvider" type="string">The wallet that last wrote the identity. On an ERC-3643 register, the trusted issuer of the KYC claim. The zero address when there is none.</ResponseField>
-        <ResponseField name="timestamp" type="integer">Unix seconds of the last write. Always `0` on an ERC-3643 register, except on T-REX 5, where it is the issue time of the KYC claim.</ResponseField>
+        <ResponseField name="kycHash" type="string">The registered KYC hash. On the instance ID register, the root of the attestation the register resolves for the wallet. On an ERC-3643 register, the data of the wallet's KYC claim. All zeros when there is none.</ResponseField>
+        <ResponseField name="investorType" type="integer">`1` retail, `2` professional, `3` eligible counterparty, `0` none. On the instance ID register, the investor class of the attestation, read as `1` when the register does not accept classes from that attester. Always `0` on an ERC-3643 register.</ResponseField>
+        <ResponseField name="kycProvider" type="string">The wallet that wrote the identity. On the instance ID register, the attester of the attestation. On an ERC-3643 register, the trusted issuer of the KYC claim. The zero address when there is none.</ResponseField>
+        <ResponseField name="timestamp" type="integer">Unix seconds of the last write. On the instance ID register, the issue time of the attestation. Always `0` on an ERC-3643 register, except on T-REX 5, where it is the issue time of the KYC claim.</ResponseField>
         <ResponseField name="softExpiry" type="integer">Unix seconds, or `0`. Always `0` on an ERC-3643 register.</ResponseField>
         <ResponseField name="hardExpiry" type="integer">Unix seconds, or `0`. Always `0` on an ERC-3643 register.</ResponseField>
-        <ResponseField name="status" type="string">On a Trusset register, `active`, `soft_expired`, `hard_expired` or `revoked`. A wallet that was never verified also reads `revoked`, with an all-zero `kycHash`. On an ERC-3643 register, `active` when verified, `revoked` when on the register but not verified, `none` when not on it. On T-REX 5 a wallet that carries a KYC claim which no longer counts, for example a revoked one, also reads `revoked`.</ResponseField>
+        <ResponseField name="status" type="string">`none` for a wallet the register holds nothing for, with an all-zero `kycHash`. Otherwise, on the instance ID register and a Trusset-compatible register, `active`, `soft_expired`, `hard_expired` or `revoked`. On the instance ID register a suspended attestation also reads `revoked`. On an ERC-3643 register, `active` when verified, `revoked` when on the register but not verified, `none` when not on it. On T-REX 5 a wallet that carries a KYC claim which no longer counts, for example a revoked one, also reads `revoked`.</ResponseField>
         <ResponseField name="statusCode" type="integer">`0` active, `1` soft expired, `2` hard expired, `3` revoked or none.</ResponseField>
-        <ResponseField name="frozen" type="boolean">Whether the register freezes the wallet. Always `false` on an ERC-3643 register, where freezing lives on each token.</ResponseField>
-        <ResponseField name="isVerified" type="boolean">Whether the register counts the wallet as verified. On T-REX 5 that holds once the ONCHAINID the identity factory links to the wallet carries valid claims for the required topics, whether or not the wallet is registered on the register.</ResponseField>
-        <ResponseField name="registerKind" type="string">ERC-3643 only. Always `TREX`.</ResponseField>
+        <ResponseField name="frozen" type="boolean">Whether the register freezes the wallet. On the instance ID register the freeze applies to your instance only. Always `false` on an ERC-3643 register, where freezing lives on each token.</ResponseField>
+        <ResponseField name="isVerified" type="boolean">Whether the register counts the wallet as verified. On the instance ID register that holds when a trusted attester's active, unexpired attestation carries `KYC_DONE` and the wallet is not frozen. On T-REX 5 it holds once the ONCHAINID the identity factory links to the wallet carries valid claims for the required topics, whether or not the wallet is registered on the register.</ResponseField>
+        <ResponseField name="registerKind" type="string">`INSTANCE` on the instance ID register, `TREX` on an ERC-3643 register. Absent on a Trusset-compatible register of your own.</ResponseField>
+        <ResponseField name="attester" type="string">Instance ID register only. The trusted attester whose attestation makes the wallet verified, or `null` when none does. The fields above then describe the first record a trusted attester holds about the wallet, so `status` shows why it does not count.</ResponseField>
+        <ResponseField name="predicates" type="string">Instance ID register only. The predicate bits of that attestation the register accepts from its attester, as a decimal string of the 128-bit mask. `"0"` when no attester verifies the wallet. See [Predicates](/endpoints/customers/introduction#predicates).</ResponseField>
+        <ResponseField name="predicateNames" type="string[]">Instance ID register only. The names of the standard predicate bits set in `predicates`, such as `KYC_DONE` or `EEA_RESIDENT`. Bits outside the standard table are not named.</ResponseField>
         <ResponseField name="trexVersion" type="integer">T-REX 5 only. `5`.</ResponseField>
         <ResponseField name="identityType" type="integer">T-REX 5 only. The identity type the factory records for the ONCHAINID, `2` individual or `3` corporate, or `null`.</ResponseField>
         <ResponseField name="onchainId" type="string">ERC-3643 only. The wallet's ONCHAINID, or `null`.</ResponseField>
-        <ResponseField name="country" type="string">ERC-3643 only. The wallet's country on the register, in alpha-3, or `null`. Always `null` on T-REX 5, which records no country.</ResponseField>
+        <ResponseField name="country" type="string">ERC-3643 only. The wallet's country on the register, in alpha-3, or `null`. Always `null` on T-REX 5, which records no country. The instance ID register holds no country.</ResponseField>
         <ResponseField name="unavailable" type="boolean">Present, and `true`, only when the register could not be read. Every other field is then zeroed and `status` is `none`.</ResponseField>
         <ResponseField name="unavailableReason" type="string">Present with `unavailable`. The code of the failed read, or `READ_FAILED`.</ResponseField>
-        <ResponseField name="migration" type="object">
-          Present only on the Trusset ID Register, for an identity the register move of 10 October 2026 copied and nobody has rewritten since. See [The Trusset ID Register](/endpoints/customers/introduction#the-trusset-id-register).
-          <Expandable>
-            <ResponseField name="previousRegistry" type="string">The register the identity was copied from, lowercased.</ResponseField>
-            <ResponseField name="originalKycProvider" type="string">The wallet that verified the identity on the previous register, lowercased.</ResponseField>
-            <ResponseField name="originalKycProviderName" type="string">That wallet's name as the previous register records it, such as `Trusset Test KYC`, or `null`.</ResponseField>
-            <ResponseField name="originalTimestamp" type="integer">Unix seconds of the original verification.</ResponseField>
-            <ResponseField name="originalSoftExpiry" type="integer">The soft expiry on the previous register, Unix seconds, or `null` when it had none.</ResponseField>
-            <ResponseField name="softExpiryRefreshed" type="boolean">`true` when that soft expiry had passed and the copy moved it to one hour after the copy. `softExpiry` above holds the moved value.</ResponseField>
-            <ResponseField name="migratedAt" type="integer">Unix seconds of the copy. The same value as `timestamp`.</ResponseField>
-            <ResponseField name="migrator" type="string">The migration key that wrote the copy, lowercased. The same wallet as `kycProvider`.</ResponseField>
-            <ResponseField name="migratorName" type="string">`Trusset register migration`.</ResponseField>
-            <ResponseField name="migrationTxHash" type="string">The transaction that wrote the copy, or `null`.</ResponseField>
-          </Expandable>
-        </ResponseField>
       </Expandable>
     </ResponseField>
     <ResponseField name="offChain" type="object">
@@ -69,10 +57,6 @@ Returns the current identity state from two sources: the identity register your 
     </ResponseField>
   </Expandable>
 </ResponseField>
-
-<Note>
-  On an identity copied in the register move, `kycProvider` and `timestamp` show the copy: the migration key and 10 October 2026. The original verifier and the date of the original verification are in `migration`. Read them from there when you report who verified the customer and when.
-</Note>
 
 <RequestExample>
 ```bash cURL
@@ -97,7 +81,7 @@ if (data.onChain.isVerified && data.offChain?.status !== 'verified') {
 </RequestExample>
 
 <ResponseExample>
-```json Response - Trusset
+```json Response - Instance ID Register
 {
   "success": true,
   "data": {
@@ -112,7 +96,11 @@ if (data.onChain.isVerified && data.offChain?.status !== 'verified') {
       "status": "active",
       "statusCode": 0,
       "frozen": false,
-      "isVerified": true
+      "isVerified": true,
+      "registerKind": "INSTANCE",
+      "attester": "0x51A4F0c3B2e8d7A6c5B4e3f2A1d0c9b8e7f6A5D4",
+      "predicates": "291",
+      "predicateNames": ["KYC_DONE", "AML_CLEAR", "EEA_RESIDENT", "RESIDENCY_ON_FILE"]
     },
     "offChain": {
       "status": "verified",
@@ -125,49 +113,6 @@ if (data.onChain.isVerified && data.offChain?.status !== 'verified') {
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
     "timestamp": "2026-09-30T12:10:00.000Z"
-  }
-}
-```
-```json Response - Copied in the Register Move
-{
-  "success": true,
-  "data": {
-    "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
-    "onChain": {
-      "kycHash": "0xffb1f8c219725bd62205597cd7247c85cafeca20ac0a59f8ec6a7b979eaf672c",
-      "investorType": 2,
-      "kycProvider": "0x5Ad87a0621175206b72d10E4b8577b192e7F40aB",
-      "timestamp": 1791605136,
-      "softExpiry": 1822305600,
-      "hardExpiry": 1853841600,
-      "status": "active",
-      "statusCode": 0,
-      "frozen": false,
-      "isVerified": true,
-      "migration": {
-        "previousRegistry": "0xe9114c40934f6fb6bb317935156b731f7a86d006",
-        "originalKycProvider": "0x51a4f0c3b2e8d7a6c5b4e3f2a1d0c9b8e7f6a5d4",
-        "originalKycProviderName": "Trusset Test KYC",
-        "originalTimestamp": 1774083600,
-        "originalSoftExpiry": 1822305600,
-        "softExpiryRefreshed": false,
-        "migratedAt": 1791605136,
-        "migrator": "0x5ad87a0621175206b72d10e4b8577b192e7f40ab",
-        "migratorName": "Trusset register migration",
-        "migrationTxHash": "0xced5047cbdbf04b91d4e82405f905f36868843ac4d0aa6e7c0f8926ef5f37cea"
-      }
-    },
-    "offChain": {
-      "status": "verified",
-      "country": "DEU",
-      "investorType": "PROFESSIONAL",
-      "verifiedAt": "2026-03-21T09:00:00.000Z"
-    }
-  },
-  "error": null,
-  "metadata": {
-    "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2026-10-10T12:10:00.000Z"
   }
 }
 ```
@@ -217,10 +162,14 @@ if (data.onChain.isVerified && data.offChain?.status !== 'verified') {
       "timestamp": 0,
       "softExpiry": 0,
       "hardExpiry": 0,
-      "status": "revoked",
+      "status": "none",
       "statusCode": 3,
       "frozen": false,
-      "isVerified": false
+      "isVerified": false,
+      "registerKind": "INSTANCE",
+      "attester": null,
+      "predicates": "0",
+      "predicateNames": []
     },
     "offChain": null
   },
@@ -271,4 +220,5 @@ if (data.onChain.isVerified && data.offChain?.status !== 'verified') {
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_ADDRESS` | `400` | `walletAddress` is not a valid address |
-| `STATUS_FAILED` | `500` | The customer record could not be read, or no register is configured for the instance's network |
+| `INSTANCE_REGISTER_REQUIRED` | `409` | Your instance is in Trusset mode and has not created its instance ID register yet |
+| `STATUS_FAILED` | `500` | The customer record could not be read, or the request failed unexpectedly |

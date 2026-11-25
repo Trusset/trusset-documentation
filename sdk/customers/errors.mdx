@@ -17,7 +17,7 @@ import {
 } from '@trusset/sdk'
 ```
 
-`ValidationError` is the one that never reaches the network. The SDK raises it from client-side checks, so it costs no request and its message names the offending field.
+`ValidationError` is the one that never reaches the network. The SDK raises it from client-side checks, so it costs no request and its message names the offending field. Its `code` is `VALIDATION_ERROR`, or one of the [KYC proof bundle codes](#kyc-proof-bundle-codes) when a proof bundle is refused before it is sent.
 
 | Class | Status | Fires when | Do |
 |---|---|---|---|
@@ -101,7 +101,7 @@ Every `TrussetError` instance exposes:
 | `KEY_MATERIAL_REJECTED` | 400 | A request body carried a field named for key material or signing on someone's behalf. Trusset never accepts one |
 | `TX_NOT_FOUND` | 404 | The transaction being confirmed has no receipt yet. Wait for it to mine and confirm again |
 | `TX_REVERTED` | 400 | The transaction being confirmed reverted on chain |
-| `TX_WRONG_TARGET` | 400 | The transaction called a different contract than the identity registry |
+| `TX_WRONG_TARGET` | 400 | The transaction called a different contract than the identity register, or the IdentityHub on an instance ID register |
 | `TX_WRONG_FUNCTION` | 400 | The transaction called a different function than the write being confirmed |
 | `TX_TARGET_MISMATCH` | 400 | The transaction acted on a different wallet than the one named in the confirm |
 | `TX_ENTRIES_MISMATCH` | 400 | A batch confirm named entries that do not match the mined transaction. Confirm with the prepared `entries` |
@@ -132,6 +132,47 @@ Every `TrussetError` instance exposes:
 | `SOURCE_UNAVAILABLE` | 409 | The KYC source of a running onboarding is paused or removed |
 | `LIST_REQUIRED` | 400 | A whitelist admission was confirmed without `listId` while several whitelists were open |
 
+## Instance ID register codes
+
+`trusset.customers.identity` raises these on an [instance ID register](/sdk/customers/identity#instance-id-registers).
+
+| Code | Status | Meaning |
+|---|---|---|
+| `INSTANCE_REGISTER_REQUIRED` | 409 | The instance has no ID register yet. Create it in the instance settings of the issuer app |
+| `IDENTITY_HUB_NOT_CONFIGURED` | 501 | The IdentityHub is not deployed on the instance's network yet |
+| `ATTESTER_MISSING` | 403 | None of the instance's registered wallets is a trusted attester of its register. The hub would accept the attestation, but it would not count for the instance. Trust a wallet on the wallet page of the issuer app, signed by a register admin |
+| `UNTRUSTED_ATTESTER` | 403 | The confirmed transaction, or the holder batch, was signed by a wallet the register does not trust |
+| `NOT_VERIFIED_ON_REGISTER` | 409 | The attestation mined, but no trusted attester vouches for the wallet with the predicates the register requires |
+| `BASE_PREDICATE_REQUIRED` | 409 | `revokeClaim` was asked to clear `KYC_DONE`, which carries the verification. Revoke the identity instead |
+| `IDENTITY_SUSPENDED` | 409 | The attestation is suspended, so its claims cannot change |
+| `IDENTITY_SOFT_EXPIRED` | 409 | The identity passed its soft expiry. Verify it again before changing its claims |
+| `IDENTITY_EXPIRED` | 409 | The identity passed its hard expiry. Verify it again before changing its claims |
+| `IDENTITY_NOT_ACTIVE` | 409 | A claim change or proof claim for a wallet with no active attestation. Verify it first |
+| `IDENTITY_NOT_REGISTERED` | 409 | A revoke or claim for a wallet the register holds no active attestation for |
+| `NOTHING_TO_REVOKE` | 409 | The `signerAddress` of a revoke holds no attestation about the wallet, so its revoke would revert. Sign with the record's attester, or freeze the wallet |
+| `KYC_HASH_MISSING` | 409 | A pending row has no root to attest. Dismiss it and verify the customer again |
+| `KYC_HASH_REQUIRED` | 400 | A verify or batch-verify on the instance ID register carries `kycData`, or no `kycHash` on the calldata leg. Send the bundle root or your own salted commitment |
+| `DATA_HASH_REQUIRED` | 400 | An add-claim on the instance ID register carries `dataInput`. Send `dataHash`, your own salted commitment |
+| `NOTHING_TO_ERASE` | 409 | The `signerAddress` of an erase holds no entry about the wallet on the hub |
+| `TX_ATTESTER_MISMATCH` | 400 | The erase confirm found an `Erased` event of another attester than `signerAddress` |
+| `TX_PREDICATES_MISMATCH` | 400 | The mined attestation lacks a predicate the confirm expects, or still carries one it should have cleared |
+| `TX_ROOT_MISMATCH` | 400 | The mined attestation carries another root than the confirm expects |
+| `CHAIN_UNAVAILABLE` | 503 | The register or the chain could not be read just now. Not a verdict: retry |
+
+A revoke that succeeds can carry the warning `STILL_VERIFIED_BY_ANOTHER_ATTESTER` in `result.warnings`. It is not an error: another trusted attester still vouches for the wallet.
+
+### Holder claim codes
+
+| Code | Status | Meaning |
+|---|---|---|
+| `HOLDER_PATH_UNAVAILABLE` | 409 | The instance writes to another register than an instance ID register. Register the queue with your own wallet instead |
+| `HOLDER_BATCH_MISSING` | 409 | `storeHolderSignature` named rows that have no built batch. Call `buildHolderBatch` first |
+| `HOLDER_BATCH_MISMATCH` | 409 | The rows belong to different batches. Store each batch with its own `ids` |
+| `HOLDER_BATCH_EXPIRED` | 409 | The batch passed its deadline. Build it again |
+| `ATTESTER_MISMATCH` | 400 | The batch was built for another attester than the one storing the signature |
+| `INVALID_SIGNATURE` | 400 | The signature does not recover to the attester, and the attester is not a contract wallet |
+| `TX_CLAIM_MISMATCH` | 400 | The confirmed transaction claims another batch than the one stored for the wallet |
+
 ## Hosted verification page codes
 
 These come from the hosted ID link page and from a partner page that drives the same link endpoints. Show the message to the customer; the next step is theirs unless the row says otherwise.
@@ -161,7 +202,24 @@ A link is never used up by any of these answers.
 
 `GET /public/id-links/{token}` returns the link's `note` and `customMessage` to anyone who opens the link, before any wallet sign-in, so neither may carry personal data.
 
-KYC proof flow codes (`NOT_VERIFIED`, `HASH_MISMATCH`, `WALLET_MISMATCH`, `STUB_NOT_ALLOWED`, `INVALID_MANIFEST`, `INVALID_HASH`, `PROOF_REQUIRED`, `INVALID_CLAIM_TYPE`, `NO_SELECTED_CLAIMS`) are documented with fixes in the [KYC proofs troubleshooting table](/sdk/customers/kyc-proofs#troubleshooting).
+## KYC proof bundle codes
+
+Trusset never receives proof bytes: the KYC tool's STARKs are not zero-knowledge, so a proof reveals the value it proves, an age proof the date of birth and a set-membership proof the country. `addClaimsFromProof`, `attestProofs`, `inspectManifest` and `verifyFromManifest` check the bundle before any request and raise these as a `ValidationError` with the code below. `statusCode` is `400` and nothing was sent.
+
+| Code | Fires when |
+|---|---|
+| `PROOFS_NOT_ACCEPTED` | The input, the manifest or one of its leaves carries `proofs`, `proof`, `proofBytes` or `zk` with a value. The API answers a request that carries them with the same code |
+| `PERSONAL_DATA_IN_MANIFEST` | The manifest `passthrough` carries `country` or `investorType`, as 2.x and 3.0 bundles do, or the `passthrough` of a 3.1.0 manifest carries anything besides `softExpiryDays` and `hardExpiryDays`. The API answers the same code. Re-issue the bundle with tool v3.1 |
+| `LOCAL_VERIFICATION_FAILED` | The `verifier` you passed returned `false` or `{ ok: false }`, or threw. `details` holds what it returned or threw |
+| `HEADER_REQUIRED` | A 3.1.0 manifest came without `header` and `headerSignature`, or one of the two came alone |
+| `INVALID_HEADER` | `header` is not `header.json` parsed with exactly its ten keys and their formats, or a header came with a pre-3.1.0 manifest |
+| `INVALID_HEADER_SIGNATURE` | `headerSignature` is not the 64 bytes of `header.sig`, as bytes, hex or base64 |
+| `HEADER_MISMATCH` | The header and the manifest disagree on root, wallet, date, leaf count, Merkle version or chain block |
+| `WALLET_MISMATCH` | The header names another wallet than `walletAddress` |
+
+`ProofErrorCode` types these codes together with the header codes only the API raises: `CHAIN_MISMATCH`, `HUB_MISMATCH`, `ATTESTER_NOT_TRUSTED`, `ATTESTER_MISMATCH`, `OPERATOR_KEY_UNKNOWN`, `UNREGISTERED_OPERATOR_KEY`, `NOT_ATTESTABLE`, `LEAF_LAPSED` and `CHAIN_UNAVAILABLE`. With `{ signer }`, `attestProofs` raises `NO_PROOF_STEPS` when the signed plan held no step that attests a data point, wrapped in a `ConfirmationError` like any failed confirm.
+
+The other KYC proof flow codes (`NOT_VERIFIED`, `HASH_MISMATCH`, `STUB_NOT_ALLOWED`, `INVALID_MANIFEST`, `INVALID_HASH`, `PROOF_REQUIRED`, `INVALID_CLAIM_TYPE`, `NO_SELECTED_CLAIMS`) are documented with fixes in the [KYC proofs troubleshooting table](/sdk/customers/kyc-proofs#troubleshooting).
 
 ## Retry behavior
 
@@ -192,7 +250,7 @@ const trusset = new TrussetClient({
 })
 ```
 
-On-chain write methods raise the request timeout to at least 60 seconds, and `addClaimsFromProof` to 180 seconds, whatever `timeoutMs` says, because the backend verifies a proof bundle on both legs.
+On-chain write methods raise the request timeout to at least 60 seconds, and `addClaimsFromProof`, `attestProofs` and `inspectManifest` to 180 seconds, whatever `timeoutMs` says, because the backend checks a proof bundle against the IdentityHub on both legs.
 
 ## Enable logging
 

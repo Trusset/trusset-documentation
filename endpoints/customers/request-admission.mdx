@@ -28,7 +28,9 @@ The `investorType` is compared with the profile key in any letter case. Admissio
 
 The profile's register mode, recorded when the register was bound, is checked before the customer. See [Which registers can be signed here](/endpoints/customers/introduction#which-registers-can-be-signed-here).
 
-When the profile's register is your instance register itself, registering a wallet there is its admission. Nothing is queued, and the call answers `201` with `admission: null`, `mode: INSTANCE_REGISTER` and a `message`. Register the wallet through [Verify Identity](/endpoints/customers/verify-identity) or the [pending queue](/endpoints/customers/list-pending-verifications) instead.
+When the profile's register is your instance register itself, registering a wallet there is its admission. Nothing is queued, and the call answers `200` with `admission: null`, `mode: INSTANCE_REGISTER` and a `message`. Register the wallet through [Verify Identity](/endpoints/customers/verify-identity) or the [pending queue](/endpoints/customers/list-pending-verifications) instead.
+
+When your instance keeps its customers on its [instance ID register](/endpoints/customers/introduction#the-instance-id-register) and the profile is on chain with a [profile gate](/endpoints/customers/introduction#profile-gates), eligibility is computed from each wallet's attestation. A wallet is eligible as soon as an attester the register trusts vouches for it with the predicates and investor class the profile requires. Nothing is queued, the customer is not checked, and the call answers `200` with `admission: null`, `mode: GATE`, `gateAddress`, `walletAddress` and a `message`. Only `walletAddress` is validated.
 
 When the profile's register is managed outside your instance, in the `EXTERNAL` mode, its owner admits wallets with its own tools. The call is refused with `409 ADMISSIONS_MANAGED_EXTERNALLY`.
 
@@ -95,17 +97,20 @@ The period restarts only on a verification of the customer, through an ID link o
 | Already on the register | `200` | `admission` with `status: ADMITTED`, `alreadyAdmitted: true` |
 | A removal was waiting and the wallet is still on the register | `200` | The removal is cancelled and the admission is `ADMITTED` again. `alreadyAdmitted: true`, `removalCancelled: true`, and `renewed: true` with `reverifiedOutsideTrusset: true` |
 | A removal was waiting and the wallet is already off the register | `201` | The admission is `PENDING` again, `alreadyAdmitted: false` |
-| The profile's register is your instance register | `201` | `admission: null`, `mode: INSTANCE_REGISTER` and a `message` |
+| The profile's register is your instance register | `200` | `admission: null`, `mode: INSTANCE_REGISTER` and a `message` |
+| The profile is checked by its gate on your instance ID register | `200` | `admission: null`, `mode: GATE`, `gateAddress`, `walletAddress` and a `message` |
 
 ## Response Fields
 
 <ResponseField name="data" type="object">
   <Expandable>
-    <ResponseField name="admission" type="object">The admission, as on [List Admissions](/endpoints/customers/list-admissions). `null` with `mode: INSTANCE_REGISTER`.</ResponseField>
-    <ResponseField name="alreadyAdmitted" type="boolean">`true` when the wallet is already on the register. Absent with `mode: INSTANCE_REGISTER`.</ResponseField>
+    <ResponseField name="admission" type="object">The admission, as on [List Admissions](/endpoints/customers/list-admissions). `null` with `mode`.</ResponseField>
+    <ResponseField name="alreadyAdmitted" type="boolean">`true` when the wallet is already on the register. Absent with `mode`.</ResponseField>
     <ResponseField name="removalCancelled" type="boolean">Present and `true` when a waiting removal was cancelled.</ResponseField>
     <ResponseField name="renewed" type="boolean">Present and `true` when the re-verification period started again, so `dueAt` counts from now.</ResponseField>
-    <ResponseField name="mode" type="string">`INSTANCE_REGISTER`, only when the profile's register is your instance register.</ResponseField>
+    <ResponseField name="mode" type="string">`INSTANCE_REGISTER` when the profile's register is your instance register, `GATE` when the profile is checked by its gate on your instance ID register. Absent otherwise.</ResponseField>
+    <ResponseField name="gateAddress" type="string">The profile gate, checksummed. With `mode: GATE` only.</ResponseField>
+    <ResponseField name="walletAddress" type="string">The wallet, checksummed. With `mode: GATE` only.</ResponseField>
     <ResponseField name="message" type="string">Why nothing was queued, with `mode` only.</ResponseField>
   </Expandable>
 </ResponseField>
@@ -260,7 +265,7 @@ const { success, data, error } = await response.json();
 | `ELIGIBILITY_CONFIRMATION_REQUIRED` | `409` | The customer was onboarded under another profile and `confirmEligibility` is not `true` |
 | `REVERIFICATION_REQUIRED` | `409` | The wallet's removal is waiting with reason `LAPSED`, `REVOKED`, `REJECTED` or `REQUIREMENTS_CHANGED`, and `reverifiedOutsideTrusset` is not `true`. Re-verify the customer, or send `reverifiedOutsideTrusset: true` once you have |
 | `ADMISSIONS_MANAGED_EXTERNALLY` | `409` | The profile's register is in the `EXTERNAL` mode, so its owner admits wallets with its own tools |
-| `ELIGIBILITY_REGISTER_NOT_SET` | `409` | The profile has no eligibility register |
+| `ELIGIBILITY_REGISTER_NOT_SET` | `409` | The profile has no eligibility register. On an instance that keeps its customers on its instance ID register, the profile is not on chain yet, so it has no gate either. The message names the remedy |
 | `RATE_LIMIT_EXCEEDED` | `429` | Your instance went over its budget of 120 eligibility requests per minute. See [Rate limits](/endpoints/customers/introduction#rate-limits) |
 | `REQUEST_ADMISSION_FAILED` | `500` | The admission could not be recorded |
 | `CHAIN_UNAVAILABLE` | `503` | A removal was waiting and the register could not be read to tell whether the wallet is still on it. Nothing changed. Retry shortly |

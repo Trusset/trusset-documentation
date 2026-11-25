@@ -1,15 +1,25 @@
 ---
 title: 'Attest Proofs'
 api: 'POST /customers/api/identity/proofs'
-description: 'File proof-backed claims and rotate the on-chain root when the bundle is newer'
+description: 'File chosen leaves of a 3.1 proof bundle and rotate the on-chain root when the bundle is newer'
 ---
 
-Files claims from a bundle and, unlike [Add Claims from Proof](/endpoints/customers/add-claims-from-proof), can rotate the identity's on-chain root to this bundle's root in the same flow. Use it when re-proving a subject against a new batch, where the root on the registry is the old one.
+Files the leaves you choose from a [KYC-STARKs](/tools/kyc-starks/overview) 3.1 bundle and, unlike [Add Claims from Proof](/endpoints/customers/add-claims-from-proof), can rotate the identity's on-chain root to this bundle's root in the same flow. Use it when re-proving a subject against a new batch, where the root on the register is the old one.
 
-It also records a ledger row per confirmed claim, so [List Proofs](/endpoints/customers/list-proofs) can later say which proof backs which slot.
+It also records a ledger row per confirmed claim, so [List Proofs](/endpoints/customers/list-proofs) can later say which leaf backs which claim.
 
 <Warning>
-  The registry keeps one claim per slot. Filing a slot replaces the claim already there, whoever wrote it.
+  Trusset never receives proof bytes. A 3.1 proof reveals the value it is about: an age proof the date of birth, a set-membership proof the country, a tier proof the investor class. Verify the proofs on your side with the tool or the SDK, then send the manifest and its signed header only. A body that carries `proofs`, `proof`, `proofBytes` or `zk` is refused with `400 PROOFS_NOT_ACCEPTED`, and a 2.x or 3.0 bundle with `400 PERSONAL_DATA_IN_MANIFEST`.
+</Warning>
+
+Trusset checks the header signature against the operator key the identity hub publishes for the header's attester, or against the key registered with [Set Operator Key](/endpoints/customers/set-operator-key) when the attester has published none. It checks every leaf, the root and the trust anchors as described on [What Trusset checks](/endpoints/customers/add-claims-from-proof#what-trusset-checks). The plan is built for the attester the header names, so that wallet signs it.
+
+On the [instance ID register](/endpoints/customers/introduction#the-instance-id-register) each leaf proves a [predicate](/endpoints/customers/introduction#predicates), and the plan is one `attest` on the identity hub that writes them all. See [Which predicate a leaf proves](#which-predicate-a-leaf-proves). Nothing is verified on chain: the hub stores the root, the investor class and the predicate bits, and the leaf hashes stay in Trusset's proof ledger.
+
+<Warning>
+  On the instance ID register the `attest` writes the attestation the bundle describes: its root, investor class and expiries, `KYC_DONE` and the predicates of the leaves you file. From the attester's current attestation it keeps the attester statements (`AML_CLEAR`, `SANCTIONS_CLEAR`, `PEP_CLEAR`, `NOT_US_PERSON`, `CONTRACT_HOLDER`) and, when the root is the same, the bundle's predicates it already carries. The hub stores the attestation under the wallet that sends it, so send the step from the attester the header names.
+
+  On a register of your own with the Trusset interface (`registerKind: TRUSSET`) the register keeps one claim per slot, and filing a slot replaces the claim already there, whoever wrote it.
 
   A root rotation rewrites the identity record, not only its root. [Root rotation](#root-rotation) lists what it keeps and what it resets.
 </Warning>
@@ -25,31 +35,33 @@ It also records a ledger row per confirmed claim, so [List Proofs](/endpoints/cu
 </ParamField>
 
 <ParamField body="manifest" type="object" required>
-  The bundle's `manifest.json`, parsed. At most 64 KiB serialized and 32 leaves.
+  The bundle's `manifest.json`, parsed, version `3.1.0`. At most 64 KiB serialized and 32 leaves.
 </ParamField>
 
-<ParamField body="manifestSig" type="string">
-  The 64 raw bytes of `manifest.sig`, base64-encoded. Required whenever an operator key is registered, as on Add Claims from Proof.
+<ParamField body="header" type="object" required>
+  The bundle's `header.json`, parsed.
 </ParamField>
 
-<ParamField body="proofs" type="object">
-  A map of field name to base64 STARK bytes. Under enforcement, verification needs one for every leaf you file. The size caps are those of Add Claims from Proof.
+<ParamField body="headerSignature" type="string" required>
+  The bundle's `header.sig` as `0x` followed by 128 lowercase hex characters.
 </ParamField>
 
 <ParamField body="entries" type="array" required>
-  Which leaves to file and where, 1 to 8 entries. Each names a `fieldName` from the manifest, optionally a `claimType` slot by name, and optionally `expiryDays` for that claim alone.
+  Which leaves to file, 1 to 8 entries. Each names a `fieldName` from the manifest, optionally a `claimType` slot by name, and optionally `expiryDays` for that claim alone. A leaf with no `binding.predicate` is refused with `NOT_ATTESTABLE`.
 
-  A canonical field always files under its own slot. `country` files as `RESIDENCY`, `nationality` as `CITIZENSHIP` and `investorType` as `ACCREDITATION`, and naming another slot is refused with `SLOT_LOCKED`. A leaf with no canonical meaning has no default slot, so it needs an entry naming one of `AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK` or `PEP_CHECK`.
+  On the instance ID register the leaf's predicate decides the claim and `claimType` is ignored. The `INVESTOR_CLASS` leaf is refused with `NOT_ATTESTABLE`: it sets the attestation's investor class and is not a predicate of its own.
 
-  `expiryDays` runs from 0 to 36500, where `0` means no expiry. Omitted, the claim inherits the identity's hard expiry when that is in the future, and the rotated one when the root rotates.
+  On a register of your own a leaf whose predicate has a slot always files under it, and naming another slot is refused with `SLOT_LOCKED`. An `ADULT` leaf has no slot of its own, so its entry names one of `AML`, `TAX_RESIDENCY`, `SANCTIONS_CHECK` or `PEP_CHECK`.
+
+  `expiryDays` runs from 0 to 36500, where `0` means no expiry. Omitted, the claim inherits the identity's hard expiry when that is in the future, and the rotated one when the root rotates. On the instance ID register the expiries come from the bundle, and a value here only adds an `EXPIRY_FROM_BUNDLE` warning.
 </ParamField>
 
 <ParamField body="rootTxHash" type="string">
-  The hash of the mined transaction that registered this bundle's root on the identity. Required on the confirm leg when the bundle's root differs from what the registry holds.
+  Register of your own only. The hash of the mined transaction that registered this bundle's root on the identity. Required on the confirm leg when the bundle's root differs from what the register holds.
 </ParamField>
 
 <ParamField body="txResults" type="array">
-  Send this to confirm. An array of `{ fieldName, txHash }`, one per claim you broadcast.
+  Send this to confirm. An array of `{ fieldName, txHash }`, one per claim you broadcast. On the instance ID register one transaction writes every claim, rotation included, so its hash is read for every entry. A field you leave out comes back `skipped`, unless a rotation was confirmed with `rootTxHash`, which then counts for it. Send at least one entry: a body without `txResults` is read as a calldata request.
 </ParamField>
 
 <ParamField body="claimSignatures" type="array">
@@ -57,30 +69,48 @@ It also records a ledger row per confirmed claim, so [List Proofs](/endpoints/cu
 </ParamField>
 
 <ParamField body="signerAddress" type="string">
-  ERC-3643 register only. The instance wallet that signs the claims. It must hold a CLAIM key on the register's trusted issuer.
+  The wallet you will sign with. When sent, it must be the attester the header names, or the call answers `ATTESTER_MISMATCH`.
 </ParamField>
+
+## Which predicate a leaf proves
+
+Each leaf of a 3.1 bundle names its predicate in `binding.predicate`, inside its leaf hash, so it cannot be relabelled. Trusset checks that the predicate fits the leaf:
+
+| Leaf predicate | Leaf | Claim on the instance ID register | Slot on a register of your own |
+|---|---|---|---|
+| `ADULT` | `age_threshold`, `minAgeDays` at least 6570 | `ADULT` | One you name from the four manual slots |
+| `EEA_RESIDENT` | `set_membership` on the `eea` list | `EEA_RESIDENT` | `RESIDENCY` |
+| `RESIDENCY_ON_FILE` | `set_membership` on an approved list | `RESIDENCY` | `RESIDENCY` |
+| `CITIZENSHIP_ON_FILE` | `set_membership` on an approved list | `CITIZENSHIP` | `CITIZENSHIP` |
+| `TAX_RESIDENCY_ON_FILE` | `set_membership` on an approved list | `TAX_RESIDENCY` | `TAX_RESIDENCY` |
+| `ACCREDITED` | `tier_threshold`, `minTier` at least 2 | `ACCREDITATION` | `ACCREDITATION` |
+| `INVESTOR_CLASS` | `tier_threshold`, `minTier` is the subject's class | Not filed: sets the investor class | `ACCREDITATION` |
+
+`KYC_DONE` is set on every attestation from a bundle. Two entries that file the same claim, such as an `EEA_RESIDENT` and a `RESIDENCY_ON_FILE` leaf on a register of your own, are refused with `DUPLICATE_SLOT`.
 
 ## Root rotation
 
-The registry holds one root per identity. A bundle proved in a later batch has a different root, and its leaves cannot be checked against the old one.
+A register holds one root per identity. A bundle proved in a later batch has a different root, and its leaves cannot be checked against the old one.
 
-When the bundle's root differs from the chain's, the calldata leg returns the root-rotation transaction as the first step and the claim transactions after it. Broadcast the rotation first, then pass its hash back as `rootTxHash` alongside `txResults`.
+On the instance ID register the rotation is the whole plan: one `attest`, `stepType: ROOT_ROTATION`, that writes the attestation the new bundle describes:
 
-On the Trusset register the rotation is `updateIdentity`, which rewrites the whole identity record:
+- The root becomes the bundle's root.
+- The investor class becomes the bundle's class.
+- The soft and hard expiries become the bundle's.
+- The predicates become `KYC_DONE` and those of the leaves you file, plus the attester statements the attester's current attestation carries. Predicates proved under the old root are not carried over.
+- The hub records it under the wallet that sends it, with a new issue time.
 
-- The investor type stays as it is, or comes from the bundle's `passthrough.investorType` when the record has none, and defaults to `RETAIL`.
-- The expiries become the bundle's `softExpiryDays` and `hardExpiryDays` counted from now. Where the bundle states none, the current expiry is kept.
-- The signing wallet becomes the identity's KYC provider.
+Confirm with the transaction's hash in `txResults`. `rootTxHash` is not needed there.
 
-An identity whose kept expiry has already passed is refused with `IDENTITY_EXPIRED` and must be re-verified instead. A bundle whose soft expiry is not earlier than its hard expiry is refused with `INVALID_EXPIRY`.
+On a register of your own with the Trusset interface the rotation is an `updateIdentity` step before one `addClaim` step per claim. It sets the investor type to the bundle's class and the expiries to the bundle's, keeps the current expiry where the bundle states none, and the signing wallet becomes the identity's KYC provider. Broadcast the rotation first, then pass its hash back as `rootTxHash` alongside `txResults`. Confirming without it is refused with `ROOT_ROTATION_REQUIRED`. The receipt must be a mined `updateIdentity` or `verifyIdentity` on your register that targets this wallet (`TX_TARGET_MISMATCH`) and registers this bundle's root (`TX_ROOT_MISMATCH`). A rotation the identity has since moved past, because its root on chain is now another one, is refused with `ROTATION_SUPERSEDED` and changes nothing, so a replayed confirm can never rewrite the customer's stored root to one the chain no longer holds. The root is read at the newest block the node has reached, on every register kind; when it cannot be read the confirm answers `503 CHAIN_UNAVAILABLE` and records nothing. A rotation signed by a wallet outside your instance is logged but not refused.
 
-Confirming without `rootTxHash` is refused with `ROOT_ROTATION_REQUIRED`. The rotation receipt must be a mined `updateIdentity` or `verifyIdentity` on this instance's register. It must target this wallet (`TX_TARGET_MISMATCH`) and register this bundle's root (`TX_ROOT_MISMATCH`). A rotation the identity has since moved past, because its root on chain is now another one, is refused with `ROTATION_SUPERSEDED` and changes nothing, so a replayed confirm can never rewrite the customer's stored root to one the chain no longer holds. The root is read at the newest block the node has reached, on every register kind; when it cannot be read the confirm answers `503 CHAIN_UNAVAILABLE` and records nothing. A rotation signed by a wallet outside your instance is logged but not refused. Once it is confirmed, the customer record takes the new root.
+A bundle whose expiry has already passed is refused with `BUNDLE_EXPIRED`, and an identity whose kept expiry has already passed with `IDENTITY_EXPIRED`; re-verify it instead. A bundle whose soft expiry is not earlier than its hard expiry is refused with `INVALID_EXPIRY`. On the instance ID register a suspended attestation is refused with `409 IDENTITY_SUSPENDED`. Once a rotation is confirmed, the customer record takes the new root.
 
 ## Sign and confirm
 
-Before handing out calldata, the API checks that one of your instance's registered wallets holds `KYC_PROVIDER_ROLE` on the register, which `addClaim` and `updateIdentity` both require. It refuses with `KYC_PROVIDER_ROLE_MISSING` otherwise, and skips the check when the instance has no registered wallet or the role cannot be read.
+Before handing out calldata, the API checks that one of your instance's registered wallets can sign the plan. On the instance ID register it must be a trusted attester of the register, or the call is refused with `403 ATTESTER_MISSING`. See [Attesters and trust](/endpoints/customers/introduction#attesters-and-trust). On your own Trusset-interface register it must hold `KYC_PROVIDER_ROLE`, which `addClaim` and `updateIdentity` both require, or the call is refused with `KYC_PROVIDER_ROLE_MISSING`; the register's owner grants that role. Both checks are skipped when the instance has no registered wallet or the role cannot be read.
 
-The confirm leg verifies the bundle again, then each claim receipt independently. A receipt must be a mined, successful `addClaim` on this instance's register for this wallet, writing the slot and data hash the server derived. It does not check who signed. A claim whose hash you omit comes back `skipped`, and one that fails a check comes back `failed` with a reason. Only a confirmed claim writes its ledger row and an `ADD_CLAIM` audit entry.
+The confirm leg checks the bundle again, then each claim receipt. On the instance ID register a receipt must be a mined, successful `attest` on the identity hub for this wallet, sent by the bundle's attester, carrying the bundle's root, its investor class and the predicates you filed. On your own Trusset-interface register it must be a mined, successful `addClaim` on that register for this wallet, writing the slot and data hash the server derived. A claim whose hash you omit comes back `skipped`, and one that fails a check comes back `failed` with a reason. Only a confirmed claim writes its ledger row and an `ADD_CLAIM` audit entry.
 
 <Note>
   `success` is `false` with `NO_PROOFS_ADDED` when the confirm leg files nothing, on a `200`. Read `added` against `total`.
@@ -99,18 +129,19 @@ On a T-REX 5 register the messages are EIP-712 typed data with an `issuedAt` to 
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`. On an ERC-3643 register the first answer is `SIGN_MESSAGES`. Calldata leg only.</ResponseField>
-    <ResponseField name="registerKind" type="string">`TRUSSET` or `TREX`, the interface of the register this instance writes to. Calldata leg only.</ResponseField>
-    <ResponseField name="steps" type="array">The rotation step when one is needed, then one step per claim. A claim step carries `stepType: "ADD_CLAIM"`, `fieldName`, `circuit`, `claimType`, `canonical`, `dataHash` and `expiry`. The rotation step carries `stepType: "ROOT_ROTATION"`, `fromKycHash`, `kycHash`, `investorType`, `softExpiry` and `hardExpiry`. Calldata leg only.</ResponseField>
+    <ResponseField name="registerKind" type="string">`INSTANCE` on the instance ID register, `TRUSSET` on a register of your own with the Trusset interface, `TREX` on an ERC-3643 register. Calldata leg only.</ResponseField>
+    <ResponseField name="signerAddress" type="string">Instance ID register: the attester the plan is built for. Calldata leg only.</ResponseField>
+    <ResponseField name="steps" type="array">On the instance ID register, one `attest` step: `stepType: "ROOT_ROTATION"` when the root rotates, otherwise `"ADD_CLAIM"`. It carries `claims` (each with `claimType`, `claimTypeIndex`, `dataHash`, `fieldName` and `predicate`), `predicates` as a decimal string, `predicateNames`, `investorClass`, `softExpiry`, `hardExpiry`, `attester`, `signer` and `source`. On a register of your own, the rotation step when one is needed, then one step per claim. A claim step carries `stepType: "ADD_CLAIM"`, `fieldName`, `circuit`, `claimType`, `canonical`, `dataHash` and `expiry`. A rotation step carries `stepType: "ROOT_ROTATION"`, `fromKycHash`, `kycHash`, `investorType`, `softExpiry` and `hardExpiry`. Calldata leg only.</ResponseField>
     <ResponseField name="walletAddress" type="string">The subject, checksummed.</ResponseField>
-    <ResponseField name="kycHash" type="string">The root the registry holds now. When a `rootTxHash` was sent and checked, the bundle's root.</ResponseField>
-    <ResponseField name="bundleRoot" type="string">The root the manifest states, which its leaves recompute to. Calldata leg only.</ResponseField>
+    <ResponseField name="kycHash" type="string">The root the register holds now. When a rotation was confirmed, the bundle's root.</ResponseField>
+    <ResponseField name="bundleRoot" type="string">The root the header signs, which the leaves recompute to. Calldata leg only.</ResponseField>
     <ResponseField name="rootRotation" type="object">`{ required, from, to, investorType, softExpiry, hardExpiry }` when a rotation is needed, `null` otherwise. Calldata leg only.</ResponseField>
     <ResponseField name="rootRotated" type="object">`{ from, to, txHash }` when a rotation was confirmed, `null` otherwise. Confirm leg only.</ResponseField>
     <ResponseField name="added" type="integer">Claims confirmed. Confirm leg only.</ResponseField>
-    <ResponseField name="total" type="integer">Steps on the calldata leg, the rotation included. Claims on the confirm leg.</ResponseField>
-    <ResponseField name="proofs" type="array">Per claim: `fieldName`, `claimType`, `dataHash` and a `status` of `confirmed`, `skipped` or `failed`. A confirmed entry carries `txHash`, `expiry` and `gasUsed`, a failed one carries `error`. Confirm leg only.</ResponseField>
-    <ResponseField name="warnings" type="array">One `NON_CANONICAL_SLOT` entry per leaf filed under a slot it has no canonical meaning for, with `code`, `fieldName`, `claimType` and `message`. The register shows only the slot, and only this instance's ledger records which field backs it. A leaf that cannot be filed fails the whole request instead.</ResponseField>
-    <ResponseField name="verification" type="object">`verified`, `mode`, `reportId`, `verifierVersion` and `cached`.</ResponseField>
+    <ResponseField name="total" type="integer">Steps on the calldata leg, the rotation included, so `1` on the instance ID register. Claims on the confirm leg.</ResponseField>
+    <ResponseField name="proofs" type="array">Per claim: `fieldName`, `claimType`, `dataHash` and a `status` of `confirmed`, `skipped` or `failed`. A confirmed entry carries `txHash`, `expiry` and `gasUsed`, a failed one carries `error`. On the instance ID register `expiry` is the attestation's hard expiry. Confirm leg only.</ResponseField>
+    <ResponseField name="warnings" type="array">`NON_CANONICAL_SLOT` per leaf filed under a slot it has no canonical meaning for, with `code`, `fieldName`, `claimType` and `message`, on a register of your own. `EXPIRY_FROM_BUNDLE` when an entry sent `expiryDays` for the instance ID register.</ResponseField>
+    <ResponseField name="verification" type="object">`verified`, `version`, `mode`, `reportId`, `verifierVersion`, `cached`, `attester`, `chainId`, `hub`, `keyId`, `operatorKey`, `attestation`, `attestPredicates` and `attestPredicateNames`. See [Add Claims from Proof](/endpoints/customers/add-claims-from-proof#verification).</ResponseField>
     <ResponseField name="confirmWith" type="object">`{ field: "txResults", shape: "[{ fieldName, txHash }]", rootField: "rootTxHash" }`. Calldata leg only.</ResponseField>
   </Expandable>
 </ResponseField>
@@ -123,38 +154,42 @@ Every verification failure from [Add Claims from Proof](/endpoints/customers/add
 |---|---|---|
 | `INVALID_ADDRESS` | `400` | `walletAddress` is missing or malformed |
 | `MISSING_MANIFEST` | `400` | No manifest object in the body |
-| `INVALID_PROOFS` | `400` | `proofs` is not a map of field name to base64 string |
 | `NO_ENTRIES` | `400` | `entries` is missing or empty |
 | `TOO_MANY_ENTRIES` | `400` | More than 8 entries |
 | `INVALID_ENTRY` | `400` | An entry is not an object |
 | `INVALID_FIELD` | `400` | An entry has no `fieldName`, or one over 128 characters |
 | `FIELD_NOT_IN_MANIFEST` | `400` | An entry names a field the manifest does not carry |
-| `INVALID_CLAIM_TYPE` | `400` | The named slot is not a claim type name |
-| `SLOT_LOCKED` | `400` | A canonical field names a slot other than its own |
-| `SLOT_REQUIRED` | `400` | A leaf with no canonical meaning was filed without naming a slot |
-| `SLOT_RESERVED` | `400` | A leaf with no canonical meaning names one of the four canonical slots |
-| `CIRCUIT_MISMATCH` | `400` | A canonical field was proved with the wrong circuit |
+| `NOT_ATTESTABLE` | `400` | A leaf carries no predicate, or on the instance ID register is the `INVESTOR_CLASS` leaf |
+| `INVALID_CLAIM_TYPE` | `400` | Register of your own: the named slot is not a claim type name |
+| `SLOT_LOCKED` | `400` | Register of your own: a leaf names a slot other than its predicate's |
+| `SLOT_REQUIRED` | `400` | Register of your own: an `ADULT` leaf was filed without naming a slot |
+| `SLOT_RESERVED` | `400` | Register of your own: an `ADULT` leaf names one of the reserved slots |
 | `DUPLICATE_FIELD` | `400` | Two entries name the same field |
-| `DUPLICATE_SLOT` | `400` | Two entries would occupy the same slot |
+| `DUPLICATE_SLOT` | `400` | Two entries would file the same claim |
 | `INVALID_EXPIRY` | `400` | An entry's `expiryDays` is outside 0 to 36500, or the bundle's soft expiry is not earlier than its hard expiry |
-| `NOT_VERIFIED` | `400` | The subject carries no root on the registry |
+| `BUNDLE_EXPIRED` | `400` | A rotation would write a bundle expiry that has already passed. Re-issue the bundle |
+| `NOT_VERIFIED` | `400` | The subject carries no root on the register |
 | `IDENTITY_REVOKED` | `400` | The identity is revoked on chain. Re-verify before attaching proofs |
 | `IDENTITY_EXPIRED` | `400` | A rotation would keep an expiry that has already passed. Re-verify the identity |
-| `ROOT_ROTATION_REQUIRED` | `400` | Confirm leg: the bundle's root is not on chain and no `rootTxHash` was given |
+| `ROOT_ROTATION_REQUIRED` | `400` | Register of your own, confirm leg: the bundle's root is not on chain and no `rootTxHash` was given |
 | `INVALID_TX` | `400` | `rootTxHash` is not a 32-byte hex hash |
 | `TX_REVERTED` | `400` | The rotation transaction reverted |
-| `TX_WRONG_TARGET` | `400` | The rotation transaction was not sent to this instance's register |
+| `TX_WRONG_TARGET` | `400` | The rotation transaction was not sent to your register |
 | `TX_WRONG_FUNCTION` | `400` | The rotation transaction does not call `updateIdentity` or `verifyIdentity` |
 | `TX_TARGET_MISMATCH` | `400` | The rotation transaction targets a different wallet |
 | `TX_ROOT_MISMATCH` | `400` | The rotation transaction does not register this bundle's root |
 | `ROTATION_SUPERSEDED` | `409` | The rotation transaction is mined, but the identity's root on chain has moved past it. Nothing was recorded. Attach proofs from a bundle with the current root, or rotate again |
 | `NO_PROOFS_ADDED` | `200` | Confirm leg, nothing filed. `success` is `false` |
-| `KYC_PROVIDER_ROLE_MISSING` | `403` | None of your instance's wallets holds `KYC_PROVIDER_ROLE` on the register. Calldata leg only |
+| `ATTESTER_MISSING` | `403` | Instance ID register: none of your instance's registered wallets is a trusted attester of the register. Calldata leg only |
+| `KYC_PROVIDER_ROLE_MISSING` | `403` | Your own Trusset-interface register: none of your instance's wallets holds `KYC_PROVIDER_ROLE` on it. Calldata leg only |
 | `INSTANCE_NOT_FOUND` | `404` | The instance behind your key no longer exists |
 | `TX_NOT_FOUND` | `404` | The rotation transaction is not mined yet |
+| `INSTANCE_REGISTER_REQUIRED` | `409` | Your instance has no instance ID register yet. It is created in the issuer app, under Settings |
+| `IDENTITY_SUSPENDED` | `409` | Instance ID register: the attestation is suspended. Calldata leg only |
 | `RATE_LIMITED` | `429` | More than 30 proof requests from this instance in the current 60-second window |
-| `CHAIN_UNAVAILABLE` | `503` | The registry could not be read |
+| `IDENTITY_HUB_NOT_CONFIGURED` | `501` | The identity hub is not deployed on your instance's network |
 | `CHAIN_BEHIND` | `503` | Confirm leg with a rotation: the chain node has not reached the block of the rotation transaction yet. Nothing was recorded. Retry in a moment |
+| `CHAIN_UNAVAILABLE` | `503` | The register or the identity hub could not be read. On the confirm leg of a rotation this includes the identity's current root, which is read before anything is recorded |
 | `ATTEST_PROOF_FAILED` | `400` or `500` | A chain call failed (`400`), or the request failed unexpectedly (`500`) |
 
 <RequestExample>
@@ -167,9 +202,9 @@ curl -X POST "https://api.trusset.org/customers/api/identity/proofs" \
   -d "{
     \"walletAddress\": \"0xabCDeF0123456789AbcdEf0123456789aBCDEF01\",
     \"manifest\": $(cat "$BUNDLE/manifest.json"),
-    \"manifestSig\": \"$(base64 < "$BUNDLE/manifest.sig" | tr -d '\n')\",
-    \"proofs\": { \"country\": \"$(base64 < "$BUNDLE/proofs/country.bin" | tr -d '\n')\" },
-    \"entries\": [{ \"fieldName\": \"country\" }]
+    \"header\": $(cat "$BUNDLE/header.json"),
+    \"headerSignature\": \"0x$(xxd -p -c 64 "$BUNDLE/header.sig")\",
+    \"entries\": [{ \"fieldName\": \"country\" }, { \"fieldName\": \"dateOfBirth\" }]
   }"
 ```
 ```typescript TypeScript
@@ -180,9 +215,9 @@ const manifest = JSON.parse(await readFile(`${bundle}/manifest.json`, 'utf8'));
 const body = {
   walletAddress: manifest.walletAddress,
   manifest,
-  manifestSig: (await readFile(`${bundle}/manifest.sig`)).toString('base64'),
-  proofs: { country: (await readFile(`${bundle}/proofs/country.bin`)).toString('base64') },
-  entries: [{ fieldName: 'country' }]
+  header: JSON.parse(await readFile(`${bundle}/header.json`, 'utf8')),
+  headerSignature: '0x' + (await readFile(`${bundle}/header.sig`)).toString('hex'),
+  entries: [{ fieldName: 'country' }, { fieldName: 'dateOfBirth' }]
 };
 
 const url = 'https://api.trusset.org/customers/api/identity/proofs';
@@ -195,8 +230,13 @@ const txResults = [];
 for (const step of built.data.steps) {
   const tx = await signer.sendTransaction(step.transaction);
   await tx.wait();
-  if (step.stepType === 'ROOT_ROTATION') rootTxHash = tx.hash;
-  else txResults.push({ fieldName: step.fieldName, txHash: tx.hash });
+  if (built.data.registerKind === 'INSTANCE') {
+    for (const entry of body.entries) txResults.push({ fieldName: entry.fieldName, txHash: tx.hash });
+  } else if (step.stepType === 'ROOT_ROTATION') {
+    rootTxHash = tx.hash;
+  } else if (step.stepType === 'ADD_CLAIM') {
+    txResults.push({ fieldName: step.fieldName, txHash: tx.hash });
+  }
 }
 
 const confirmed = await fetch(url, {
@@ -215,56 +255,78 @@ console.log(`${confirmed.data.added} of ${confirmed.data.total} proofs attested`
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTIONS",
-    "registerKind": "TRUSSET",
+    "registerKind": "INSTANCE",
     "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
+    "signerAddress": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
     "steps": [
       {
         "action": "SIGN_TRANSACTION",
-        "transaction": { "to": "0xEf244c4Bd4d71Bd9A30EDF6Edef7CCC72642291a", "data": "0x..." },
+        "chainId": 11155111,
+        "transaction": { "to": "0x5A1d0c7E3f9B2a48C6e1D05b7F3a92c8E4d61B07", "data": "0x..." },
         "functionName": "updateIdentity",
-        "description": "Register the refreshed KYC root for 0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
-        "registerKind": "TRUSSET",
+        "contractFunction": "attest",
+        "registerKind": "INSTANCE",
+        "description": "Register the refreshed KYC root for 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 and attest the selected proofs",
         "stepType": "ROOT_ROTATION",
         "claimType": "KYC",
-        "fromKycHash": "0x5e0b3c7a91d24f68e1b0c35a9d7f2e4608b1c9d3e5f7a2b4c6d8e0f1a3b5c7d9",
-        "kycHash": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
-        "investorType": 2,
-        "softExpiry": 1820232000,
-        "hardExpiry": 1851768000
-      },
-      {
-        "action": "SIGN_TRANSACTION",
-        "transaction": { "to": "0xEf244c4Bd4d71Bd9A30EDF6Edef7CCC72642291a", "data": "0x..." },
-        "functionName": "addClaim",
-        "description": "Attest country as RESIDENCY for 0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
-        "registerKind": "TRUSSET",
-        "stepType": "ADD_CLAIM",
-        "claimType": "RESIDENCY",
-        "dataHash": "0x41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b9f2c",
-        "expiry": 1851768000,
-        "fieldName": "country",
-        "circuit": "set_membership",
-        "canonical": true
+        "claims": [
+          { "claimType": "EEA_RESIDENT", "claimTypeIndex": 105, "dataHash": "0xb243ad330db44c7539253c46a21615e23cd51bb07a00106c1b78c59b2081e39a", "fieldName": "country", "predicate": "EEA_RESIDENT" },
+          { "claimType": "ADULT", "claimTypeIndex": 104, "dataHash": "0x569e7557ecdfa47f313a743c06459dcb2bcc8fff2aa86b178e0d41f01419fb84", "fieldName": "dateOfBirth", "predicate": "ADULT" }
+        ],
+        "predicates": "49",
+        "predicateNames": ["KYC_DONE", "ADULT", "EEA_RESIDENT"],
+        "investorClass": 2,
+        "softExpiry": 1826582400,
+        "hardExpiry": 1858118400,
+        "attester": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
+        "signer": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
+        "source": "attestation_from_manifest"
       }
     ],
     "kycHash": "0x5e0b3c7a91d24f68e1b0c35a9d7f2e4608b1c9d3e5f7a2b4c6d8e0f1a3b5c7d9",
-    "bundleRoot": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
+    "bundleRoot": "0xf2240e2fc453da2ce40b3ab3363ed18a959722fc35c92767837f2c79b44f181f",
     "rootRotation": {
       "required": true,
       "from": "0x5e0b3c7a91d24f68e1b0c35a9d7f2e4608b1c9d3e5f7a2b4c6d8e0f1a3b5c7d9",
-      "to": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
+      "to": "0xf2240e2fc453da2ce40b3ab3363ed18a959722fc35c92767837f2c79b44f181f",
       "investorType": 2,
-      "softExpiry": 1820232000,
-      "hardExpiry": 1851768000
+      "softExpiry": 1826582400,
+      "hardExpiry": 1858118400
     },
     "warnings": [],
-    "total": 2,
+    "total": 1,
     "verification": {
       "verified": true,
+      "version": "3.1.0",
       "mode": "production",
       "reportId": "cmpv9a4k1004dghxk7q2c8rze",
-      "verifierVersion": "trusset-verifier@e146dac/c065d261b49d",
-      "cached": false
+      "verifierVersion": "trusset-verifier@9cd3ce4/11a7f0767b4a",
+      "cached": false,
+      "attester": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
+      "chainId": 11155111,
+      "hub": "0x5A1d0c7E3f9B2a48C6e1D05b7F3a92c8E4d61B07",
+      "keyId": 1,
+      "operatorKey": {
+        "source": "hub",
+        "keyId": 1,
+        "publicKey": "9c9dddc50bab5a103e218498604469ea9470318578b414615b9cb6c3ecf18cc2"
+      },
+      "attestation": {
+        "version": "3.1.0",
+        "subject": "0xabcdef0123456789abcdef0123456789abcdef01",
+        "root": "0xf2240e2fc453da2ce40b3ab3363ed18a959722fc35c92767837f2c79b44f181f",
+        "investorClass": 2,
+        "predicates": "817",
+        "predicateNames": ["KYC_DONE", "ADULT", "EEA_RESIDENT", "RESIDENCY_ON_FILE", "CITIZENSHIP_ON_FILE"],
+        "softExpiry": 1826582400,
+        "hardExpiry": 1858118400,
+        "attester": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+        "chainId": 11155111,
+        "hub": "0x5a1d0c7e3f9b2a48c6e1d05b7f3a92c8e4d61b07",
+        "keyId": 1
+      },
+      "attestPredicates": "49",
+      "attestPredicateNames": ["KYC_DONE", "ADULT", "EEA_RESIDENT"]
     },
     "confirmWith": {
       "field": "txResults",
@@ -275,7 +337,7 @@ console.log(`${confirmed.data.added} of ${confirmed.data.total} proofs attested`
   "error": null,
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2026-09-06T12:00:00.000Z"
+    "timestamp": "2026-11-19T12:00:00.000Z"
   }
 }
 ```
@@ -284,38 +346,60 @@ console.log(`${confirmed.data.added} of ${confirmed.data.total} proofs attested`
   "success": true,
   "data": {
     "walletAddress": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
-    "kycHash": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
+    "kycHash": "0xf2240e2fc453da2ce40b3ab3363ed18a959722fc35c92767837f2c79b44f181f",
     "rootRotated": {
       "from": "0x5e0b3c7a91d24f68e1b0c35a9d7f2e4608b1c9d3e5f7a2b4c6d8e0f1a3b5c7d9",
-      "to": "0x7c3a9f1d8b2e64057af13c9e0d5b8a4726f1c0e93d8b5a2740c6e19fb3d47a58",
+      "to": "0xf2240e2fc453da2ce40b3ab3363ed18a959722fc35c92767837f2c79b44f181f",
       "txHash": "0x1a7e5c3b9d0f2468ace13579bdf02468ace13579bdf02468ace13579bdf02468"
     },
-    "added": 1,
-    "total": 1,
+    "added": 2,
+    "total": 2,
     "proofs": [
       {
         "fieldName": "country",
-        "claimType": "RESIDENCY",
-        "dataHash": "0x41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b9f2c",
+        "claimType": "EEA_RESIDENT",
+        "dataHash": "0xb243ad330db44c7539253c46a21615e23cd51bb07a00106c1b78c59b2081e39a",
         "status": "confirmed",
-        "txHash": "0x9f2c41d8b7e05a3164c2870fbd935e1a4c7802db6135ea9048f7c21b5d3ea41b",
-        "expiry": 1851768000,
-        "gasUsed": "84213"
+        "txHash": "0x1a7e5c3b9d0f2468ace13579bdf02468ace13579bdf02468ace13579bdf02468",
+        "expiry": 1858118400,
+        "gasUsed": "61944"
+      },
+      {
+        "fieldName": "dateOfBirth",
+        "claimType": "ADULT",
+        "dataHash": "0x569e7557ecdfa47f313a743c06459dcb2bcc8fff2aa86b178e0d41f01419fb84",
+        "status": "confirmed",
+        "txHash": "0x1a7e5c3b9d0f2468ace13579bdf02468ace13579bdf02468ace13579bdf02468",
+        "expiry": 1858118400,
+        "gasUsed": "61944"
       }
     ],
     "warnings": [],
     "verification": {
       "verified": true,
+      "version": "3.1.0",
       "mode": "production",
       "reportId": "cmpv9c7t2005eghxkr4m1wb3n",
-      "verifierVersion": "trusset-verifier@e146dac/c065d261b49d",
-      "cached": false
+      "verifierVersion": "trusset-verifier@9cd3ce4/11a7f0767b4a",
+      "cached": false,
+      "attester": "0x1234f9a07C6B53d81e2A4F70C9b385d6014a7E52",
+      "chainId": 11155111,
+      "hub": "0x5A1d0c7E3f9B2a48C6e1D05b7F3a92c8E4d61B07",
+      "keyId": 1,
+      "operatorKey": {
+        "source": "hub",
+        "keyId": 1,
+        "publicKey": "9c9dddc50bab5a103e218498604469ea9470318578b414615b9cb6c3ecf18cc2"
+      },
+      "attestation": { "...": "as on the calldata leg" },
+      "attestPredicates": "49",
+      "attestPredicateNames": ["KYC_DONE", "ADULT", "EEA_RESIDENT"]
     }
   },
   "error": null,
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2026-09-06T12:00:00.000Z"
+    "timestamp": "2026-11-19T12:00:00.000Z"
   }
 }
 ```

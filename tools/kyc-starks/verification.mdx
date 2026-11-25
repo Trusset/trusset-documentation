@@ -1,48 +1,59 @@
 ---
 title: "Verification"
-description: "How a bundle is verified, and what a passing report does and does not prove."
+description: "How a bundle or a single disclosed leaf is verified, and what a passing report does and does not prove."
 ---
 
-The verifier is `trusset-verifier-cli`, wrapped by `npm run verify`. It reads a bundle directory or an archive, runs every check even after one fails, and prints a report. It needs no keys, no config and no network.
+The verifier is `trusset-verifier-cli`, wrapped by `npm run verify`. It reads a bundle directory, an archive or one disclosed leaf, runs every check even after one fails, and prints a report. It needs no keys and no config, and no network unless you pass `--rpc-url`.
 
-## Two anchors
+Verification is local by design. A predicate proof reveals the value it is about, so Trusset never receives proofs: the operator, or whoever is handed a bundle, runs this verifier, and only the manifest and its signed header go to Trusset.
+
+## Anchors
 
 A bundle verified against nothing proves only its own internal consistency, which anyone who rewrote the whole bundle could also produce. The verifier therefore requires at least one anchor, and checks both when both are given.
 
 ```bash
-npm run verify -- 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 --root 0xbefab9f6fdaba8c1fdb740880fd7a7e6505f6a29b0c2fb2e4b089be395606168
+npm run verify -- 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 --root 0xf2240e2fc453da2ce40b3ab3363ed18a959722fc35c92767837f2c79b44f181f
 ```
 
 ```bash
-npm run verify -- 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 --public-key 5fead1a1c06ed570c7e7ba99675464ac418036a7f88e9fc412506aa1dfab2baa
+npm run verify -- 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 --public-key 9c9dddc50bab5a103e218498604469ea9470318578b414615b9cb6c3ecf18cc2
 ```
 
 | | `--root <0x + 64 hex>` | `--public-key <64 hex>` |
 |---|---|---|
 | What you supply | The `kycHash` you read from the chain, or from wherever the operator published it | The operator's ed25519 public key, obtained out of band |
-| What passes | `manifest.kycHash` equals your root, the leaves recompute to it, and every STARK verifies | The signature verifies under your key over the canonical manifest, the leaves recompute to `manifest.kycHash`, and every STARK verifies |
+| What passes | `manifest.kycHash` equals your root, the leaves recompute to it, and every STARK verifies | The manifest signature, and on a 3.1.0 bundle the header signature, verify under your key, the leaves recompute to `manifest.kycHash`, and every STARK verifies |
 | What it establishes | This bundle is the one the published root commits to. Nobody needs to be trusted about who signed it | The holder of that key signed exactly this manifest. Whether the root was ever published is not established |
-| When to use it | Whenever the root is independently known. This is the right anchor for anyone who can read the chain | Offline bundles whose root cannot be looked up |
+| When to use it | Whenever the root is independently known. It does not authenticate the header, the `chain` block or the expiry days | Offline bundles whose root cannot be looked up |
 | Report | `anchor: "root"`, `signature_valid` shown as `[n/a]` | `anchor: "public_key"`, `root_anchor_valid` shown as `[n/a]` |
 
-With both flags, `anchor` is `public_key+root` and both must hold. The operator's key is printed by `npm run init` and `npm run show`, and recorded in `manifest.issuer.publicKey`. Recording it there does not make the signature self-authenticating: an adversary who rewrites the manifest rewrites that field too. The verifier reports when a supplied key disagrees with the recorded one, and the signature check governs.
+With both flags, `anchor` is `public_key+root` and both must hold. The operator's key is printed by `npm run init` and `npm run key -- show`, recorded in `manifest.issuer.publicKey`, and on 3.1 published on the identity hub. Recording it there does not make the signature self-authenticating: an adversary who rewrites the manifest rewrites that field too. The verifier reports when a supplied key disagrees with the recorded one, and the signature check governs.
 
-### What neither anchor proves
+### Reading both anchors from the hub
+
+A 3.1.0 bundle names its attestation in the signed header, so the verifier can take both anchors from the chain:
+
+```bash
+npm run verify -- 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 --rpc-url https://<rpc>
+```
+
+It sends only `eth_chainId` and `eth_call`. It reads `operatorKeyAt(attester, keyId)` and `getAttestation(attester, wallet)` from the hub the header names, verifies the bundle with that key and that root, and compares the hub record with the attestation the bundle proves: root, investor class, predicate bits, expiries and status. Any difference is reported and the command exits 2. A `--public-key` or `--root` you pass as well must agree with the hub. The RPC provider learns which wallet you checked.
+
+### What no anchor proves
 
 - **That the input was true.** A valid proof of a false record is a valid proof. The tool trusts what was under `input/`.
-- **That the root is on chain.** The verifier has no chain access. `--root` is a string you supply; its authority comes from wherever you read it.
+- **That the root is on chain**, unless you use `--rpc-url`. `--root` is a string you supply; its authority comes from wherever you read it.
 - **That the key is the operator's.** A public key pins whoever holds the private key. Obtaining the right key is out of band.
-- **Anything about `country` or `investorType`.** Those two values travel in cleartext in `manifest.passthrough`; their proofs bind them, they do not hide them. See [Concepts](/tools/kyc-starks/concepts#disclosure-classes).
 - **That the claims are current.** `overall_pass` is cryptography only. Whether the subject could rely on the bundle at a given instant is the second question, below.
 - **Recency.** `epochDays` is the operator's chosen batch date, and the verifier does not compare it with today. A counterparty enforces its own staleness window.
-- **Hiding by the proof itself.** Proof bytes are deterministic in the witness and the nonce, so a field value stays hidden because its commitment nonce stays secret. [Overview](/tools/kyc-starks/overview#what-it-is-not) explains this.
+- **That the value stays hidden.** A passing proof of a predicate leaf also carries the leaf's value. The verifier does not hide it from you, and you should not pass a proof to a party not entitled to that value. [What a proof reveals](/tools/kyc-starks/overview#what-a-proof-reveals) has the table.
 - **The registry signatures, when read from a directory.** Registries under `--registry` are validated for structure only. Their signatures are checked when they arrive inside an archive and a `--public-key` was supplied.
 
 ## The check ladder
 
 Every check runs regardless of earlier results, so the report is complete.
 
-1. `layout_ok`: `manifest.json`, `manifest.sig`, `kycHash.hex` and every `proofs/*.bin` named in the manifest are present, each `proofPath` is a plain `proofs/<name>` entry, and `version` is `2.0.0`, `2.1.0` or `3.0.0`.
+1. `layout_ok`: `manifest.json`, `manifest.sig`, `kycHash.hex` and every `proofs/*.bin` named in the manifest are present, each `proofPath` is a plain `proofs/<name>` entry, and `version` is `2.0.0`, `2.1.0`, `3.0.0` or `3.1.0`.
 2. `mode_acceptable`: `mode` is `production`, or `stub` with `--accept-stub`.
 3. `kyc_hash_file_matches`: `kycHash.hex` equals `manifest.kycHash`.
 4. `signature_valid`: with a key, the ed25519 signature verifies over the canonical signing view, `createdAt` replaced by the sentinel.
@@ -54,12 +65,14 @@ Every check runs regardless of earlier results, so the report is complete.
    - `commitment` and `publicDigest` decode.
    - The proof file exists and `proofDigest` recomputes from it.
    - `circuit` and `circuitId` agree.
-   - `paramsHash` recomputes from `params`.
+   - `paramsHash` recomputes from `params`, and `params` agree with `publicInputs`.
+   - On a 3.1.0 leaf, the predicate fits the circuit and its parameters, an age leaf's `currentEpochDays` equals the batch date, and the proof bytes are the canonical serialisation of the proof.
    - An empty proof is allowed only for `commitment_only` or a stub bundle.
    - The circuit's `verify()` accepts the proof against the public inputs, with the AIR selected by `circuitsVersion`.
    - `leafHash` recomputes from all of the above.
 7. `merkle_root_valid`: the leaf hashes recompute to `manifest.kycHash` under `merkleVersion`.
-8. `overall_pass`: every check above, every leaf passed, and every supplied anchor held.
+8. On a 3.1.0 bundle, `header_present`, `header_consistent` (the header's root, wallet, date, leaf count, Merkle version and chain values equal the manifest's) and `header_signature_valid` with a key. The report also prints the attestation the bundle proves.
+9. `overall_pass`: every check above, every leaf passed, and every supplied anchor held.
 
 A leaf that fails records a `reason`, such as `proof digest mismatch`, `leaf hash mismatch`, `paramsHash mismatch: ...` or `empty proof on a proving leaf in a non-stub bundle`.
 
@@ -114,8 +127,8 @@ A voidance wins over everything, then the earliest applicable lapse, then the wi
 ```json
 {
   "wallet_address": "0xabCDeF0123456789AbcdEf0123456789aBCDEF01",
-  "kyc_hash": "0xbefab9f6fdaba8c1fdb740880fd7a7e6505f6a29b0c2fb2e4b089be395606168",
-  "leaf_count": 9,
+  "kyc_hash": "0xf2240e2fc453da2ce40b3ab3363ed18a959722fc35c92767837f2c79b44f181f",
+  "leaf_count": 10,
   "layout_ok": true,
   "mode_acceptable": true,
   "kyc_hash_file_matches": true,
@@ -124,21 +137,45 @@ A voidance wins over everything, then the earliest applicable lapse, then the wi
   "leaves": [],
   "anchor": "public_key",
   "root_anchor_valid": false,
-  "manifest_version": "3.0.0",
+  "manifest_version": "3.1.0",
   "overall_pass": true,
+  "header": {
+    "present": true,
+    "signature_valid": true,
+    "consistent": true,
+    "reason": null,
+    "attester": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+    "chain_id": 11155111,
+    "hub": "0x5a1d0c7e3f9b2a48c6e1d05b7f3a92c8e4d61b07",
+    "key_id": 1,
+    "attestation": {
+      "version": "3.1.0",
+      "subject": "0xabcdef0123456789abcdef0123456789abcdef01",
+      "root": "0xf2240e2fc453da2ce40b3ab3363ed18a959722fc35c92767837f2c79b44f181f",
+      "investorClass": 2,
+      "predicates": "817",
+      "predicateNames": ["KYC_DONE", "ADULT", "EEA_RESIDENT", "RESIDENCY_ON_FILE", "CITIZENSHIP_ON_FILE"],
+      "softExpiry": 1826582400,
+      "hardExpiry": 1858118400,
+      "attester": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "chainId": 11155111,
+      "hub": "0x5a1d0c7e3f9b2a48c6e1d05b7f3a92c8e4d61b07",
+      "keyId": 1
+    }
+  },
   "issuer": {
     "name": "Example Bank AG",
     "identifier_scheme": "LEI",
     "identifier": "529900T8BM49AURSDO55",
     "jurisdiction": "DE",
-    "key_id": "issuing-2026-09",
-    "public_key": "0x5fead1a1c06ed570c7e7ba99675464ac418036a7f88e9fc412506aa1dfab2baa",
+    "key_id": "issuing-2026-11",
+    "public_key": "0x9c9dddc50bab5a103e218498604469ea9470318578b414615b9cb6c3ecf18cc2",
     "public_key_disagrees_with_anchor": false
   },
   "temporal": {
     "as_of": "now",
-    "as_of_epoch_days": 20708,
-    "as_of_date": "2026-09-12",
+    "as_of_epoch_days": 20776,
+    "as_of_date": "2026-11-19",
     "as_of_chain_id": null,
     "as_of_block": null,
     "resolved_root": null,
@@ -150,8 +187,8 @@ A voidance wins over everything, then the earliest applicable lapse, then the wi
       "no revocation log was supplied, so claim statuses reflect only what this bundle asserts. A lapse or voidance declared elsewhere would not be visible here."
     ],
     "unpinned_epoch": false,
-    "manifest_as_of_date": "2026-09-12",
-    "epoch_days_source": "fixed:20708"
+    "manifest_as_of_date": "2026-11-19",
+    "epoch_days_source": "fixed:20776"
   }
 }
 ```
@@ -166,6 +203,10 @@ A voidance wins over everything, then the earliest applicable lapse, then the wi
 
 <ResponseField name="manifest_version" type="string">
   As read from the bundle, for callers that branch on it.
+</ResponseField>
+
+<ResponseField name="header" type="object">
+  3.1.0 bundles: `present`, `consistent`, `signature_valid` (`false` without a key), `reason` on a failure, the `attester`, `chain_id`, `hub` and `key_id` the header names, and `attestation`, the attestation the bundle proves, as in `attestation.json`.
 </ResponseField>
 
 <ResponseField name="issuer" type="object | null">
@@ -184,14 +225,14 @@ A voidance wins over everything, then the earliest applicable lapse, then the wi
   The descriptor as recorded, resolved at the instant. `status` and `detail` give the outcome. `legal_basis`, `legal_reference`, `assertion` and `evidence_class` repeat the descriptor. `issuing_party` and `issuing_party_identifier` name the warranting party as `scheme:identifier`. `validity_from`, `validity_until` and `basis_as_of` each come with a `_date` rendering. For `set_membership`, `list_id`, `list_version`, `list_resolved` and `list_entry_count` say whether the registry or archive could resolve the proof's root back to the list's values. `null` on a leaf with no binding block.
 </ResponseField>
 
-The human report prints the same content, with each leaf's claim descriptor, window, list resolution and status under the leaf line, then the notes, then `Verifies` and `Entitled`. In the claim line the tool separates the reference from the assertion with an em dash, which these pages render as a hyphen.
+The human report prints the same content, with each leaf's claim descriptor, window, list resolution and status under the leaf line, then the notes, then `Verifies` and `Entitled`. In the claim line the tool separates the reference from the assertion with a colon.
 
 ## Exit codes
 
 | Code | Meaning | Produced by |
 |---|---|---|
 | 0 | Verified, and entitled at the instant asked about | the verifier binary |
-| 2 | Verification failed: a cryptographic mismatch or a policy rejection such as a stub bundle without `--accept-stub` | the verifier binary |
+| 2 | Verification failed: a cryptographic mismatch, a policy rejection such as a stub bundle without `--accept-stub`, or with `--rpc-url` a hub record that disagrees with the bundle | the verifier binary, or `npm run verify` with `--rpc-url` |
 | 3 | Verified, but not entitled: lapsed, void, outside its window, or a different root at that block | the verifier binary |
 | 64 | Usage error detected by the binary, such as `--as-of-block` without `--chain-id`, or an unknown flag | the verifier binary, passed through by `npm run verify` |
 | 66 | Bundle or archive unreadable, including a failed archive integrity check | the verifier binary |
@@ -204,7 +245,7 @@ The human report prints the same content, with each leaf's claim descriptor, win
 An archive carries the bundles, the list registries their proofs depend on, the root history and the revocation log, so it verifies on a machine that has nothing else:
 
 ```bash
-./target/release/trusset-verifier-cli --archive 2026Q3.tka --public-key 5fead1a1c06ed570c7e7ba99675464ac418036a7f88e9fc412506aa1dfab2baa
+./target/release/trusset-verifier-cli --archive 2026Q3.tka --public-key 9c9dddc50bab5a103e218498604469ea9470318578b414615b9cb6c3ecf18cc2
 ```
 
 Every subject in the archive is verified and reported in turn; `--subject <0xADDR>` selects one. With a public key, the archived registry signatures are verified under it before anything else is believed. The npm wrapper takes the same path with `npm run verify -- <wallet> --archive 2026Q3.tka --public-key <hex>`, mapping the wallet to `--subject`.
@@ -215,9 +256,35 @@ An archive whose contents no longer hash to its recorded digest is refused befor
 trusset-verifier-cli: archive integrity check failed: recorded digest 0x61a6... but the contents hash to 0x6ea1.... The file has been modified since it was written.
 ```
 
+## A single disclosed leaf
+
+A 3.1.0 holder can hand over one leaf instead of the bundle: `disclosures/<leaf>.json` with `proofs/<leaf>.bin`. It verifies on its own against the operator key:
+
+```bash
+./target/release/trusset-verifier-cli --disclosure output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01/disclosures/dateOfBirth.json \
+    --public-key 9c9dddc50bab5a103e218498604469ea9470318578b414615b9cb6c3ecf18cc2 --wallet 0xabCDeF0123456789AbcdEf0123456789aBCDEF01
+```
+
+```
+Leaf:       dateOfBirth (age_threshold), proves ADULT
+
+  header_signature_valid:  [ok]
+  wallet_matches:          [ok]
+  leaf_valid:              [ok]
+  leaf_hash_valid:         [ok]
+  inclusion_valid:         [ok]
+  stark_valid:             [ok] (verified)
+
+Verifies: PASS
+```
+
+The checks run in order: the document parses strictly; the header signature under the key; the wallet, when you name one with `--wallet`; the leaf (canonical proof bytes, public digest, binding digest, list version against `setRoot`, `params` against `publicInputs`, `paramsHash`, the predicate against its circuit and parameters, an age leaf's date against the header's); the leaf hash under the header's wallet and date; the path to the header's root; and the STARK, under `circuitsVersion` 3 because the header version says so. `--proof <FILE>` names the proof when it is not next to the disclosure. The WASM export is `verify_disclosure`.
+
+The verifier receives the leaf's value with the proof. Ask for a disclosure only of a leaf you are entitled to see, and compare the header's root with the attestation on the hub before relying on it.
+
 ## Older and development bundles
 
-A version 2 bundle verifies exactly as before. `issuer` is `null`, every leaf's `claim` is `null`, and `entitled` depends only on `overall_pass`. A note says that what each predicate stands for and how long it was asserted are not recorded. A manifest with `circuitsVersion: 2` is checked against the frozen `set_membership` AIR of that version.
+A 3.0.0 bundle verifies exactly as before, with no header checks. A version 2 bundle also verifies exactly as before. `issuer` is `null`, every leaf's `claim` is `null`, and `entitled` depends only on `overall_pass`. A note says that what each predicate stands for and how long it was asserted are not recorded. A manifest with `circuitsVersion: 2` is checked against the frozen `set_membership` AIR of that version.
 
 A bundle built with `--skip-proofs` carries `mode: "stub"` and zero-byte proofs. It fails `mode_acceptable` unless `--accept-stub` is passed, and `--strict` is accepted as a no-op for older scripts. A production bundle with an empty proof on a proving leaf is rejected outright, so the two cannot be confused.
 
@@ -225,7 +292,7 @@ A bundle built with `--dev-unpinned-epoch` verifies, and the report adds `reprod
 
 ## The WASM build
 
-`scripts/build.sh` also compiles the verifier to `target/wasm32-unknown-unknown/release/trusset_verifier.wasm` when the target is installed. The `wasm` feature exposes the whole-bundle entry points `verify_strict`, `verify_permissive`, `verify_with_anchors` and `verify_as_of`. It also exposes granular ones for a consumer that drives its own check ladder: `proof_digest_hex`, `public_digest_hex`, `leaf_hash_hex`, `leaf_hash_hex_bound`, `binding_digest_hex`, `merkle_root_hex`, `merkle_root_hex_v`, `manifest_signing_bytes`, `verify_manifest_signature`, `verify_leaf_stark` and `verify_leaf_stark_v`. `scripts/rebuild-wasm.sh` produces a reproducible Node.js binding with a provenance record, and `tests/e2e/wasm_parity.sh` asserts the native and WASM verifiers produce byte-identical reports. A consumer that vendors the WASM must rebuild it whenever the manifest schema gains a field, or its recomputed signing view will drop the field and every signature will fail.
+`scripts/build.sh` also compiles the verifier to `target/wasm32-unknown-unknown/release/trusset_verifier.wasm` when the target is installed. The `wasm` feature exposes the whole-bundle entry points `verify_strict`, `verify_permissive`, `verify_with_anchors`, `verify_as_of` and, for 3.1.0, `verify_with_header`, plus `verify_disclosure` for one leaf. It also exposes granular ones for a consumer that drives its own check ladder: `proof_digest_hex`, `public_digest_hex`, `leaf_hash_hex`, `leaf_hash_hex_bound`, `binding_digest_hex`, `merkle_root_hex`, `merkle_root_hex_v`, `merkle_root_from_path_hex`, `manifest_signing_bytes`, `verify_manifest_signature`, `header_signing_bytes`, `verify_header_signature`, `attestation_from_manifest`, `verify_leaf_stark` and `verify_leaf_stark_v`. Trusset's backend uses the header, digest and attestation exports and never the STARK ones, because it never receives proofs. `scripts/rebuild-wasm.sh` produces a reproducible Node.js binding with a provenance record, and `tests/e2e/wasm_parity.sh` asserts the native and WASM verifiers produce byte-identical reports. A consumer that vendors the WASM must rebuild it whenever the manifest schema gains a field, or its recomputed signing view will drop the field and every signature will fail.
 
 ## In the repository
 

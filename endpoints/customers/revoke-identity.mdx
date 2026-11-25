@@ -12,11 +12,16 @@ Revokes a wallet's identity on the register your instance writes to, and marks t
   A T-REX 5 register works the other way round: revoking revokes the KYC claim and leaves the register entry. See [On a T-REX 5 register](#on-a-t-rex-5-register).
 </Warning>
 
-Both registers answer with one transaction. What it does depends on `registerKind`:
+<Warning>
+  On the instance ID register, revoking withdraws only the attestation of the wallet that signs. When another trusted attester of your register still vouches for the wallet, it stays verified, and the confirm says so in `warnings`. A register admin or compliance officer freezes the wallet in the issuer app to stop it for your whole instance. See [On the instance ID register](#on-the-instance-id-register).
+</Warning>
+
+Every register answers with one transaction. What it does depends on `registerKind`:
 
 | `registerKind` | Transaction | Effect | Who sends it |
 |---|---|---|---|
-| `TRUSSET` | `revokeIdentity` on the register | The identity stays on the register and reads as `revoked` | A wallet with `REGISTER_OPERATOR_ROLE` |
+| `INSTANCE` | `revoke` on the identity hub | The signing attester's own attestation reads as revoked. The register stops counting it | The trusted attester whose attestation it is |
+| `TRUSSET` | `revokeIdentity` on your Trusset-compatible register | The identity stays on the register and reads as `revoked` | A wallet with `REGISTER_OPERATOR_ROLE` |
 | `TREX` | `deleteIdentity` on the register | The wallet's entry is removed from the register | An agent of the register |
 | `TREX`, `trexVersion: 5` | `revokeClaimByDigest(digest)` on the trusted issuer identity that signed the wallet's KYC claim | The KYC claim is revoked, so the wallet stops counting as verified on every register that trusts this issuer. Verifying again signs a new claim | A MANAGEMENT key (purpose 1) of the trusted issuer identity |
 
@@ -29,7 +34,9 @@ Call it once without `txHash` to get the calldata, and again with `txHash` once 
 </ParamField>
 
 <ParamField body="signerAddress" type="string">
-  ERC-3643 only. Returned as `signerAddress`, in place of your primary wallet. The API does not check it.
+  On the instance ID register, the wallet you will sign with. When it holds no active or suspended attestation about the wallet, the call answers `409 NOTHING_TO_REVOKE`, because its revocation would revert. Omitted, the calldata is built without that check.
+
+  On an ERC-3643 register, returned as `signerAddress`, in place of your primary wallet. The API does not check it.
 
   On a T-REX 5 register it is checked: it must hold a MANAGEMENT key on the issuer identity of the claim, or the call answers `403 SIGNER_ROLE_MISSING`, and the message names the wallets that hold one. Omitted, the first of your instance's wallets that holds one is returned.
 </ParamField>
@@ -43,10 +50,12 @@ Call it once without `txHash` to get the calldata, and again with `txHash` once 
 <ResponseField name="data" type="object">
   <Expandable title="Calldata leg">
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
-    <ResponseField name="transaction" type="object">`{ to, data }`, where `to` is the register.</ResponseField>
-    <ResponseField name="functionName" type="string">`revokeIdentity` on a Trusset register, `deleteIdentity` on an ERC-3643 register.</ResponseField>
+    <ResponseField name="chainId" type="integer">Instance ID register only. The chain the identity hub runs on.</ResponseField>
+    <ResponseField name="transaction" type="object">`{ to, data }`, where `to` is the identity hub on the instance ID register and the register otherwise.</ResponseField>
+    <ResponseField name="functionName" type="string">`revokeIdentity` on the instance ID register and a Trusset-compatible register, `deleteIdentity` on an ERC-3643 register.</ResponseField>
+    <ResponseField name="contractFunction" type="string">Instance ID register only. `revoke`, the hub function the transaction calls.</ResponseField>
     <ResponseField name="description" type="string">What the transaction does.</ResponseField>
-    <ResponseField name="registerKind" type="string">`TRUSSET` or `TREX`.</ResponseField>
+    <ResponseField name="registerKind" type="string">`INSTANCE`, `TRUSSET` or `TREX`.</ResponseField>
     <ResponseField name="walletAddress" type="string">The wallet, checksummed.</ResponseField>
     <ResponseField name="register" type="string">ERC-3643 only. The register address.</ResponseField>
     <ResponseField name="signerAddress" type="string">ERC-3643 only. Your primary wallet, or the `signerAddress` you sent. It is not checked to be an agent.</ResponseField>
@@ -64,14 +73,27 @@ Call it once without `txHash` to get the calldata, and again with `txHash` once 
     <ResponseField name="status" type="string">Always `revoked`.</ResponseField>
     <ResponseField name="txHash" type="string">The confirmed transaction.</ResponseField>
     <ResponseField name="gasUsed" type="string">Gas used.</ResponseField>
+    <ResponseField name="warnings" type="array">Instance ID register only, and present only when the register still verifies the wallet after the revocation: `[{ code: 'STILL_VERIFIED_BY_ANOTHER_ATTESTER', attester, message }]`, where `attester` is the trusted attester that still vouches for it.</ResponseField>
   </Expandable>
 </ResponseField>
 
 ## Before the calldata
 
-On a Trusset register, the API refuses with `REGISTER_OPERATOR_ROLE_MISSING` when it can read that none of your instance's wallets holds the role. Grant it with **Grant on-chain roles** on the wallet page of the issuer app (see [Customers](/endpoints/customers/introduction)). On the Trusset ID Register, which every instance without a register of its own shares, it refuses with `IDENTITY_HELD_BY_ANOTHER_ISSUER` when the identity was registered by a wallet that is not one of your instance's, and with `CHAIN_UNAVAILABLE` when the register cannot be read to tell. A wallet with no active identity there is refused with `409 IDENTITY_NOT_REGISTERED`, because revoking it would revert on chain.
+### On the instance ID register
 
-On an ERC-3643 register, it refuses with `REGISTRY_AGENT_MISSING` when none of your instance's wallets is an agent. It refuses with `NOT_REGISTERED` when the wallet is not on the register.
+The API refuses with `409 INSTANCE_REGISTER_REQUIRED` when your instance has not created its register yet, and with `403 ATTESTER_MISSING` when it can read that the register trusts none of your instance's registered wallets as an attester. A register admin trusts a wallet on the wallet page of the issuer app. See [Attesters and trust](/endpoints/customers/introduction#attesters-and-trust).
+
+It reads the register first. A wallet the register reports no unrevoked attestation for is refused with `409 IDENTITY_NOT_REGISTERED`, and a register that cannot be read with `503 CHAIN_UNAVAILABLE`. With `signerAddress`, a signer that holds no active or suspended attestation about the wallet is refused with `409 NOTHING_TO_REVOKE`.
+
+The calldata calls `revoke` on the identity hub. The hub lets a wallet revoke only its own attestation, so send it from the attester that wrote the one you want to withdraw. Attestations other trusted attesters wrote about the same wallet stay as they are.
+
+### On a Trusset-compatible register of your own
+
+The API refuses with `REGISTER_OPERATOR_ROLE_MISSING` when it can read that none of your instance's wallets holds the role. Your register's owner grants it.
+
+### On an ERC-3643 register
+
+The API refuses with `REGISTRY_AGENT_MISSING` when none of your instance's wallets is an agent. It refuses with `NOT_REGISTERED` when the wallet is not on the register.
 
 ### On a T-REX 5 register
 
@@ -81,11 +103,13 @@ Besides `REGISTRY_AGENT_MISSING`, the build refuses with `NOT_REGISTERED` when t
 
 ## Confirm
 
-The confirm leg checks that the transaction is mined, succeeded, and calls `revokeIdentity` or `deleteIdentity` on the register for the wallet you named. A receipt for a different wallet is refused with `TX_TARGET_MISMATCH`, and nothing changes. On the Trusset ID Register the transaction must be signed by a verified wallet of your instance, or the confirm is refused with `UNAUTHORIZED_SIGNER`. The revocation is recorded once in your instance's verification history as a `REVOKE` entry with the transaction and its signer.
+The confirm leg checks that the transaction is mined, succeeded, and revokes the wallet you named: `revoke` on the identity hub for the instance ID register, `revokeIdentity` or `deleteIdentity` on any other register. A receipt for a different wallet is refused with `TX_TARGET_MISMATCH`, and nothing changes. On the instance ID register a `revokeBatch` is refused with `TX_WRONG_FUNCTION`, and a revocation signed by a wallet the register does not trust as an attester with `403 UNTRUSTED_ATTESTER`. On a Trusset-compatible register of your own the signer is logged, not checked. The revocation is recorded once in your instance's verification history as a `REVOKE` entry with the transaction and its signer.
 
 It then sets the customer record for that wallet to `revoked` with `revokedAt`, archived or not. When no record exists, nothing is written and the call still succeeds.
 
-Revoking on your instance register does not take the wallet off an eligibility register. The confirm queues that removal, with reason `REVOKED`, from every eligibility register the wallet is on, and cancels its admissions still waiting. Until your wallet signs the removal, lending markets and vaults that read the eligibility register still admit the wallet. See [Eligibility registers](/endpoints/customers/introduction#eligibility-registers).
+On the instance ID register the confirm then asks the register whether the wallet is still verified. When another trusted attester still vouches for it, the answer carries a `STILL_VERIFIED_BY_ANOTHER_ATTESTER` warning naming that attester. The customer record is set to `revoked` all the same, but tokens, markets and vaults that read the register or its [profile gates](/endpoints/customers/introduction#profile-gates) keep admitting the wallet until it is frozen on the register or the other attester revokes too.
+
+Revoking on your own ERC-3643 register does not take the wallet off an eligibility register. The confirm queues that removal, with reason `REVOKED`, from every eligibility register the wallet is on, and cancels its admissions still waiting. Until your wallet signs the removal, lending markets and vaults that read the eligibility register still admit the wallet. See [Eligibility registers](/endpoints/customers/introduction#eligibility-registers). A profile gate on the instance ID register reads the attestations directly, so it needs no removal.
 
 <RequestExample>
 ```bash cURL
@@ -117,18 +141,20 @@ await fetch(url, {
 </RequestExample>
 
 <ResponseExample>
-```json Calldata Response - Trusset
+```json Calldata Response - Instance ID Register
 {
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTION",
+    "chainId": 11155111,
     "transaction": {
-      "to": "0xEf244c4Bd4d71Bd9A30EDF6Edef7CCC72642291a",
-      "data": "0x0ebddd17..."
+      "to": "0x3B8e1F6a0D4c2E9b7A5f8C1d3E6a9B2c4D7f0E15",
+      "data": "0x74a8f103..."
     },
     "functionName": "revokeIdentity",
+    "contractFunction": "revoke",
+    "registerKind": "INSTANCE",
     "description": "Revoke 0xaBc123DEf456789012345678901234567890aBCD on the identity registry",
-    "registerKind": "TRUSSET",
     "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
     "confirmWith": {
       "endpoint": "POST /customers/api/identity/revoke",
@@ -186,6 +212,29 @@ await fetch(url, {
   }
 }
 ```
+```json Confirmed Response - Still Verified
+{
+  "success": true,
+  "data": {
+    "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
+    "status": "revoked",
+    "txHash": "0x2404b4cd06b02a65d7bc0fe19be869fa7237e5b73bb807564254ab045045420f",
+    "gasUsed": "42150",
+    "warnings": [
+      {
+        "code": "STILL_VERIFIED_BY_ANOTHER_ATTESTER",
+        "attester": "0x6E2d9A4b1C8f3E7a0D5c2B9f4A1e8D3c6B0a7F52",
+        "message": "The instance ID register still verifies this wallet through 0x6E2d9A4b1C8f3E7a0D5c2B9f4A1e8D3c6B0a7F52. Freeze the wallet to stop it for the whole instance."
+      }
+    ]
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T12:05:00.000Z"
+  }
+}
+```
 ```json Error - Not Registered
 {
   "success": false,
@@ -207,10 +256,13 @@ await fetch(url, {
 | Code | HTTP | Cause |
 |---|---|---|
 | `INVALID_ADDRESS` | `400` | `walletAddress` is missing or not a valid address |
-| `REGISTER_OPERATOR_ROLE_MISSING` | `403` | Trusset register: none of your instance's wallets holds `REGISTER_OPERATOR_ROLE` |
-| `IDENTITY_HELD_BY_ANOTHER_ISSUER` | `403` | Trusset ID Register: the identity was registered by a wallet that is not one of your instance's |
-| `IDENTITY_NOT_REGISTERED` | `409` | Trusset ID Register: the wallet holds no active identity, so there is nothing to revoke. Calldata leg only |
-| `UNAUTHORIZED_SIGNER` | `403` | Trusset ID Register, confirm leg: the transaction was not signed by a verified wallet of your instance |
+| `INSTANCE_REGISTER_REQUIRED` | `409` | Your instance is in Trusset mode and has not created its instance ID register yet |
+| `ATTESTER_MISSING` | `403` | Instance ID register: none of your instance's registered wallets is a trusted attester of the register |
+| `IDENTITY_NOT_REGISTERED` | `409` | Instance ID register: the register reports no unrevoked identity for the wallet, so there is nothing to revoke. Calldata leg only |
+| `NOTHING_TO_REVOKE` | `409` | Instance ID register: `signerAddress` holds no active or suspended attestation about the wallet, so its revocation would revert. Calldata leg only |
+| `IDENTITY_HUB_NOT_CONFIGURED` | `501` | The identity hub is not deployed on your instance's network |
+| `UNTRUSTED_ATTESTER` | `403` | Instance ID register, confirm leg: the revocation was signed by a wallet the register does not trust as an attester |
+| `REGISTER_OPERATOR_ROLE_MISSING` | `403` | Trusset-compatible register of your own: none of your instance's wallets holds `REGISTER_OPERATOR_ROLE` |
 | `REGISTRY_AGENT_MISSING` | `403` | ERC-3643: none of your instance's wallets is an agent of the register |
 | `NOT_REGISTERED` | `409` | ERC-3643: the wallet is not on the register. T-REX 5: the wallet carries no KYC claim from a trusted issuer of the register |
 | `ALREADY_REVOKED` | `409` | T-REX 5: the wallet's KYC claim is already revoked |
@@ -222,8 +274,8 @@ await fetch(url, {
 | `INVALID_TX` | `400` | `txHash` is not 32-byte hex |
 | `TX_NOT_FOUND` | `404` | The transaction is not mined yet |
 | `TX_REVERTED` | `400` | The transaction reverted |
-| `TX_WRONG_TARGET` | `400` | The transaction does not write to the register |
-| `TX_WRONG_FUNCTION` | `400` | The transaction does not call `revokeIdentity` or `deleteIdentity` |
+| `TX_WRONG_TARGET` | `400` | The transaction does not write to the identity hub or the register |
+| `TX_WRONG_FUNCTION` | `400` | The transaction does not call `revoke` on the hub, or `revokeIdentity` or `deleteIdentity` on the register |
 | `TX_TARGET_MISMATCH` | `400` | The transaction revokes a different wallet |
-| `CHAIN_UNAVAILABLE` | `503` | ERC-3643: the transaction could not be read. Trusset ID Register: the identity could not be read to check who registered it. Retry |
+| `CHAIN_UNAVAILABLE` | `503` | ERC-3643: the transaction could not be read. Instance ID register: the register could not be read to check the wallet. Retry |
 | `REVOKE_FAILED` | `400`, `500` | Any other failure. `400` when a chain call failed |

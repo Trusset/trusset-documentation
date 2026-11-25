@@ -1,0 +1,92 @@
+---
+title: "Migrating from 3.0"
+description: "What changes when you move from version 3.0 to 3.1.0, and what Trusset now accepts."
+---
+
+Version 3.1 binds every bundle to one attestation on the identity hub, removes clear-text personal values from the bundle files, lets a holder disclose one leaf at a time, and moves the operator key out of environment variables. It changes nothing inside the circuits: `circuitsVersion` stays 3.
+
+It does not make proofs zero-knowledge. Winterfell 0.13.1 has no hiding mode, so there is no `circuitsVersion` 4. A predicate proof reveals its value, as before. Version 3.1 documents that, and Trusset no longer takes proofs at all: you verify them locally and send the manifest and its signed header. [What a proof reveals](/tools/kyc-starks/overview#what-a-proof-reveals) has the table.
+
+## What keeps working
+
+- **Existing bundles verify.** 2.0.0, 2.1.0 and 3.0.0 bundles verify unchanged under the 3.1 verifier, strict mode included. The repository's test vectors hold a 2.1.0 and a 3.0.0 bundle proved by the 3.0.0 release, and the native and WASM suites verify them on every run.
+- **Existing configs.** A config with no `manifest.version`, or with `3.0.0`, keeps producing 3.0.0 bundles with `npm start`. Nothing changes until you set `manifest.version` to `3.1.0`.
+- **Claims already on chain.** Attestations and claims filed from earlier bundles stay where they are.
+
+## What stops working on Trusset
+
+The proof endpoints take 3.1 bundles only, without proofs:
+
+| Request | Answer |
+|---|---|
+| Any `proofs`, `proof`, `proofBytes` or `zk` field, at the top level, in the manifest or in a leaf | `400 PROOFS_NOT_ACCEPTED` |
+| A 2.x or 3.0 manifest, which carries `country` and `investorType` in `passthrough` | `400 PERSONAL_DATA_IN_MANIFEST` |
+| A 3.1 manifest with any `passthrough` key besides `softExpiryDays` and `hardExpiryDays` | `400 PERSONAL_DATA_IN_MANIFEST` |
+| A 3.1 manifest without `header` and `headerSignature` | `400 HEADER_REQUIRED` |
+| `manifestSig` | Not read for a 3.1 bundle. Drop it |
+
+To file new claims for a subject proved under 3.0, re-issue the subject under 3.1 and use [Attest Proofs](/endpoints/customers/attest-proofs), which rotates the attestation's root to the new bundle.
+
+## What a 3.1.0 bundle adds
+
+| File | Content |
+|---|---|
+| `header.json`, `header.sig` | The signed header: version, root, wallet, `epochDays`, attester, `chainId`, hub, `keyId`, `merkleVersion` and `leafCount` |
+| `disclosures/<leaf>.json` | One leaf, its inclusion path and the signed header |
+| `attestation.json` | What the hub `attest` call needs: subject, root, investor class, predicates, expiries, attester, chain, hub and key id |
+
+The manifest gains a `chain` block, `merkleVersion: 3`, and `binding.predicate` on proving leaves. `passthrough` holds only `softExpiryDays` and `hardExpiryDays`. The index CSV drops the `country` column. [Bundle format](/tools/kyc-starks/bundle-format#what-changes-between-versions) lists every field.
+
+`country` and `investorType` are no longer `plaintext` leaves. `country` is proved twice by default: against the EEA list for `EEA_RESIDENT`, optional so a non-EEA resident still gets a bundle, and against the allowlist for `RESIDENCY_ON_FILE`. `investorType` is proved at the subject's own class, `"minTier": "ATTESTED"`, which becomes the attestation's investor class.
+
+## Steps
+
+<Steps>
+  <Step title="Rebuild">
+    `npm run build`. A platform that vendors the WASM verifier re-vendors it with `scripts/rebuild-wasm.sh` for the new exports.
+  </Step>
+  <Step title="Move the keys into an encrypted store">
+    ```bash
+    npm run key -- encrypt --from .trusset/keys.env
+    ```
+
+    It asks for a passphrase of at least 12 characters and writes `.trusset/operator.key`, encrypted with ChaCha20-Poly1305 under a key derived with scrypt. Add the printed `keyStore` line to `config.json` under `security`, check it with `npm run key -- show --verify`, then delete `.trusset/keys.env`. The public key does not change. On macOS, `--keychain` stores the keys in the keychain instead. `TRUSSET_KYC_SIGNING_KEY` and `TRUSSET_KYC_MASTER_KEY` remain for CI only.
+  </Step>
+  <Step title="Publish the operator key on the hub">
+    `npm run key -- show` prints the `setAttesterProfile(operatorKey, leiHash, metadataURI)` calldata. Send it from the attester wallet; the tool never sends anything. The hub assigns key id 1 to an attester's first key and the next id on every change. Trusset checks every 3.1 header against the key the hub publishes, and falls back to the key from [Set Operator Key](/endpoints/customers/set-operator-key) only while the hub holds none for the attester.
+  </Step>
+  <Step title="Record the EEA list">
+    ```bash
+    npm run list-version -- --list-id eea --source config/list_commitments/eea.source.txt
+    ```
+  </Step>
+  <Step title="Edit config.json">
+    Compare with `config.example.v3.1.json`:
+
+    - `"manifest": { "version": "3.1.0", ... }`
+    - `"chain": { "chainId": ..., "hub": "0x...", "attester": "0x...", "keyId": 1 }`
+    - `investorType`: `{ "circuit": "tier_threshold", "params": { "minTier": "ATTESTED" }, "predicate": "INVESTOR_CLASS", ... }`
+    - `country`: an `eea` instance with `"predicate": "EEA_RESIDENT", "optional": true`, and the allowlist instance with `"predicate": "RESIDENCY_ON_FILE"`
+    - `dateOfBirth`: `"predicate": "ADULT"`; `nationality`: `"predicate": "CITIZENSHIP_ON_FILE"`
+
+    `npm run init -- --chain-id ... --hub ... --attester ...` writes all of this on a fresh tree. [Configuration](/tools/kyc-starks/configuration) has every field.
+  </Step>
+  <Step title="Check the records">
+    In 3.1 every record needs an `investorType` of `RETAIL`, `PROFESSIONAL` or `ELIGIBLE_COUNTERPARTY`, because the hub records a class, and `softExpiryDays` below `hardExpiryDays`. Run `npm run issue -- --dry-run` and read what it reports.
+  </Step>
+  <Step title="Issue">
+    `npm run issue` writes 3.1.0 bundles and an `attestation.json` per subject. Verify each bundle locally before you send its manifest and header anywhere.
+  </Step>
+  <Step title="Update the API calls">
+    Send `manifest`, `header` and `headerSignature` (`header.sig` as `0x` and 128 hex characters) to [Inspect Manifest](/endpoints/customers/inspect-manifest), [Add Claims from Proof](/endpoints/customers/add-claims-from-proof) and [Attest Proofs](/endpoints/customers/attest-proofs). Drop `manifestSig` and `proofs`. Send the `attest` step from the attester the header names.
+  </Step>
+</Steps>
+
+## New error codes
+
+The prover adds `E_CHAIN_INVALID`, `E_PREDICATE_INVALID` and `E_PASSTHROUGH_REFUSED`. Under 3.1 the CLI also quarantines a record whose investor type is not a class with `E_TIER_NONE`, and an `optional` instance whose value is not in its list is left out instead of failing with `E_LIST_MEMBER_MISSING`. [Errors](/tools/kyc-starks/errors) has all of them, and the API codes are on [Add Claims from Proof](/endpoints/customers/add-claims-from-proof#verification-failures).
+
+## In the repository
+
+- [docs/MIGRATION_V30_TO_V31.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/MIGRATION_V30_TO_V31.md), the migration guide with what the backend pins
+- [docs/SECURITY.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/SECURITY.md), what a proof reveals, per circuit

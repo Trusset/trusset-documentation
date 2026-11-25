@@ -1,28 +1,55 @@
 ---
 title: "KYC-STARKs"
 sidebarTitle: "Overview"
-description: "Prove facts about your customers from their KYC data without revealing the data."
+description: "Prove facts about your customers from their KYC records, bound to one attestation on the identity hub."
 ---
 
-KYC-STARKs turns your KYC records into zero-knowledge proofs. A counterparty can check that a customer is over 18, resident in an approved jurisdiction or a professional client, and never sees the date of birth, the nationality or the document.
+KYC-STARKs turns your KYC records into STARK proofs bound to one attestation on the identity hub. Each proof shows that a fact holds for a customer: over 18, resident in the EEA, a professional client.
 
-It runs on your own machine. The tool makes no network calls, not even during verification, there is no service to operate, and your keys never leave the host.
+A proof is not zero-knowledge. It shows the fact and it also reveals the value behind it: an age proof the date of birth, a set-membership proof the country, a tier proof the class. Holders and issuers should share a proof only with a party entitled to that value. [What a proof reveals](#what-a-proof-reveals) has the details.
 
-For each subject, one run of `trusset-kyc-zk-proofs` writes:
+It runs on your own machine. The tool sends nothing and signs no transaction, there is no service to operate, and your keys never leave the host. `verify` with `--rpc-url` is the one command that reads a chain, and only when you ask it to.
 
-- a `kycHash`, one 32-byte Rescue-Prime Merkle root that you can publish on chain or anywhere else public,
-- a bundle of zk-STARK proofs backing that root, one per proved field,
-- a manifest signed with your ed25519 key that records who asserted what, under which rule, on what evidence, and for how long.
+For each subject, one run of `npm run issue` writes:
 
-Fintechs use it to prove facts about a client to a bank without handing over the KYC data. [Trusset for fintechs](/protocol/fintechs#tools-for-fintechs) lists it with the other tools on that path.
+- a `kycHash`, one 32-byte Rescue-Prime Merkle root, the root of the subject's attestation,
+- a bundle of STARK proofs behind that root, one leaf per claim, each naming the hub predicate it proves (`ADULT`, `EEA_RESIDENT`, `INVESTOR_CLASS`, ...),
+- a manifest signed with your ed25519 operator key that records who asserted what, under which rule, on what evidence, and for how long,
+- a signed header that binds the root to the wallet, the batch date and your attestation: attester, chain, identity hub and key id,
+- one disclosure file per leaf, so the holder can show a single claim without the rest of the bundle,
+- an `attestation.json` with what the hub's `attest` call needs.
+
+No clear-text personal value appears in these files. The values stay in `secrets.enc`, encrypted, on your machine.
+
+Fintechs use it to prove facts about a client to a bank. [Trusset for fintechs](/protocol/fintechs#tools-for-fintechs) lists it with the other tools on that path.
 
 ## Who uses it
 
 | Role | What they do with the tool |
 |---|---|
-| Operator | An institution that performs KYC and wants to publish verifiable claims without disclosing the underlying data. Runs `npm start`, keeps the keys and the encrypted witnesses. |
-| Counterparty or auditor | Anyone handed a bundle or an archive. Runs the verifier against a root read from the chain, or against the operator's public key obtained out of band. Needs no keys, no config, and no network. |
-| Integrator | A platform that consumes bundles. Reads `manifest.json`, recomputes the root, and verifies the STARKs with the native or WASM verifier. |
+| Operator | An institution that performs KYC and publishes verifiable claims about its customers. Runs `npm run issue`, keeps the keys and the encrypted witnesses, and attests on the identity hub from its attester wallet. |
+| Counterparty or auditor | Anyone handed a bundle, a single disclosure or an archive. Runs the verifier against a root read from the chain, the operator's public key, or both read from the hub with `--rpc-url`. Needs no keys and no config. |
+| Integrator | A platform that consumes bundles. On Trusset the integrator never receives proofs: the operator verifies them locally and sends the manifest and its signed header. |
+
+## What a proof reveals
+
+The STARK library, Winterfell 0.13.1, has no zero-knowledge mode: it adds no randomness to the proof and commits to the trace without salts. A proof carries evaluations of the circuit's trace from which the witness can be read back. What each circuit gives away to anyone holding the proof:
+
+| Circuit | Leaf | Revealed by the proof |
+|---|---|---|
+| `set_membership` | `country`, `nationality`, `documentIssuingCountry` | The value itself, such as the country code |
+| `age_threshold` | `dateOfBirth` | The exact date of birth |
+| `tier_threshold` | `investorType` | The exact tier. For an `INVESTOR_CLASS` leaf that is the class the attestation records on chain anyway |
+| `commitment_only` | names, document type and number | Nothing beyond the commitment. No proof is produced |
+
+So a predicate proof proves its predicate and hands its value to whoever gets it. In practice:
+
+- Share a proof only with a party entitled to the value. A bank that relies on a holder's disclosure of one leaf learns that leaf's value, not the others: the inclusion path is made of hashes over salted commitments.
+- Trusset never receives proof bytes. You verify the proofs locally with the tool or the SDK, and send the manifest and its signed header.
+- What goes on chain is unaffected: the hub stores the root, the investor class, the predicate bits and the dates. Proofs never go on chain.
+- Names and document numbers are `commitment_only` and stay hidden.
+
+The repository documents the analysis per circuit, with tests that read the values back out of real proofs, in [docs/SECURITY.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/SECURITY.md).
 
 ## The two questions a bundle answers
 
@@ -30,55 +57,79 @@ The verifier keeps two questions apart on purpose, because they have different a
 
 | Question | Field | What it takes into account |
 |---|---|---|
-| Does this bundle hold together, and did the named operator sign it? | `overall_pass`, printed as `Verifies: PASS` or `FAIL` | Cryptography only: layout, signature or root anchor, every STARK, every leaf hash, the Merkle root. |
+| Does this bundle hold together, and did the named operator sign it? | `overall_pass`, printed as `Verifies: PASS` or `FAIL` | Cryptography only: layout, signatures or root anchor, every STARK, every leaf hash, the Merkle root, the signed header. |
 | Could this subject rely on it at a given instant? | `temporal.entitled`, printed as `Entitled: YES` or `NO` | The root that was live at that instant, each claim's validity window, and any lapse or voidance the operator has since signed. |
 
 A bundle whose claims were later declared void still verifies. The proof is a true record of what the operator asserted; the second question is where the voidance shows. [Verification](/tools/kyc-starks/verification) covers both in detail.
 
 ## On chain and off chain
 
-The chain carries the root. Everything else is verified off chain against that root: a verifier reads the `kycHash` from the chain, then checks the bundle's signature, STARKs and Merkle tree with `--root`. No STARK is verified on chain, and the tool itself never talks to a chain. Which root was published at which block is something the operator records in a signed local registry, so as-of questions can be answered offline years later.
+The chain carries the root. Everything else is verified off chain against that root: a verifier reads the `kycHash` from the chain, then checks the bundle's signatures, STARKs and Merkle tree with `--root`. No STARK is verified on chain. Which root was published at which block is something the operator records in a signed local registry, so as-of questions can be answered offline years later.
+
+## From a bundle to an attestation
+
+On Trusset, a bundle ends up as one attestation on the identity hub, written under the wallet of the institution that verified the customer, the attester. See [The instance ID register](/endpoints/customers/introduction#the-instance-id-register).
+
+The signed header names that attester, the chain, the hub and the key id the hub assigned to the operator key. The bundle's `kycHash` becomes the attestation's root. Every leaf under it is a commitment salted with a 32-byte nonce, so the root reveals nothing on its own. It links to a person only through the bundle's secrets, which stay with the attester. When the attester erases the attestation and deletes those secrets, the root on chain links to nothing.
+
+Each proving leaf names its hub predicate in `binding.predicate`, inside its leaf hash:
+
+| Leaf | Circuit | Predicate |
+|---|---|---|
+| The root itself | | `KYC_DONE` |
+| `dateOfBirth` | `age_threshold`, at least 18 years | `ADULT` |
+| `country` | `set_membership` on the `eea` list, optional | `EEA_RESIDENT` |
+| `country@country_allowlist` | `set_membership` on the allowlist | `RESIDENCY_ON_FILE` |
+| `nationality` | `set_membership` | `CITIZENSHIP_ON_FILE` |
+| `investorType` | `tier_threshold` at the subject's own class | `INVESTOR_CLASS`, the attestation's investor class |
+
+The leaves and the proofs do not go on chain, and do not go to Trusset. You verify the proofs on your machine. Trusset receives the manifest and the signed header, checks the header signature against the operator key the hub publishes for your attester, recomputes every leaf and the root, applies its trust anchors, and returns the `attest` transaction. [Trusset platform integration](/tools/kyc-starks/trusset-integration) walks through it.
+
+So the chain says, for example, that the attester holds a bundle under this root showing the customer is an adult and resident in the EEA, and nothing more. The proofs stay with the attester. Trusset keeps the leaf hashes and proof digests of the claims it filed, not the proofs.
+
+A counterparty checks a claim without Trusset. It reads the attestation for the wallet and the attester from the identity hub, and runs the verifier on what the customer or the attester hands over: the whole bundle, or one disclosure file with its proof. `--rpc-url` reads the root and the attester's operator key from the hub and reports any difference between the hub and the bundle.
 
 ## What it is not
 
 <Note>
-  **The proofs are real STARKs; hiding comes from the commitment nonce.** Each proving leaf is a sound Winterfell STARK with no trusted setup, and its predicate is enforced inside the circuit. Winterfell 0.13 adds no blinding to the trace, so proof bytes are a deterministic function of the witness and the nonce. A field value stays hidden because its 32-byte nonce, derived from a per-subject key, stays secret. Under the default deterministic mode, two bundles for the same subject on the same batch date carry byte-identical proofs, so a counterparty holding both can tell whether a field changed without learning its value. Running with `--no-deterministic` draws a fresh per-subject key and removes that linkability. The repository documents this in [FUTURE_WORK.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/FUTURE_WORK.md).
+  **It is not zero-knowledge.** Each proving leaf is a sound Winterfell STARK with no trusted setup, and its predicate is enforced inside the circuit. The proof also discloses its value, as set out above. Hiding rests on the commitment nonce, which keeps the values of the leaves you do not hand out secret, and on who is given a proof. Under the default deterministic mode, two bundles for the same subject on the same batch date carry byte-identical proofs, so a holder of both can tell whether a value changed. Running with `--no-deterministic` draws a fresh per-subject key and removes that linkability. Hiding proofs are tracked in [FUTURE_WORK.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/FUTURE_WORK.md).
 </Note>
 
-**It has no chain access.** `--root` is a hex string you supply. As-of checks resolve against `config/registry/root_history.json`, which you write with `npm run anchor` after publishing. An anchor that misstates the block is a signed misstatement by the operator, not something the tool can detect.
+**It reads no chain unless asked.** `--root` is a hex string you supply, and `--rpc-url` sends only `eth_chainId` and `eth_call`. The RPC provider learns which wallet you checked. As-of checks resolve against `config/registry/root_history.json`, which you write with `npm run anchor` after publishing. An anchor that misstates the block is a signed misstatement by the operator, not something the tool can detect.
 
 **It is not a KYC data source.** Records under `input/` are trusted. Malformed input produces a quarantined row; false input produces a valid proof of a false statement.
 
 **It is not a service.** It is a batch command line tool. There are no prebuilt binaries: `npm install` compiles about 130 Rust crates from a pinned `Cargo.lock`, which takes a few minutes the first time. The release gate ran on macOS under Rosetta 2; Linux and Windows are untested.
 
-**Two fields are not hidden by design.** `country` and `investorType` are written in cleartext to the batch index CSV and to `manifest.passthrough`. The pipeline the tool was built for consumes them. Their proofs add integrity, not privacy. `country` is mandatory in every record; `investorType` is optional. [Concepts](/tools/kyc-starks/concepts#disclosure-classes) explains the disclosure classes.
+**Bundles before 3.1 carry clear text.** A 2.x or 3.0 bundle writes `country` and `investorType` in clear text to `manifest.passthrough` and the index CSV. They keep verifying, but Trusset refuses them with `PERSONAL_DATA_IN_MANIFEST`. [Migrating from 3.0](/tools/kyc-starks/migration-from-v3) has the upgrade.
 
 ## Primitives
 
 | Layer | Choice |
 |---|---|
-| STARK library | Winterfell 0.13, no trusted setup |
+| STARK library | Winterfell 0.13.1, no trusted setup, no zero-knowledge mode |
 | Field | Goldilocks, `p = 2^64 - 2^32 + 1` |
 | Hash, inside and outside the circuits | Rescue-Prime 64/256 |
-| Manifest and registry signatures | ed25519 (RFC 8032, deterministic) |
+| Manifest, header and registry signatures | ed25519 (RFC 8032, deterministic; strict verification for headers) |
+| Operator keys at rest | scrypt and ChaCha20-Poly1305 key file, or the macOS keychain |
 | Witness encryption at rest | XSalsa20-Poly1305, libsodium `secretbox` compatible |
 | Key derivation | HKDF-SHA256 |
 | Conjectured STARK security | 113 bits against a published floor of 100 |
 
-Version 3.0.0. MIT license. Rust 1.91.0 pinned through `rust-toolchain.toml`, Node.js 18 or newer.
+Version 3.1.0. MIT license. Rust 1.91.0 pinned through `rust-toolchain.toml`, Node.js 18 or newer.
 
 <CardGroup cols={2}>
   <Card title="Quickstart" icon="rocket" href="/tools/kyc-starks/quickstart">
     Clone to first verified bundle, every step run against the real CLI
   </Card>
   <Card title="Concepts" icon="lightbulb" href="/tools/kyc-starks/concepts">
-    Leaves, commitments, the root, and what a claim descriptor binds
+    Leaves, commitments, the root, the header and what a leaf binds
   </Card>
   <Card title="Verification" icon="shield-check" href="/tools/kyc-starks/verification">
-    Root-anchored versus key-pinned, and what neither proves
+    Root-anchored, key-pinned and hub-read, and single-leaf disclosures
   </Card>
   <Card title="Security model" icon="key" href="/tools/kyc-starks/security-model">
-    Threat model, key hierarchy, determinism, what lives on disk
+    Threat model, what a proof reveals, keys, what lives on disk
   </Card>
 </CardGroup>
 
@@ -86,3 +137,4 @@ Version 3.0.0. MIT license. Rust 1.91.0 pinned through `rust-toolchain.toml`, No
 
 - [README.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/README.md)
 - [docs/ARCHITECTURE.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/ARCHITECTURE.md), the crate map and data flow
+- [docs/SECURITY.md](https://github.com/Trusset/trusset-kyc-zk-proofs/blob/main/docs/SECURITY.md), the threat model and what a proof reveals

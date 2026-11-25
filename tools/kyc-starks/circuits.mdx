@@ -1,6 +1,6 @@
 ---
 title: "Circuits"
-description: "The four zk-STARK circuits and exactly what each one proves."
+description: "The four STARK circuits, exactly what each one proves, and what each one reveals."
 ---
 
 Four circuits ship, each as its own crate under `circuits/`, plus one leaf mode that produces no proof. Every circuit exposes the same Rust API (`Witness`, `PublicInputs`, `Params`, `commit`, `validate`, `prove`, `verify`), so the prover dispatches a leaf by circuit id alone.
@@ -16,6 +16,10 @@ Four circuits ship, each as its own crate under `circuits/`, plus one leaf mode 
 The circuit id is bound into the commitment, the leaf hash and the per-leaf nonce derivation. It is a public contract: ids are never renumbered.
 
 All four proofs establish, at minimum, that the prover knows an opening of the leaf's commitment under the tag, the circuit id and the length prefix described on [Concepts](/tools/kyc-starks/concepts#hiding-commitments). The rows below state what each circuit adds on top of that.
+
+<Warning>
+  The proofs are sound but not zero-knowledge. Winterfell 0.13.1 has no hiding mode, so each proof also reveals its witness to whoever holds it: `set_membership` the value itself, `age_threshold` the exact date of birth, `tier_threshold` the exact tier, and `preimage_knowledge` should be treated as revealing its value. A `commitment_only` leaf has no proof and reveals nothing beyond its commitment. Share a proof only with a party entitled to the value. [What a proof reveals](/tools/kyc-starks/security-model#what-a-proof-reveals) explains how each value is read back.
+</Warning>
 
 The statements use `‖` for concatenation and `Felt(x)` for a Goldilocks field element. `bytes_to_field` chunks bytes into 7-byte little-endian limbs.
 
@@ -133,9 +137,24 @@ No value length is enforced for this mode. `maxValueBytes` is recorded in `param
 
 ## Leaf hash and Merkle root
 
-Every leaf, with or without a proof, is folded into the leaf hash on [Concepts](/tools/kyc-starks/concepts#digests-and-the-leaf-hash), and the leaf hashes into the root with the `merkleVersion: 2` construction described there.
+Every leaf, with or without a proof, is folded into the leaf hash on [Concepts](/tools/kyc-starks/concepts#digests-and-the-leaf-hash), and the leaf hashes into the root with the construction `merkleVersion` names.
 
 ### Merkle root construction
+
+**Version 3, used by 3.1.0 bundles only,** is the version 2 tree with the root wrapped under its own tag and an inclusion path for every leaf:
+
+```text
+root = Rescue(MERKLE_ROOT_V3_TAG ‖ inner_root ‖ u64_le(leaf_count) ‖ 0x02)
+
+path = the sibling hashes from the padded leaf layer up to the inner root,
+       log2(max(2, next_pow2(leaf_count))) of them
+
+node = leaf_hash
+for s in path: node = Rescue(NODE_TAG ‖ min(node, s) ‖ max(node, s))
+root == Rescue(MERKLE_ROOT_V3_TAG ‖ node ‖ u64_le(leaf_count) ‖ 0x02)
+```
+
+Pairs are merged smaller first, so a path carries no direction bits. Its length is fixed by the signed `leafCount`, so an inner node cannot be presented as a leaf, and a padding leaf cannot be disclosed because the verifier recomputes the leaf hash from the leaf's own fields.
 
 Bundles issued before version 2.1 carry no `merkleVersion` field, which means version 1, and the verifier selects the matching construction from the manifest. Version 1 is identical to version 2 through the pairing step, with three differences. An odd layer duplicated its last node instead of padding. There was no root wrap. A single-leaf tree returned the leaf itself as the root.
 
@@ -168,7 +187,7 @@ hash collision  : Rescue-Prime 64/256         = 128 bits
 
 ## circuitsVersion
 
-`CIRCUITS_VERSION` is 3. It is recorded in every manifest and folded into every per-subject key derivation, so a bump re-keys every subject at once. It was bumped from 1 to 2 with the field-element commitment scheme and from 2 to 3 with the `set_membership` carry binding. Version 3.0.0 of the tool changed nothing inside any circuit. The AIRs, the commitment scheme, the leaf hash for a version 2 leaf and the Merkle construction are all as they were at 2.1.0.
+`CIRCUITS_VERSION` is 3. It is recorded in every manifest and folded into every per-subject key derivation, so a bump re-keys every subject at once. It was bumped from 1 to 2 with the field-element commitment scheme and from 2 to 3 with the `set_membership` carry binding. Versions 3.0.0 and 3.1.0 of the tool changed nothing inside any circuit. The AIRs and the commitment scheme are as they were at 2.1.0. There is no `CIRCUITS_VERSION` 4: making the proofs hiding would need new AIRs with randomized trace rows, and Winterfell 0.13.1 offers no hiding mode to build them on.
 
 ## In the repository
 

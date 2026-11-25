@@ -1,11 +1,11 @@
 ---
 title: "Quickstart"
-description: "From a fresh clone to a verified proof bundle in one sitting."
+description: "From a fresh clone to a verified 3.1 proof bundle in one sitting."
 ---
 
-Build the tool, generate keys, prove a sample batch and verify it.
+Build the tool, create the operator keys, publish the key on the identity hub, prove a sample batch and verify it.
 
-Nothing here is skipped. Every command below was run in this order against a clean clone, and the output shown is what it printed. One substitution: where the tool prints an em dash, these excerpts show a hyphen.
+Nothing here is skipped. Every command below was run in this order against the 3.1.0 tree, and the output shown is what it printed, with the working directory shortened to `/path/to/trusset-kyc-zk-proofs`.
 
 ## Toolchain
 
@@ -17,9 +17,11 @@ You need three things on the machine:
 | Rust via rustup | `rust-toolchain.toml` pins Rust 1.91.0 with the `wasm32-unknown-unknown` target, and rustup installs both on the first build. The declared minimum in `Cargo.toml` is 1.82. |
 | git | To clone the repository. |
 
-There are no prebuilt binaries. The first build compiles about 130 crates from the pinned `Cargo.lock`. On the machine used for this page it took just under four minutes; after that, builds are incremental and take seconds.
+There are no prebuilt binaries. The first build compiles about 130 crates from the pinned `Cargo.lock`, which takes a few minutes; after that, builds are incremental and take seconds.
 
-Tested on macOS under Rosetta 2. Linux and Windows are untested. The key-loading step below assumes a POSIX shell.
+Tested on macOS under Rosetta 2. Linux and Windows are untested.
+
+You also need the attestation details the bundles will be bound to: the chain id, the identity hub's address on that chain, and the attester wallet that will send the `attest` transactions. [Networks](/protocol/infrastructure/networks) lists where the hub is deployed; it has the same address on every chain.
 
 <Steps>
   <Step title="Clone and build">
@@ -35,13 +37,16 @@ Tested on macOS under Rosetta 2. Linux and Windows are untested. The key-loading
   </Step>
 
   <Step title="Initialise the working tree">
-    `init` asks who is legally responsible for the assertions the tool will produce. Interactively it prompts for four values. To script it, pass them as flags:
+    `init` asks who is legally responsible for the assertions the tool will produce, and which attestation the bundles are bound to. To script it, pass them as flags:
 
     ```bash
-    npm run init -- --issuer-name "Example Bank AG" --issuer-scheme LEI --issuer-identifier 529900T8BM49AURSDO55 --issuer-jurisdiction DE --non-interactive
+    npm run init -- --issuer-name "Example Bank AG" --issuer-scheme LEI \
+                    --issuer-identifier 529900T8BM49AURSDO55 --issuer-jurisdiction DE \
+                    --chain-id 11155111 --hub 0x5a1d0c7e3f9b2a48c6e1d05b7f3a92c8e4d61b07 \
+                    --attester 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 --non-interactive
     ```
 
-    In one pass it does six things. It generates both keys and writes them to `.trusset/keys.env` at mode 0600, adding that path to `.gitignore`. It writes a `config.json` with the batch date pinned to today and starting claim descriptors. It records version 1 of the sample allowlist in the signed registry. It checks the environment, and it prints your operator public key:
+    Addresses must be all lowercase or correctly checksummed. `init` asks for a passphrase for the key file, at least 12 characters; for a scripted run, set `TRUSSET_KYC_KEY_PASSPHRASE` for that one command. It generates both keys into `.trusset/operator.key`, encrypted, and writes a 3.1.0 `config.json` with the batch date pinned to today, the `chain` block and starting claim descriptors. It records version 1 of the sample allowlist and of the EEA list in the signed registry, checks the environment, and prints your operator public key:
 
     ```
     Environment
@@ -52,16 +57,18 @@ Tested on macOS under Rosetta 2. Linux and Windows are untested. The key-loading
       [ok]      trusset-registry         /path/to/trusset-kyc-zk-proofs/target/release/trusset-registry
       [ok]      trusset-archive          /path/to/trusset-kyc-zk-proofs/target/release/trusset-archive
       [ok]      list registry: country_allowlist 1 version(s), current has 17 entries
+      [ok]      list registry: eea       1 version(s), current has 30 entries
       [missing] input/                   empty
-                 ↳ place .json or .csv records in input/ - see the input format in README.md
+                 ↳ place .json or .csv records in input/, see the input format in README.md
 
     Configuration
       [written]  /path/to/trusset-kyc-zk-proofs/config.json
-      [written]  /path/to/trusset-kyc-zk-proofs/.trusset/keys.env (mode 0600)
-      [written]  list registry version 1 for: country_allowlist
+      [written]  /path/to/trusset-kyc-zk-proofs/.trusset/operator.key (mode 0600)
+      config emits manifest 3.1.0
+      [written]  list registry version 1 for: country_allowlist, eea
 
     Operator public key (give this to counterparties who verify offline)
-      5fead1a1c06ed570c7e7ba99675464ac418036a7f88e9fc412506aa1dfab2baa
+      9c9dddc50bab5a103e218498604469ea9470318578b414615b9cb6c3ecf18cc2
 
     Evidence classes available for `descriptor.evidenceClass`
       SELF_ATTESTED  DOCUMENTARY  THIRD_PARTY_RELIANCE  AUTHORITATIVE_SOURCE  CRYPTOGRAPHIC  PHYSICAL_PRESENCE
@@ -75,17 +82,29 @@ Tested on macOS under Rosetta 2. Linux and Windows are untested. The key-loading
       `init` pins the batch date into `config.json` as `"epochDaysSource": "fixed:<today>"`. Leave it pinned. Every per-subject key, nonce and leaf hash derives from that number, so a bundle proved against a moving clock cannot be reproduced tomorrow. Reproducing a bundle is exactly what an auditor asks for. The tool refuses to run unpinned unless you pass `--dev-unpinned-epoch`.
     </Note>
 
-    Running `init` again on an existing tree leaves `config.json` and the key file untouched and says so. `--force` replaces both, which makes every existing bundle unreproducible.
+    Running `init` again on an existing tree leaves `config.json` and the key file untouched and says so. `--force` replaces both, which makes every existing bundle unreproducible. Back up `.trusset/operator.key`, and keep the passphrase apart from it. Lose either and no existing `secrets.enc` can be decrypted, no bundle regenerated, and nothing further signed under the same key.
   </Step>
 
-  <Step title="Load the keys">
-    The prover reads both keys from the environment. Do this in every new shell:
-
+  <Step title="Publish the operator key on the hub">
     ```bash
-    set -a && . ./.trusset/keys.env && set +a
+    npm run key -- show
     ```
 
-    Back the file up where you keep other operator-private material and never commit it. Lose the master key and no existing `secrets.enc` can be decrypted and no bundle can be regenerated. Lose the signing key and no future bundle can be signed under the same identity.
+    ```
+    Operator public key:  9c9dddc50bab5a103e218498604469ea9470318578b414615b9cb6c3ecf18cc2
+    Key store:            /path/to/trusset-kyc-zk-proofs/.trusset/operator.key
+    Hub keyId:            1
+    Attester:             0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 on chain 11155111
+
+    Publish it on the hub by sending this from the attester wallet (this tool never sends it):
+      to:   0x5a1d0c7e3f9b2a48c6e1d05b7f3a92c8e4d61b07
+      data: 0xc0f2a5079c9dddc50bab5a103e218498604469ea9470318578b414615b9cb6c3ecf18cc2cd90e7d06e65820b817b3f75493176d42f93b7a072de2ac488954ae02a36382c00000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000000
+
+    The hub assigns keyId = previous keyId + 1 (1 for your first key). Put that number in
+    chain.keyId. Roots issued under an older keyId stay verifiable against operatorKeyAt(attester, keyId).
+    ```
+
+    Send that transaction from the attester wallet. It calls `setAttesterProfile` with the key, the hash of your LEI and a metadata URI. From then on, anyone can read your key from the hub, and Trusset checks every header you send against it.
   </Step>
 
   <Step title="Add records">
@@ -123,58 +142,70 @@ Tested on macOS under Rosetta 2. Linux and Windows are untested. The key-loading
     ]
     ```
 
-    Both country codes are in the shipped sample allowlist of 17 ISO 3166-1 alpha-3 codes, and both tiers satisfy the generated config's `minTier: PROFESSIONAL`. A `RETAIL` record would fail that predicate and be reported, not silently downgraded. [Input records](/tools/kyc-starks/input-records) has every column.
+    Both country codes are in the EEA list and in the shipped sample allowlist of 17 ISO 3166-1 alpha-3 codes. Under 3.1 every record needs an `investorType` of `RETAIL`, `PROFESSIONAL` or `ELIGIBLE_COUNTERPARTY`, because the hub records a class; the `investorType` leaf proves the subject's own class. [Input records](/tools/kyc-starks/input-records) has every column.
   </Step>
 
   <Step title="Dry run">
     A dry run validates the whole batch through every stage, including the prover's own predicate checks, reports every problem at once, and writes nothing. It needs no keys.
 
     ```bash
-    npm start -- --dry-run
+    npm run issue -- --dry-run
     ```
 
     ```
-    Dry run - nothing was written.
-    Batch as-of date 2026-09-12 (epoch day 20708), manifest version 3.0.0.
+    Dry run: nothing was written.
+    Batch as-of date 2026-11-19 (epoch day 20776), manifest version 3.1.0.
 
     All 2 subject(s) would produce a bundle.
     ```
 
-    The `--` is required: npm drops arguments that come before it. `npm run hash` is the same command as `npm start`.
+    The `--` is required: npm drops arguments that come before it.
   </Step>
 
   <Step title="Prove">
     ```bash
-    npm start
+    npm run issue
     ```
 
     ```
-    Batch as-of date 2026-09-12 (epoch day 20708), manifest 3.0.0.
+    Batch as-of date 2026-11-19 (epoch day 20776), manifest 3.1.0.
     Processing 2 subject(s)…
       ⏳ 0xabCDeF0123456789AbcdEf0123456789aBCDEF01
       ✔  0xabCDeF0123456789AbcdEf0123456789aBCDEF01  →  /path/to/trusset-kyc-zk-proofs/output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01
       ⏳ 0xfEdcBA9876543210FedCBa9876543210fEdCBa98
       ✔  0xfEdcBA9876543210FedCBa9876543210fEdCBa98  →  /path/to/trusset-kyc-zk-proofs/output/0xfEdcBA9876543210FedCBa9876543210fEdCBa98
-    Index CSV: /path/to/trusset-kyc-zk-proofs/output/kyc_hashes_2026-09-12T17-33-45-658Z.csv
+    Index CSV: /path/to/trusset-kyc-zk-proofs/output/kyc_hashes_2026-11-19T22-42-01-976Z.csv
+    Attestations (2): upload each attestation.json to the issuer app to build the attest calldata.
+      /path/to/trusset-kyc-zk-proofs/output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01/attestation.json
+      /path/to/trusset-kyc-zk-proofs/output/0xfEdcBA9876543210FedCBa9876543210fEdCBa98/attestation.json
 
-    Next: record each published root so as-of checks resolve offline -
+    Next: record each published root so as-of checks resolve offline:
       npm run anchor -- --bundle output/<wallet> --chain-id <id> --block <n> --block-time <unix>
-    Then archive the batch for long-term verification -
+    Then archive the batch for long-term verification:
       npm run archive -- --output <name>.tka --all output
     ```
 
-    Each subject took about seven seconds on the machine used here, almost all of it in the three `set_membership` proofs. [Performance](/tools/kyc-starks/performance) has measured numbers.
+    The run asks for the key file's passphrase first. Two subjects took about eleven seconds end to end on the machine used here, almost all of it in the four `set_membership` proofs per subject. [Performance](/tools/kyc-starks/performance) has measured numbers.
 
     The wallet is printed in its EIP-55 checksummed form, and that is the bundle directory name. Use that form in the commands below.
 
     ```
     output/
     ├── 0xabCDeF0123456789AbcdEf0123456789aBCDEF01/
+    │   ├── attestation.json
+    │   ├── disclosures/
+    │   │   ├── country.json
+    │   │   ├── country@country_allowlist.json
+    │   │   ├── dateOfBirth.json
+    │   │   └── ... one per leaf
+    │   ├── header.json
+    │   ├── header.sig
     │   ├── kycHash.hex
     │   ├── manifest.json
     │   ├── manifest.sig
     │   ├── proofs/
     │   │   ├── country.bin
+    │   │   ├── country@country_allowlist.bin
     │   │   ├── dateOfBirth.bin
     │   │   ├── documentIssuingCountry.bin
     │   │   ├── documentNumber.bin
@@ -186,10 +217,33 @@ Tested on macOS under Rosetta 2. Linux and Windows are untested. The key-loading
     │   └── secrets.enc
     ├── 0xfEdcBA9876543210FedCBa9876543210fEdCBa98/
     ├── audit.log
-    └── kyc_hashes_2026-09-12T17-33-45-658Z.csv
+    └── kyc_hashes_2026-11-19T22-42-01-976Z.csv
     ```
 
-    Four of the nine proof files are zero bytes long: `firstName`, `lastName`, `documentType` and `documentNumber` are `commitment_only` leaves, which carry a hiding commitment and no STARK. [Bundle format](/tools/kyc-starks/bundle-format) describes every file.
+    Ten leaves: `country` is proved twice, against the EEA list (`EEA_RESIDENT`) and against the allowlist (`RESIDENCY_ON_FILE`). A subject outside the EEA gets nine, because the EEA instance is optional. Four of the proof files are zero bytes long: `firstName`, `lastName`, `documentType` and `documentNumber` are `commitment_only` leaves, which carry a hiding commitment and no STARK. No file except `secrets.enc` carries a value in clear text, and the index CSV has no `country` column. [Bundle format](/tools/kyc-starks/bundle-format) describes every file.
+
+    `attestation.json` holds what the hub's `attest` call needs:
+
+    ```json
+    {
+      "attester": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
+      "chainId": 11155111,
+      "hardExpiry": 1858118400,
+      "hub": "0x5a1d0c7e3f9b2a48c6e1d05b7f3a92c8e4d61b07",
+      "investorClass": 2,
+      "keyId": 1,
+      "predicateNames": ["KYC_DONE", "ADULT", "EEA_RESIDENT", "RESIDENCY_ON_FILE", "CITIZENSHIP_ON_FILE"],
+      "predicates": "817",
+      "root": "0xf2240e2fc453da2ce40b3ab3363ed18a959722fc35c92767837f2c79b44f181f",
+      "softExpiry": 1826582400,
+      "subject": "0xabcdef0123456789abcdef0123456789abcdef01",
+      "version": "3.1.0"
+    }
+    ```
+
+    <Warning>
+      Each proof reveals the value it is about: `proofs/dateOfBirth.bin` the date of birth, `proofs/country.bin` the country. Keep `proofs/` and `disclosures/` as you keep the records, and hand a proof only to a party entitled to its value. Trusset never takes them.
+    </Warning>
 
     <Warning>
       The generated `config.json` sets `security.clearInputAfterProcessing` to `true`, so a real run deletes the files under `input/` when it finishes. A dry run does not. Keep your own copy of the records if you need to re-run the batch.
@@ -197,25 +251,17 @@ Tested on macOS under Rosetta 2. Linux and Windows are untested. The key-loading
   </Step>
 
   <Step title="Verify against your key">
-    `show` prints the resolved configuration and, with the keys loaded, your operator public key. It is the key `init` printed.
-
     ```bash
-    npm run show
-    ```
-
-    Verify Alice's bundle against it:
-
-    ```bash
-    npm run verify -- 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 --public-key 5fead1a1c06ed570c7e7ba99675464ac418036a7f88e9fc412506aa1dfab2baa
+    npm run verify -- 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 --public-key 9c9dddc50bab5a103e218498604469ea9470318578b414615b9cb6c3ecf18cc2
     ```
 
     ```
     Wallet:    0xabCDeF0123456789AbcdEf0123456789aBCDEF01
-    kycHash:   0xbefab9f6fdaba8c1fdb740880fd7a7e6505f6a29b0c2fb2e4b089be395606168
-    Leaves:    9
-    Version:   3.0.0
+    kycHash:   0xf2240e2fc453da2ce40b3ab3363ed18a959722fc35c92767837f2c79b44f181f
+    Leaves:    10
+    Version:   3.1.0
     Anchor:    public_key
-    Issuer:    Example Bank AG (LEI:529900T8BM49AURSDO55, DE)  key issuing-2026-09
+    Issuer:    Example Bank AG (LEI:529900T8BM49AURSDO55, DE)  key issuing-2026-11
 
       layout_ok:              [ok]
       mode_acceptable:        [ok]
@@ -223,15 +269,21 @@ Tested on macOS under Rosetta 2. Linux and Windows are untested. The key-loading
       signature_valid:        [ok]
       root_anchor_valid:      [n/a]
       merkle_root_valid:      [ok]
+      header_present:         [ok]
+      header_consistent:      [ok]
+      header_signature_valid: [ok]
+      attestation:            attester 0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52 on chain 11155111 (hub 0x5a1d0c7e3f9b2a48c6e1d05b7f3a92c8e4d61b07, key 1)
+                              class 2, predicates 817 [KYC_DONE, ADULT, EEA_RESIDENT, RESIDENCY_ON_FILE, CITIZENSHIP_ON_FILE]
 
-    As of:     2026-09-12 (now)
+    As of:     2026-11-19 (now)
 
     Per-leaf:
-      [ok] investorType             tier_threshold
-            ...
-      [ok] nationality              set_membership
-            ...
-            list     country_allowlist v1 (resolved, 17 entries)
+      ...
+      [ok] country                  set_membership
+            claim    EEA_AGREEMENT / Art. 31, right of establishment: Subject residence is in an EEA member state
+            evidence DOCUMENTARY   warranted by Example Bank AG (LEI:529900T8BM49AURSDO55)
+            valid    2026-11-19 .. 2027-11-18   evidence examined 2026-08-01
+            list     eea v1 (resolved, 30 entries)
             status   [ok] effective
       ...
 
@@ -239,14 +291,14 @@ Tested on macOS under Rosetta 2. Linux and Windows are untested. The key-loading
       - no revocation log was supplied, so claim statuses reflect only what this bundle asserts. A lapse or voidance declared elsewhere would not be visible here.
 
     Verifies:  PASS
-    Entitled:  YES   (as of 2026-09-12)
+    Entitled:  YES   (as of 2026-11-19)
     ```
 
-    Exit code 0. Each leaf prints its claim descriptor, its validity window, and for `set_membership` leaves which list version the proof was made against.
+    Exit code 0. This is the step Trusset relies on you to run: it never receives the proofs, so it never runs the STARKs.
   </Step>
 
   <Step title="Verify against the root">
-    A counterparty who can read the `kycHash` from the chain does not need your key at all. The root authenticates the bundle. Here the root is read from the bundle itself, which is what a chain read would return:
+    A counterparty who can read the root from the chain does not need your key. Here the root is read from the bundle itself, which is what a chain read would return:
 
     ```bash
     npm run verify -- 0xabCDeF0123456789AbcdEf0123456789aBCDEF01 --root $(cat output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01/kycHash.hex)
@@ -258,17 +310,45 @@ Tested on macOS under Rosetta 2. Linux and Windows are untested. The key-loading
       signature_valid:        [n/a]
       root_anchor_valid:      [ok]
       merkle_root_valid:      [ok]
+      header_present:         [ok]
+      header_consistent:      [ok]
+      header_signature_valid: [n/a]
     ...
     Verifies:  PASS
-    Entitled:  YES   (as of 2026-09-12)
+    Entitled:  YES   (as of 2026-11-19)
     ```
 
-    Passing neither anchor is refused with exit code 1, because a bundle verified against nothing proves only its own internal consistency. Passing a wrong root fails with exit code 2. [Verification](/tools/kyc-starks/verification) explains what each anchor proves.
+    Once the attestation is on chain, `--rpc-url <url>` reads both the root and your key from the hub and compares the hub record with the bundle. Passing no anchor is refused with exit code 1, because a bundle verified against nothing proves only its own internal consistency. Passing a wrong root fails with exit code 2. [Verification](/tools/kyc-starks/verification) explains what each anchor proves.
+  </Step>
+
+  <Step title="Verify one disclosed leaf">
+    A holder can show one claim without the rest of the bundle:
+
+    ```bash
+    ./target/release/trusset-verifier-cli --disclosure output/0xabCDeF0123456789AbcdEf0123456789aBCDEF01/disclosures/dateOfBirth.json \
+        --public-key 9c9dddc50bab5a103e218498604469ea9470318578b414615b9cb6c3ecf18cc2 --wallet 0xabCDeF0123456789AbcdEf0123456789aBCDEF01
+    ```
+
+    ```
+    Leaf:       dateOfBirth (age_threshold), proves ADULT
+
+      header_signature_valid:  [ok]
+      wallet_matches:          [ok]
+      leaf_valid:              [ok]
+      leaf_hash_valid:         [ok]
+      inclusion_valid:         [ok]
+      stark_valid:             [ok] (verified)
+
+    Verifies: PASS
+    ```
+
+    Whoever receives this disclosure with `proofs/dateOfBirth.bin` can read the date of birth from the proof, and learns nothing about the other leaves.
   </Step>
 </Steps>
 
 ## What to do next
 
+- Attest each subject. On Trusset, verify the subject with the bundle's root, then send `manifest.json`, `header.json` and `header.sig`, never the proofs, to [Add Claims from Proof](/endpoints/customers/add-claims-from-proof). [Trusset platform integration](/tools/kyc-starks/trusset-integration) walks through it.
 - Record where you published each root with `npm run anchor`, so a question about a past block can be answered without chain access. Then build an archive with `npm run archive`, one file that verifies on a bare machine. Both are on [Registries and archives](/tools/kyc-starks/registries-and-archives).
 - Review `config.json`. The claim descriptors `init` wrote are starting points that name a plausible instrument and provision. They are hashed into every leaf, so they are evidence, not comments. [Configuration](/tools/kyc-starks/configuration) documents every field.
 - Replace the sample allowlist. The 17 codes in `config/list_commitments/country_allowlist.source.txt` are a sample, and recording a new version is one command.

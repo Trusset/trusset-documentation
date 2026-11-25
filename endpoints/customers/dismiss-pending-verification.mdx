@@ -10,13 +10,15 @@ description: 'Close a queued KYC approval without registering it'
   Verifying the wallet later with [Verify Identity](/endpoints/customers/verify-identity) or [Batch Verify](/endpoints/customers/batch-verify) settles only `PENDING` rows. The follow-ups of a confirmed row therefore never run for this one. Its hosted verification checkout does not turn `VERIFIED`, stock escrow deposits waiting on its ID link are not bound to the wallet, and the customer is not emailed.
 
   A new KYC approval for the customer queues a fresh row. The dismissed one stays as it is.
+
+  On the instance ID register, dismissing a row that carries a signed [holder claim](/endpoints/customers/introduction#holder-claims) stops verify.trusset.org from offering the claim to the customer. The attester's signature still stays valid on the identity hub until its `deadline`, so a customer who already holds the claim transaction can still submit it, and [Confirm Holder Claim](/endpoints/customers/confirm-holder-claim) then finds no row to record it on. The answer therefore carries `invalidate`: the hub's `invalidate(subject)` for the wallet, to be sent by the attester that signed the claim. Once it is mined, the claim can no longer be submitted. To void the whole batch instead, the attester calls `cancelBatch` on the hub with its own tooling.
 </Warning>
 
 Closes one queued approval from [List Pending Verifications](/endpoints/customers/list-pending-verifications) without registering it. Use it for an approval you have decided not to put on chain. The row turns `DISMISSED` and stays listable under that status.
 
-Nothing else changes. No transaction is built, nothing on chain moves, and the customer record keeps its status. A `REGISTER_SWITCH` row's customer therefore still reads `verified`, although nothing put the wallet on your new register.
+Nothing else changes. Nothing on chain moves, and the customer record keeps its status. Only a row with a signed holder claim comes back with a transaction, `invalidate`, which you may send or leave. A `REGISTER_SWITCH` row's customer therefore still reads `verified`, although nothing put the wallet on your new register.
 
-The dismissal is written to the customer audit log as `ON_CHAIN_VERIFICATION_DISMISSED`, with the row `id` and its `source`.
+The dismissal is written to the customer audit log as `ON_CHAIN_VERIFICATION_DISMISSED`, with the row `id` and its `source`, and for a row with a holder claim, `holderClaim: true` and the `attester`.
 
 ## Path Parameters
 
@@ -29,6 +31,12 @@ The dismissal is written to the customer audit log as `ON_CHAIN_VERIFICATION_DIS
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="message" type="string">`Pending verification dismissed`.</ResponseField>
+    <ResponseField name="invalidate" type="object">
+      Present only when the row carried a signed holder claim. `action` (`SIGN_TRANSACTION`), `chainId`, `transaction` (`{ to, data }`, where `to` is the identity hub), `functionName` and `contractFunction` (both `invalidate`), `registerKind` (`INSTANCE`), `description`, `walletAddress`, `attester` and `signerAddress` (the attester that signed the claim, which must send the transaction), `batchRoot` and `deadline` of the claim. Nothing confirms it: the hub's nonce for the wallet moves on, and the claim stops verifying.
+    </ResponseField>
+    <ResponseField name="invalidateUnavailable" type="object">
+      Present only when the row carried a holder claim but the transaction could not be built, for example because your instance is no longer bound to its ID register: `{ code, message }`. The row is dismissed all the same.
+    </ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -55,6 +63,36 @@ const { success, error } = await response.json();
   "success": true,
   "data": {
     "message": "Pending verification dismissed"
+  },
+  "error": null,
+  "metadata": {
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-09-30T10:00:00.000Z"
+  }
+}
+```
+```json Response - Holder Claim
+{
+  "success": true,
+  "data": {
+    "message": "Pending verification dismissed",
+    "invalidate": {
+      "action": "SIGN_TRANSACTION",
+      "chainId": 11155111,
+      "transaction": {
+        "to": "0x3B8e1F6a0D4c2E9b7A5f8C1d3E6a9B2c4D7f0E15",
+        "data": "0x37a3931f000000000000000000000000abc123def456789012345678901234567890abcd"
+      },
+      "functionName": "invalidate",
+      "contractFunction": "invalidate",
+      "registerKind": "INSTANCE",
+      "description": "Void the holder claim 0x51A4F0c3B2e8d7A6c5B4e3f2A1d0c9b8e7f6A5D4 signed for 0xaBc123DEf456789012345678901234567890aBCD",
+      "walletAddress": "0xaBc123DEf456789012345678901234567890aBCD",
+      "attester": "0x51A4F0c3B2e8d7A6c5B4e3f2A1d0c9b8e7f6A5D4",
+      "signerAddress": "0x51A4F0c3B2e8d7A6c5B4e3f2A1d0c9b8e7f6A5D4",
+      "batchRoot": "0x4b1e8c2d7a9f3e6b0c5d1a8e4f7b2c9d6e3a0f5b8c1d4e7a2f9b6c3d0e5a8f1b",
+      "deadline": 1766059200
+    }
   },
   "error": null,
   "metadata": {

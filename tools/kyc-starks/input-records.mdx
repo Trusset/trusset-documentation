@@ -7,7 +7,7 @@ The tool reads KYC records as JSON or CSV from `input/` and writes the bundles a
 
 ## Files
 
-`npm start` reads every `.json` and `.csv` file directly under `input/`, in file-name order, and treats all their rows as one batch. Other extensions are ignored.
+`npm run issue`, like `npm start`, reads every `.json` and `.csv` file directly under `input/`, in file-name order, and treats all their rows as one batch. Other extensions are ignored.
 
 A JSON file holds an array of records, or one record as a bare object. A CSV file has a header row; values are trimmed and a UTF-8 byte-order mark is tolerated. Both shapes carry the same fields.
 
@@ -46,26 +46,26 @@ Column names come from `config.mapping`. The names below are the defaults `init`
 
 ### Passthrough columns
 
-These are validated in TypeScript before the prover starts. Two of them, `country` and `investorType`, are also written in cleartext to the index CSV and to `manifest.passthrough`, which is why their leaves carry the `plaintext` disclosure class.
+These are validated in TypeScript before the prover starts. In a 3.1.0 run, `country` and `investorType` are proved as leaves and written in clear text nowhere in the bundle; the index CSV carries `investorType`, the class the attestation records on chain anyway. Before 3.1 both were also written in clear text to the index CSV and to `manifest.passthrough`, and their leaves carried the `plaintext` disclosure class.
 
 <ResponseField name="walletAddress" type="string" required>
   The subject identifier: `0x` followed by 40 hex characters. A mixed-case address must carry a correct EIP-55 checksum; all-lowercase and all-uppercase forms are accepted. The bundle directory and every manifest field use the checksummed form, whatever case the input used.
 </ResponseField>
 
 <ResponseField name="country" type="string" required>
-  At least two characters. The value is upper-cased and cut to its first three characters, so supply an ISO 3166-1 alpha-3 code. Under the default predicate it must be a member of `country_allowlist`. A row without it is quarantined; the tool cannot run without a country column.
+  At least two characters. The value is upper-cased and cut to its first three characters, so supply an ISO 3166-1 alpha-3 code. Under the 3.1 config it must be a member of `country_allowlist`, and it is also proved against the `eea` list when it is a member, for `EEA_RESIDENT`. A row without it is quarantined; the tool cannot run without a country column.
 </ResponseField>
 
 <ResponseField name="investorType" type="string">
-  One of `NONE`, `RETAIL`, `PROFESSIONAL`, `ELIGIBLE_COUNTERPARTY`, matched case-insensitively. A blank column takes `output.defaults.investorType` (`RETAIL` in the generated config). A value that is present and not one of the four fails the row. A `NONE` subject fails the `tier_threshold` predicate with `E_TIER_NONE`, so a subject with no tier claim should have the predicate removed from the config rather than a tier of `NONE`.
+  One of `NONE`, `RETAIL`, `PROFESSIONAL`, `ELIGIBLE_COUNTERPARTY`, matched case-insensitively. A blank column takes `output.defaults.investorType` (`RETAIL` in the generated config). A value that is present and not one of the four fails the row. A `NONE` subject fails with `E_TIER_NONE`. Under 3.1 every subject needs `RETAIL`, `PROFESSIONAL` or `ELIGIBLE_COUNTERPARTY`, because the hub records a class, and the CLI quarantines a `NONE` row before proving.
 </ResponseField>
 
 <ResponseField name="softExpiryDays" type="integer">
-  Whole days between 0 and 36500. Blank takes `output.defaults.softExpiryDays` (365). Passthrough only: no circuit witnesses it and no verifier evaluates it. When both expiries are above zero, `softExpiryDays` must not exceed `hardExpiryDays`.
+  Whole days between 0 and 36500. Blank takes `output.defaults.softExpiryDays` (365). Passthrough only: no circuit witnesses it, the manifest signature covers it, and under 3.1 it sets the attestation's soft expiry in `attestation.json`. When both expiries are above zero, `softExpiryDays` must not exceed `hardExpiryDays`, and under 3.1 it must be below it.
 </ResponseField>
 
 <ResponseField name="hardExpiryDays" type="integer">
-  Same rules; the default is 730. Passthrough only.
+  Same rules; the default is 730. Passthrough only. Under 3.1 it sets the attestation's hard expiry.
 </ResponseField>
 
 <ResponseField name="evidenceDate" type="string">
@@ -78,8 +78,8 @@ Every name listed in `config.mapping.fields` is a hashed field: its value is com
 
 | Field | Default predicate | Value rules |
 |---|---|---|
-| `dateOfBirth` | `age_threshold`, at least 18 years | `YYYY-MM-DD`, or a days-since-1970 integer. Must be a real calendar date on or after 1970-01-01 and not after the batch date. |
-| `nationality` | `set_membership` on `country_allowlist` | Must be a member of the list version authoritative on the batch date. Compared after NFC normalisation. |
+| `dateOfBirth` | `age_threshold`, at least 18 years, `ADULT` under 3.1 | `YYYY-MM-DD`, or a days-since-1970 integer. Must be a real calendar date on or after 1970-01-01 and not after the batch date. |
+| `nationality` | `set_membership` on `country_allowlist`, `CITIZENSHIP_ON_FILE` under 3.1 | Must be a member of the list version authoritative on the batch date. Compared after NFC normalisation. |
 | `documentIssuingCountry` | `set_membership` on `country_allowlist` | Same. |
 | `firstName`, `lastName` | `commitment_only` | Any non-empty string. |
 | `documentType`, `documentNumber` | `commitment_only` | Any non-empty string. |
@@ -96,7 +96,7 @@ A batch fails in two stages, and one bad row never stops the others.
 
 **Prover** failures are per subject. An under-age date of birth, a value missing from the allowlist, a tier below the floor: the subject fails and the rest of the batch continues. The row goes to `failures.csv` with `stage=prover`. A real run stops at the first failing leaf of a subject; `--dry-run` reports every failing leaf of every subject in one pass.
 
-Failure messages name the leaf and the asserted threshold and never echo the subject's value. `failures.csv` travels, and a nationality is exactly what the `nationality` predicate exists to keep private.
+Failure messages name the leaf and the asserted threshold and never echo the subject's value. `failures.csv` travels, and a subject's nationality has no place in a file that travels.
 
 ```csv
 walletAddress,stage,errorCode,message
@@ -109,7 +109,8 @@ walletAddress,stage,errorCode,message
 
 ```
 output/
-├── <walletAddress>/                 one bundle directory per successful subject
+├── <walletAddress>/                 one bundle directory per successful subject, with
+│                                    its header, disclosures and attestation.json under 3.1
 ├── kyc_hashes_<timestamp>.csv       the batch index
 ├── failures.csv                     only when a row failed
 └── audit.log                        one NDJSON event per line, rewritten each run
@@ -119,15 +120,15 @@ Bundles are written to `output/.tmp/<wallet>/` and renamed into place only after
 
 ### The index CSV
 
-One row per successful subject, in input order, with the cleartext passthrough values and the root:
+One row per successful subject, in input order, with the investor type, the expiry days and the root. A 3.1.0 run writes no `country` column:
 
 ```csv
-walletAddress,country,investorType,softExpiryDays,hardExpiryDays,kycHash,index
-0xabCDeF0123456789AbcdEf0123456789aBCDEF01,DEU,PROFESSIONAL,365,730,0xbefab9f6fdaba8c1fdb740880fd7a7e6505f6a29b0c2fb2e4b089be395606168,1
-0xfEdcBA9876543210FedCBa9876543210fEdCBa98,FRA,ELIGIBLE_COUNTERPARTY,365,730,0x9ee10301aa7a741038d21bc0511c53bd0a94cea0a2e18c99fa4ab3b1f20d5b4d,2
+walletAddress,investorType,softExpiryDays,hardExpiryDays,kycHash,index
+0xabCDeF0123456789AbcdEf0123456789aBCDEF01,PROFESSIONAL,365,730,0xf2240e2fc453da2ce40b3ab3363ed18a959722fc35c92767837f2c79b44f181f,1
+0xfEdcBA9876543210FedCBa9876543210fEdCBa98,ELIGIBLE_COUNTERPARTY,365,730,0xe9d2f0e3de067dac22c32d124208ee77b2f57a2c8a0cadc788ba227ca2339039,2
 ```
 
-The file name carries the run's UTC timestamp. `npm start -- --raw` drops the `index` column and appends `_raw` to the file name. `output.format: "json"` writes the same rows as a JSON array with a `.json` extension, and `output.emitIndexCsv: false` suppresses the file in either format. The `kycHash` column equals `kycHash.hex` and `manifest.kycHash` for that subject.
+Before 3.1 the index also carried `country` in clear text, after the wallet. The file name carries the run's UTC timestamp. `--raw` drops the `index` column and appends `_raw` to the file name. `output.format: "json"` writes the same rows as a JSON array with a `.json` extension, and `output.emitIndexCsv: false` suppresses the file in either format. The `kycHash` column equals `kycHash.hex` and `manifest.kycHash` for that subject.
 
 ### audit.log
 
@@ -144,7 +145,7 @@ The prover writes `output/audit.log` on every real run and truncates it first, s
 
 No field value ever appears in it, and a failed subject is recorded by error code only, without the message, because messages carry numeric context. The wallet address is recorded; it is a public identifier. Timestamps are wall-clock, so the file differs between two otherwise identical runs, and the determinism canary ignores it by design.
 
-## Exit codes of `npm start`
+## Exit codes of `npm run issue` and `npm start`
 
 | Code | Meaning |
 |---|---|

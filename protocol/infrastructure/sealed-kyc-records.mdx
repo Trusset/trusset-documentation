@@ -1,9 +1,11 @@
 ---
 title: "Sealed KYC Records"
-description: "Receive the KYC file of an investor from the verifier you designate, as ciphertext only you can open"
+description: "Receive the KYC file of an investor from the verifier you designate, and facts a holder discloses to you, as ciphertext only you can open"
 ---
 
 An investor is often verified before they reach you, for example by the liability umbrella that onboarded them at the time of investment. A sealed KYC record brings that verifier's KYC file to you through Trusset without Trusset being able to read it. The verifier encrypts the file to a key whose private half exists only on your machine, signs it, and posts it to your inbox. You open it locally, decide, and your wallet signs the admission.
+
+A holder can send you facts from their own KYC proof bundle the same way, in answer to a [disclosure request](#disclosures-from-a-holder).
 
 ## Who does what
 
@@ -106,6 +108,43 @@ Each change is reported to your customer webhooks: a record received, opened, re
 ## Availability
 
 Sealed KYC records are switched on for development instances. For production instances Trusset enables them for each organisation. Until then, registering a record key, adding a source or issuing an invite on a production instance is refused with `SEALED_KYC_NOT_ENABLED`.
+
+## Disclosures from a holder
+
+A disclosure request asks the holder of a wallet for facts from the KYC proof bundle their verifier issued them: their age, their country of residence, or the whole bundle. The answer travels like a sealed record. It is encrypted to your record key, Trusset relays ciphertext it cannot read, and only your tool opens it.
+
+<Steps>
+  <Step title="You ask">
+    You create a [disclosure request](/endpoints/customers/create-disclosure-request) for a wallet and a scope: `AGE`, `COUNTRY` or `FULL_KYC`. The request names the active record key of your instance.
+  </Step>
+  <Step title="The holder approves in verify.trusset.org">
+    The holder signs in with the wallet and picks a KYC-STARKs 3.1 bundle. Earlier bundles cannot be disclosed. The browser takes the disclosed leaves and proofs the scope needs and encrypts them to your record key with HPKE. The wallet then signs a consent, `DisclosureConsent` version 2, whose `envelopeDigest` names that exact envelope.
+  </Step>
+  <Step title="Trusset relays">
+    Trusset checks the envelope's shape and size, its header against the request, and the consent signature against the wallet and the envelope. It stores the ciphertext and a header without personal data. It accepts no proof in clear and verifies none.
+  </Step>
+  <Step title="You open and verify locally">
+    Your [courier](/tools/kyc-courier/overview) downloads the envelope, checks the consent against it, and decrypts it with your record key. Given the verifier and an RPC URL, it verifies each proof with `verify_disclosure` of the [KYC STARK tool](/tools/kyc-starks/verification#a-single-disclosed-leaf) 3.1, against the operator key the identity hub publishes for the attester, and checks the bundle root against the wallet's attestation on the hub. Then it proves the opening, or rejects the envelope with a reason. Either way Trusset deletes the ciphertext.
+  </Step>
+</Steps>
+
+### What a proof reveals
+
+A KYC STARK proof is not zero-knowledge. It proves its predicate and also shows the value behind it. You see exactly the values the selected proofs show, and nothing about the other leaves of the bundle.
+
+| Scope | The holder discloses | You learn |
+|---|---|---|
+| `AGE` | A leaf proving `ADULT` | The date of birth |
+| `COUNTRY` | A leaf proving `EEA_RESIDENT` or `RESIDENCY_ON_FILE` | The country of residence |
+| `FULL_KYC` | Every leaf of the bundle | Every value a proof shows: with the tool's default configuration the date of birth, the country, the nationality, the document's issuing country and the investor class. Names and document data are commitment-only leaves and stay hidden |
+
+Ask only for what you are entitled to see. Once opened, the values are personal data you hold under your own data protection duties.
+
+### What Trusset holds for a disclosure
+
+Trusset holds the ciphertext until you open or reject it, or for 30 days after the holder answered. The header names the request, the wallet, your key ID, the scope and its fixed predicates, two digests and a date. It never names the leaves the holder disclosed: for `COUNTRY` that would show whether the holder lives in the EEA. After the ciphertext is deleted, the header, the digests, the size, the consent and the dates stay, so you can show later which envelope the holder consented to.
+
+Encrypted disclosures need the same production switch as sealed records. Until Trusset enables your organisation, creating or answering a request on a production instance is refused with `ENCRYPTED_DISCLOSURES_NOT_ENABLED`. Opening, rejecting and the 30-day deletion always work.
 
 ## What stays between you and your verifier
 

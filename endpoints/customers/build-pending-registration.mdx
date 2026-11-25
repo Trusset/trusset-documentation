@@ -6,12 +6,16 @@ description: 'Unsigned transactions that register queued KYC approvals on your r
 
 Returns the unsigned transactions that register a set of rows from [List Pending Verifications](/endpoints/customers/list-pending-verifications). They carry what was queued: the `kycHash`, investor type, expiries and residency claim the platform computed at approval. Your wallets sign and broadcast them, then [Confirm Pending Registration](/endpoints/customers/confirm-pending-registration) records the result.
 
-What comes back depends on the register your instance writes to, reported as `registerKind`. A Trusset register takes one batch. An ERC-3643 register takes up to three phases of signatures, so call again after each until `phase` is `REGISTER`.
+What comes back depends on the register your instance writes to, reported as `registerKind`. The [instance ID register](/endpoints/customers/introduction#the-instance-id-register) takes one `attestBatch` on the identity hub. A register of your own with the Trusset interface takes one batch plus renewal and claim steps. An ERC-3643 register takes up to three phases of signatures, so call again after each until `phase` is `REGISTER`.
+
+This is the issuer path: your wallet signs and pays for the batch. On the instance ID register each customer can also submit their own attestation from their wallet, after you sign one batch with [Build Holder Batch](/endpoints/customers/build-holder-batch). See [Holder claims](/endpoints/customers/introduction#holder-claims).
 
 <Warning>
-  One row from a blocked country refuses the whole call with `COUNTRY_BLOCKED`, and the message names its wallet. Leave that id out to build the rest. Dismissing the row also lets the rest build, but a dismissal cannot be undone. A dismissed approval never reaches the register from the queue.
+  One row from a blocked country refuses the whole call with `COUNTRY_BLOCKED`, and the message names its wallet. Leave that id out to build the rest. Dismissing the row also lets the rest build, but a dismissal cannot be undone. A dismissed approval never reaches the register from the queue. A row whose wallet belongs only to an archived customer refuses the call with `409 CUSTOMER_ARCHIVED`.
 
-  On a Trusset register the build reads each row's wallet on the register first. A wallet without an active identity goes into the batch. A wallet whose identity your instance registered, or whose identity has expired, gets its own `updateIdentity` step that renews it. On the Trusset ID Register, a wallet another issuer registered and whose identity is still valid refuses the whole call with `409 IDENTITY_HELD_BY_ANOTHER_ISSUER`, naming the wallet and who registered it; dismiss that row to build the rest. The batch still skips a row whose expiry has passed and any entry it runs out of gas for. A row whose wallet belongs only to an archived customer refuses the call with `409 CUSTOMER_ARCHIVED`.
+  On the instance ID register the batch is all or nothing. A row without a `kycHash` refuses the whole call with `409 KYC_HASH_MISSING`, and a row whose expiry has already passed with `400 INVALID_EXPIRY`. Dismiss that row to build the rest.
+
+  On a register of your own with the Trusset interface the build reads each row's wallet on the register first. A wallet without an active identity goes into the batch. A wallet that holds one, or whose identity has expired, gets its own `updateIdentity` step that renews it. The batch still skips a row whose expiry has passed and any entry it runs out of gas for.
 </Warning>
 
 ## Body Parameters
@@ -25,16 +29,34 @@ What comes back depends on the register your instance writes to, reported as `re
 </ParamField>
 
 <ParamField body="signerAddress" type="string">
+  Not used on the instance ID register.
+
   ERC-3643 only. The wallet that will sign the claims. It must hold a CLAIM key on the register's trusted issuer. Otherwise the call is refused with `CLAIM_SIGNER_NOT_TRUSTED`, or with `CLAIM_SIGNER_MISSING` when none of your registered wallets holds one either. It also becomes the management key of every ONCHAINID the plan deploys. Name a wallet registered to your instance, because [Confirm ONCHAINID](/endpoints/customers/confirm-onchainid) refuses any other management key. Omit it to use the first registered wallet that holds a CLAIM key. A malformed address is ignored.
 
   On a T-REX 5 register it names the wallet you will sign the current phase with, and never becomes a management key of an investor's ONCHAINID. When it lacks the role a step or message of the phase needs, the call answers `403 SIGNER_ROLE_MISSING`, and the message names the wallets that hold it.
 </ParamField>
 
-## Sign for a Trusset register
+## Sign for the instance ID register
+
+The answer is `SIGN_TRANSACTIONS` with `registerKind` set to `INSTANCE`. It holds one step, `stepType: verify`, an `attestBatch` call on the identity hub for every row. Each row is attested with its `kycHash` as the root, its investor type as the investor class, its expiries, and these [predicates](/endpoints/customers/introduction#predicates):
+
+| Predicate | Set when |
+|---|---|
+| `KYC_DONE` | Always |
+| `RESIDENCY_ON_FILE` | The row carries a `residencyClaim` |
+| `EEA_RESIDENT` | The row's country is in the EEA |
+
+The country itself never goes on chain. `operations` maps every row id to `verify`: a wallet your signer already attested is attested again, which replaces that attestation.
+
+Sign the step with a wallet registered to your instance that your register trusts as an attester. The build refuses with `403 ATTESTER_MISSING` when none of your registered wallets is one. A register admin trusts a wallet in the issuer app, on the wallet page. See [Attesters and trust](/endpoints/customers/introduction#attesters-and-trust). An instance without its instance ID register is refused with `409 INSTANCE_REGISTER_REQUIRED`; it is created in the issuer app, under Settings.
+
+Confirm with the batch hash as `txHash`.
+
+## Sign for a register of your own
 
 The answer is `SIGN_TRANSACTIONS` with `registerKind` set to `TRUSSET`. The first step, `stepType: verify`, is one `batchVerifyIdentities` call for every row whose wallet holds no active identity, and is left out when there is none. Each row whose identity is renewed follows as an `updateIdentity` step, `stepType: update`, carrying the row's `id`. Each row with a `residencyClaim` adds an `addClaim` step, `stepType: residencyClaim`, that files its `RESIDENCY` slot. `operations` maps every row id to `verify` or `update`.
 
-Sign every step with a wallet registered to your instance that holds `KYC_PROVIDER_ROLE` on the register. The build refuses with `KYC_PROVIDER_ROLE_MISSING` when the register reports that none of your registered wallets holds it. Grant the role with **Grant on-chain roles** on the wallet page of the issuer app (see [Customers](/endpoints/customers/introduction)).
+Sign every step with a wallet registered to your instance that holds `KYC_PROVIDER_ROLE` on the register. The build refuses with `KYC_PROVIDER_ROLE_MISSING` when the register reports that none of your registered wallets holds it. The register's owner grants the role.
 
 Broadcast the steps in order, and let the batch be mined before the claims. The register refuses a claim for an identity that is not active yet.
 
@@ -85,7 +107,7 @@ Every step names the wallet that must sign it in `signer`. A T-REX 5 register re
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTIONS`, or `SIGN_MESSAGES` in the `SIGN_CLAIMS` phase.</ResponseField>
-    <ResponseField name="registerKind" type="string">`TRUSSET` or `TREX`.</ResponseField>
+    <ResponseField name="registerKind" type="string">`INSTANCE` on the instance ID register, `TRUSSET` on a register of your own with the Trusset interface, `TREX` on an ERC-3643 register.</ResponseField>
     <ResponseField name="phase" type="string">ERC-3643 only. `DEPLOY_IDENTITY`, `SIGN_CLAIMS` or `REGISTER`. On a T-REX 5 register `CREATE_IDENTITY` takes the place of `DEPLOY_IDENTITY`.</ResponseField>
     <ResponseField name="trexVersion" type="integer">ERC-3643 only. `4` or `5`.</ResponseField>
     <ResponseField name="identityFactory" type="string">T-REX 5 only. The identity factory the register names.</ResponseField>
@@ -111,9 +133,11 @@ Every step names the wallet that must sign it in `signer`. A T-REX 5 register re
 <ResponseField name="steps" type="array">
   <Expandable>
     <ResponseField name="action" type="string">`SIGN_TRANSACTION`.</ResponseField>
-    <ResponseField name="stepType" type="string">`verify` for the batch or register call, `residencyClaim` or `claim` for a claim, `country` for `updateCountry`, and `deployIdentity` for an ONCHAINID. On a T-REX 5 register also `createIdentity` for an ONCHAINID the factory creates and `rotateClaim` for a revoked previous claim.</ResponseField>
+    <ResponseField name="stepType" type="string">`verify` for the batch or register call, `update` for a renewal, `residencyClaim` or `claim` for a claim, `country` for `updateCountry`, and `deployIdentity` for an ONCHAINID. On a T-REX 5 register also `createIdentity` for an ONCHAINID the factory creates and `rotateClaim` for a revoked previous claim.</ResponseField>
     <ResponseField name="transaction" type="object">`to` and `data`. A deployment has `to: null` and `create: true`, and is sent as a contract creation.</ResponseField>
-    <ResponseField name="functionName" type="string">`batchVerifyIdentities`, `addClaim`, `registerIdentity`, `batchRegisterIdentity` or `updateCountry`, or `IdentityProxy` for a deployment. On a T-REX 5 register also `createIdentityFor`, `addClaimTo` and `revokeClaimByDigest`.</ResponseField>
+    <ResponseField name="functionName" type="string">`batchVerifyIdentities`, `updateIdentity`, `addClaim`, `registerIdentity`, `batchRegisterIdentity` or `updateCountry`, or `IdentityProxy` for a deployment. On a T-REX 5 register also `createIdentityFor`, `addClaimTo` and `revokeClaimByDigest`. On the instance ID register it is `batchVerifyIdentities`, and `contractFunction` names the hub call, `attestBatch`.</ResponseField>
+    <ResponseField name="contractFunction" type="string">Instance ID register only. `attestBatch`.</ResponseField>
+    <ResponseField name="chainId" type="integer">Instance ID register only. The chain to send the step on.</ResponseField>
     <ResponseField name="signer" type="string">T-REX 5 only. The wallet that must sign the step.</ResponseField>
     <ResponseField name="description" type="string">What the step does.</ResponseField>
     <ResponseField name="ids" type="array">The rows a batch or register step covers.</ResponseField>
@@ -131,7 +155,7 @@ Every step names the wallet that must sign it in `signer`. A T-REX 5 register re
 
 The example uses one issuer wallet, `wallet`, as an ethers v5 signer. On an ERC-3643 register it assumes that wallet is an agent of the register and holds a CLAIM key on its trusted issuer. Passing its address as `signerAddress` makes it the management key of any ONCHAINID it deploys, so it can also send the claim steps.
 
-On a Trusset register the first answer has no `phase`, so the loop is skipped and the steps are broadcast directly.
+On the instance ID register and on a register of your own with the Trusset interface the first answer has no `phase`, so the loop is skipped and the steps are broadcast directly.
 
 ```typescript
 import { ethers } from 'ethers';
@@ -211,58 +235,43 @@ const { data: plan } = await response.json();
 </RequestExample>
 
 <ResponseExample>
-```json Trusset Register
+```json Instance ID Register
 {
   "success": true,
   "data": {
     "action": "SIGN_TRANSACTIONS",
-    "registerKind": "TRUSSET",
+    "registerKind": "INSTANCE",
     "steps": [
       {
         "action": "SIGN_TRANSACTION",
+        "chainId": 11155111,
         "transaction": {
-          "to": "0xBC06fBe06A95aC37425A3736Dd862de129a9E100",
-          "data": "0x9f4cc990..."
+          "to": "0x5A1d0c7E3f9B2a48C6e1D05b7F3a92c8E4d61B07",
+          "data": "0x6c1a3e0b..."
         },
         "functionName": "batchVerifyIdentities",
-        "description": "Register 2 verified identities on-chain",
+        "contractFunction": "attestBatch",
+        "registerKind": "INSTANCE",
+        "description": "Attest 2 verified identities on the instance ID register",
         "stepType": "verify",
         "ids": ["cmg1u7k3p0004l80h2f9s6d1x", "cmg1u9q2m0007l80hc4t8z3wa"]
-      },
-      {
-        "action": "SIGN_TRANSACTION",
-        "transaction": {
-          "to": "0xBC06fBe06A95aC37425A3736Dd862de129a9E100",
-          "data": "0x07363788..."
-        },
-        "functionName": "addClaim",
-        "description": "Add residency claim for 0x96c5822784130360f904372b83e130be4a1894d6",
-        "stepType": "residencyClaim",
-        "id": "cmg1u7k3p0004l80h2f9s6d1x"
-      },
-      {
-        "action": "SIGN_TRANSACTION",
-        "transaction": {
-          "to": "0xBC06fBe06A95aC37425A3736Dd862de129a9E100",
-          "data": "0x07363788..."
-        },
-        "functionName": "addClaim",
-        "description": "Add residency claim for 0xff21b8ac28bb6a20c1c0160af42303d2946b99ea",
-        "stepType": "residencyClaim",
-        "id": "cmg1u9q2m0007l80hc4t8z3wa"
       }
     ],
     "total": 2,
     "ids": ["cmg1u7k3p0004l80h2f9s6d1x", "cmg1u9q2m0007l80hc4t8z3wa"],
+    "operations": {
+      "cmg1u7k3p0004l80h2f9s6d1x": "verify",
+      "cmg1u9q2m0007l80hc4t8z3wa": "verify"
+    },
     "confirmWith": {
       "endpoint": "POST /customers/api/identity/pending/confirm",
-      "fields": ["ids", "txHash", "claimTxResults?"]
+      "fields": ["ids", "txHash (the attestBatch transaction)"]
     }
   },
   "error": null,
   "metadata": {
     "requestId": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": "2026-09-30T10:00:00.000Z"
+    "timestamp": "2026-11-19T10:00:00.000Z"
   }
 }
 ```
@@ -471,26 +480,31 @@ const { data: plan } = await response.json();
 | Code | HTTP | Cause |
 |---|---|---|
 | `VALIDATION_ERROR` | `400` | `ids` is not an array of 1 to 200 ids |
+| `INVALID_EXPIRY` | `400` | Instance ID register: a row's expiry has already passed. The whole call is refused |
+| `INVALID_INVESTOR_TYPE` | `400` | Instance ID register: a row's investor type is not 1, 2 or 3 |
 | `INVALID_CLAIM_SIGNATURE` | `400` | A claim signature is not 65 bytes of hex, or recovers to no signer for its identity, topic and data |
 | `COUNTRY_BLOCKED` | `403` | A row's country is on the blocked list of its verification profile. The whole call is refused |
-| `KYC_PROVIDER_ROLE_MISSING` | `403` | Trusset register: none of your registered wallets holds `KYC_PROVIDER_ROLE` |
+| `ATTESTER_MISSING` | `403` | Instance ID register: none of your registered wallets is a trusted attester of the register |
+| `KYC_PROVIDER_ROLE_MISSING` | `403` | Your own Trusset-interface register: none of your registered wallets holds `KYC_PROVIDER_ROLE` |
 | `REGISTRY_AGENT_MISSING` | `403` | ERC-3643 register: none of your registered wallets is an agent of the register |
 | `CLAIM_SIGNER_MISSING` | `403` | ERC-3643 register: neither `signerAddress` nor any of your registered wallets holds a CLAIM key on the register's trusted issuer |
 | `CLAIM_SIGNER_NOT_TRUSTED` | `403` | `signerAddress`, or the wallet a claim signature recovers to, holds no CLAIM key on the trusted issuer |
 | `CLAIM_MANAGER_MISSING` | `403` | T-REX 5: none of your registered wallets holds a MANAGEMENT key on the trusted issuer identity |
 | `IDENTITY_ISSUER_MISSING` | `403` | T-REX 5: a wallet has no ONCHAINID, and none of your registered wallets holds the IDENTITY_ISSUER role of the identity factory's authority |
 | `SIGNER_ROLE_MISSING` | `403` | T-REX 5: `signerAddress` lacks the role a step or message of this phase needs. The message names the wallets that hold it |
+| `NOT_FOUND` | `404` | None of the `ids` is a `PENDING` row of your instance, or the instance no longer exists |
+| `INSTANCE_REGISTER_REQUIRED` | `409` | Your instance has no instance ID register yet. It is created in the issuer app, under Settings |
+| `KYC_HASH_MISSING` | `409` | Instance ID register: a row has no `kycHash` to attest. Dismiss it and verify the customer again |
 | `IDENTITY_TYPE_NOT_ENABLED` | `409` | T-REX 5: the identity factory has no policy for a wallet's identity type |
 | `IDENTITY_BINDING_REVOKED` | `409` | T-REX 5: a wallet's binding on the identity factory is revoked. Dismiss that row to build the rest |
 | `CLAIM_NOT_VALID` | `409` | T-REX 5: the trusted issuer does not accept a signed claim. Sign it again |
-| `NOT_FOUND` | `404` | None of the `ids` is a `PENDING` row of your instance, or the instance no longer exists |
 | `OWN_REGISTRY_NOT_CONFIGURED` | `409` | Your instance is set to its own register but holds no valid register address |
 | `REGISTRY_NO_CLAIM_TOPICS` | `409` | The ERC-3643 register requires no claim topic, so there is no claim to sign |
 | `REGISTRY_NO_TRUSTED_ISSUER` | `409` | The register requires a claim topic but names no trusted issuer for it |
 | `ONCHAINID_AUTHORITY_UNKNOWN` | `409` | A wallet needs an ONCHAINID, and no identity on the register shows which implementation authority to deploy it from |
-| `IDENTITY_HELD_BY_ANOTHER_ISSUER` | `409` | Trusset ID Register: a row's wallet holds a valid identity another issuer registered. The whole call is refused |
 | `CUSTOMER_ARCHIVED` | `409` | A row's wallet belongs only to an archived customer. The whole call is refused |
-| `CHAIN_UNAVAILABLE` | `503` | Trusset register: the rows' wallets could not be read on the register. Retry shortly |
+| `IDENTITY_HUB_NOT_CONFIGURED` | `501` | The identity hub is not deployed on your instance's network |
+| `CHAIN_UNAVAILABLE` | `503` | Your own Trusset-interface register: the rows' wallets could not be read on the register. Retry shortly |
 | `REGISTRY_PROBE_FAILED` | `503` | The register or its trusted issuer could not be read. Retry shortly |
 | `PENDING_CALLDATA_FAILED` | `400` | A chain read failed while building |
 | `PENDING_CALLDATA_FAILED` | `500` | Any other failure |
