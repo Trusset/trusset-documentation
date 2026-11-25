@@ -10,7 +10,7 @@ A market deployed through [Deploy Market](/endpoints/lending/deploy-market) is b
 
 No market exists yet, so there is no market access check. The token must be one this instance imported and holds as active, with a published profile. Otherwise the call is refused with `TOKEN_PROFILE_REQUIRED`, the same refusal a deployment gets. Import the token with [Import Token](/endpoints/tokenization/import-token) and fill its profile with [Update Profile](/endpoints/tokenization/update-profile).
 
-The preview stores nothing. Pass the same `mode`, `priceSource` and `borrowAssetAddress` the deployment will use, because each of them is part of the bundle. When the market will carry documents, send the same parameters as a JSON body to `POST /lending-external-securities-v2/api/markets/asset-data/preview` with the same `documents` array the deployment will carry: the documents are part of the bundle too. On a `FIXED` deployment pass the same `initialPrice` too: the bundle commits to the fixed price itself. The deployment response carries its own `assetData.contentHash`, so compare the two before the issuer signs.
+The preview stores nothing. Pass the same `mode`, `priceSource` and `borrowAssetAddress` the deployment will use, because each of them is part of the bundle. When the market will carry documents, send the same parameters as a JSON body to `POST /lending-external-securities-v2/api/markets/asset-data/preview` with the same `documents` array the deployment will carry: the documents are part of the bundle too. On a `FIXED` deployment pass the same `initialPrice` too: the bundle commits to the fixed price itself. When the market will carry [identity terms](/endpoints/lending/identity-terms), send the same `identityTerms` and the same borrower and provider registers in the `POST` body: the preview judges the terms against those registers exactly as the deployment will. The signatures on record are part of the terms' member, so a member who signs between the preview and the deployment changes the hash. The deployment response carries its own `assetData.contentHash`, so compare the two before the issuer signs.
 
 ## Query Parameters
 
@@ -38,9 +38,21 @@ The preview stores nothing. Pass the same `mode`, `priceSource` and `borrowAsset
   `POST` only. The documents the deployment will attach, as described on [Deploy Market](/endpoints/lending/deploy-market#documents). Each public document must have been uploaded by this instance first.
 </ParamField>
 
+<ParamField body="identityTerms" type="object">
+  `POST` only. `{ id, version }`: the latest published version of [identity terms](/endpoints/lending/identity-terms) of this instance the deployment will attach. The terms are checked against the registers below and the collateral token's own identity registry, and a claim they do not back is refused with `IDENTITY_TERMS_CLAIM_NOT_BACKED`.
+</ParamField>
+
+<ParamField body="identityRegistry" type="string">
+  `POST` only, read with `identityTerms`. The borrower register the deployment will install. `identityRegistryProfile` or `identityRegistryAccessList` may name it instead, as on [Deploy Market](/endpoints/lending/deploy-market).
+</ParamField>
+
+<ParamField body="providerRegistry" type="string">
+  `POST` only, read with `identityTerms`. The provider register the deployment will propose. `providerRegistryProfile` or `providerRegistryAccessList` may name it instead. It is recorded in the terms' gates and no rule is judged against it.
+</ParamField>
+
 ## What the bundle contains
 
-A bundle this API builds follows schema `1.1.0` and has up to five members, or schema `1.2.0` with a sixth member, `documents`, when the market carries documents. A bundle stored under schema `1.0.0` has no `instrument` member. A bundle without documents is built under `1.1.0` exactly as before, so its hash does not change. The rules are fixed per schema version, so a stored bundle re-hashes to the same value for as long as it is kept.
+A bundle this API builds follows schema `1.1.0` and has up to five members, or schema `1.2.0` with a sixth member, `documents`, when the market carries documents. A bundle that carries identity terms follows schema `1.3.0`, which adds the member `identity` and carries documents as `1.2.0` does. A bundle stored under schema `1.0.0` has no `instrument` member. A bundle without documents is built under `1.1.0` exactly as before, and a bundle without identity terms under `1.1.0` or `1.2.0`, so its hash does not change. The rules are fixed per schema version, so a stored bundle re-hashes to the same value for as long as it is kept.
 
 | Member | Contents |
 |---|---|
@@ -48,8 +60,9 @@ A bundle this API builds follows schema `1.1.0` and has up to five members, or s
 | `market` | What the deployment fixes: `chainId`, `factory`, `family` (always `FUNGIBLE` on this surface), `borrowAsset`, `collateralMode` and `priceSource`. A `FIXED` deployment adds `fixedPrice`, the price in the settlement token's smallest unit, so the lender of record acknowledges the value itself at adoption |
 | `token` | The facts recorded when the token was imported: `tokenAddress`, `name`, `symbol`, `decimals`, `framework`, `assetType`, `totalSupply` |
 | `profile` | The issuer's published profile, limited to `issuerName`, `jurisdiction`, `sector`, `description`, `isin`, `lei`, `website`, `ammAddress`, `reserveURI`, `prospectusURI` and `documents`, each document reduced to `name` and `uri` |
-| `documents` | Schema `1.2.0` only. The market's documents, sorted by name, each `{ name, documentType, documentDate, visibility, contentHash, uri }`: `contentHash` is the SHA-256 of the file as 64 lower-case hex characters, `uri` is present for a public document only. Private files never enter the bundle, only their hash |
+| `documents` | Schema `1.2.0` and `1.3.0`. The market's documents, sorted by name, each `{ name, documentType, documentDate, visibility, contentHash, uri }`: `contentHash` is the SHA-256 of the file as 64 lower-case hex characters, `uri` is present for a public document only. Private files never enter the bundle, only their hash |
 | `instrument` | The token's [instrument record](/endpoints/tokenization/get-instrument) on this network: its string and true-or-false fields, dates as `YYYY-MM-DD`, its call and put schedules as dated entries, and its documents reduced to `docType`, `uri`, `contentHash`, `language`, `version` and `issuedAt`. Left out when the token has no record |
+| `identity` | Schema `1.3.0` only. The attached [identity terms](/endpoints/lending/identity-terms#in-the-asset-data): `{ terms, coreHash, signatures, gates }`. `terms` is the whole published version, `signatures` the member signatures on record, and `gates` the registers the terms were judged against with `readAt: { chainId, block }`. `block` is `0` before deployment |
 
 The market's own address is not a member. The first attestation travels inside the transaction that creates that address, and the factory's own record binds the hash to the market.
 
@@ -60,7 +73,7 @@ The market's own address is not a member. The first attestation travels inside t
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="contentHash" type="string">keccak256 over the UTF-8 bytes of `canonicalJson`. The value the deployment writes as its first attestation.</ResponseField>
-    <ResponseField name="schemaVersion" type="string">`1.1.0`, or `1.2.0` when the bundle carries documents.</ResponseField>
+    <ResponseField name="schemaVersion" type="string">`1.1.0`, `1.2.0` when the bundle carries documents, or `1.3.0` when it carries identity terms.</ResponseField>
     <ResponseField name="canonicalJson" type="string">The exact bytes the hash commits to.</ResponseField>
     <ResponseField name="bundle" type="object">The same bundle as an object, for display.</ResponseField>
     <ResponseField name="documents" type="array">The documents in the bundle, empty when none.</ResponseField>
@@ -69,6 +82,7 @@ The market's own address is not a member. The first attestation travels inside t
     <ResponseField name="fixedPrice" type="object">`FIXED` only. The price the bundle commits to: `priceWei`, `price`, `settlementSymbol`, `settlementDecimals`, and `perWholeToken`, `neverStale` and `markDownOnly`, each `true`, with a `note`.</ResponseField>
     <ResponseField name="fixedPriceCheck" type="object">`FIXED` only. The checks [Deploy Market](/endpoints/lending/deploy-market#fixed-price) runs on the price: `tokenCurrency` from the instrument record, `settlementCurrency`, `currencyKnown`, `currencyMatches`, `nominalPerUnit`, `redemptionPricePct` with `redemptionPricePctAssumed`, `expectedPrice` and `expectedPriceWei` (nominal times redemption percent over 100), `matchesNominal`, and the `formula`. A `null` comparison means the instrument record lacks the figure. The price checked is repeated as `priceWei` and `price`, with `settlementSymbol` and `perWholeToken`.</ResponseField>
     <ResponseField name="fixedSupported" type="boolean">`FIXED` only. Whether the lending factory creates oracles that can hold a fixed price. `null` when it could not be read.</ResponseField>
+    <ResponseField name="identity" type="object">With `identityTerms` only. `{ termsId, version, coreHash, gates, signatures, verdicts, warnings }`: the version attached, its core hash, the gates it was judged against, the signatures the bundle carries, one [verdict](/endpoints/lending/identity-terms#checks-and-verdicts) per rule and the [warnings](/endpoints/lending/identity-terms#warnings).</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -176,7 +190,7 @@ The asset data routes report a validation failure with the first failing rule as
 
 | Code | HTTP | Cause |
 |---|---|---|
-| `VALIDATION_ERROR` | `400` | `collateralTokenAddress` is missing or malformed, `mode` or `priceSource` is not an accepted value, `initialPrice` is not a decimal greater than zero with at most 18 decimal places, or `borrowAssetAddress` is malformed |
+| `VALIDATION_ERROR` | `400` | `collateralTokenAddress` is missing or malformed, `mode` or `priceSource` is not an accepted value, `initialPrice` is not a decimal greater than zero with at most 18 decimal places, `borrowAssetAddress` is malformed, or `identityTerms` is not `{ id, version }` |
 | `INVALID_BORROW_ASSET` | `400` | `borrowAssetAddress` fails the address checksum |
 | `BORROW_ASSET_NOT_CONTRACT` | `400` | No contract is deployed at `borrowAssetAddress` |
 | `BORROW_ASSET_NOT_ERC20` | `400` | `borrowAssetAddress` does not answer `decimals` and `balanceOf` |
@@ -190,3 +204,11 @@ The asset data routes report a validation failure with the first failing rule as
 | `INVALID_DOCUMENT_NAME`, `INVALID_DOCUMENT_TYPE`, `INVALID_DOCUMENT_DATE`, `INVALID_CONTENT_HASH`, `INVALID_DOCUMENT_URI` | `400` | A document field breaks its rule. `details.field` names it |
 | `PUBLIC_DOCUMENT_NOT_PINNED` | `422` | A public document whose `ipfs://` address this instance did not pin under the same SHA-256 |
 | `INSTRUMENT_UNREADABLE` | `503` | The token's instrument record could not be read, so the bundle could not be built. Retry shortly |
+| `IDENTITY_TERMS_NOT_FOUND`, `IDENTITY_TERMS_VERSION_NOT_FOUND` | `404` | `identityTerms` names terms this instance does not have, or a version not published yet |
+| `IDENTITY_TERMS_SUPERSEDED` | `409` | `identityTerms.version` is not the latest version. Review the latest one and send it |
+| `IDENTITY_TERMS_NOT_PUBLISHED`, `IDENTITY_TERMS_WITHDRAWN` | `409` | The terms have no published version, or are withdrawn |
+| `IDENTITY_TERMS_WRONG_CHAIN`, `IDENTITY_TERMS_OUT_OF_SCOPE`, `IDENTITY_TERMS_EXPIRED` | `409` | The version names another chain, is limited to other tokens, or is past its `validTo` |
+| `IDENTITY_TERMS_CLAIM_NOT_BACKED` | `409` | The terms say a gate enforces a rule the named registers do not enforce. `details.verdicts` lists every verdict |
+| `IDENTITY_TERMS_GATES_UNREADABLE` | `503` | A register, or the collateral token's identity registry, could not be read. Retry shortly |
+
+A register named by profile or whitelist also answers the profile and whitelist codes of [Deploy Market](/endpoints/lending/deploy-market#error-codes). The lending [error table](/endpoints/lending/introduction#error-codes) gives the remedy for every `IDENTITY_TERMS_*` code.

@@ -1,0 +1,167 @@
+---
+title: "Identity Terms"
+description: "Draft, check, publish and sign identity terms, and attach them to a market's asset data with the SDK"
+---
+
+[Identity terms](/endpoints/lending/identity-terms) state how the investors of your tokens are identified: who performs the KYC and stands behind it, on which basis a lender may rely on it, and which gate or member enforces each investor rule. A published version is frozen under its core hash, the organisations it names sign it with their wallets, and a market carries it in its [asset data](/sdk/lending/asset-data), where the lender of record reads it before it acknowledges.
+
+`trusset.lending.identityTerms` has ten methods. None of them signs anything: they are API reads and writes. The attachment to a market travels in an asset data attestation or a deployment, which follow the [signing model](/sdk/lending/signing). Terms describe gates and never install one.
+
+## Draft the terms
+
+`create` opens a document with a draft. `name` may be left out when `draft.name` is set. A draft may be as incomplete as you like, and `draftProblems` lists its validation problems.
+
+```typescript
+const created = await trusset.lending.identityTerms.create({
+  draft: { name: 'TokenForge investors under Concedus', validFrom: '2026-12-01', governingLaw: 'DE' },
+})
+
+console.log(created.terms.id, created.draftProblems.map(p => p.field))
+```
+
+`update` saves the whole draft again. Pass `expectedUpdatedAt` with the `updatedAt` you read, so a save never overwrites a change made in between: a stale save answers `409 IDENTITY_TERMS_CHANGED` and changes nothing.
+
+```typescript
+const saved = await trusset.lending.identityTerms.update(created.terms.id, {
+  draft: { ...created.draft, evidence: 'OFFCHAIN_RECORD', delivery: 'KYC_COURIER' },
+  expectedUpdatedAt: created.terms.updatedAt,
+})
+```
+
+Rules longer than the schema holds go in `requirementsExtJson`, the extension as JSON text. The platform pins the exact bytes and writes `requirementsExt: { uri, hash }` into the draft, and `null` removes it. The SDK refuses a draft over 64 KB and an extension over 256 KB or not JSON before any request. Saving also refuses, on the API side, control characters, personal data, a text longer than 612 characters and nesting deeper than 8 levels. `draftProblems` lists what the schema still misses; publishing refuses each of those problems, and in addition a claim no gate can back and a draft that states exactly what the latest version states.
+
+## Check the claims
+
+`check` validates the draft, or the published version named in `version`, and judges each of the five rules. What it judges against depends on the input. See [Checks and verdicts](/endpoints/lending/identity-terms#checks-and-verdicts).
+
+```typescript
+const check = await trusset.lending.identityTerms.check(termsId, {
+  borrowerRegistryProfile: 'professional-de',
+  collateralTokenAddress: tokenAddress,
+  priceSource: 'NAV',
+})
+
+for (const verdict of check.verdicts ?? []) console.log(verdict.rule, verdict.verdict, verdict.reason)
+```
+
+| Input | Judged against |
+|---|---|
+| Nothing, or `version` alone | No gate: only claims no gate of that kind can ever back. Other gate claims read `verdict: null` |
+| `borrowerRegistry`, `borrowerRegistryProfile`, `borrowerRegistryAccessList`, `providerRegistry`, `collateralTokenAddress` | The registers a deployment would install, as [Deploy Market](/endpoints/lending/deploy-market) judges them |
+| `market` | The market's gates and its collateral token's registry at the current block |
+
+With `market` the gates are read from the market itself, so the SDK refuses the register fields beside it. `priceSource` is accepted with `market` and ignored there: the market's own price source counts. A draft that is not complete yet answers `valid: false` with `version: null` and no verdicts.
+
+## Publish, revise and withdraw
+
+`publish` freezes the draft as the next version under its [core hash](/endpoints/lending/identity-terms#core-hash). Pass `expectedUpdatedAt` with the `updatedAt` of the draft you reviewed: when the document changed in between, the call answers `409 IDENTITY_TERMS_CHANGED` and nothing is published.
+
+```typescript
+const reviewed = await trusset.lending.identityTerms.get(termsId)
+const published = await trusset.lending.identityTerms.publish(termsId, { expectedUpdatedAt: reviewed.terms.updatedAt })
+const [version] = published.versions
+
+console.log(version.version, version.coreHash)
+```
+
+Publishing also refuses a schema problem with `422`, a claim no gate can ever back with `409 IDENTITY_TERMS_CLAIM_NOT_BACKED`, and a draft that states exactly what the latest version states with `409 IDENTITY_TERMS_UNCHANGED`. It revokes every open signing link of the document.
+
+`revise` opens the draft of the next version, which names the core hash of the latest one in `supersedes`. `withdraw` is final: markets keep the copy they attested and show `TERMS_WITHDRAWN`. `list` returns every document of your instance.
+
+```typescript
+await trusset.lending.identityTerms.revise(termsId)
+await trusset.lending.identityTerms.withdraw(oldTermsId)
+
+const { terms } = await trusset.lending.identityTerms.list()
+console.log(terms.map(t => `${t.name}: ${t.status}, version ${t.latestVersion}`))
+```
+
+## Invite the members to sign
+
+`createInvite` returns a signing link for one member of the latest version. The link is returned once: Trusset sends nothing, so pass `url` to the member over your own channel. It is valid for 14 days and for one answer.
+
+```typescript
+const invite = await trusset.lending.identityTerms.createInvite(termsId, { member: 1 })
+console.log(invite.member.legalName, invite.url, invite.invite.expiresAt)
+```
+
+A new link for a member revokes that member's open link. Requests for the same member and version are serialized, so at most one open link per member and version holds even when they arrive in parallel. `revokeInvite` sets an open link to `REVOKED`. A link that has already expired stays `EXPIRED`, and revoking it changes nothing. A used link cannot be revoked (`409 IDENTITY_TERMS_INVITE_USED`).
+
+```typescript
+await trusset.lending.identityTerms.revokeInvite(termsId, invite.invite.id)
+```
+
+The member opens the link and signs with its own wallet through the public [signing routes](/endpoints/lending/read-identity-terms-invite). They take no API key, and the SDK has no method for them. `get` shows where each member stands in `versions[].members[].state`.
+
+## Attach the terms to a market
+
+A deployment attaches a published version with `identityTerms: { id, version }` on [`markets.deploy`](/sdk/lending/markets#deploy-a-market). `assetData.preview` judges the same version against the registers the deployment will install. It posts as soon as `identityTerms` or a register field is present. Register fields without `identityTerms` are accepted and ignored.
+
+```typescript
+const preview = await trusset.lending.assetData.preview({
+  collateralTokenAddress: tokenAddress,
+  priceSource: 'NAV',
+  identityTerms: { id: termsId, version: version.version },
+  identityRegistryProfile: 'professional-de',
+})
+console.log(preview.contentHash, preview.identity?.verdicts)
+```
+
+The preview and the deployment produce the same bytes while no member signs in between. The signatures on record are part of the identity member, so a later signature changes the hash.
+
+On a market that exists, `attest(marketAddress, { identityTerms, documents }, options)` re-attests the asset data. The prepared attestation names what moves in `identityChanges` and `documentChanges` before anything is signed.
+
+```typescript
+const prepared = await trusset.lending.assetData.attest(marketAddress, { identityTerms: { id: termsId, version: version.version }, documents })
+console.log(prepared.identityChanges, prepared.documentChanges)
+
+const attested = await trusset.lending.assetData.attest(marketAddress, { identityTerms: { id: termsId, version: version.version }, documents }, { signer: issuer })
+```
+
+| Input | Effect |
+|---|---|
+| `identityTerms` left out | The standing terms are carried over byte for byte |
+| `identityTerms: null` | The terms are removed |
+| `identityTerms: { id, version }` | The latest published version is attached, judged against the market's gates at the current block |
+| `documents` left out | The standing documents are carried over |
+| `documents: [...]` | The complete new list, at most 20 entries, sent unchanged. `[]` removes every document |
+
+Re-attest the same version to carry signatures the members gave after the last attestation.
+
+## Recompute the core hash
+
+`identityTermsCoreHash` recomputes a version's core hash locally, with no request: keccak256 over the RFC 8785 canonical JSON of the core, with `null`, empty strings, empty lists and empty objects dropped. `identityTermsTypedData` builds the EIP-712 typed data a member signs over that hash. `lending.identityTerms.coreHash` and `lending.identityTerms.typedData` do the same.
+
+<Note>
+  `identityTermsCoreHash` hashes the core exactly as the API publishes it: `versions[].core` on the document, or the bundle's `identity.terms`. Do not hash a draft you wrote by hand. Publishing normalizes the draft (list order, address and LEI case, the author flag), so a hand-written draft can hash differently from the version it became.
+</Note>
+
+```typescript
+import { identityTermsCoreHash, identityTermsTypedData } from '@trusset/sdk'
+import { utils } from 'ethers'
+
+const read = await trusset.lending.assetData.bundle(marketAddress)
+console.log(identityTermsCoreHash(read.identity!.terms) === read.identity!.coreHash)
+
+const member = version.members[1]
+const typed = identityTermsTypedData({ chainId: version.chainId, coreHash: version.coreHash, member: member.index, wallet: member.wallet })
+if (member.kind === 'EOA') console.log(utils.verifyTypedData(typed.domain, typed.types, typed.message, member.signature!).toLowerCase() === member.wallet.toLowerCase())
+```
+
+A signature of `kind: 'ERC1271'` comes from a contract wallet and is checked with the wallet's own `isValidSignature`, not by recovery. See [Signing](/endpoints/lending/identity-terms#signing).
+
+## Methods and endpoints
+
+| Method | Endpoint |
+|---|---|
+| `list` | [List Identity Terms](/endpoints/lending/list-identity-terms) |
+| `get` | [Get Identity Terms](/endpoints/lending/get-identity-terms) |
+| `create` | [Create Identity Terms](/endpoints/lending/create-identity-terms) |
+| `update` | [Update Identity Terms](/endpoints/lending/update-identity-terms) |
+| `check` | [Check Identity Terms](/endpoints/lending/check-identity-terms) |
+| `publish` | [Publish Identity Terms](/endpoints/lending/publish-identity-terms) |
+| `revise` | [Revise Identity Terms](/endpoints/lending/revise-identity-terms) |
+| `withdraw` | [Withdraw Identity Terms](/endpoints/lending/withdraw-identity-terms) |
+| `createInvite` | [Create Invite](/endpoints/lending/create-identity-terms-invite) |
+| `revokeInvite` | [Revoke Invite](/endpoints/lending/revoke-identity-terms-invite) |
+| `coreHash`, `typedData` | None: computed locally |

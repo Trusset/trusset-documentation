@@ -1,0 +1,153 @@
+---
+title: 'Publish Identity Terms'
+api: 'POST /lending-external-securities-v2/api/identity-terms/{id}/publish'
+description: 'Freeze the draft of identity terms as the next version with its core hash'
+---
+
+Publishes the open draft of an [identity terms](/endpoints/lending/identity-terms) document as its next version. The platform validates the whole draft against the [schema](/endpoints/lending/identity-terms#schema), normalizes it, sets `version` and `supersedes`, computes the [core hash](/endpoints/lending/identity-terms#core-hash) and freezes the result. The draft is then cleared.
+
+Publishing refuses:
+
+- the first problem of an incomplete or invalid draft, with `422` and every problem in `details.problems`;
+- a claim that no gate of the named kind can ever back, such as `personTypes` enforced by a gate, with `409 IDENTITY_TERMS_CLAIM_NOT_BACKED`. This is a static check: no gate is read, and `details.verdicts` holds only the claims no gate can back;
+- a draft that states exactly what the latest version states, with `409 IDENTITY_TERMS_UNCHANGED`.
+
+Run [Check Identity Terms](/endpoints/lending/check-identity-terms) first to see all of it without publishing. Claims against real gates are judged when the version is attached to a market.
+
+Send `expectedUpdatedAt` with the `updatedAt` you read, so you publish exactly the draft you reviewed. When the document changed in between, the call answers `409 IDENTITY_TERMS_CHANGED` and nothing is published. Without it, the draft is published as it stands.
+
+Publishing revokes every open signing link of the document, so links to an earlier version stop working. Invite the members to sign the new version with [Create Invite](/endpoints/lending/create-identity-terms-invite).
+
+## Path Parameters
+
+<ParamField path="id" type="string" required>
+  The terms id.
+</ParamField>
+
+## Body Parameters
+
+Send `{}`, or `{ expectedUpdatedAt }`.
+
+<ParamField body="expectedUpdatedAt" type="string">
+  Optional. The `updatedAt` of the document as you read it, ISO 8601. When it differs from the stored `updatedAt`, nothing is published.
+</ParamField>
+
+## Response Fields
+
+The document, as [Get Identity Terms](/endpoints/lending/get-identity-terms#response-fields) returns it, with the new version first in `versions`, `status` `PUBLISHED` and `draft` `null`.
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/identity-terms/cmx9t4k2p0007lq0cz3h8w1rd/publish" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "expectedUpdatedAt": "2026-11-25T11:02:47.000Z" }'
+```
+```typescript TypeScript
+const base = 'https://api.trusset.org/lending-external-securities-v2/api/identity-terms';
+const headers = { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' };
+
+const reviewed = await (await fetch(`${base}/${termsId}`, { headers })).json();
+
+const res = await fetch(`${base}/${termsId}/publish`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ expectedUpdatedAt: reviewed.data.terms.updatedAt })
+});
+const { success, data, error } = await res.json();
+if (!success) {
+  console.error(error.code, error.details?.problems ?? error.details?.remedy);
+} else {
+  const [published] = data.versions;
+  console.log(`Version ${published.version}: ${published.coreHash}`);
+}
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "terms": {
+      "id": "cmx9t4k2p0007lq0cz3h8w1rd",
+      "name": "TokenForge investors under Concedus",
+      "status": "PUBLISHED",
+      "latestVersion": 1,
+      "latestCoreHash": "0x8f380a6ce6479c4c1d957bc31fd844d2135dccfc10864fe9d06135b5246041aa",
+      "publishedAt": "2026-11-25T13:40:02.000Z",
+      "hasDraft": false,
+      "draftUpdatedAt": null,
+      "createdAt": "2026-11-25T11:02:47.000Z",
+      "updatedAt": "2026-11-25T13:40:02.000Z"
+    },
+    "draft": null,
+    "draftProblems": [],
+    "versions": [
+      {
+        "version": 1,
+        "chainId": 11155111,
+        "coreHash": "0x8f380a6ce6479c4c1d957bc31fd844d2135dccfc10864fe9d06135b5246041aa",
+        "supersedesHash": null,
+        "publishedAt": "2026-11-25T13:40:02.000Z",
+        "core": { "schema": "trusset.identity-terms/1.0.0", "name": "TokenForge investors under Concedus", "version": 1 },
+        "typedDataDomain": { "name": "Trusset Identity Terms", "version": "1", "chainId": 11155111 },
+        "members": [
+          { "index": 0, "legalName": "TokenForge GmbH", "roles": ["ISSUER", "PLATFORM"], "wallet": "0x1111111111111111111111111111111111111111", "author": true, "state": "NONE" },
+          { "index": 1, "legalName": "Concedus GmbH", "roles": ["KYC_PROVIDER"], "wallet": "0x2222222222222222222222222222222222222222", "author": false, "state": "NONE" },
+          { "index": 2, "legalName": "Example Register AG", "roles": ["REGISTER"], "wallet": "0x3333333333333333333333333333333333333333", "author": false, "state": "NONE" }
+        ],
+        "invites": []
+      }
+    ]
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-11-25T13:40:02.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Invalid LEI
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "IDENTITY_TERMS_INVALID_LEI",
+    "message": "members[1].lei is not a valid ISO 17442 LEI (20 characters with a correct check sum). Enter the 20-character Legal Entity Identifier exactly as GLEIF lists it.",
+    "details": {
+      "field": "members[1].lei",
+      "problems": [
+        {
+          "code": "IDENTITY_TERMS_INVALID_LEI",
+          "field": "members[1].lei",
+          "message": "members[1].lei is not a valid ISO 17442 LEI (20 characters with a correct check sum).",
+          "remedy": "Enter the 20-character Legal Entity Identifier exactly as GLEIF lists it."
+        }
+      ],
+      "remedy": "Enter the 20-character Legal Entity Identifier exactly as GLEIF lists it."
+    }
+  }
+}
+```
+</ResponseExample>
+
+`core` above is shortened. The answer carries the whole published core.
+
+## Error Codes
+
+Every schema problem answers `422` with its own code: `IDENTITY_TERMS_FIELD_REQUIRED`, `IDENTITY_TERMS_FIELD_INVALID`, `IDENTITY_TERMS_UNKNOWN_FIELD`, `IDENTITY_TERMS_MEMBER_COUNT`, `IDENTITY_TERMS_MEMBER_INDEX`, `IDENTITY_TERMS_AUTHOR_INVALID`, `IDENTITY_TERMS_AUTHOR_WALLET`, `IDENTITY_TERMS_DUPLICATE_WALLET`, `IDENTITY_TERMS_INVALID_LEI`, `IDENTITY_TERMS_KYC_PROVIDER_INCOMPLETE`, `IDENTITY_TERMS_OBLIGED_ENTITY`, `IDENTITY_TERMS_BASIS_NOTE_REQUIRED`, `IDENTITY_TERMS_AGREEMENT_HASH`, `IDENTITY_TERMS_COUNTRY`, `IDENTITY_TERMS_CHECK_NOT_ALLOWED`, `IDENTITY_TERMS_ENFORCEMENT_INCOMPLETE`, `IDENTITY_TERMS_PERSONAL_DATA`, `IDENTITY_TERMS_TEXT_INVALID`, `IDENTITY_TERMS_URL_INVALID`, `IDENTITY_TERMS_DATES`, `IDENTITY_TERMS_EXT_INVALID` and `IDENTITY_TERMS_WRONG_CHAIN`. The [lending error table](/endpoints/lending/introduction#error-codes) gives the remedy for each.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | The body carries a field other than `expectedUpdatedAt`, or `expectedUpdatedAt` is not a string of at most 40 characters |
+| `IDENTITY_TERMS_FIELD_INVALID` | `400` | `expectedUpdatedAt` is not an ISO 8601 time |
+| `IDENTITY_TERMS_NOT_FOUND` | `404` | No terms with this id exist in your instance |
+| `IDENTITY_TERMS_CHANGED` | `409` | `expectedUpdatedAt` differs from the document's `updatedAt`, or the document changed while it was being published. Nothing was published. Read it again, review the draft and publish again |
+| `IDENTITY_TERMS_CLAIM_NOT_BACKED` | `409` | The terms say a gate enforces a rule no gate of that kind can check. `details` carries `rule`, `by` and `remedy`, and `details.verdicts` holds only the claims no gate can back, from a static check that reads no gate. Name a `MEMBER` for that rule |
+| `IDENTITY_TERMS_NO_DRAFT` | `409` | No draft is open. Revise first |
+| `IDENTITY_TERMS_UNCHANGED` | `409` | The draft states exactly what the latest version states. Change it, or keep using the published version |
+| `IDENTITY_TERMS_WITHDRAWN` | `409` | The document is withdrawn |
+| `RATE_LIMIT_EXCEEDED` | `429` | More than 10 writes in a minute. Retry after the interval in `Retry-After` |
+| `IDENTITY_TERMS_PUBLISH_FAILED` | `500` | The version could not be published for a reason that carries no code of its own. Retry, or contact support with the request ID |

@@ -4,7 +4,7 @@ api: 'GET /lending-external-securities-v2/api/markets/{market}/asset-data/bundle
 description: 'Read the exact bytes behind an asset data hash, re-hashed before they are served'
 ---
 
-Returns the stored bundle behind an asset data hash: the exact canonical bytes the hash commits to, and the same bundle as an object. This is what a lender of record reads before it acknowledges a version. It can recompute the hash from the bytes and compare it with the factory's record, without trusting this response.
+Returns the stored bundle behind an asset data hash: the exact canonical bytes the hash commits to, and the same bundle as an object. This is what a lender of record reads before it acknowledges a version. It can recompute the hash from the bytes and compare it with the factory's record, without trusting this response. A bundle under schema `1.3.0` also carries the [identity terms](/endpoints/lending/identity-terms) the issuer attached, in `identity`. The hash covers them, so acknowledging the bundle acknowledges the terms. Read them, and the live verdicts on [Get Asset Data](/endpoints/lending/get-asset-data#identity-terms), before you acknowledge.
 
 The bytes are re-hashed before they leave. A stored row whose bytes do not hash to their own key is refused with `SNAPSHOT_CORRUPT` rather than served as evidence. The hash on the factory still stands in that case, and the issuer is the party to ask for the bytes.
 
@@ -35,7 +35,8 @@ A `hash` can name any bundle stored for this market, including one stored by an 
     <ResponseField name="schemaVersion" type="string">Bundle schema the bytes were written under.</ResponseField>
     <ResponseField name="canonicalJson" type="string">The exact bytes the hash commits to.</ResponseField>
     <ResponseField name="bundle" type="object">`canonicalJson` parsed, so its members arrive in canonical order.</ResponseField>
-    <ResponseField name="documents" type="array">The market documents the bundle carries under schema `1.2.0`, each `{ name, documentType, documentDate, visibility, contentHash, uri }`. Empty for an earlier schema. A private document lists its SHA-256 only: verify the copy the issuer sends you against it.</ResponseField>
+    <ResponseField name="documents" type="array">The market documents the bundle carries under schema `1.2.0` or `1.3.0`, each `{ name, documentType, documentDate, visibility, contentHash, uri }`. Empty for an earlier schema. A private document lists its SHA-256 only: verify the copy the issuer sends you against it.</ResponseField>
+    <ResponseField name="identity" type="object">Present when the bundle follows schema `1.3.0` and carries identity terms: `{ terms, coreHash, signatures, gates }`. `terms` is the whole published version, `coreHash` its [core hash](/endpoints/lending/identity-terms#core-hash), `signatures` the member signatures on record when the bundle was built (left out when there are none), and `gates` the registers the terms were judged against with `readAt`. See [In the asset data](/endpoints/lending/identity-terms#in-the-asset-data).</ResponseField>
     <ResponseField name="version" type="integer">Attestation version this bundle stood as. `null` when no attestation of it was confirmed on this platform.</ResponseField>
     <ResponseField name="attestor" type="string">Wallet that attested it. `null` when no attestation of it was confirmed on this platform.</ResponseField>
     <ResponseField name="storedAt" type="string">When the bytes were stored.</ResponseField>
@@ -53,7 +54,7 @@ A `hash` can name any bundle stored for this market, including one stored by an 
 The check needs one hash function. Compare the result with `attested` on the factory record, which Get Asset Data returns as `record.attested`, or read `assetData(market)` on the factory directly.
 
 ```typescript TypeScript
-import { keccak256, toUtf8Bytes } from 'ethers';
+import { utils } from 'ethers';
 
 const res = await fetch(
   `https://api.trusset.org/lending-external-securities-v2/api/markets/${marketAddress}/asset-data/bundle`,
@@ -62,7 +63,7 @@ const res = await fetch(
 const { success, data, error } = await res.json();
 if (!success) throw new Error(`${error.code}: ${error.message}`);
 
-const recomputed = keccak256(toUtf8Bytes(data.canonicalJson));
+const recomputed = utils.keccak256(utils.toUtf8Bytes(data.canonicalJson));
 if (recomputed !== data.contentHash) throw new Error('The bytes do not match the hash');
 ```
 

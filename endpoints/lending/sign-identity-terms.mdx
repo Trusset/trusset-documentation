@@ -1,0 +1,123 @@
+---
+title: 'Sign Identity Terms'
+api: 'POST /public/identity-terms/sign/{token}'
+authMethod: 'none'
+description: 'Record a member wallet signature over a version of identity terms'
+---
+
+Records the signature of the member a signing link is for. Read the link first with [Read Signing Link](/endpoints/lending/read-identity-terms-invite), have the member's wallet sign its `typedData`, and send the signature here. The signature declares that this organisation stands behind this version of the [identity terms](/endpoints/lending/identity-terms) in the role the terms give it. It allocates no liability by itself.
+
+The signature must come from the wallet the terms name for the member:
+
+- **A wallet without code**: a 65-byte signature in canonical low-s form that recovers that wallet.
+- **A contract wallet**, such as a Safe: the wallet's EIP-1271 `isValidSignature` must accept the signature over the typed-data digest. The signature may be up to 4,096 bytes.
+
+A refused signature does not use up the link, so the member can sign again. A signature that is accepted uses it. Sending the same signature again answers the stored signature with `alreadySigned: true`, so a lost answer is safe to retry.
+
+This route is public. It takes no API key, accepts a body of at most 32 KB, answers with `Cache-Control: no-store`, and allows 6 writes per minute from one address.
+
+## Path Parameters
+
+<ParamField path="token" type="string" required>
+  The token of the link.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="signature" type="string" required>
+  The wallet's signature over the link's `typedData`, `0x` followed by hex. No other field is accepted.
+</ParamField>
+
+## Response Fields
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="signed" type="boolean">`true`.</ResponseField>
+    <ResponseField name="alreadySigned" type="boolean">`true` when this exact signature was already on record.</ResponseField>
+    <ResponseField name="member" type="integer">The member's index.</ResponseField>
+    <ResponseField name="version" type="integer">The version signed.</ResponseField>
+    <ResponseField name="coreHash" type="string">Its core hash.</ResponseField>
+    <ResponseField name="kind" type="string">`EOA` or `ERC1271`.</ResponseField>
+    <ResponseField name="signedAt" type="string">When the signature was recorded.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/public/identity-terms/sign/3f9c1a7e5b2d4f6a8c0e1b3d5f7a9c2e4b6d8f0a1c3e5b7d9f2a4c6e8b0d1f3a" \
+  -H "Content-Type: application/json" \
+  -d '{ "signature": "0x9b2e4d6f8a0c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a6c8e0b1d3f5a7c9e2b4d6f8a0c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a6c8e0b1d3f5a7c9e2b1c9b1c" }'
+```
+```typescript TypeScript
+const link = `https://api.trusset.org/public/identity-terms/sign/${token}`;
+const { data: view } = await (await fetch(link)).json();
+
+const signature = await window.ethereum.request({
+  method: 'eth_signTypedData_v4',
+  params: [view.member.wallet, JSON.stringify({
+    ...view.typedData,
+    types: {
+      EIP712Domain: [
+        { name: 'name', type: 'string' },
+        { name: 'version', type: 'string' },
+        { name: 'chainId', type: 'uint256' }
+      ],
+      ...view.typedData.types
+    }
+  })]
+});
+
+const res = await fetch(link, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ signature })
+});
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json Response
+{
+  "success": true,
+  "data": {
+    "signed": true,
+    "alreadySigned": false,
+    "member": 1,
+    "version": 1,
+    "coreHash": "0x8f380a6ce6479c4c1d957bc31fd844d2135dccfc10864fe9d06135b5246041aa",
+    "kind": "EOA",
+    "signedAt": "2026-11-25T16:44:19.000Z"
+  }
+}
+```
+```json Error - Wrong Wallet
+{
+  "success": false,
+  "error": {
+    "code": "IDENTITY_TERMS_SIGNATURE_INVALID",
+    "message": "The signature does not come from the member wallet 0x2222222222222222222222222222222222222222 for this version of the terms. Connect the wallet the terms name for your organisation and sign the typed data again.",
+    "remedy": "Connect the wallet the terms name for your organisation and sign the typed data again.",
+    "field": "signature"
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+A refusal on the public routes carries `error.code`, `error.message` and, where there is one, `error.remedy` and `error.field`.
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `IDENTITY_TERMS_INVITE_INVALID` | `400` | The token is not 64 lower-case hex characters. Open the link exactly as you received it |
+| `IDENTITY_TERMS_SIGNATURE_INVALID` | `400` | The body is not `{ signature }`, the signature is not hex, a 65-byte signature is not low-s, or it does not come from the member's wallet for this version. Sign the link's typed data again with that wallet |
+| `IDENTITY_TERMS_INVITE_NOT_FOUND` | `404` | No link with this token exists. Ask the author for a new one |
+| `IDENTITY_TERMS_ALREADY_SIGNED` | `409` | The member already signed this version with another signature. The first signature stands |
+| `IDENTITY_TERMS_INVITE_EXPIRED` | `410` | The link is older than 14 days. Ask the author for a new one |
+| `IDENTITY_TERMS_INVITE_REVOKED` | `410` | The link was revoked, the terms were withdrawn, or a newer version was published. Ask the author for a link to the current version |
+| `IDENTITY_TERMS_INVITE_USED` | `410` | The link was already used for another answer. Ask the author for a new one if you still need to answer |
+| `RATE_LIMIT_EXCEEDED` | `429` | More than 6 writes in a minute from one address. Wait a minute |
+| `IDENTITY_TERMS_SIGNING_FAILED` | `500` | The request could not be completed. Retry in a moment |
+| `IDENTITY_TERMS_CHAIN_UNAVAILABLE` | `503` | The member's wallet could not be read from the network, so a contract wallet's signature could not be checked. Nothing was recorded. Retry shortly |

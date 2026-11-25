@@ -112,6 +112,10 @@ A collateral token can back several markets as long as they differ in collateral
   Optional documents the market carries from creation, at most 20. See [Documents](#documents). A deployment without documents attests exactly the bundle it attested before.
 </ParamField>
 
+<ParamField body="identityTerms" type="object">
+  Optional. `{ id, version }`: the latest published version of [identity terms](/endpoints/lending/identity-terms) of this instance, attached to the asset data the deployment attests. See [Identity terms](#identity-terms).
+</ParamField>
+
 <ParamField body="txHash" type="string">
   Hash of the transaction you broadcast for this operation. Send it to confirm the transaction and record the result. Omit it to receive the calldata.
 </ParamField>
@@ -213,6 +217,14 @@ A public document is uploaded first and is public for good; it must contain no p
 
 The calldata response returns the exact bytes being attested under `assetData`, so the deploying wallet sees what it signs for. [Preview Asset Data](/endpoints/lending/preview-asset-data) returns the same bundle before anything is built. A lender of record reviews it and names the hash it read when it takes the role.
 
+## Identity terms
+
+`identityTerms` attaches a published version of [identity terms](/endpoints/lending/identity-terms): who performs the KYC of the token's investors, what a lender receives, and which gate or party enforces each investor rule. The bundle then follows schema `1.3.0` and carries the terms as its `identity` member. A deployment without `identityTerms` attests exactly the bundle it attested before.
+
+Before anything is built, the terms are judged against the gates this deployment installs: the borrower register from `identityRegistry`, `identityRegistryProfile` or `identityRegistryAccessList`, and the collateral token's own identity registry. The provider register is recorded beside them. The gates are recorded with `readAt.block` `0`, so the bundle equals the one [Preview Asset Data](/endpoints/lending/preview-asset-data) returns for the same parameters, as long as no member signs in between: the signatures on record at that moment are part of the `identity` member, so a later signature changes the hash, and the Issuer Portal previews again. A claim the gates do not back, such as a professional floor claimed for a borrower register that admits retail investors, is refused with `409 IDENTITY_TERMS_CLAIM_NOT_BACKED`, and nothing is built.
+
+The terms never install a gate. They count for the market once the lender of record acknowledges the asset data that carries them, at adoption or later.
+
 ## On-chain checks
 
 This endpoint returns one factory transaction. The first chart traces the checks the factory makes before it creates anything, up to the price oracle. The second traces how it builds and wires the rest of the set and queues the market for a lender of record. A red box reverts the whole transaction, so nothing is deployed.
@@ -249,9 +261,10 @@ Without `txHash`, the response is the unsigned factory transaction.
       The asset data this deployment attests.
       <Expandable>
         <ResponseField name="contentHash" type="string">keccak256 of `canonicalJson`. This is the hash the deployment writes to the factory.</ResponseField>
-        <ResponseField name="schemaVersion" type="string">Bundle schema version, `1.1.0`.</ResponseField>
+        <ResponseField name="schemaVersion" type="string">Bundle schema version: `1.1.0`, `1.2.0` with documents, or `1.3.0` with identity terms.</ResponseField>
         <ResponseField name="canonicalJson" type="string">The exact bytes hashed: the bundle as RFC 8785 canonical JSON.</ResponseField>
-        <ResponseField name="bundle" type="object">The same bundle as an object, with `schemaVersion`, `market`, `token`, `profile` and `instrument`. Empty members are omitted.</ResponseField>
+        <ResponseField name="bundle" type="object">The same bundle as an object, with `schemaVersion`, `market`, `token`, `profile` and `instrument`, plus `documents` and `identity` when the market carries them. Empty members are omitted.</ResponseField>
+        <ResponseField name="identity" type="object">With `identityTerms` only. `{ termsId, version, coreHash, gates, signatures, verdicts, warnings }`, as on [Preview Asset Data](/endpoints/lending/preview-asset-data#response-fields).</ResponseField>
         <ResponseField name="attestor" type="string">The wallet the attestation will name, the same as `signer`.</ResponseField>
         <ResponseField name="note" type="string">What the signature attests.</ResponseField>
       </Expandable>
@@ -627,6 +640,14 @@ const { data: recorded } = await confirm.json();
 | `ACCESS_LIST_UNREADABLE` | `503` | Whether a named address is a whitelist, or whether a wallet of this instance owns or manages it, could not be read. Retry shortly |
 | `ACCESS_LISTS_NOT_CONFIGURED` | `501` | A whitelist ID was sent on a network where the whitelist factory is not deployed |
 | `FACTORY_READ_FAILED` | `503` | The factory could not be read to validate the offering, to confirm the fixed shares, to tell whether it creates fixed-price oracles, or to tell whether an existing market is still operable. Nothing was built. Retry shortly |
+| `IDENTITY_TERMS_NOT_FOUND`, `IDENTITY_TERMS_VERSION_NOT_FOUND` | `404` | `identityTerms` names terms this instance does not have, or a version not published yet |
+| `IDENTITY_TERMS_SUPERSEDED` | `409` | `identityTerms.version` is not the latest version. Review the latest one and send it |
+| `IDENTITY_TERMS_NOT_PUBLISHED`, `IDENTITY_TERMS_WITHDRAWN` | `409` | The terms have no published version, or are withdrawn |
+| `IDENTITY_TERMS_WRONG_CHAIN`, `IDENTITY_TERMS_OUT_OF_SCOPE`, `IDENTITY_TERMS_EXPIRED` | `409` | The version names another chain, is limited to other tokens, or is past its `validTo` |
+| `IDENTITY_TERMS_CLAIM_NOT_BACKED` | `409` | The terms say a gate enforces a rule the deployment's gates do not enforce. `details.verdicts` lists every verdict |
+| `IDENTITY_TERMS_GATES_UNREADABLE` | `503` | A named register, or the collateral token's identity registry, could not be read. Retry shortly |
+
+The lending [error table](/endpoints/lending/introduction#error-codes) gives the remedy for every `IDENTITY_TERMS_*` code. A malformed `identityTerms` answers `VALIDATION_ERROR`.
 
 Confirming with `txHash` can also return:
 

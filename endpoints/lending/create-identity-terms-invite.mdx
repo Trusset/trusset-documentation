@@ -1,0 +1,126 @@
+---
+title: 'Create Invite'
+api: 'POST /lending-external-securities-v2/api/identity-terms/{id}/invites'
+description: 'Create a one-time link through which a member signs the latest version of identity terms'
+---
+
+Creates a signing link for one member of the latest published version of an [identity terms](/endpoints/lending/identity-terms) document. The member opens the link, reads the version and signs it with the wallet the terms name for it, or declines with a reason. See [Signing](/endpoints/lending/identity-terms#signing).
+
+<Warning>
+  The link is returned once, in this answer only. Trusset sends nothing: pass `url` to the member over your own channel. Anyone who holds the link can read the version and decline it for the member. A signature counts only when it comes from the wallet the terms name for that member.
+</Warning>
+
+- A link is valid for 14 days and for one answer: a signature or a decline.
+- Each member has at most one open link per version. Creating a new one revokes that member's open link. Requests for the same member and version are serialized, so this holds even when they arrive in parallel.
+- A link stops working when it is revoked, when the terms are withdrawn, or when a newer version is published.
+- `url` points at the Issuer Portal on `https://issuers.trusset.org`. `path` is the same link without the origin, so an app of your own can serve the signing page.
+
+## Path Parameters
+
+<ParamField path="id" type="string" required>
+  The terms id.
+</ParamField>
+
+## Body Parameters
+
+<ParamField body="member" type="integer" required>
+  The index of the member in the latest version, counted from 0.
+</ParamField>
+
+## Response Fields
+
+Answers `201` with `Cache-Control: no-store`.
+
+<ResponseField name="data" type="object">
+  <Expandable>
+    <ResponseField name="invite" type="object">`{ id, member, createdAt, expiresAt, usedAt, revokedAt, state, version }`. `state` is `OPEN`.</ResponseField>
+    <ResponseField name="member" type="object">`{ index, legalName, wallet }` of the member invited.</ResponseField>
+    <ResponseField name="token" type="string">The secret of the link: 64 hex characters. Only its hash is stored.</ResponseField>
+    <ResponseField name="path" type="string">`/sign/identity-terms/` followed by the token.</ResponseField>
+    <ResponseField name="url" type="string">The full link on the Issuer Portal.</ResponseField>
+    <ResponseField name="note" type="string">A reminder that the link is shown once.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<RequestExample>
+```bash cURL
+curl -X POST "https://api.trusset.org/lending-external-securities-v2/api/identity-terms/cmx9t4k2p0007lq0cz3h8w1rd/invites" \
+  -H "X-API-Key: trusset_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{ "member": 1 }'
+```
+```typescript TypeScript
+const res = await fetch(
+  `https://api.trusset.org/lending-external-securities-v2/api/identity-terms/${termsId}/invites`,
+  {
+    method: 'POST',
+    headers: { 'X-API-Key': 'trusset_your_key_here', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ member: 1 })
+  }
+);
+const { success, data, error } = await res.json();
+if (!success) throw new Error(`${error.code}: ${error.message}`);
+console.log(`Send to ${data.member.legalName}: ${data.url}`);
+```
+</RequestExample>
+
+<ResponseExample>
+```json 201 Created
+{
+  "success": true,
+  "data": {
+    "invite": {
+      "id": "cmxa2b7nq0002mb0c5k9r4t6v",
+      "member": 1,
+      "createdAt": "2026-11-25T14:05:30.000Z",
+      "expiresAt": "2026-12-09T14:05:30.000Z",
+      "usedAt": null,
+      "revokedAt": null,
+      "state": "OPEN",
+      "version": 1
+    },
+    "member": {
+      "index": 1,
+      "legalName": "Concedus GmbH",
+      "wallet": "0x2222222222222222222222222222222222222222"
+    },
+    "token": "3f9c1a7e5b2d4f6a8c0e1b3d5f7a9c2e4b6d8f0a1c3e5b7d9f2a4c6e8b0d1f3a",
+    "path": "/sign/identity-terms/3f9c1a7e5b2d4f6a8c0e1b3d5f7a9c2e4b6d8f0a1c3e5b7d9f2a4c6e8b0d1f3a",
+    "url": "https://issuers.trusset.org/sign/identity-terms/3f9c1a7e5b2d4f6a8c0e1b3d5f7a9c2e4b6d8f0a1c3e5b7d9f2a4c6e8b0d1f3a",
+    "note": "The link is shown once. Send it to the member yourself; it is valid for 14 days and for one signature."
+  },
+  "error": null,
+  "metadata": {
+    "timestamp": "2026-11-25T14:05:30.000Z",
+    "requestId": "550e8400-e29b-41d4-a716-446655440000",
+    "instanceId": "inst_abc123"
+  }
+}
+```
+```json Error - Already Signed
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "IDENTITY_TERMS_ALREADY_SIGNED",
+    "message": "Concedus GmbH already signed version 1. Nothing to send: the signature is on record.",
+    "details": {
+      "remedy": "Nothing to send: the signature is on record."
+    }
+  }
+}
+```
+</ResponseExample>
+
+## Error Codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `VALIDATION_ERROR` | `400` | `member` is missing, not a whole number from 0 to 63, or the body carries another field |
+| `IDENTITY_TERMS_MEMBER_INDEX` | `400` | `member` names no member of the latest version |
+| `IDENTITY_TERMS_NOT_FOUND` | `404` | No terms with this id exist in your instance |
+| `IDENTITY_TERMS_ALREADY_SIGNED` | `409` | The member already signed the latest version. Nothing to send |
+| `IDENTITY_TERMS_NOT_PUBLISHED` | `409` | No version is published yet. Publish the draft first |
+| `IDENTITY_TERMS_WITHDRAWN` | `409` | The document is withdrawn |
+| `RATE_LIMIT_EXCEEDED` | `429` | More than 10 writes in a minute. Retry after the interval in `Retry-After` |
+| `IDENTITY_TERMS_INVITE_FAILED` | `500` | The link could not be created for a reason that carries no code of its own. Retry, or contact support with the request ID |
