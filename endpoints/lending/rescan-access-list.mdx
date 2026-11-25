@@ -4,9 +4,11 @@ api: 'POST /lending-external-securities-v2/api/access-lists/{listId}/rescan'
 description: 'Catch the whitelist record up with every change on chain, confirmed or not'
 ---
 
-Reads the whitelist's events from the last block its record has seen up to the chain's settled head. It records every member listed or removed, every manager added or removed, and the owner and pending owner. Use it after a change signed outside these routes, or when a confirm call was never sent. Nothing is signed.
+Reads the whitelist's events from the last final block its record has seen up to the latest block. It records every member listed or removed, every manager added or removed, and the owner and pending owner. Use it right after a change signed outside these routes, or when a confirm call was never sent. Reads of the whitelist do the same at most once every 20 seconds; a rescan does it now. Nothing is signed.
 
-One call reads at most 20 windows of 10,000 blocks, and stops early once about 4,000 events have been read. `complete: false` means the record has not reached the head yet: call again until it reads `true`. Each recorded change is written to the audit log once per transaction, marked as found by a rescan.
+A member change from a block that is not final yet is recorded only when the list's own `isVerified` agrees with it, and is read again until its block is final. A recorded change whose block was dropped from the chain before it became final is put right from the list's own answer and counted in `reorgCorrected`. A change the list does not agree with yet is counted in `deferred` and leaves `complete: false`. When the new owner's wallet belongs to exactly one other instance, the record moves to that instance with the change.
+
+One call reads at most 20 windows of 10,000 blocks, and stops early once about 4,000 events have been read. `complete: false` means the record has not reached the latest block yet, or a change waits as above: call again until it reads `true`. Each recorded change is written to the audit log once per transaction, marked as found by a rescan.
 
 The list must be kept by your instance, or owned, managed or pending to one of its verified wallets.
 
@@ -21,11 +23,16 @@ The list must be kept by your instance, or owned, managed or pending to one of i
 <ResponseField name="data" type="object">
   <Expandable>
     <ResponseField name="list" type="object">The list after the rescan, as `list` on [Get Whitelist](/endpoints/lending/get-access-list).</ResponseField>
-    <ResponseField name="applied" type="integer">Member rows the rescan wrote or moved forward.</ResponseField>
+    <ResponseField name="applied" type="integer">Changes the rescan recorded: member rows written or moved forward, managers added or removed, and an owner or pending owner that changed.</ResponseField>
+    <ResponseField name="membersApplied" type="integer">The member rows among `applied`.</ResponseField>
     <ResponseField name="events" type="integer">List events read in this call.</ResponseField>
-    <ResponseField name="syncedBlock" type="integer">The block the record has now read up to.</ResponseField>
-    <ResponseField name="head" type="integer">The settled head the rescan read towards.</ResponseField>
-    <ResponseField name="complete" type="boolean">`true` once `syncedBlock` has reached `head`.</ResponseField>
+    <ResponseField name="syncedBlock" type="integer">The block the events were read up to.</ResponseField>
+    <ResponseField name="head" type="integer">The latest block when the rescan started.</ResponseField>
+    <ResponseField name="finalizedBlock" type="integer">The last final block. Events after it are read again on the next rescan or read.</ResponseField>
+    <ResponseField name="reorgCorrected" type="integer">Member rows put right because the block of their recorded change left the chain before it became final. Counted in `applied` too.</ResponseField>
+    <ResponseField name="deferred" type="integer">Wallets whose change from a block that is not final yet the list does not agree with yet. They are recorded on a later read.</ResponseField>
+    <ResponseField name="complete" type="boolean">`true` once `syncedBlock` has reached `head` and `deferred` is 0.</ResponseField>
+    <ResponseField name="recordMoved" type="boolean">Present and `true` when the record moved to the instance that holds the new owner.</ResponseField>
     <ResponseField name="recorded" type="array">The changes the rescan found, one per transaction and kind: `action` (`LENDING_ACCESS_LIST_MEMBERS_SET`, `LENDING_ACCESS_LIST_MANAGER_SET`, `LENDING_ACCESS_LIST_OWNERSHIP_ACCEPTED` or `LENDING_ACCESS_LIST_OWNER_PROPOSED`), `txHash`, `signer` and `details`.</ResponseField>
     <ResponseField name="managed" type="boolean">Present and `true` on a list another instance keeps.</ResponseField>
     <ResponseField name="managedBy" type="string">Your wallet that manages it. Present with `managed`.</ResponseField>
@@ -68,15 +75,19 @@ while (!complete) {
       "archived": false,
       "createdTxHash": "0x3f6c0e7a91d24b58c06e1f9a7b3d25e48c17a0f9d63e2b51a84c7f0e9d16b23a",
       "createdBlock": 9384120,
-      "syncedBlock": 9411904,
+      "syncedBlock": 9411840,
       "createdAt": "2026-10-08T14:02:11.000Z",
       "updatedAt": "2026-10-09T12:20:05.000Z",
       "own": true
     },
     "applied": 2,
+    "membersApplied": 2,
     "events": 2,
     "syncedBlock": 9411904,
     "head": 9411904,
+    "finalizedBlock": 9411840,
+    "deferred": 0,
+    "reorgCorrected": 0,
     "complete": true,
     "recorded": [
       {

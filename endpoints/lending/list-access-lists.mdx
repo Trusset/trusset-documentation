@@ -12,7 +12,7 @@ A list bound to a [KYC source](/endpoints/customers/list-kyc-sources) does recor
 
 ## How whitelists work
 
-The wallet that creates a whitelist owns it, and your instance keeps its record: the name, the purpose and the members it has seen confirmed. The owner adds and removes managers. The owner and every manager list and remove wallets, in batches of at most 200 per transaction. Ownership moves in two steps, proposed by the owner and accepted by the new owner, and a list can never be left without an owner.
+The wallet that creates a whitelist owns it, and your instance keeps its record: the name, the purpose, the members, the managers and the owner, kept in line with the list's events on chain. The owner adds and removes managers. The owner and every manager list and remove wallets, in batches of at most 200 per transaction. Ownership moves in two steps, proposed by the owner and accepted by the new owner, and a list can never be left without an owner.
 
 Every change is a transaction a wallet you control signs, built and confirmed through these routes:
 
@@ -23,7 +23,9 @@ Every change is a transaction a wallet you control signs, built and confirmed th
 | Add or remove a manager | [Set Whitelist Manager](/endpoints/lending/set-access-list-manager) | [Confirm Whitelist Manager](/endpoints/lending/confirm-access-list-manager) |
 | Propose or accept a new owner | [Transfer Whitelist Ownership](/endpoints/lending/transfer-access-list-ownership) | [Confirm Whitelist Ownership](/endpoints/lending/confirm-access-list-ownership) |
 
-[Get Whitelist](/endpoints/lending/get-access-list) reads one list with its members, [Rescan Whitelist](/endpoints/lending/rescan-access-list) catches the record up with changes signed elsewhere, and [Update Whitelist](/endpoints/lending/update-access-list) renames, re-purposes or archives the record.
+[Get Whitelist](/endpoints/lending/get-access-list) reads one list with its members, [Rescan Whitelist](/endpoints/lending/rescan-access-list) catches the record up with the newest blocks at once, and [Update Whitelist](/endpoints/lending/update-access-list) renames, re-purposes or archives the record.
+
+Every read of the whitelists, here and on [Get Whitelist](/endpoints/lending/get-access-list), first reads the events of every whitelist recorded on your network since the last read, at most once every 20 seconds. A listing, a removal, a manager or an ownership change signed outside these routes, or whose confirm call was never sent, so reaches the record without a rescan. A change from a block that is not final yet is recorded once the list's own answer agrees with it.
 
 <Warning>
   A change to a whitelist applies at once to every gate it serves: every market and vault that installed it, also those of other instances. A gate admits the list's members at the moment of each check. Removing a wallet from a list that gates a market's borrowers stops that wallet's next draw there, and listing one admits it everywhere the list is installed.
@@ -33,12 +35,16 @@ Every change is a transaction a wallet you control signs, built and confirmed th
 
 A whitelist is recorded by the instance that created it. When a verified wallet of your instance manages a list another instance keeps, that list appears under `managed`. Your instance can list and remove wallets on it, confirm those changes and rescan it. Only the instance that keeps the list adds managers and transfers it. A list whose pending transfer names one of your wallets appears under `managed` too, so the transfer can be accepted.
 
-Suppose the list's owner on chain is a verified wallet of your instance, and the instance that kept the record does not hold that wallet. The record then moves to your instance with its name. That happens the first time your instance reads the list with [Get Whitelist](/endpoints/lending/get-access-list), or builds, confirms or rescans a change to it. The move is written to the audit log as `LENDING_ACCESS_LIST_REHOMED`.
+Suppose the list's owner on chain is a verified wallet of your instance, and the instance that kept the record does not hold that wallet. The record then moves to your instance with its name. When your instance already has a whitelist of that name, the moved record takes the name with a number, such as `Borrowers (2)`, and the audit log keeps the old name. That happens once the ownership change is read from the chain, or the first time your instance reads the list with [Get Whitelist](/endpoints/lending/get-access-list), or builds, confirms or rescans a change to it. The move is written to the audit log as `LENDING_ACCESS_LIST_REHOMED`.
 
 ## Query Parameters
 
 <ParamField query="includeArchived" type="boolean" default="false">
   `true` or `1` also returns the lists your instance archived. Any other value leaves them out.
+</ParamField>
+
+<ParamField query="pendingManagers" type="boolean" default="false">
+  `true` or `1` adds `pendingManagers` to each active list: the lenders of record of your instance's adopted markets that install the list as a gate and are not yet its managers, judged as the `accessListSteps` of [Get Identity Gates](/endpoints/lending/get-identity-gates) are. It reads up to 200 markets and judges up to 10 market and lender pairs; `pendingManagersTruncated: true` says the answer stopped there.
 </ParamField>
 
 ## Response Fields
@@ -59,10 +65,13 @@ Suppose the list's owner on chain is a verified wallet of your instance, and the
         <ResponseField name="archived" type="boolean">Whether your instance archived the record. An archived list still works on chain.</ResponseField>
         <ResponseField name="createdTxHash" type="string">The creating transaction.</ResponseField>
         <ResponseField name="createdBlock" type="integer">Its block.</ResponseField>
-        <ResponseField name="syncedBlock" type="integer">The last block the record has read the list's events up to.</ResponseField>
+        <ResponseField name="syncedBlock" type="integer">The last final block the record has read the list's events up to. Events after it are read again on each read until their block is final.</ResponseField>
         <ResponseField name="createdAt" type="string">ISO 8601.</ResponseField>
         <ResponseField name="updatedAt" type="string">ISO 8601.</ResponseField>
         <ResponseField name="own" type="boolean">Always `true` here.</ResponseField>
+        <ResponseField name="pendingManagers" type="array">
+          Present with `pendingManagers=true`. Each lender of record whose market installs this list as its borrower or provider gate while it is neither the owner nor a manager: `manager`, `markets` (each with `marketAddress`, `gates` of `borrower` and `provider`, and `blocked`), `blocked`, `code` and `reason`. `blocked: true` with `code: ACCESS_LIST_SHARED` means adding the manager is not offered on any of those markets, because the list also serves another lender's market or a vault, and `reason` says why. Otherwise the owner adds it with [Set Whitelist Manager](/endpoints/lending/set-access-list-manager). `null` when the markets could not be read.
+        </ResponseField>
       </Expandable>
     </ResponseField>
     <ResponseField name="managed" type="array">
@@ -83,11 +92,13 @@ Suppose the list's owner on chain is a verified wallet of your instance, and the
     <ResponseField name="available" type="boolean">Whether the whitelist factory is configured on this network. Every other whitelist route answers `501 ACCESS_LISTS_NOT_CONFIGURED` while it is `false`.</ResponseField>
     <ResponseField name="factory" type="string">The whitelist factory, lowercased, or `null`.</ResponseField>
     <ResponseField name="maxBatch" type="integer">`200`, the most wallets one transaction lists or removes.</ResponseField>
+    <ResponseField name="sync" type="object">How far the records were brought in line with the chain before this answer: `complete`, `head`, `syncedBlock`, `readAt`, while the read still runs `running: true`, and `setAside` when some lists could not be read and are retried on their own shortly. See [Get Whitelist](/endpoints/lending/get-access-list). `null` while whitelists are not available.</ResponseField>
+    <ResponseField name="pendingManagersTruncated" type="boolean">Present with `pendingManagers=true`. `true` when more markets or pairs existed than one read judges, so `pendingManagers` may be incomplete.</ResponseField>
   </Expandable>
 </ResponseField>
 
 <Note>
-  `managers`, `ownerWallet` and `memberCount` are the record, written by the confirm calls and by [Rescan Whitelist](/endpoints/lending/rescan-access-list). A change signed and never confirmed reaches the record only through a rescan. [Get Whitelist](/endpoints/lending/get-access-list) with `wallets` reads the live state from the chain.
+  `managers`, `ownerWallet` and `memberCount` are the record, written by the confirm calls and by the chain read before each answer. When `sync.complete` is `false`, the newest blocks are not in it yet: [Rescan Whitelist](/endpoints/lending/rescan-access-list) reads them at once. [Get Whitelist](/endpoints/lending/get-access-list) with `wallets` reads the live state from the chain.
 </Note>
 
 <RequestExample>
@@ -145,7 +156,13 @@ const depositorLists = data.lists.filter((list: { purpose: string }) => list.pur
     ],
     "available": true,
     "factory": "0x2c9e47a1b05d83f6e4a17c3b92d0f68e5a4c1b37",
-    "maxBatch": 200
+    "maxBatch": 200,
+    "sync": {
+      "complete": true,
+      "head": 9402410,
+      "syncedBlock": 9402410,
+      "readAt": "2026-10-09T08:16:02.000Z"
+    }
   }
 }
 ```

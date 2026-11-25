@@ -6,7 +6,7 @@ description: 'One whitelist with its recorded members, and optionally its live s
 
 Returns one whitelist your instance keeps or manages, with the members its record holds. Pass `wallets` to read, for those wallets, whether the list admits them right now, together with the list's live owner, pending owner and managers.
 
-The members come from the record: the confirm calls and [Rescan Whitelist](/endpoints/lending/rescan-access-list) write them. A wallet listed or removed by a transaction nobody confirmed appears only after a rescan, so check `live.verified` before acting on one wallet. A removed wallet stays in `members` with `listed: false`.
+The members come from the record. Every read of a whitelist first brings the records of your network in line with the lists' events on chain, including changes signed outside these routes, at most once every 20 seconds. A change from the newest blocks is recorded once the list's own `isVerified` agrees with it, so check `live.verified` before acting on one wallet. `sync` tells you how far that read got. A removed wallet stays in `members` with `listed: false`.
 
 A list another instance keeps is returned when a verified wallet of your instance owns or manages it on chain, or is named by its pending transfer. Its `list` then carries `own: false` and `name: null`. See [Lists another instance keeps](/endpoints/lending/list-access-lists#lists-another-instance-keeps).
 
@@ -39,13 +39,24 @@ A list another instance keeps is returned when a verified wallet of your instanc
     </ResponseField>
     <ResponseField name="membersTotal" type="integer">Every recorded member row, listed or not.</ResponseField>
     <ResponseField name="membersTruncated" type="boolean">`true` when `membersTotal` exceeds the rows returned.</ResponseField>
+    <ResponseField name="sync" type="object">
+      How far the records were brought in line with the chain before this answer.
+      <Expandable>
+        <ResponseField name="complete" type="boolean">`true` when every list event up to `head` is recorded. `false` when the chain could not be read in time or a change from the newest blocks waits for the list to agree; [Rescan Whitelist](/endpoints/lending/rescan-access-list) reads those blocks at once.</ResponseField>
+        <ResponseField name="head" type="integer">The latest block read, or `null`.</ResponseField>
+        <ResponseField name="syncedBlock" type="integer">The block the events were read up to, or `null`.</ResponseField>
+        <ResponseField name="readAt" type="string">ISO 8601.</ResponseField>
+        <ResponseField name="running" type="boolean">Present and `true` when the read was still running when this answer was sent. Read again in a moment.</ResponseField>
+        <ResponseField name="setAsideList" type="boolean">Present and `true` when this list's events could not be read and the list is retried on its own shortly. `complete` is then `false`; a rescan reads it at once.</ResponseField>
+      </Expandable>
+    </ResponseField>
     <ResponseField name="live" type="object">
       Present when `wallets` was sent. Read from the list contract in one call.
       <Expandable>
         <ResponseField name="owner" type="string">The owner on chain, lowercased. `null` when the read failed.</ResponseField>
         <ResponseField name="pendingOwner" type="string">The wallet a pending transfer names, or `null`.</ResponseField>
         <ResponseField name="managers" type="object">Whether each recorded manager and each verified wallet of your instance is a manager now, keyed by lowercased address. `null` for an answer that could not be read.</ResponseField>
-        <ResponseField name="verified" type="object">Whether the list admits each address in `wallets`, keyed by lowercased address. This is the answer every gate the list serves receives. `null` for an answer that could not be read.</ResponseField>
+        <ResponseField name="verified" type="object">Whether the list admits each address in `wallets`, keyed by lowercased address, so look a checksummed address up in lower case. This is the answer every gate the list serves receives. `null` for an answer that could not be read.</ResponseField>
         <ResponseField name="ownedByThisInstance" type="boolean">Whether the owner is a verified wallet of your instance. `null` when the read failed.</ResponseField>
         <ResponseField name="readFailed" type="boolean">`true` when the list could not be read. The other fields are then empty, and say nothing about the list.</ResponseField>
       </Expandable>
@@ -59,14 +70,14 @@ curl "https://api.trusset.org/lending-external-securities-v2/api/access-lists/cm
   -H "X-API-Key: trusset_your_key_here"
 ```
 ```typescript TypeScript
-const wallet = '0x6a6cba16dad34f7ea7ecbcdbf050f8146b942d6b';
+const wallet = '0x6A6cBA16DaD34F7ea7EcBcdbF050F8146B942d6B';
 const res = await fetch(
   `https://api.trusset.org/lending-external-securities-v2/api/access-lists/${listId}?wallets=${wallet}`,
   { headers: { 'X-API-Key': 'trusset_your_key_here' } }
 );
 const { data } = await res.json();
 if (data.live.readFailed) throw new Error('Whitelist unreadable, retry');
-const admitted = data.live.verified[wallet] === true;
+const admitted = data.live.verified[wallet.toLowerCase()] === true;
 ```
 </RequestExample>
 
@@ -103,6 +114,12 @@ const admitted = data.live.verified[wallet] === true;
     ],
     "membersTotal": 151,
     "membersTruncated": false,
+    "sync": {
+      "complete": true,
+      "head": 9402410,
+      "syncedBlock": 9402410,
+      "readAt": "2026-10-09T08:16:02.000Z"
+    },
     "live": {
       "owner": "0x1234f9a07c6b53d81e2a4f70c9b385d6014a7e52",
       "pendingOwner": null,
